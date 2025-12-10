@@ -7,3 +7,4 @@ edition = "2024"
 clap = { version = "4.4", features = ["derive"] }
 polars = { version = "0.51.0", features = ["parquet", "timezones"] }
 anyhow = "1.0"
+velora-ta = "0.0.1"
