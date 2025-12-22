@@ -1,0 +1,6 @@
+MES:
+  margin_per_contract: 50.0
+  session: globex   # or rth
+ES:
+  margin_per_contract: 500.0
+  session: globex
