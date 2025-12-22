@@ -12,7 +12,7 @@
 - [ ] Ensure feature warmup handling (NaNs) is masked or trimmed before training.
 
 ## Backtester enhancements
-- [ ] Equity/reward export (CSV/npz) from Rust runner for quick inspection.
+- [x] Equity/reward export (CSV) from Rust runner for quick inspection.
 - [ ] Batch stepping performance profiling; reduce allocations in env step.
 - [ ] Slippage/commission configs per instrument; load from config file.
 
@@ -20,13 +20,13 @@
 - [ ] Replace deprecated PyO3/numpy APIs with bound versions to remove warnings.
 - [ ] Provide wheels/build script for Python 3.12+ (avoid ABI3 workaround if possible).
 - [ ] Add `python/examples`:
-  - [ ] `train_ppo.py` using PyTorch (MLP policy) against batched env.
+  - [x] `train_ppo.py` using PyTorch (MLP policy) against batched env.
   - [ ] `train_ga.py` illustrating GA fitness over multiple windows.
 
 ## RL/GA logic
 - [ ] Implement PPO-style rollout/advantage calc with configurable reward weights (Sharpe/PnL/drawdown).
 - [ ] Implement GA fitness over multiple regimes: mean return/Sharpe, penalties for drawdown/std returns.
-- [ ] Action space: keep discrete {buy/sell/hold/revert}; optional hybrid size head later.
+- [x] Action space: keep discrete {buy/sell/hold/revert}; optional hybrid size head later.
 - [ ] Hard rule enforcement: finalize margin/session rules and penalties.
 
 ## Data splits / evaluation
@@ -39,5 +39,5 @@
 - [ ] Basic property tests for PnL accounting and drawdown metrics.
 
 ## Documentation
-- [ ] Update README with build instructions (`uv` + `maturin develop --features python`).
+- [x] Update README with build instructions (`uv` + `maturin develop --features python`).
 - [ ] Quickstart for running EMA rule vs. feature-only RL training.
