@@ -43,6 +43,7 @@ mod py_bindings {
                 max_position,
                 margin_per_contract,
                 enforce_margin,
+                default_session_open: true,
                 risk_penalty,
                 idle_penalty,
             };
