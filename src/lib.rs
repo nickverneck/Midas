@@ -73,7 +73,7 @@ mod py_bindings {
                 "sell" => Action::Sell,
                 "hold" => Action::Hold,
                 "revert" | "flip" => Action::Revert,
-                other => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Unknown action: {other}"))),
+                other => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unknown action: {other}"))),
             };
 
             let (reward, info) = self.inner.step(
@@ -86,7 +86,6 @@ mod py_bindings {
             );
 
             Python::with_gil(|py| {
-                #[allow(deprecated)]
                 let dict = PyDict::new(py);
                 let s = self.inner.state();
                 dict.set_item("commission_paid", info.commission_paid)?;
@@ -115,7 +114,7 @@ mod py_bindings {
         ) -> PyResult<(Vec<f64>, Vec<PyObject>)> {
             let prices = prices.as_slice()?;
             if prices.len() != actions.len() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                return Err(pyo3::exceptions::PyValueError::new_err(
                     "prices and actions must have same length",
                 ));
             }
@@ -129,7 +128,7 @@ mod py_bindings {
                     "hold" => Action::Hold,
                     "revert" | "flip" => Action::Revert,
                     other => {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
                             "Unknown action: {other}"
                         )))
                     }
@@ -145,7 +144,6 @@ mod py_bindings {
                 );
                 rewards.push(reward);
                 Python::with_gil(|py| {
-                    #[allow(deprecated)]
                     let d = PyDict::new(py);
                     let s = self.inner.state();
                     d.set_item("commission_paid", info.commission_paid)?;
@@ -177,7 +175,7 @@ mod py_bindings {
         high: Option<PyReadonlyArray1<'_, f64>>,
         low: Option<PyReadonlyArray1<'_, f64>>,
         volume: Option<PyReadonlyArray1<'_, f64>>,
-    ) -> PyResult<&'py PyDict> {
+    ) -> PyResult<Bound<'py, PyDict>> {
         let close_slice = close.as_slice()?;
 
         let volume_owned: Option<Vec<f64>> = if let Some(v) = volume {
@@ -204,10 +202,8 @@ mod py_bindings {
             low_owned.as_deref(),
             volume_slice,
         );
-        #[allow(deprecated)]
         let dict = PyDict::new(py);
         for (k, v) in feats {
-            #[allow(deprecated)]
             let arr = PyArray1::from_vec(py, v);
             dict.set_item(k, arr)?;
         }
@@ -236,7 +232,7 @@ mod py_bindings {
         margin_ok: Option<PyReadonlyArray1<'_, bool>>,
         position: i32,
         equity: f64,
-    ) -> PyResult<&'py PyArray1<f64>> {
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let close_s = close.as_slice()?;
         let high_s = high.as_slice()?;
         let low_s = low.as_slice()?;
@@ -259,7 +255,6 @@ mod py_bindings {
             position,
             equity,
         );
-        #[allow(deprecated)]
         Ok(PyArray1::from_vec(py, obs))
     }
 
@@ -271,7 +266,7 @@ mod py_bindings {
 
     /// Python module definition.
     #[pymodule]
-    fn midas_env(_py: Python, m: &PyModule) -> PyResult<()> {
+    fn midas_env(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<PyTradingEnv>()?;
         m.add_function(wrap_pyfunction!(compute_features_py, m)?)?;
         m.add_function(wrap_pyfunction!(indicator_periods, m)?)?;
