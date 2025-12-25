@@ -13,12 +13,13 @@ import midas_env as me
 
 def load_data(parquet_path: Path):
     df = pl.read_parquet(parquet_path)
+    open_ = df["open"].to_numpy() if "open" in df.columns else df["close"].to_numpy()
     close = df["close"].to_numpy()
     volume = df.get_column("volume").to_numpy() if "volume" in df.columns else None
     feats = me.compute_features_py(close, volume=volume)
     keys = sorted(feats.keys())
     feat_mat = np.vstack([feats[k] for k in keys]).T  # (n, d)
-    return close, volume, feat_mat, keys
+    return open_, close, volume, feat_mat, keys
 
 
 def main():
@@ -31,7 +32,7 @@ def main():
     parser.add_argument("--max-position", type=int, default=1)
     args = parser.parse_args()
 
-    prices, volume, feat_mat, feat_names = load_data(args.parquet)
+    opens, prices, volume, feat_mat, feat_names = load_data(args.parquet)
     print(f"Loaded {len(prices)} bars with {feat_mat.shape[1]} features")
 
     env = me.PyTradingEnv(

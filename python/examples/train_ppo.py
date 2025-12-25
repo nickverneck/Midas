@@ -57,10 +57,11 @@ def make_mlp(input_dim, hidden=128):
     )
 
 
-def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position, equity):
+def compute_obs(idx, close, high, low, open, vol, dt_ns, sess, margin, position, equity):
     obs = me.build_observation_py(
         idx,
         close, high, low,
+        open=open,
         volume=vol,
         datetime_ns=dt_ns,
         session_open=sess,
@@ -72,17 +73,17 @@ def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position, equit
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
+def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
     start, end = window
     # seed env at window start price
     env.reset(float(close[start]), initial_balance=initial_balance)
     position = 0
     equity = initial_balance
-    obs_dim = len(me.build_observation_py(start + 1, close, high, low, volume=vol, datetime_ns=dt_ns, session_open=sess, margin_ok=margin, position=position, equity=equity))
+    obs_dim = len(me.build_observation_py(start + 1, close, high, low, open=open, volume=vol, datetime_ns=dt_ns, session_open=sess, margin_ok=margin, position=position, equity=equity))
     obs_buf, act_buf, logp_buf, rew_buf, pnl_buf, val_buf, done_buf = [], [], [], [], [], [], []
 
     for t in range(start + 1, end):
-        obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position, equity)
+        obs = compute_obs(t, close, high, low, open, vol, dt_ns, sess, margin, position, equity)
         obs = obs.to(next(policy.parameters()).device)
         with torch.no_grad():
             logits = policy(obs)
@@ -219,6 +220,7 @@ def main():
 
     def load_dataset(path: Path):
         df = pl.read_parquet(path)
+        open_ = np.ascontiguousarray(df["open"].to_numpy(), dtype=np.float64) if "open" in df.columns else np.ascontiguousarray(df["close"].to_numpy(), dtype=np.float64)
         close = np.ascontiguousarray(df["close"].to_numpy(), dtype=np.float64)
         high = np.ascontiguousarray(df["high"].to_numpy(), dtype=np.float64)
         low = np.ascontiguousarray(df["low"].to_numpy(), dtype=np.float64)
@@ -227,7 +229,7 @@ def main():
             vol = np.ascontiguousarray(vol, dtype=np.float64)
         dt_ns = np.ascontiguousarray(df["date"].cast(pl.Int64).to_numpy(), dtype=np.int64)
         symbol = str(df["symbol"][0])
-        return df, close, high, low, vol, dt_ns, symbol
+        return df, open_, close, high, low, vol, dt_ns, symbol
 
     if args.parquet:
         train_path = args.parquet
@@ -238,9 +240,9 @@ def main():
         val_path = args.val_parquet
         test_path = args.test_parquet
 
-    df_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(train_path)
-    df_val, close_val, high_val, low_val, vol_val, dt_val, _ = load_dataset(val_path)
-    df_test, close_test, high_test, low_test, vol_test, dt_test, _ = load_dataset(test_path)
+    df_train, open_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(train_path)
+    df_val, open_val, close_val, high_val, low_val, vol_val, dt_val, _ = load_dataset(val_path)
+    df_test, open_test, close_test, high_test, low_test, vol_test, dt_test, _ = load_dataset(test_path)
 
     # Load symbol config if present
     margin_cfg = None
@@ -285,7 +287,7 @@ def main():
         random.shuffle(windows_train)
 
     # Initialize networks once
-    obs_dim = len(me.build_observation_py(1, close_train, high_train, low_train, volume=vol_train, datetime_ns=dt_train, session_open=sess_train, margin_ok=margin_train, position=0, equity=args.initial_balance))
+    obs_dim = len(me.build_observation_py(1, close_train, high_train, low_train, open=open_train, volume=vol_train, datetime_ns=dt_train, session_open=sess_train, margin_ok=margin_train, position=0, equity=args.initial_balance))
     policy = make_mlp(obs_dim).to(device)
     value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
     opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=args.lr)
@@ -297,7 +299,7 @@ def main():
     for epoch in range(args.epochs):
         random.shuffle(windows_train)
         for w in windows_train[:3]:  # limit for demo; extend as needed
-            batch = rollout(env, policy, value, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train, w, args.gamma, args.lam, args.initial_balance)
+            batch = rollout(env, policy, value, open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train, w, args.gamma, args.lam, args.initial_balance)
             # move to device
             for k in batch:
                 batch[k] = batch[k].to(device)
@@ -309,7 +311,7 @@ def main():
         eval_pnls = []
         eval_equity = []
         for w in windows_val[: args.eval_windows]:
-            b = rollout(env, policy, value, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val, w, args.gamma, args.lam, args.initial_balance)
+            b = rollout(env, policy, value, open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val, w, args.gamma, args.lam, args.initial_balance)
             eval_rewards.append(b["ret"].mean().item())
             eval_pnls.append(float(b["pnl"].sum().item()))
             eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())

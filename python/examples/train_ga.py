@@ -57,10 +57,11 @@ def make_mlp(input_dim, hidden=128):
     )
 
 
-def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position, equity):
+def compute_obs(idx, close, high, low, open, vol, dt_ns, sess, margin, position, equity):
     obs = me.build_observation_py(
         idx,
         close, high, low,
+        open=open,
         volume=vol,
         datetime_ns=dt_ns,
         session_open=sess,
@@ -72,7 +73,7 @@ def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position, equit
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
+def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
     start, end = window
     env.reset(float(close[start]), initial_balance=initial_balance)
     position = 0
@@ -90,7 +91,7 @@ def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, wind
             # updated at the end of the previous loop
             pass
 
-        obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position, equity)
+        obs = compute_obs(t, close, high, low, open, vol, dt_ns, sess, margin, position, equity)
         obs = obs.to(next(policy.parameters()).device)
         with torch.no_grad():
             logits = policy(obs)
@@ -215,8 +216,8 @@ def evaluate_candidate(
     w_pnl, w_sharpe, w_mdd = weights
     device = base_cfg["device"]
 
-    close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t = train_data
-    close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e = eval_data
+    open_t, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t = train_data
+    open_e, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e = eval_data
 
     env = me.PyTradingEnv(
         float(close_t[0]),
@@ -225,7 +226,7 @@ def evaluate_candidate(
         enforce_margin=not args.disable_margin,
     )
 
-    obs_dim = len(me.build_observation_py(1, close_t, high_t, low_t, volume=vol_t, datetime_ns=dt_t, session_open=sess_t, margin_ok=margin_t, position=0, equity=base_cfg["initial_balance"]))
+    obs_dim = len(me.build_observation_py(1, close_t, high_t, low_t, open=open_t, volume=vol_t, datetime_ns=dt_t, session_open=sess_t, margin_ok=margin_t, position=0, equity=base_cfg["initial_balance"]))
     policy = make_mlp(obs_dim).to(device)
     value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
     opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=base_cfg["lr"])
@@ -240,7 +241,7 @@ def evaluate_candidate(
     random.shuffle(windows_train)
     for _ in range(base_cfg["train_epochs"]):
         for w in windows_train[: base_cfg["train_windows"]]:
-            batch = rollout(env, policy, value, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"])
+            batch = rollout(env, policy, value, open_t, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"])
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device)
@@ -255,7 +256,7 @@ def evaluate_candidate(
     eval_rewards = []
     eval_equity = []
     for w in windows_eval[: base_cfg["eval_windows"]]:
-        b = rollout(env, policy, value, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"])
+        b = rollout(env, policy, value, open_e, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"])
         eval_rewards.append(b["ret"].mean().item())
         eval_pnls.append(float(b["pnl"].sum().item()))
         eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())
@@ -350,6 +351,7 @@ def main():
         print(f"🔁 Loaded checkpoint from {args.load_checkpoint}, resuming at generation {start_gen}")
     def load_dataset(path: Path):
         df = pl.read_parquet(path)
+        open_ = np.ascontiguousarray(df["open"].to_numpy(), dtype=np.float64) if "open" in df.columns else np.ascontiguousarray(df["close"].to_numpy(), dtype=np.float64)
         close = np.ascontiguousarray(df["close"].to_numpy(), dtype=np.float64)
         high = np.ascontiguousarray(df["high"].to_numpy(), dtype=np.float64)
         low = np.ascontiguousarray(df["low"].to_numpy(), dtype=np.float64)
@@ -358,7 +360,7 @@ def main():
             vol = np.ascontiguousarray(vol, dtype=np.float64)
         dt_ns = np.ascontiguousarray(df["date"].cast(pl.Int64).to_numpy(), dtype=np.int64)
         symbol = str(df["symbol"][0])
-        return df, close, high, low, vol, dt_ns, symbol
+        return df, open_, close, high, low, vol, dt_ns, symbol
 
     if args.parquet:
         train_path = args.parquet
@@ -369,9 +371,9 @@ def main():
     val_path = args.val_parquet
     test_path = args.test_parquet if args.test_parquet.exists() else args.val_parquet
 
-    df_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(train_path)
-    df_val, close_val, high_val, low_val, vol_val, dt_val, _ = load_dataset(val_path)
-    df_test, close_test, high_test, low_test, vol_test, dt_test, _ = load_dataset(test_path)
+    df_train, open_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(train_path)
+    df_val, open_val, close_val, high_val, low_val, vol_val, dt_val, _ = load_dataset(val_path)
+    df_test, open_test, close_test, high_test, low_test, vol_test, dt_test, _ = load_dataset(test_path)
     margin_cfg = None
     session_cfg = None
     if args.symbol_config.exists():
@@ -441,8 +443,8 @@ def main():
                 base_cfg,
                 windows_train,
                 windows_eval,
-                (close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
-                (close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
+                (open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+                (open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
             )
             scored.append((metrics["fitness"], w, metrics))
             with log_path.open("a") as f:
@@ -485,8 +487,8 @@ def main():
             base_cfg,
             windows_train,
             windows_test,
-            (close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
-            (close_test, high_test, low_test, vol_test, dt_test, sess_test, margin_test),
+            (open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+            (open_test, close_test, high_test, low_test, vol_test, dt_test, sess_test, margin_test),
         )
         print(
             f"test | w={best_w} | fitness {test_metrics['fitness']:.2f} | "
