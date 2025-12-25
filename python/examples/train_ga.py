@@ -1,10 +1,7 @@
 """
-Minimal PPO training skeleton for the Rust midas_env.
-- Discrete actions: {buy, sell, hold, revert}
-- Uses window sampler (list_windows) to avoid lookahead.
-- Feature/obs construction via build_observation_py.
-
-This is intentionally lightweight for prototyping; add replay logging, eval, and checkpointing as needed.
+GA + PPO hybrid training example.
+- GA searches reward/fitness weights.
+- PPO trains policy for each GA candidate.
 """
 import argparse
 from pathlib import Path
@@ -21,7 +18,6 @@ import yaml
 import midas_env as me
 
 ACTIONS = ["buy", "sell", "hold", "revert"]
-ACTION_TO_IDX = {a: i for i, a in enumerate(ACTIONS)}
 
 
 def infer_margin(symbol: str) -> float:
@@ -30,20 +26,16 @@ def infer_margin(symbol: str) -> float:
         return 50.0
     if sym == "ES" or "ES@" in sym or sym.endswith("ES"):
         return 500.0
-    return 100.0  # fallback
+    return 100.0
+
 
 def build_session_mask(datetimes_ns: np.ndarray, globex: bool = True) -> np.ndarray:
-    """
-    Build session mask.
-    - If globex=True: 23h CME Globex (prev 18:00 ET to 17:00 ET), closed 17:00-18:00 ET daily maintenance.
-    - If globex=False: RTH only 09:30-16:00 ET.
-    """
     import pandas as pd
     dt_utc = pd.to_datetime(datetimes_ns, utc=True)
     dt_et = dt_utc.tz_convert("America/New_York")
     hours = dt_et.hour + dt_et.minute / 60.0
     if globex:
-        open_mask = ~(hours >= 17.0)  # closed 17:00-18:00 ET
+        open_mask = ~(hours >= 17.0)
     else:
         open_mask = (hours >= 9.5) & (hours <= 16.0)
     return np.asarray(open_mask)
@@ -73,11 +65,12 @@ def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position):
 
 def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam):
     start, end = window
-    # seed env at window start price
     env.reset(float(close[start]))
     position = 0
-    obs_dim = len(me.build_observation_py(start + 1, close, high, low, volume=vol, datetime_ns=dt_ns, session_open=sess, margin_ok=margin, position=position))
     obs_buf, act_buf, logp_buf, rew_buf, pnl_buf, val_buf, done_buf = [], [], [], [], [], [], []
+    non_hold = 0
+    non_zero_pos = 0
+    abs_pnl = 0.0
 
     for t in range(start + 1, end):
         obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position)
@@ -92,6 +85,11 @@ def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, wind
         reward, info = env.step(action_str, float(close[t]), session_open=True, margin_ok=True)
         position = info["position"]
         pnl_change = float(info["pnl_change"])
+        if action_str != "hold":
+            non_hold += 1
+        if position != 0:
+            non_zero_pos += 1
+        abs_pnl += abs(pnl_change)
 
         with torch.no_grad():
             val = value(obs).squeeze(0)
@@ -103,7 +101,6 @@ def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, wind
         val_buf.append(val)
         done_buf.append(torch.tensor(0.0))
 
-    # compute GAE
     returns = []
     advs = []
     next_value = torch.tensor(0.0)
@@ -123,6 +120,12 @@ def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, wind
         "ret": torch.stack(returns),
         "val": torch.stack(val_buf),
         "pnl": torch.stack(pnl_buf),
+        "debug": {
+            "steps": len(obs_buf),
+            "non_hold": non_hold,
+            "non_zero_pos": non_zero_pos,
+            "mean_abs_pnl": abs_pnl / max(1, len(obs_buf)),
+        },
     }
     return batch
 
@@ -178,6 +181,79 @@ def summarize_batch(batch):
     }
 
 
+def evaluate_candidate(
+    weights,
+    base_cfg,
+    windows_train,
+    windows_eval,
+    train_data,
+    eval_data,
+):
+    w_pnl, w_sharpe, w_mdd = weights
+    device = base_cfg["device"]
+
+    close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t = train_data
+    close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e = eval_data
+
+    env = me.PyTradingEnv(
+        float(close_t[0]),
+        margin_per_contract=base_cfg["margin_per_contract"],
+        enforce_margin=True,
+    )
+
+    obs_dim = len(me.build_observation_py(1, close_t, high_t, low_t, volume=vol_t, datetime_ns=dt_t, session_open=sess_t, margin_ok=margin_t, position=0))
+    policy = make_mlp(obs_dim).to(device)
+    value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
+    opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=base_cfg["lr"])
+
+    random.shuffle(windows_train)
+    for _ in range(base_cfg["train_epochs"]):
+        for w in windows_train[: base_cfg["train_windows"]]:
+            batch = rollout(env, policy, value, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"])
+            for k, v in batch.items():
+                if torch.is_tensor(v):
+                    batch[k] = v.to(device)
+            policy, value = ppo_update(policy, value, batch, opt, epochs=base_cfg["ppo_epochs"])
+
+    eval_pnls = []
+    eval_rewards = []
+    eval_equity = []
+    for w in windows_eval[: base_cfg["eval_windows"]]:
+        b = rollout(env, policy, value, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"])
+        eval_rewards.append(b["ret"].mean().item())
+        eval_pnls.append(float(b["pnl"].sum().item()))
+        eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())
+        if base_cfg.get("debug", False):
+            dbg = b["debug"]
+            print(
+                f"debug eval | steps {dbg['steps']} | non_hold {dbg['non_hold']} | "
+                f"non_zero_pos {dbg['non_zero_pos']} | mean_abs_pnl {dbg['mean_abs_pnl']:.6f}"
+            )
+
+    eval_sharpe = compute_sharpe(eval_pnls)
+    eval_draw = max_drawdown([x[-1] if len(x) > 0 else 0.0 for x in eval_equity])
+    eval_pnl = float(np.mean(eval_pnls)) if eval_pnls else 0.0
+
+    fitness = (w_pnl * eval_pnl) + (w_sharpe * eval_sharpe) - (w_mdd * eval_draw)
+
+    return {
+        "fitness": fitness,
+        "eval_pnl": eval_pnl,
+        "eval_sharpe": eval_sharpe,
+        "eval_drawdown": eval_draw,
+        "eval_ret_mean": float(np.mean(eval_rewards)) if eval_rewards else 0.0,
+    }
+
+
+def mutate(weights, min_w, max_w, sigma):
+    out = []
+    for w in weights:
+        w2 = w + random.gauss(0.0, sigma)
+        w2 = max(min_w, min(max_w, w2))
+        out.append(w2)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parquet", type=Path, help="Single parquet file (legacy)")
@@ -187,30 +263,33 @@ def main():
     ap.add_argument("--full-file", action="store_true", help="Use entire file as a single episode (no windowing)")
     ap.add_argument("--window", type=int, default=512)
     ap.add_argument("--step", type=int, default=256)
-    ap.add_argument("--epochs", type=int, default=4)
+    ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--globex", action="store_true", default=True)
+    ap.add_argument("--rth", action="store_true")
+    ap.add_argument("--margin-per-contract", type=float, default=None)
+    ap.add_argument("--symbol-config", type=Path, default=Path("config/symbols.yaml"))
+    ap.add_argument("--outdir", type=Path, default=Path("runs_ga"))
+
+    ap.add_argument("--generations", type=int, default=5)
+    ap.add_argument("--pop-size", type=int, default=6)
+    ap.add_argument("--elite-frac", type=float, default=0.33)
+    ap.add_argument("--mutation-sigma", type=float, default=0.25)
+    ap.add_argument("--weight-min", type=float, default=0.0)
+    ap.add_argument("--weight-max", type=float, default=2.0)
+
+    ap.add_argument("--train-epochs", type=int, default=2)
+    ap.add_argument("--train-windows", type=int, default=3)
+    ap.add_argument("--eval-windows", type=int, default=2)
     ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--lam", type=float, default=0.95)
-    ap.add_argument("--device", type=str, default=None, help="cuda or cpu (default: cuda if available)")
-    ap.add_argument("--globex", action="store_true", default=True, help="Use Globex hours (default true)")
-    ap.add_argument("--rth", action="store_true", help="Use RTH 09:30-16:00 ET (overrides globex)")
-    ap.add_argument("--margin-per-contract", type=float, default=None, help="Override inferred margin")
-    ap.add_argument("--symbol-config", type=Path, default=Path("config/symbols.yaml"), help="YAML with symbol defaults")
-    ap.add_argument("--outdir", type=Path, default=Path("runs"), help="Directory for checkpoints/logs")
-    ap.add_argument("--log-interval", type=int, default=1, help="Epoch interval for checkpoint/log")
-    ap.add_argument("--eval-windows", type=int, default=2, help="Number of windows to eval each epoch")
-    ap.add_argument("--fitness-w-pnl", type=float, default=1.0, help="Fitness weight for total PnL")
-    ap.add_argument("--fitness-w-sharpe", type=float, default=1.0, help="Fitness weight for Sharpe")
-    ap.add_argument("--fitness-w-mdd", type=float, default=1.0, help="Fitness weight for max drawdown (penalty)")
     args = ap.parse_args()
 
     default_device = (
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     device = torch.device(args.device or default_device)
-    if args.device is None and torch.backends.mps.is_built() and not torch.backends.mps.is_available():
-        print("[warn] MPS is built but not available; falling back to", device)
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     def load_dataset(path: Path):
@@ -237,8 +316,6 @@ def main():
     df_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(train_path)
     df_val, close_val, high_val, low_val, vol_val, dt_val, _ = load_dataset(val_path)
     df_test, close_test, high_test, low_test, vol_test, dt_test, _ = load_dataset(test_path)
-
-    # Load symbol config if present
     margin_cfg = None
     session_cfg = None
     if args.symbol_config.exists():
@@ -254,7 +331,6 @@ def main():
             use_globex = False
         elif session_cfg.lower() == "globex":
             use_globex = True
-
     sess_train = build_session_mask(dt_train, globex=use_globex)
     sess_val = build_session_mask(dt_val, globex=use_globex)
     sess_test = build_session_mask(dt_test, globex=use_globex)
@@ -263,89 +339,92 @@ def main():
     margin_val = np.ones_like(close_val, dtype=bool)
     margin_test = np.ones_like(close_test, dtype=bool)
 
-    env = me.PyTradingEnv(
-        float(close_train[0]),
-        margin_per_contract=margin_per_contract,
-        enforce_margin=True,
-    )
-
     if args.full_file:
         windows_train = [(0, len(close_train))]
-        windows_val = [(0, len(close_val))]
+        windows_eval = [(0, len(close_val))]
         windows_test = [(0, len(close_test))]
     else:
         windows_train = me.list_windows(len(close_train), args.window, args.step)
-        windows_val = me.list_windows(len(close_val), args.window, args.step)
+        windows_eval = me.list_windows(len(close_val), args.window, args.step)
         windows_test = me.list_windows(len(close_test), args.window, args.step)
         random.shuffle(windows_train)
 
-    # Initialize networks once
-    obs_dim = len(me.build_observation_py(1, close_train, high_train, low_train, volume=vol_train, datetime_ns=dt_train, session_open=sess_train, margin_ok=margin_train, position=0))
-    policy = make_mlp(obs_dim).to(device)
-    value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
-    opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=args.lr)
+    base_cfg = {
+        "device": device,
+        "margin_per_contract": margin_per_contract,
+        "train_epochs": args.train_epochs,
+        "train_windows": args.train_windows,
+        "eval_windows": args.eval_windows,
+        "ppo_epochs": args.ppo_epochs,
+        "lr": args.lr,
+        "gamma": args.gamma,
+        "lam": args.lam,
+        "debug": True,
+    }
 
-    log_path = args.outdir / "train_log.csv"
+    log_path = args.outdir / "ga_log.csv"
     if not log_path.exists():
-        log_path.write_text("epoch,train_ret_mean,train_pnl,train_sharpe,train_drawdown,eval_ret_mean,eval_pnl,eval_sharpe,eval_drawdown,fitness\n")
+        log_path.write_text("gen,idx,w_pnl,w_sharpe,w_mdd,fitness,eval_pnl,eval_sharpe,eval_drawdown,eval_ret_mean\n")
 
-    for epoch in range(args.epochs):
-        random.shuffle(windows_train)
-        for w in windows_train[:3]:  # limit for demo; extend as needed
-            batch = rollout(env, policy, value, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train, w, args.gamma, args.lam)
-            # move to device
-            for k in batch:
-                batch[k] = batch[k].to(device)
-            policy, value = ppo_update(policy, value, batch, opt, epochs=args.ppo_epochs)
-        train_stats = summarize_batch(batch)
+    pop = [
+        [
+            random.uniform(args.weight_min, args.weight_max),
+            random.uniform(args.weight_min, args.weight_max),
+            random.uniform(args.weight_min, args.weight_max),
+        ]
+        for _ in range(args.pop_size)
+    ]
 
-        # Eval on a few windows
-        eval_rewards = []
-        eval_pnls = []
-        eval_equity = []
-        for w in windows_val[: args.eval_windows]:
-            b = rollout(env, policy, value, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val, w, args.gamma, args.lam)
-            eval_rewards.append(b["ret"].mean().item())
-            eval_pnls.append(float(b["pnl"].sum().item()))
-            eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())
-
-        eval_sharpe = compute_sharpe(eval_pnls)
-        eval_draw = max_drawdown([x[-1] if len(x) > 0 else 0.0 for x in eval_equity])
-        eval_pnl = float(np.mean(eval_pnls)) if eval_pnls else 0.0
-        fitness = (args.fitness_w_pnl * eval_pnl) + (args.fitness_w_sharpe * eval_sharpe) - (args.fitness_w_mdd * eval_draw)
-
-        print(
-            "epoch {epoch} | train ret {train_ret:.2f} | train pnl {train_pnl:.2f} | "
-            "eval ret {eval_ret:.2f} | eval pnl {eval_pnl:.2f} | eval sharpe {eval_sharpe:.2f} | "
-            "eval mdd {eval_draw:.2f} | fitness {fitness:.2f}".format(
-                epoch=epoch,
-                train_ret=batch["ret"].mean().item(),
-                train_pnl=train_stats["total_pnl"],
-                eval_ret=float(np.mean(eval_rewards)) if eval_rewards else 0.0,
-                eval_pnl=eval_pnl,
-                eval_sharpe=eval_sharpe,
-                eval_draw=eval_draw,
-                fitness=fitness,
+    for gen in range(args.generations):
+        scored = []
+        for idx, w in enumerate(pop):
+            metrics = evaluate_candidate(
+                w,
+                base_cfg,
+                windows_train,
+                windows_eval,
+                (close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+                (close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
             )
-        )
-        if (epoch + 1) % args.log_interval == 0:
-            ckpt = {
-                "policy": policy.state_dict(),
-                "value": value.state_dict(),
-                "opt": opt.state_dict(),
-                "epoch": epoch,
-            }
-            torch.save(ckpt, args.outdir / f"ppo_epoch_{epoch+1}.pt")
-            np.savez(args.outdir / f"ppo_last_batch_{epoch+1}.npz",
-                     ret=batch["ret"].cpu().numpy(),
-                     adv=batch["adv"].cpu().numpy(),
-                     pnl=batch["pnl"].cpu().numpy())
+            scored.append((metrics["fitness"], w, metrics))
             with log_path.open("a") as f:
                 f.write(
-                    f\"{epoch},{batch['ret'].mean().item():.4f},{train_stats['total_pnl']:.4f},{train_stats['sharpe']:.4f},"
-                    f\"{train_stats['drawdown']:.4f},{float(np.mean(eval_rewards)) if eval_rewards else 0.0:.4f},"
-                    f\"{eval_pnl:.4f},{eval_sharpe:.4f},{eval_draw:.4f},{fitness:.4f}\\n\"
+                    f"{gen},{idx},{w[0]:.4f},{w[1]:.4f},{w[2]:.4f},{metrics['fitness']:.4f},"
+                    f"{metrics['eval_pnl']:.4f},{metrics['eval_sharpe']:.4f},{metrics['eval_drawdown']:.4f},{metrics['eval_ret_mean']:.4f}\n"
                 )
+            print(
+                f"gen {gen} cand {idx} | w={w} | fitness {metrics['fitness']:.2f} | "
+                f"pnl {metrics['eval_pnl']:.2f} | sharpe {metrics['eval_sharpe']:.2f} | mdd {metrics['eval_drawdown']:.2f}"
+            )
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        elite_n = max(1, int(args.elite_frac * args.pop_size))
+        elites = [w for _, w, _ in scored[:elite_n]]
+
+        # Refill population
+        new_pop = elites[:]
+        while len(new_pop) < args.pop_size:
+            parent = random.choice(elites)
+            child = mutate(parent, args.weight_min, args.weight_max, args.mutation_sigma)
+            new_pop.append(child)
+        pop = new_pop
+
+    # Final evaluation on test set using best weights from last generation
+    if scored:
+        best_w = scored[0][1]
+        test_metrics = evaluate_candidate(
+            best_w,
+            base_cfg,
+            windows_train,
+            windows_test,
+            (close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+            (close_test, high_test, low_test, vol_test, dt_test, sess_test, margin_test),
+        )
+        print(
+            f"test | w={best_w} | fitness {test_metrics['fitness']:.2f} | "
+            f"pnl {test_metrics['eval_pnl']:.2f} | sharpe {test_metrics['eval_sharpe']:.2f} | "
+            f"mdd {test_metrics['eval_drawdown']:.2f}"
+        )
 
 
 if __name__ == "__main__":
