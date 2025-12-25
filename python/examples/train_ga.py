@@ -494,19 +494,21 @@ def main():
 
         scored.sort(key=lambda x: x[0], reverse=True)
         
-        # Save evaluation trace for the best candidate of this generation
-        best_cand_metrics = scored[0][2]
-        if best_cand_metrics.get("eval_histories"):
-            trace_path = args.outdir / f"best_trace_gen{gen}.csv"
-            import csv
-            with trace_path.open("w", newline="") as f:
-                # Use headers from first step of first history
-                headers = best_cand_metrics["eval_histories"][0][0].keys()
-                writer = csv.DictWriter(f, fieldnames=headers)
-                writer.writeheader()
-                for history in best_cand_metrics["eval_histories"]:
-                    writer.writerows(history)
-            print(f"📈 Saved best candidate trace to {trace_path}")
+        # Save evaluation traces for the top 5 candidates of this generation
+        import csv
+        for i in range(min(5, len(scored))):
+            cand_metrics = scored[i][2]
+            if cand_metrics.get("eval_histories"):
+                trace_path = args.outdir / f"trace_gen{gen}_rank{i}.csv"
+                with trace_path.open("w", newline="") as f:
+                    # Use headers from first step of first history
+                    headers = cand_metrics["eval_histories"][0][0].keys()
+                    writer = csv.DictWriter(f, fieldnames=headers)
+                    writer.writeheader()
+                    for history in cand_metrics["eval_histories"]:
+                        writer.writerows(history)
+                if i == 0:
+                    print(f"📈 Saved best candidate trace to {trace_path}")
 
         elite_n = max(1, int(args.elite_frac * args.pop_size))
         elites = [w for _, w, _ in scored[:elite_n]]
