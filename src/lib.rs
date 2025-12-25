@@ -222,13 +222,14 @@ mod py_bindings {
 
     /// Build observation for index `idx` using prior data (t-1) and position.
     #[pyfunction]
-    #[pyo3(signature = (idx, close, high, low, volume=None, datetime_ns=None, session_open=None, margin_ok=None, position=0, equity=10000.0))]
+    #[pyo3(signature = (idx, close, high, low, open=None, volume=None, datetime_ns=None, session_open=None, margin_ok=None, position=0, equity=10000.0))]
     fn build_observation_py<'py>(
         py: Python<'py>,
         idx: usize,
         close: PyReadonlyArray1<'_, f64>,
         high: PyReadonlyArray1<'_, f64>,
         low: PyReadonlyArray1<'_, f64>,
+        open: Option<PyReadonlyArray1<'_, f64>>,
         volume: Option<PyReadonlyArray1<'_, f64>>,
         datetime_ns: Option<PyReadonlyArray1<'_, i64>>,
         session_open: Option<PyReadonlyArray1<'_, bool>>,
@@ -239,6 +240,7 @@ mod py_bindings {
         let close_s = close.as_slice()?;
         let high_s = high.as_slice()?;
         let low_s = low.as_slice()?;
+        let open_s: Option<Vec<f64>> = open.map(|o| o.as_slice().unwrap().to_vec());
         let vol_s: Option<Vec<f64>> = volume.map(|v| v.as_slice().unwrap().to_vec());
         let dt_s: Option<Vec<i64>> = datetime_ns.map(|d| d.as_slice().unwrap().to_vec());
         let sess_s: Option<Vec<bool>> = session_open.map(|s| s.as_slice().unwrap().to_vec());
@@ -246,6 +248,7 @@ mod py_bindings {
 
         let obs = build_observation(
             idx,
+            open_s.as_deref(),
             close_s,
             high_s,
             low_s,

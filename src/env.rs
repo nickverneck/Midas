@@ -237,6 +237,7 @@ impl TradingEnv {
 /// - Uses features up to t-1 (so pass slices ending at t-1).
 pub fn build_observation(
     idx: usize,
+    open: Option<&[f64]>,
     close: &[f64],
     high: &[f64],
     low: &[f64],
@@ -248,7 +249,17 @@ pub fn build_observation(
     equity: f64,
 ) -> Vec<f64> {
     let feats = compute_features_ohlcv(close, Some(high), Some(low), volume);
-    let mut obs = Vec::with_capacity(3 + feats.len() + 4);
+    let mut obs = Vec::with_capacity(4 + feats.len() + 4);
+    
+    // Current bar's open (the "right now" price)
+    if let Some(o) = open {
+        obs.push(o[idx]);
+    } else if idx > 0 {
+        obs.push(close[idx - 1]);
+    } else {
+        obs.push(f64::NAN);
+    }
+
     // price context t-1
     if idx > 0 {
         obs.push(close[idx - 1]);
@@ -352,7 +363,7 @@ mod tests {
         let dt = vec![now, now, now, now];
         let sess = vec![true, true, true, true];
         let margin = vec![true, true, true, true];
-        let obs = build_observation(3, &close, &high, &low, None, Some(&dt), Some(&sess), Some(&margin), 1, 1000.0);
+        let obs = build_observation(3, None, &close, &high, &low, None, Some(&dt), Some(&sess), Some(&margin), 1, 1000.0);
         assert!(obs.len() > 0);
         assert_eq!(obs.last().cloned().unwrap(), 1.0); // margin mask
     }
