@@ -23,9 +23,10 @@ import midas_env as me
 # Globals to hold checkpoint‑loaded weights (if any)
 loaded_policy_state = None
 loaded_value_state = None
-# Globals to hold the most recent trained models for final saving
-last_policy = None
-last_value = None
+# Variables to hold the overall best models found across all generations
+best_overall_fitness = -float("inf")
+best_overall_policy_state = None
+best_overall_value_state = None
 
 ACTIONS = ["buy", "sell", "hold", "revert"]
 
@@ -259,11 +260,6 @@ def evaluate_candidate(
                     batch[k] = v.to(device)
             policy, value = ppo_update(policy, value, batch, opt, epochs=base_cfg["ppo_epochs"])
 
-    # Store the trained models in globals for final saving
-    global last_policy, last_value
-    last_policy = policy
-    last_value = value
-
     eval_pnls = []
     eval_rewards = []
     eval_equity = []
@@ -294,6 +290,8 @@ def evaluate_candidate(
         "eval_drawdown": eval_draw,
         "eval_ret_mean": float(np.mean(eval_rewards)) if eval_rewards else 0.0,
         "eval_histories": eval_histories,
+        "policy_state": policy.state_dict(),
+        "value_state": value.state_dict(),
     }
 
 
@@ -494,21 +492,36 @@ def main():
 
         scored.sort(key=lambda x: x[0], reverse=True)
         
-        # Save evaluation traces for the top 5 candidates of this generation
+        # Save evaluation traces and NN weights for the top 5 candidates of this generation
         import csv
         for i in range(min(5, len(scored))):
             cand_metrics = scored[i][2]
+            cand_fitness = scored[i][0]
+            
+            # Trace saving
             if cand_metrics.get("eval_histories"):
                 trace_path = args.outdir / f"trace_gen{gen}_rank{i}.csv"
                 with trace_path.open("w", newline="") as f:
-                    # Use headers from first step of first history
                     headers = cand_metrics["eval_histories"][0][0].keys()
                     writer = csv.DictWriter(f, fieldnames=headers)
                     writer.writeheader()
                     for history in cand_metrics["eval_histories"]:
                         writer.writerows(history)
-                if i == 0:
-                    print(f"📈 Saved best candidate trace to {trace_path}")
+            
+            # Weight saving
+            policy_path = args.outdir / f"policy_gen{gen}_rank{i}.pt"
+            value_path = args.outdir / f"value_gen{gen}_rank{i}.pt"
+            torch.save(cand_metrics["policy_state"], policy_path)
+            torch.save(cand_metrics["value_state"], value_path)
+
+            if i == 0:
+                print(f"📈 Gen {gen} Top Performer: fitness {cand_fitness:.2f}, trace/weights saved.")
+                # Update best overall
+                global best_overall_fitness, best_overall_policy_state, best_overall_value_state
+                if cand_fitness > best_overall_fitness:
+                    best_overall_fitness = cand_fitness
+                    best_overall_policy_state = cand_metrics["policy_state"]
+                    best_overall_value_state = cand_metrics["value_state"]
 
         elite_n = max(1, int(args.elite_frac * args.pop_size))
         elites = [w for _, w, _ in scored[:elite_n]]
@@ -548,13 +561,12 @@ def main():
         total_elapsed = time.time() - overall_start_time
         print(f"⏱ Total training time: {total_elapsed:.2f} seconds")
         # Save the final best weights
-        best_policy_path = base_cfg["outdir"] / "best_policy.pt"
-        best_value_path = base_cfg["outdir"] / "best_value.pt"
-        if last_policy is not None and last_value is not None:
-            torch.save(last_policy.state_dict(), best_policy_path)
-            torch.save(last_value.state_dict(), best_value_path)
-            print(f"✅ Saved final policy to {best_policy_path}")
-            print(f"✅ Saved final value network to {best_value_path}")
+        best_policy_path = base_cfg["outdir"] / "best_overall_policy.pt"
+        best_value_path = base_cfg["outdir"] / "best_overall_value.pt"
+        if best_overall_policy_state is not None:
+            torch.save(best_overall_policy_state, best_policy_path)
+            torch.save(best_overall_value_state, best_value_path)
+            print(f"🏆 Saved best overall policy (fitness {best_overall_fitness:.2f}) to {best_policy_path}")
         else:
             print("⚠️ No trained policy/value available to save.")
 
