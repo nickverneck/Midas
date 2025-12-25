@@ -14,8 +14,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import yaml
+import time
 
 import midas_env as me
+
+# Globals to hold checkpoint‑loaded weights (if any)
+loaded_policy_state = None
+loaded_value_state = None
 
 ACTIONS = ["buy", "sell", "hold", "revert"]
 
@@ -205,6 +210,13 @@ def evaluate_candidate(
     policy = make_mlp(obs_dim).to(device)
     value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
     opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=base_cfg["lr"])
+    # Load saved weights if a checkpoint was provided
+    if loaded_policy_state is not None:
+        policy.load_state_dict(loaded_policy_state)
+        print("✅ Loaded policy weights from checkpoint")
+    if loaded_value_state is not None:
+        value.load_state_dict(loaded_value_state)
+        print("✅ Loaded value network weights from checkpoint")
 
     random.shuffle(windows_train)
     for _ in range(base_cfg["train_epochs"]):
@@ -284,6 +296,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--lam", type=float, default=0.95)
+    # New flag to load a checkpoint and resume training
+    ap.add_argument("--load-checkpoint", type=Path, default=None, help="Path to a checkpoint .pt file to resume training")
     args = ap.parse_args()
 
     default_device = (
@@ -291,7 +305,23 @@ def main():
     )
     device = torch.device(args.device or default_device)
     args.outdir.mkdir(parents=True, exist_ok=True)
-
+    # Start overall timer
+    overall_start_time = time.time()
+    # ---------------------------------------------------------------------
+    # Checkpoint loading logic
+    # ---------------------------------------------------------------------
+    global loaded_policy_state, loaded_value_state
+    start_gen = 0
+    loaded_policy_state = None
+    loaded_value_state = None
+    if args.load_checkpoint is not None and args.load_checkpoint.exists():
+        ckpt = torch.load(args.load_checkpoint, map_location=device)
+        # Assign to globals so evaluate_candidate can access them
+        loaded_policy_state = ckpt.get("policy_state")
+        loaded_value_state = ckpt.get("value_state")
+        start_gen = ckpt.get("gen", -1) + 1  # resume from next generation
+        pop = ckpt.get("pop", pop)  # fall back to freshly generated pop if missing
+        print(f"🔁 Loaded checkpoint from {args.load_checkpoint}, resuming at generation {start_gen}")
     def load_dataset(path: Path):
         df = pl.read_parquet(path)
         close = np.ascontiguousarray(df["close"].to_numpy(), dtype=np.float64)
@@ -310,8 +340,8 @@ def main():
         test_path = args.parquet
     else:
         train_path = args.train_parquet
-        val_path = args.val_parquet
-        test_path = args.test_parquet
+    val_path = args.val_parquet
+    test_path = args.test_parquet if args.test_parquet.exists() else args.val_parquet
 
     df_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(train_path)
     df_val, close_val, high_val, low_val, vol_val, dt_val, _ = load_dataset(val_path)
@@ -375,7 +405,8 @@ def main():
         for _ in range(args.pop_size)
     ]
 
-    for gen in range(args.generations):
+    for gen in range(start_gen, args.generations):
+        gen_start_time = time.time()
         scored = []
         for idx, w in enumerate(pop):
             metrics = evaluate_candidate(
@@ -396,6 +427,9 @@ def main():
                 f"gen {gen} cand {idx} | w={w} | fitness {metrics['fitness']:.2f} | "
                 f"pnl {metrics['eval_pnl']:.2f} | sharpe {metrics['eval_sharpe']:.2f} | mdd {metrics['eval_drawdown']:.2f}"
             )
+        # End of generation timing
+        gen_elapsed = time.time() - gen_start_time
+        print(f"⏱ Generation {gen} completed in {gen_elapsed:.2f} seconds")
 
         scored.sort(key=lambda x: x[0], reverse=True)
         elite_n = max(1, int(args.elite_frac * args.pop_size))
@@ -408,6 +442,15 @@ def main():
             child = mutate(parent, args.weight_min, args.weight_max, args.mutation_sigma)
             new_pop.append(child)
         pop = new_pop
+        # Save a checkpoint at the end of each generation
+        ckpt_path = args.outdir / f"checkpoint_gen{gen}.pt"
+        torch.save({
+            "gen": gen,
+            "policy_state": policy.state_dict(),
+            "value_state": value.state_dict(),
+            "pop": pop,
+        }, ckpt_path)
+        print(f"💾 Saved checkpoint for generation {gen} to {ckpt_path}")
 
     # Final evaluation on test set using best weights from last generation
     if scored:
@@ -425,6 +468,16 @@ def main():
             f"pnl {test_metrics['eval_pnl']:.2f} | sharpe {test_metrics['eval_sharpe']:.2f} | "
             f"mdd {test_metrics['eval_drawdown']:.2f}"
         )
+        # End overall timing
+        total_elapsed = time.time() - overall_start_time
+        print(f"⏱ Total training time: {total_elapsed:.2f} seconds")
+        # Save the final best weights
+        best_policy_path = args.outdir / "best_policy.pt"
+        best_value_path = args.outdir / "best_value.pt"
+        torch.save(policy.state_dict(), best_policy_path)
+        torch.save(value.state_dict(), best_value_path)
+        print(f"✅ Saved final policy to {best_policy_path}")
+        print(f"✅ Saved final value network to {best_value_path}")
 
 
 if __name__ == "__main__":
