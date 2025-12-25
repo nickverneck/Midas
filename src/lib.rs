@@ -26,9 +26,10 @@ mod py_bindings {
     #[pymethods]
     impl PyTradingEnv {
         #[new]
-        #[pyo3(signature = (initial_price, max_position=1, commission_round_turn=1.60, slippage_per_contract=0.25, margin_per_contract=50.0, enforce_margin=true, risk_penalty=0.0, idle_penalty=0.0))]
+        #[pyo3(signature = (initial_price, initial_balance=10000.0, max_position=1, commission_round_turn=1.60, slippage_per_contract=0.25, margin_per_contract=50.0, enforce_margin=true, risk_penalty=0.0, idle_penalty=0.0))]
         fn new(
             initial_price: f64,
+            initial_balance: f64,
             max_position: i32,
             commission_round_turn: f64,
             slippage_per_contract: f64,
@@ -48,13 +49,14 @@ mod py_bindings {
                 idle_penalty,
             };
             Self {
-                inner: TradingEnv::new(initial_price, cfg),
+                inner: TradingEnv::new(initial_price, initial_balance, cfg),
             }
         }
 
         /// Reset environment state to a fresh price.
-        fn reset(&mut self, price: f64) {
-            self.inner.reset(price);
+        #[pyo3(signature = (price, initial_balance=10000.0))]
+        fn reset(&mut self, price: f64, initial_balance: f64) {
+            self.inner.reset(price, initial_balance);
         }
 
         /// Step the environment.
@@ -93,6 +95,7 @@ mod py_bindings {
                 dict.set_item("margin_call_violation", info.margin_call_violation)?;
                 dict.set_item("position_limit_violation", info.position_limit_violation)?;
                 dict.set_item("session_closed_violation", info.session_closed_violation)?;
+                dict.set_item("unrealized_pnl", s.unrealized_pnl)?;
                 dict.set_item("position", s.position)?;
                 dict.set_item("cash", s.cash)?;
                 dict.set_item("last_price", s.last_price)?;
@@ -151,6 +154,7 @@ mod py_bindings {
                     d.set_item("margin_call_violation", info.margin_call_violation)?;
                     d.set_item("position_limit_violation", info.position_limit_violation)?;
                     d.set_item("session_closed_violation", info.session_closed_violation)?;
+                    d.set_item("unrealized_pnl", s.unrealized_pnl)?;
                     d.set_item("position", s.position)?;
                     d.set_item("cash", s.cash)?;
                     d.set_item("last_price", s.last_price)?;
@@ -218,7 +222,7 @@ mod py_bindings {
 
     /// Build observation for index `idx` using prior data (t-1) and position.
     #[pyfunction]
-    #[pyo3(signature = (idx, close, high, low, volume=None, datetime_ns=None, session_open=None, margin_ok=None, position=0))]
+    #[pyo3(signature = (idx, close, high, low, volume=None, datetime_ns=None, session_open=None, margin_ok=None, position=0, equity=10000.0))]
     fn build_observation_py<'py>(
         py: Python<'py>,
         idx: usize,
@@ -230,6 +234,7 @@ mod py_bindings {
         session_open: Option<PyReadonlyArray1<'_, bool>>,
         margin_ok: Option<PyReadonlyArray1<'_, bool>>,
         position: i32,
+        equity: f64,
     ) -> PyResult<&'py PyArray1<f64>> {
         let close_s = close.as_slice()?;
         let high_s = high.as_slice()?;
@@ -249,6 +254,7 @@ mod py_bindings {
             sess_s.as_deref(),
             margin_s.as_deref(),
             position,
+            equity,
         );
         #[allow(deprecated)]
         Ok(PyArray1::from_vec(py, obs))

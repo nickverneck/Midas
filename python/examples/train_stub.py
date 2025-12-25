@@ -36,6 +36,7 @@ def main():
 
     env = me.PyTradingEnv(
         initial_price=float(prices[0]),
+        initial_balance=10000.0,
         max_position=args.max_position,
         commission_round_turn=args.commission,
         slippage_per_contract=args.slippage,

@@ -89,13 +89,13 @@ pub struct TradingEnv {
 }
 
 impl TradingEnv {
-    pub fn new(initial_price: f64, cfg: EnvConfig) -> Self {
+    pub fn new(initial_price: f64, initial_balance: f64, cfg: EnvConfig) -> Self {
         Self {
             cfg,
             state: EnvState {
                 step: 0,
                 position: 0,
-                cash: 0.0,
+                cash: initial_balance,
                 last_price: initial_price,
                 unrealized_pnl: 0.0,
                 done: false,
@@ -103,11 +103,11 @@ impl TradingEnv {
         }
     }
 
-    pub fn reset(&mut self, initial_price: f64) {
+    pub fn reset(&mut self, initial_price: f64, initial_balance: f64) {
         self.state = EnvState {
             step: 0,
             position: 0,
-            cash: 0.0,
+            cash: initial_balance,
             last_price: initial_price,
             unrealized_pnl: 0.0,
             done: false,
@@ -245,9 +245,10 @@ pub fn build_observation(
     session_open: Option<&[bool]>,
     margin_ok: Option<&[bool]>,
     position: i32,
+    equity: f64,
 ) -> Vec<f64> {
     let feats = compute_features_ohlcv(close, Some(high), Some(low), volume);
-    let mut obs = Vec::with_capacity(2 + feats.len() + 4);
+    let mut obs = Vec::with_capacity(3 + feats.len() + 4);
     // price context t-1
     if idx > 0 {
         obs.push(close[idx - 1]);
@@ -258,6 +259,9 @@ pub fn build_observation(
         obs.push(f64::NAN);
         obs.push(f64::NAN);
     }
+    
+    // Equity/Balance feature
+    obs.push(equity);
 
     // indicators at t-1 (or NaN during warmup)
     for period in periods() {
@@ -305,7 +309,7 @@ mod tests {
 
     #[test]
     fn revert_flips_and_charges_double_side_costs() {
-        let mut env = TradingEnv::new(100.0, EnvConfig { max_position: 1, enforce_margin: false, ..Default::default() });
+        let mut env = TradingEnv::new(100.0, 1000.0, EnvConfig { max_position: 1, enforce_margin: false, ..Default::default() });
         let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
         assert_eq!(env.state.position, 1);
 
@@ -317,7 +321,7 @@ mod tests {
 
     #[test]
     fn hold_incurs_no_trade_costs() {
-        let mut env = TradingEnv::new(100.0, EnvConfig::default());
+        let mut env = TradingEnv::new(100.0, 1000.0, EnvConfig::default());
         let (_r, info) = env.step(Action::Hold, 101.0, StepContext::default());
         assert_eq!(info.commission_paid, 0.0);
         assert_eq!(env.state.position, 0);
@@ -325,7 +329,7 @@ mod tests {
 
     #[test]
     fn session_closed_blocks_trading() {
-        let mut env = TradingEnv::new(100.0, EnvConfig::default());
+        let mut env = TradingEnv::new(100.0, 1000.0, EnvConfig::default());
         let (r, info) = env.step(
             Action::Buy,
             100.0,
@@ -348,7 +352,7 @@ mod tests {
         let dt = vec![now, now, now, now];
         let sess = vec![true, true, true, true];
         let margin = vec![true, true, true, true];
-        let obs = build_observation(3, &close, &high, &low, None, Some(&dt), Some(&sess), Some(&margin), 1);
+        let obs = build_observation(3, &close, &high, &low, None, Some(&dt), Some(&sess), Some(&margin), 1, 1000.0);
         assert!(obs.len() > 0);
         assert_eq!(obs.last().cloned().unwrap(), 1.0); // margin mask
     }

@@ -57,7 +57,7 @@ def make_mlp(input_dim, hidden=128):
     )
 
 
-def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position):
+def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position, equity):
     obs = me.build_observation_py(
         idx,
         close, high, low,
@@ -66,21 +66,23 @@ def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position):
         session_open=sess,
         margin_ok=margin,
         position=position,
+        equity=equity,
     )
     t = torch.tensor(np.asarray(obs), dtype=torch.float32)
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam):
+def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
     start, end = window
     # seed env at window start price
-    env.reset(float(close[start]))
+    env.reset(float(close[start]), initial_balance=initial_balance)
     position = 0
-    obs_dim = len(me.build_observation_py(start + 1, close, high, low, volume=vol, datetime_ns=dt_ns, session_open=sess, margin_ok=margin, position=position))
+    equity = initial_balance
+    obs_dim = len(me.build_observation_py(start + 1, close, high, low, volume=vol, datetime_ns=dt_ns, session_open=sess, margin_ok=margin, position=position, equity=equity))
     obs_buf, act_buf, logp_buf, rew_buf, pnl_buf, val_buf, done_buf = [], [], [], [], [], [], []
 
     for t in range(start + 1, end):
-        obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position)
+        obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position, equity)
         obs = obs.to(next(policy.parameters()).device)
         with torch.no_grad():
             logits = policy(obs)
@@ -92,6 +94,7 @@ def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, wind
         reward, info = env.step(action_str, float(close[t]), session_open=True, margin_ok=True)
         position = info["position"]
         pnl_change = float(info["pnl_change"])
+        equity = info["cash"] + info["unrealized_pnl"]
 
         with torch.no_grad():
             val = value(obs).squeeze(0)
@@ -195,6 +198,7 @@ def main():
     ap.add_argument("--device", type=str, default=None, help="cuda or cpu (default: cuda if available)")
     ap.add_argument("--globex", action="store_true", default=True, help="Use Globex hours (default true)")
     ap.add_argument("--rth", action="store_true", help="Use RTH 09:30-16:00 ET (overrides globex)")
+    ap.add_argument("--initial-balance", type=float, default=10000.0, help="Initial trading balance")
     ap.add_argument("--margin-per-contract", type=float, default=None, help="Override inferred margin")
     ap.add_argument("--symbol-config", type=Path, default=Path("config/symbols.yaml"), help="YAML with symbol defaults")
     ap.add_argument("--outdir", type=Path, default=Path("runs"), help="Directory for checkpoints/logs")
@@ -265,6 +269,7 @@ def main():
 
     env = me.PyTradingEnv(
         float(close_train[0]),
+        initial_balance=args.initial_balance,
         margin_per_contract=margin_per_contract,
         enforce_margin=True,
     )
@@ -280,7 +285,7 @@ def main():
         random.shuffle(windows_train)
 
     # Initialize networks once
-    obs_dim = len(me.build_observation_py(1, close_train, high_train, low_train, volume=vol_train, datetime_ns=dt_train, session_open=sess_train, margin_ok=margin_train, position=0))
+    obs_dim = len(me.build_observation_py(1, close_train, high_train, low_train, volume=vol_train, datetime_ns=dt_train, session_open=sess_train, margin_ok=margin_train, position=0, equity=args.initial_balance))
     policy = make_mlp(obs_dim).to(device)
     value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
     opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=args.lr)
@@ -292,7 +297,7 @@ def main():
     for epoch in range(args.epochs):
         random.shuffle(windows_train)
         for w in windows_train[:3]:  # limit for demo; extend as needed
-            batch = rollout(env, policy, value, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train, w, args.gamma, args.lam)
+            batch = rollout(env, policy, value, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train, w, args.gamma, args.lam, args.initial_balance)
             # move to device
             for k in batch:
                 batch[k] = batch[k].to(device)
@@ -304,7 +309,7 @@ def main():
         eval_pnls = []
         eval_equity = []
         for w in windows_val[: args.eval_windows]:
-            b = rollout(env, policy, value, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val, w, args.gamma, args.lam)
+            b = rollout(env, policy, value, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val, w, args.gamma, args.lam, args.initial_balance)
             eval_rewards.append(b["ret"].mean().item())
             eval_pnls.append(float(b["pnl"].sum().item()))
             eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())

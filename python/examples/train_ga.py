@@ -21,6 +21,9 @@ import midas_env as me
 # Globals to hold checkpoint‑loaded weights (if any)
 loaded_policy_state = None
 loaded_value_state = None
+# Globals to hold the most recent trained models for final saving
+last_policy = None
+last_value = None
 
 ACTIONS = ["buy", "sell", "hold", "revert"]
 
@@ -54,7 +57,7 @@ def make_mlp(input_dim, hidden=128):
     )
 
 
-def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position):
+def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position, equity):
     obs = me.build_observation_py(
         idx,
         close, high, low,
@@ -63,22 +66,31 @@ def compute_obs(idx, close, high, low, vol, dt_ns, sess, margin, position):
         session_open=sess,
         margin_ok=margin,
         position=position,
+        equity=equity,
     )
     t = torch.tensor(np.asarray(obs), dtype=torch.float32)
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam):
+def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
     start, end = window
-    env.reset(float(close[start]))
+    env.reset(float(close[start]), initial_balance=initial_balance)
     position = 0
+    cash = initial_balance
     obs_buf, act_buf, logp_buf, rew_buf, pnl_buf, val_buf, done_buf = [], [], [], [], [], [], []
     non_hold = 0
     non_zero_pos = 0
     abs_pnl = 0.0
 
     for t in range(start + 1, end):
-        obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position)
+        # Current equity for the observation (after previous step)
+        if t == start + 1:
+            equity = initial_balance
+        else:
+            # updated at the end of the previous loop
+            pass
+
+        obs = compute_obs(t, close, high, low, vol, dt_ns, sess, margin, position, equity)
         obs = obs.to(next(policy.parameters()).device)
         with torch.no_grad():
             logits = policy(obs)
@@ -86,10 +98,16 @@ def rollout(env, policy, value, close, high, low, vol, dt_ns, sess, margin, wind
             action_idx = dist.sample()
             logp = dist.log_prob(action_idx)
         action_str = ACTIONS[action_idx.item()]
+        # Debug: print chosen action
+        if base_cfg.get("debug", False):
+            print(f"🕹 Action taken: {action_str}")
 
         reward, info = env.step(action_str, float(close[t]), session_open=True, margin_ok=True)
         position = info["position"]
         pnl_change = float(info["pnl_change"])
+        # Update equity for next step (for observation in next iteration)
+        equity = info["cash"] + info["unrealized_pnl"]
+        
         if action_str != "hold":
             non_hold += 1
         if position != 0:
@@ -202,11 +220,12 @@ def evaluate_candidate(
 
     env = me.PyTradingEnv(
         float(close_t[0]),
+        initial_balance=base_cfg["initial_balance"],
         margin_per_contract=base_cfg["margin_per_contract"],
-        enforce_margin=True,
+        enforce_margin=not args.disable_margin,
     )
 
-    obs_dim = len(me.build_observation_py(1, close_t, high_t, low_t, volume=vol_t, datetime_ns=dt_t, session_open=sess_t, margin_ok=margin_t, position=0))
+    obs_dim = len(me.build_observation_py(1, close_t, high_t, low_t, volume=vol_t, datetime_ns=dt_t, session_open=sess_t, margin_ok=margin_t, position=0, equity=base_cfg["initial_balance"]))
     policy = make_mlp(obs_dim).to(device)
     value = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(), nn.Linear(128, 1)).to(device)
     opt = optim.Adam(list(policy.parameters()) + list(value.parameters()), lr=base_cfg["lr"])
@@ -221,11 +240,16 @@ def evaluate_candidate(
     random.shuffle(windows_train)
     for _ in range(base_cfg["train_epochs"]):
         for w in windows_train[: base_cfg["train_windows"]]:
-            batch = rollout(env, policy, value, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"])
+            batch = rollout(env, policy, value, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"])
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device)
             policy, value = ppo_update(policy, value, batch, opt, epochs=base_cfg["ppo_epochs"])
+
+    # Store the trained models in globals for final saving
+    global last_policy, last_value
+    last_policy = policy
+    last_value = value
 
     eval_pnls = []
     eval_rewards = []
@@ -278,6 +302,7 @@ def main():
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--globex", action="store_true", default=True)
     ap.add_argument("--rth", action="store_true")
+    ap.add_argument("--initial-balance", type=float, default=10000.0)
     ap.add_argument("--margin-per-contract", type=float, default=None)
     ap.add_argument("--symbol-config", type=Path, default=Path("config/symbols.yaml"))
     ap.add_argument("--outdir", type=Path, default=Path("runs_ga"))
@@ -298,6 +323,7 @@ def main():
     ap.add_argument("--lam", type=float, default=0.95)
     # New flag to load a checkpoint and resume training
     ap.add_argument("--load-checkpoint", type=Path, default=None, help="Path to a checkpoint .pt file to resume training")
+    ap.add_argument("--disable-margin", action="store_true", help="Disable margin enforcement for debugging")
     args = ap.parse_args()
 
     default_device = (
@@ -381,6 +407,7 @@ def main():
 
     base_cfg = {
         "device": device,
+        "initial_balance": args.initial_balance,
         "margin_per_contract": margin_per_contract,
         "train_epochs": args.train_epochs,
         "train_windows": args.train_windows,
@@ -442,12 +469,10 @@ def main():
             child = mutate(parent, args.weight_min, args.weight_max, args.mutation_sigma)
             new_pop.append(child)
         pop = new_pop
-        # Save a checkpoint at the end of each generation
+        # Save a checkpoint at the end of each generation (policy/value not persisted here)
         ckpt_path = args.outdir / f"checkpoint_gen{gen}.pt"
         torch.save({
             "gen": gen,
-            "policy_state": policy.state_dict(),
-            "value_state": value.state_dict(),
             "pop": pop,
         }, ckpt_path)
         print(f"💾 Saved checkpoint for generation {gen} to {ckpt_path}")
@@ -474,10 +499,13 @@ def main():
         # Save the final best weights
         best_policy_path = args.outdir / "best_policy.pt"
         best_value_path = args.outdir / "best_value.pt"
-        torch.save(policy.state_dict(), best_policy_path)
-        torch.save(value.state_dict(), best_value_path)
-        print(f"✅ Saved final policy to {best_policy_path}")
-        print(f"✅ Saved final value network to {best_value_path}")
+        if last_policy is not None and last_value is not None:
+            torch.save(last_policy.state_dict(), best_policy_path)
+            torch.save(last_value.state_dict(), best_value_path)
+            print(f"✅ Saved final policy to {best_policy_path}")
+            print(f"✅ Saved final value network to {best_value_path}")
+        else:
+            print("⚠️ No trained policy/value available to save.")
 
 
 if __name__ == "__main__":
