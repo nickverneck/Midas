@@ -15,6 +15,8 @@ import torch.nn as nn
 import torch.optim as optim
 import yaml
 import time
+from concurrent.futures import ProcessPoolExecutor
+import functools
 
 import midas_env as me
 
@@ -73,7 +75,7 @@ def compute_obs(idx, close, high, low, open, vol, dt_ns, sess, margin, position,
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance, debug=False):
+def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance, debug=False, capture_history=False):
     start, end = window
     env.reset(float(close[start]), initial_balance=initial_balance)
     position = 0
@@ -82,6 +84,7 @@ def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin
     non_hold = 0
     non_zero_pos = 0
     abs_pnl = 0.0
+    history = []
 
     for t in range(start + 1, end):
         # Current equity for the observation (after previous step)
@@ -99,9 +102,15 @@ def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin
             action_idx = dist.sample()
             logp = dist.log_prob(action_idx)
         action_str = ACTIONS[action_idx.item()]
-        # Debug: print chosen action
-        if debug:
-            print(f"🕹 Action taken: {action_str}")
+        
+        if capture_history:
+            history.append({
+                "step": t,
+                "price": float(close[t]),
+                "equity": equity,
+                "position": position,
+                "action": action_str,
+            })
 
         reward, info = env.step(action_str, float(close[t]), session_open=True, margin_ok=True)
         position = info["position"]
@@ -144,6 +153,7 @@ def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin
         "ret": torch.stack(returns),
         "val": torch.stack(val_buf),
         "pnl": torch.stack(pnl_buf),
+        "history": history,
         "debug": {
             "steps": len(obs_buf),
             "non_hold": non_hold,
@@ -212,6 +222,8 @@ def evaluate_candidate(
     windows_eval,
     train_data,
     eval_data,
+    loaded_policy_state=None,
+    loaded_value_state=None,
 ):
     w_pnl, w_sharpe, w_mdd = weights
     device = base_cfg["device"]
@@ -255,11 +267,13 @@ def evaluate_candidate(
     eval_pnls = []
     eval_rewards = []
     eval_equity = []
+    eval_histories = []
     for w in windows_eval[: base_cfg["eval_windows"]]:
-        b = rollout(env, policy, value, open_e, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"], debug=base_cfg.get("debug", False))
+        b = rollout(env, policy, value, open_e, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"], debug=base_cfg.get("debug", False), capture_history=True)
         eval_rewards.append(b["ret"].mean().item())
         eval_pnls.append(float(b["pnl"].sum().item()))
         eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())
+        eval_histories.append(b["history"])
         if base_cfg.get("debug", False):
             dbg = b["debug"]
             print(
@@ -279,6 +293,7 @@ def evaluate_candidate(
         "eval_sharpe": eval_sharpe,
         "eval_drawdown": eval_draw,
         "eval_ret_mean": float(np.mean(eval_rewards)) if eval_rewards else 0.0,
+        "eval_histories": eval_histories,
     }
 
 
@@ -310,6 +325,7 @@ def main():
 
     ap.add_argument("--generations", type=int, default=5)
     ap.add_argument("--pop-size", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=2, help="Number of parallel individuals to train")
     ap.add_argument("--elite-frac", type=float, default=0.33)
     ap.add_argument("--mutation-sigma", type=float, default=0.25)
     ap.add_argument("--weight-min", type=float, default=0.0)
@@ -439,30 +455,59 @@ def main():
     for gen in range(start_gen, args.generations):
         gen_start_time = time.time()
         scored = []
-        for idx, w in enumerate(pop):
-            metrics = evaluate_candidate(
-                w,
-                base_cfg,
-                windows_train,
-                windows_eval,
-                (open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
-                (open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
-            )
-            scored.append((metrics["fitness"], w, metrics))
-            with log_path.open("a") as f:
-                f.write(
-                    f"{gen},{idx},{w[0]:.4f},{w[1]:.4f},{w[2]:.4f},{metrics['fitness']:.4f},"
-                    f"{metrics['eval_pnl']:.4f},{metrics['eval_sharpe']:.4f},{metrics['eval_drawdown']:.4f},{metrics['eval_ret_mean']:.4f}\n"
+        
+        print(f"\n🚀 Generation {gen} | Evaluating {len(pop)} candidates in parallel (workers={args.workers})")
+        
+        # Prepare fixed arguments for evaluate_candidate
+        eval_func = functools.partial(
+            evaluate_candidate,
+            base_cfg=base_cfg,
+            windows_train=windows_train,
+            windows_eval=windows_eval,
+            train_data=(open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+            eval_data=(open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
+            loaded_policy_state=loaded_policy_state,
+            loaded_value_state=loaded_value_state,
+        )
+
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            # Map weights to evaluate_candidate
+            futures = [executor.submit(eval_func, w) for w in pop]
+            
+            for idx, future in enumerate(futures):
+                w = pop[idx]
+                metrics = future.result()
+                scored.append((metrics["fitness"], w, metrics))
+                
+                with log_path.open("a") as f:
+                    f.write(
+                        f"{gen},{idx},{w[0]:.4f},{w[1]:.4f},{w[2]:.4f},{metrics['fitness']:.4f},"
+                        f"{metrics['eval_pnl']:.4f},{metrics['eval_sharpe']:.4f},{metrics['eval_drawdown']:.4f},{metrics['eval_ret_mean']:.4f}\n"
+                    )
+                print(
+                    f"  ✅ cand {idx}/{len(pop)-1} | fitness {metrics['fitness']:.2f} | "
+                    f"pnl {metrics['eval_pnl']:.2f} | sharpe {metrics['eval_sharpe']:.2f}"
                 )
-            print(
-                f"gen {gen} cand {idx} | w={w} | fitness {metrics['fitness']:.2f} | "
-                f"pnl {metrics['eval_pnl']:.2f} | sharpe {metrics['eval_sharpe']:.2f} | mdd {metrics['eval_drawdown']:.2f}"
-            )
         # End of generation timing
         gen_elapsed = time.time() - gen_start_time
         print(f"⏱ Generation {gen} completed in {gen_elapsed:.2f} seconds")
 
         scored.sort(key=lambda x: x[0], reverse=True)
+        
+        # Save evaluation trace for the best candidate of this generation
+        best_cand_metrics = scored[0][2]
+        if best_cand_metrics.get("eval_histories"):
+            trace_path = args.outdir / f"best_trace_gen{gen}.csv"
+            import csv
+            with trace_path.open("w", newline="") as f:
+                # Use headers from first step of first history
+                headers = best_cand_metrics["eval_histories"][0][0].keys()
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                for history in best_cand_metrics["eval_histories"]:
+                    writer.writerows(history)
+            print(f"📈 Saved best candidate trace to {trace_path}")
+
         elite_n = max(1, int(args.elite_frac * args.pop_size))
         elites = [w for _, w, _ in scored[:elite_n]]
 
