@@ -290,8 +290,8 @@ def evaluate_candidate(
         "eval_drawdown": eval_draw,
         "eval_ret_mean": float(np.mean(eval_rewards)) if eval_rewards else 0.0,
         "eval_histories": eval_histories,
-        "policy_state": policy.state_dict(),
-        "value_state": value.state_dict(),
+        "policy_state": {k: v.cpu() for k, v in policy.state_dict().items()},
+        "value_state": {k: v.cpu() for k, v in value.state_dict().items()},
     }
 
 
