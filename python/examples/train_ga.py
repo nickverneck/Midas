@@ -73,7 +73,7 @@ def compute_obs(idx, close, high, low, open, vol, dt_ns, sess, margin, position,
     return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance):
+def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin, window, gamma, lam, initial_balance, debug=False):
     start, end = window
     env.reset(float(close[start]), initial_balance=initial_balance)
     position = 0
@@ -100,7 +100,7 @@ def rollout(env, policy, value, open, close, high, low, vol, dt_ns, sess, margin
             logp = dist.log_prob(action_idx)
         action_str = ACTIONS[action_idx.item()]
         # Debug: print chosen action
-        if base_cfg.get("debug", False):
+        if debug:
             print(f"🕹 Action taken: {action_str}")
 
         reward, info = env.step(action_str, float(close[t]), session_open=True, margin_ok=True)
@@ -223,7 +223,7 @@ def evaluate_candidate(
         float(close_t[0]),
         initial_balance=base_cfg["initial_balance"],
         margin_per_contract=base_cfg["margin_per_contract"],
-        enforce_margin=not args.disable_margin,
+        enforce_margin=not base_cfg["disable_margin"],
     )
 
     obs_dim = len(me.build_observation_py(1, close_t, high_t, low_t, open=open_t, volume=vol_t, datetime_ns=dt_t, session_open=sess_t, margin_ok=margin_t, position=0, equity=base_cfg["initial_balance"]))
@@ -241,7 +241,7 @@ def evaluate_candidate(
     random.shuffle(windows_train)
     for _ in range(base_cfg["train_epochs"]):
         for w in windows_train[: base_cfg["train_windows"]]:
-            batch = rollout(env, policy, value, open_t, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"])
+            batch = rollout(env, policy, value, open_t, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"], debug=base_cfg.get("debug", False))
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device)
@@ -256,7 +256,7 @@ def evaluate_candidate(
     eval_rewards = []
     eval_equity = []
     for w in windows_eval[: base_cfg["eval_windows"]]:
-        b = rollout(env, policy, value, open_e, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"])
+        b = rollout(env, policy, value, open_e, close_e, high_e, low_e, vol_e, dt_e, sess_e, margin_e, w, base_cfg["gamma"], base_cfg["lam"], base_cfg["initial_balance"], debug=base_cfg.get("debug", False))
         eval_rewards.append(b["ret"].mean().item())
         eval_pnls.append(float(b["pnl"].sum().item()))
         eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())
@@ -419,6 +419,8 @@ def main():
         "gamma": args.gamma,
         "lam": args.lam,
         "debug": True,
+        "disable_margin": args.disable_margin,
+        "outdir": args.outdir,
     }
 
     log_path = args.outdir / "ga_log.csv"
@@ -499,8 +501,8 @@ def main():
         total_elapsed = time.time() - overall_start_time
         print(f"⏱ Total training time: {total_elapsed:.2f} seconds")
         # Save the final best weights
-        best_policy_path = args.outdir / "best_policy.pt"
-        best_value_path = args.outdir / "best_value.pt"
+        best_policy_path = base_cfg["outdir"] / "best_policy.pt"
+        best_value_path = base_cfg["outdir"] / "best_value.pt"
         if last_policy is not None and last_value is not None:
             torch.save(last_policy.state_dict(), best_policy_path)
             torch.save(last_value.state_dict(), best_value_path)

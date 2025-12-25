@@ -29,7 +29,7 @@ pub struct EmaParams {
 
 /// Run one episode over price series with given actions.
 /// Assumes `actions.len() == prices.len() - 1` (one action per transition).
-pub fn run_episode(prices: &[f64], actions: &[Action], cfg: EnvConfig) -> EpisodeResult {
+pub fn run_episode(prices: &[f64], actions: &[Action], initial_balance: f64, cfg: EnvConfig) -> EpisodeResult {
     assert!(
         prices.len() >= 2,
         "need at least two prices to compute a step"
@@ -39,7 +39,7 @@ pub fn run_episode(prices: &[f64], actions: &[Action], cfg: EnvConfig) -> Episod
         "actions should be one fewer than prices"
     );
 
-    let mut env = TradingEnv::new(prices[0], cfg);
+    let mut env = TradingEnv::new(prices[0], initial_balance, cfg);
     let mut rewards = Vec::with_capacity(actions.len());
     let mut equity_curve = Vec::with_capacity(actions.len());
 
@@ -115,7 +115,7 @@ pub fn run_ema_crossover(prices: &[f64], params: EmaParams, cfg: EnvConfig) -> E
         };
     }
 
-    run_episode(prices, &actions, cfg)
+    run_episode(prices, &actions, 10000.0, cfg)
 }
 
 fn compute_metrics(rewards: &[f64], equity_curve: &[f64]) -> EpisodeMetrics {
@@ -214,7 +214,7 @@ mod tests {
     fn episode_runs_and_computes_metrics() {
         let prices = [100.0, 101.0, 102.0, 101.0];
         let actions = [Action::Buy, Action::Hold, Action::Revert];
-        let res = run_episode(&prices, &actions, EnvConfig::default());
+        let res = run_episode(&prices, &actions, 10000.0, EnvConfig::default());
         assert_eq!(res.rewards.len(), 3);
         assert_eq!(res.equity_curve.len(), 3);
         // Should have some drawdown after revert.
