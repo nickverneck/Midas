@@ -1,36 +1,56 @@
 # Midas
 
-Rust-first backtesting and RL/GA playground for intraday futures (MES/ES).
+Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures).
 
 ## Setup
-- Rust nightly/stable, Python 3.12+ (PyO3 built with ABI3 for 3.13 support).
-- Install maturin via uv: `UV_CACHE_DIR=.uv-cache UV_TOOL_DIR=.uv-tools uv tool install maturin`
-- Build/install Python bindings:  
-  `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 UV_CACHE_DIR=.uv-cache UV_TOOL_DIR=.uv-tools uv run maturin develop --features python`
+- Rust nightly/stable, Python 3.12+ (Built and tested on 3.13).
+- Install `uv` for Python management if not already installed.
+- Build and install Python bindings:  
+  `uv run maturin develop --features python`
 
-## CLI examples
+## CLI examples (Rust)
 - Load parquet + compute features (default feature-only mode):  
-  `cargo run -- --file data/ES.parquet`
+  `cargo run -- --file data/train/SPY0.parquet`
 - EMA rule backtest:  
-  `cargo run -- --file data/ES.parquet --mode ema_rule --ema-fast 5 --ema-slow 21 --commission 1.6 --slippage 0.25`
+  `cargo run -- --file data/train/SPY0.parquet --mode ema_rule --ema-fast 5 --ema-slow 21 --commission 1.6 --slippage 0.25`
 
 ## Python examples
-- Dump features to npz:  
-  `python python/examples/feature_dump.py --parquet data/ES.parquet --out /tmp/es_features.npz`
-- PPO stub (uses Globex hours, infers margin $50 MES / $500 ES):  
-  `uv run --python 3.13 python python/examples/train_ppo.py --parquet data/ES.parquet --epochs 3`
 
-## Features/obs
-- SMA/EMA/HMA periods: 3,5,7,11,13,19,23,29,31,37,41,43,47,53
-- ATR periods: 7,14,21
-- vol_t1 (previous bar volume), time sin/cos (hour-of-day), session/margin masks, position
+### Genetic Algorithm + PPO Training
+Run the hybrid GA-PPO trainer with parallel evaluation:
+```bash
+uv run python/examples/train_ga.py \
+  --train-parquet data/train/SPY0.parquet \
+  --val-parquet data/val/SPY.parquet \
+  --test-parquet data/val/SPY.parquet \
+  --outdir runs_ga \
+  --workers 4 \
+  --pop-size 12
+```
+
+### PPO Only Training
+`uv run python/examples/train_ppo.py --parquet data/train/SPY0.parquet --epochs 3`
+
+## Environment & Observations
+- **Initial Balance**: Configurable starting cash (default $10,000).
+- **Observations**:
+  - `open[t]` (Current bar entry price)
+  - `close[t-1]`, `volume[t-1]`
+  - Real-time `equity` (Cash + Unrealized PnL)
+  - Indicators (SMA/EMA/HMA periods: 3,5,7,11,13,19,23,29,31,37,41,43,47,53)
+  - ATR (periods: 7,14,21)
+  - Time encoding (sin/cos of hour), Session/Margin masks, Current Position.
 
 ## Env/Actions
-- Discrete actions: buy, sell, hold, revert (flip). Commission/slippage configurable; margin enforcement per contract ($50 MES default, $500 ES if symbol is ES). Session hard block when closed.
+- **Discrete actions**: buy, sell, hold, revert (flip).
+- **Core Logic**: Commission/slippage configurable; margin enforcement per contract.
+- **Parallel Workers**: Training can be parallelized across CPU/GPU cores using the `--workers` flag.
 
-## Sampling
-- Chronological window sampler exposed to Python (`list_windows`) for walk-forward GA/RL evaluation.
+## Development
+To recompile the Rust environment for Python:
+`uv run maturin develop --features python`
 
-## Todo (short list)
-- Sharpe/drawdown logging in PPO loop; config-driven session/margin per symbol.
-- Window-based evaluation and checkpointing improvements.
+## Artifacts
+- **Logs**: `runs_ga/ga_log.csv` contains performance metrics for every individual.
+- **Traces**: `runs_ga/trace_gen{G}_rank{R}.csv` contains step-by-step action history for top performers.
+- **Weights**: `.pt` files for the neural networks are saved for top performers each generation.

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "Midas"
+version = "0.1.0"
+description = "Rust-first backtesting and RL/GA playground"
+dependencies = [
+    "torch",
+    "numpy",
+    "polars",
+    "pyyaml",
+]
+requires-python = ">=3.12"
+
+[tool.maturin]
+features = ["python"]
+module-name = "midas_env"
+python-source = "python/src"
