@@ -17,4 +17,3 @@ requires-python = ">=3.12"
 [tool.maturin]
 features = ["python"]
 module-name = "midas_env"
-python-source = "python/src"
