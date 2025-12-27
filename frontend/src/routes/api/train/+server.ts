@@ -6,7 +6,7 @@ export const POST = async ({ request }) => {
     const params = await request.json();
 
     // Construct arguments for the python script
-    const args = ['python/examples/train_ga.py'];
+    const args = ['python/examples/train_hybrid.py'];
 
     for (const [key, value] of Object.entries(params)) {
         if (value === true) {
