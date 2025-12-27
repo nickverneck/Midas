@@ -153,11 +153,15 @@ def ppo_update(policy, value, batch, opt, clip=0.2, vf_coef=0.5, ent_coef=0.01, 
     return policy, value
 
 
-def compute_sharpe(returns):
+def compute_sortino(returns):
     arr = np.array(returns, dtype=np.float64)
-    if arr.std() == 0:
+    downside = np.clip(arr, -np.inf, 0)
+    downside_std = np.sqrt(np.mean(downside**2))
+    if downside_std < 1e-6:
+        if arr.mean() > 0:
+            return 50.0
         return 0.0
-    return (arr.mean() / (arr.std() + 1e-8)) * math.sqrt(252)
+    return (arr.mean() / (downside_std + 1e-8)) * math.sqrt(252)
 
 
 def max_drawdown(equity):
@@ -172,11 +176,11 @@ def summarize_batch(batch):
     pnl = batch["pnl"].cpu().numpy()
     equity = np.cumsum(pnl)
     total_pnl = float(pnl.sum())
-    sharpe = compute_sharpe(pnl)
+    sortino = compute_sortino(pnl)
     drawdown = max_drawdown(equity)
     return {
         "total_pnl": total_pnl,
-        "sharpe": sharpe,
+        "sortino": sortino,
         "drawdown": drawdown,
         "equity": equity,
     }
@@ -206,7 +210,7 @@ def main():
     ap.add_argument("--log-interval", type=int, default=1, help="Epoch interval for checkpoint/log")
     ap.add_argument("--eval-windows", type=int, default=2, help="Number of windows to eval each epoch")
     ap.add_argument("--fitness-w-pnl", type=float, default=1.0, help="Fitness weight for total PnL")
-    ap.add_argument("--fitness-w-sharpe", type=float, default=1.0, help="Fitness weight for Sharpe")
+    ap.add_argument("--fitness-w-sortino", type=float, default=1.0, help="Fitness weight for Sortino")
     ap.add_argument("--fitness-w-mdd", type=float, default=1.0, help="Fitness weight for max drawdown (penalty)")
     args = ap.parse_args()
 
@@ -294,7 +298,7 @@ def main():
 
     log_path = args.outdir / "train_log.csv"
     if not log_path.exists():
-        log_path.write_text("epoch,train_ret_mean,train_pnl,train_sharpe,train_drawdown,eval_ret_mean,eval_pnl,eval_sharpe,eval_drawdown,fitness\n")
+        log_path.write_text("epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness\n")
 
     for epoch in range(args.epochs):
         random.shuffle(windows_train)
@@ -316,21 +320,21 @@ def main():
             eval_pnls.append(float(b["pnl"].sum().item()))
             eval_equity.append(np.cumsum(b["pnl"].cpu().numpy()).tolist())
 
-        eval_sharpe = compute_sharpe(eval_pnls)
+        eval_sortino = compute_sortino(eval_pnls)
         eval_draw = max_drawdown([x[-1] if len(x) > 0 else 0.0 for x in eval_equity])
         eval_pnl = float(np.mean(eval_pnls)) if eval_pnls else 0.0
-        fitness = (args.fitness_w_pnl * eval_pnl) + (args.fitness_w_sharpe * eval_sharpe) - (args.fitness_w_mdd * eval_draw)
+        fitness = (args.fitness_w_pnl * eval_pnl) + (args.fitness_w_sortino * eval_sortino) - (args.fitness_w_mdd * eval_draw)
 
         print(
             "epoch {epoch} | train ret {train_ret:.2f} | train pnl {train_pnl:.2f} | "
-            "eval ret {eval_ret:.2f} | eval pnl {eval_pnl:.2f} | eval sharpe {eval_sharpe:.2f} | "
+            "eval ret {eval_ret:.2f} | eval pnl {eval_pnl:.2f} | eval sortino {eval_sortino:.2f} | "
             "eval mdd {eval_draw:.2f} | fitness {fitness:.2f}".format(
                 epoch=epoch,
                 train_ret=batch["ret"].mean().item(),
                 train_pnl=train_stats["total_pnl"],
                 eval_ret=float(np.mean(eval_rewards)) if eval_rewards else 0.0,
                 eval_pnl=eval_pnl,
-                eval_sharpe=eval_sharpe,
+                eval_sortino=eval_sortino,
                 eval_draw=eval_draw,
                 fitness=fitness,
             )
@@ -349,9 +353,9 @@ def main():
                      pnl=batch["pnl"].cpu().numpy())
             with log_path.open("a") as f:
                 f.write(
-                    f\"{epoch},{batch['ret'].mean().item():.4f},{train_stats['total_pnl']:.4f},{train_stats['sharpe']:.4f},"
-                    f\"{train_stats['drawdown']:.4f},{float(np.mean(eval_rewards)) if eval_rewards else 0.0:.4f},"
-                    f\"{eval_pnl:.4f},{eval_sharpe:.4f},{eval_draw:.4f},{fitness:.4f}\\n\"
+                    f"{epoch},{batch['ret'].mean().item():.4f},{train_stats['total_pnl']:.4f},{train_stats['sortino']:.4f},"
+                    f"{train_stats['drawdown']:.4f},{float(np.mean(eval_rewards)) if eval_rewards else 0.0:.4f},"
+                    f"{eval_pnl:.4f},{eval_sortino:.4f},{eval_draw:.4f},{fitness:.4f}\n"
                 )
 
 

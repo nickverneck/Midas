@@ -187,11 +187,15 @@ def ppo_update(policy, value, batch, opt, clip=0.2, vf_coef=0.5, ent_coef=0.01, 
     return policy, value
 
 
-def compute_sharpe(returns):
+def compute_sortino(returns):
     arr = np.array(returns, dtype=np.float64)
-    if arr.std() == 0:
+    downside = np.clip(arr, -np.inf, 0)
+    downside_std = np.sqrt(np.mean(downside**2))
+    if downside_std < 1e-6:
+        if arr.mean() > 0:
+            return 50.0
         return 0.0
-    return (arr.mean() / (arr.std() + 1e-8)) * math.sqrt(252)
+    return (arr.mean() / (downside_std + 1e-8)) * math.sqrt(252)
 
 
 def max_drawdown(equity):
@@ -206,11 +210,11 @@ def summarize_batch(batch):
     pnl = batch["pnl"].cpu().numpy()
     equity = np.cumsum(pnl)
     total_pnl = float(pnl.sum())
-    sharpe = compute_sharpe(pnl)
+    sortino = compute_sortino(pnl)
     drawdown = max_drawdown(equity)
     return {
         "total_pnl": total_pnl,
-        "sharpe": sharpe,
+        "sortino": sortino,
         "drawdown": drawdown,
         "equity": equity,
     }
@@ -226,7 +230,7 @@ def evaluate_candidate(
     loaded_policy_state=None,
     loaded_value_state=None,
 ):
-    w_pnl, w_sharpe, w_mdd = weights
+    w_pnl, w_sortino, w_mdd = weights
     device = base_cfg["device"]
 
     open_t, close_t, high_t, low_t, vol_t, dt_t, sess_t, margin_t = train_data
@@ -277,16 +281,16 @@ def evaluate_candidate(
                 f"non_zero_pos {dbg['non_zero_pos']} | mean_abs_pnl {dbg['mean_abs_pnl']:.6f}"
             )
 
-    eval_sharpe = compute_sharpe(eval_pnls)
+    eval_sortino = compute_sortino(eval_pnls)
     eval_draw = max_drawdown([x[-1] if len(x) > 0 else 0.0 for x in eval_equity])
     eval_pnl = float(np.mean(eval_pnls)) if eval_pnls else 0.0
 
-    fitness = (w_pnl * eval_pnl) + (w_sharpe * eval_sharpe) - (w_mdd * eval_draw)
+    fitness = (w_pnl * eval_pnl) + (w_sortino * eval_sortino) - (w_mdd * eval_draw)
 
     return {
         "fitness": fitness,
         "eval_pnl": eval_pnl,
-        "eval_sharpe": eval_sharpe,
+        "eval_sortino": eval_sortino,
         "eval_drawdown": eval_draw,
         "eval_ret_mean": float(np.mean(eval_rewards)) if eval_rewards else 0.0,
         "eval_histories": eval_histories,
@@ -439,7 +443,7 @@ def main():
 
     log_path = args.outdir / "ga_log.csv"
     if not log_path.exists():
-        log_path.write_text("gen,idx,w_pnl,w_sharpe,w_mdd,fitness,eval_pnl,eval_sharpe,eval_drawdown,eval_ret_mean\n")
+        log_path.write_text("gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_pnl,eval_sortino,eval_drawdown,eval_ret_mean\n")
 
     pop = [
         [
@@ -480,11 +484,11 @@ def main():
                 with log_path.open("a") as f:
                     f.write(
                         f"{gen},{idx},{w[0]:.4f},{w[1]:.4f},{w[2]:.4f},{metrics['fitness']:.4f},"
-                        f"{metrics['eval_pnl']:.4f},{metrics['eval_sharpe']:.4f},{metrics['eval_drawdown']:.4f},{metrics['eval_ret_mean']:.4f}\n"
+                        f"{metrics['eval_pnl']:.4f},{metrics['eval_sortino']:.4f},{metrics['eval_drawdown']:.4f},{metrics['eval_ret_mean']:.4f}\n"
                     )
                 print(
                     f"  ✅ cand {idx}/{len(pop)-1} | fitness {metrics['fitness']:.2f} | "
-                    f"pnl {metrics['eval_pnl']:.2f} | sharpe {metrics['eval_sharpe']:.2f}"
+                    f"pnl {metrics['eval_pnl']:.2f} | sortino {metrics['eval_sortino']:.2f}"
                 )
         # End of generation timing
         gen_elapsed = time.time() - gen_start_time
@@ -554,7 +558,7 @@ def main():
         )
         print(
             f"test | w={best_w} | fitness {test_metrics['fitness']:.2f} | "
-            f"pnl {test_metrics['eval_pnl']:.2f} | sharpe {test_metrics['eval_sharpe']:.2f} | "
+            f"pnl {test_metrics['eval_pnl']:.2f} | sortino {test_metrics['eval_sortino']:.2f} | "
             f"mdd {test_metrics['eval_drawdown']:.2f}"
         )
         # End overall timing
