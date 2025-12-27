@@ -31,9 +31,9 @@
 	onMount(fetchLogs);
 
     // Dynamic key detection
-    let metricKey = $derived(logs.length > 0 ? (logs[0].eval_sharpe !== undefined ? 'eval_sharpe' : 'eval_sortino') : 'eval_sortino');
-    let wMetricKey = $derived(logs.length > 0 ? (logs[0].w_sharpe !== undefined ? 'w_sharpe' : 'w_sortino') : 'w_sortino');
-    let metricLabel = $derived(metricKey.replace('eval_', '').toUpperCase());
+    let metricKey = $derived('eval_sortino');
+    let wMetricKey = $derived('w_sortino');
+    let metricLabel = $derived('SORTINO');
 
     // Data Aggregation by Generation
     let genData = $derived.by(() => {

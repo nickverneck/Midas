@@ -21,7 +21,8 @@
 - [ ] Provide wheels/build script for Python 3.12+ (avoid ABI3 workaround if possible).
 - [ ] Add `python/examples`:
   - [x] `train_ppo.py` using PyTorch (MLP policy) against batched env.
-  - [ ] `train_ga.py` illustrating GA fitness over multiple windows.
+  - [x] `train_ga.py` GA-only neuroevolution over multiple windows.
+  - [x] `train_hybrid.py` GA + PPO hybrid trainer.
 
 ## RL/GA logic
 - [ ] Implement PPO-style rollout/advantage calc with configurable reward weights (Sharpe/PnL/drawdown).

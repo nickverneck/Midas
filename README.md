@@ -19,6 +19,18 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 ### Genetic Algorithm + PPO Training
 Run the hybrid GA-PPO trainer with parallel evaluation:
 ```bash
+uv run python/examples/train_hybrid.py \
+  --train-parquet data/train/SPY0.parquet \
+  --val-parquet data/val/SPY.parquet \
+  --test-parquet data/val/SPY.parquet \
+  --outdir runs_ga \
+  --workers 4 \
+  --pop-size 12
+```
+
+### GA-Only Neuroevolution
+Run GA-only training that evolves policy weights directly:
+```bash
 uv run python/examples/train_ga.py \
   --train-parquet data/train/SPY0.parquet \
   --val-parquet data/val/SPY.parquet \
