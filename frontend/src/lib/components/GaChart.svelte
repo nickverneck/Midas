@@ -24,13 +24,40 @@
         LineController
     );
 
-    let { data } = $props();
+    let { data, options = {} } = $props();
     let canvas: HTMLCanvasElement;
     let chart: Chart;
+
+    const defaultOptions = {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+            mode: 'index',
+            intersect: false,
+        },
+        scales: {
+            y: {
+                beginAtZero: false,
+                type: 'linear',
+                display: true,
+                position: 'left',
+            },
+            y1: {
+                type: 'linear',
+                display: data.datasets.some(d => d.yAxisID === 'y1'),
+                position: 'right',
+                grid: {
+                    drawOnChartArea: false,
+                },
+            },
+        }
+    };
 
     $effect(() => {
         if (chart) {
             chart.data = data;
+            // Update y1 visibility based on new data
+            chart.options.scales.y1.display = data.datasets.some(d => d.yAxisID === 'y1');
             chart.update();
         }
     });
@@ -39,19 +66,7 @@
         const config: ChartConfiguration = {
             type: 'line',
             data: data,
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: {
-                    mode: 'index',
-                    intersect: false,
-                },
-                scales: {
-                    y: {
-                        beginAtZero: false
-                    }
-                }
-            }
+            options: { ...defaultOptions, ...options }
         };
         chart = new Chart(canvas, config);
     });
