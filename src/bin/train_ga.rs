@@ -5,16 +5,22 @@ fn main() {
 }
 
 #[cfg(feature = "tch")]
+#[path = "train_ga/args.rs"]
 mod args;
 #[cfg(feature = "tch")]
+#[path = "train_ga/data.rs"]
 mod data;
 #[cfg(feature = "tch")]
+#[path = "train_ga/ga.rs"]
 mod ga;
 #[cfg(feature = "tch")]
+#[path = "train_ga/metrics.rs"]
 mod metrics;
 #[cfg(feature = "tch")]
+#[path = "train_ga/model.rs"]
 mod model;
 #[cfg(feature = "tch")]
+#[path = "train_ga/util.rs"]
 mod util;
 
 #[cfg(feature = "tch")]
