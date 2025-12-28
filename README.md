@@ -13,6 +13,8 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
   `cargo run -- --file data/train/SPY0.parquet`
 - EMA rule backtest:  
   `cargo run -- --file data/train/SPY0.parquet --mode ema_rule --ema-fast 5 --ema-slow 21 --commission 1.6 --slippage 0.25`
+- Rust GA-only trainer (requires libtorch, CUDA/MPS optional):  
+  `LIBTORCH=/path/to/libtorch cargo run --bin train_ga --features tch -- --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga --device cuda`
 
 ## Python examples
 
