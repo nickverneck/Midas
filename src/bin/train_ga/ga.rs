@@ -19,6 +19,7 @@ pub struct CandidateConfig {
     pub layers: usize,
     pub eval_windows: usize,
     pub device: tch::Device,
+    pub ignore_session: bool,
 }
 
 #[derive(Clone)]
@@ -31,6 +32,13 @@ pub struct CandidateResult {
     pub debug_non_hold: usize,
     pub debug_non_zero_pos: usize,
     pub debug_mean_abs_pnl: f64,
+    pub debug_buy: usize,
+    pub debug_sell: usize,
+    pub debug_hold: usize,
+    pub debug_revert: usize,
+    pub debug_session_violations: usize,
+    pub debug_margin_violations: usize,
+    pub debug_position_violations: usize,
 }
 
 pub fn evaluate_candidate(
@@ -60,6 +68,13 @@ pub fn evaluate_candidate(
     let mut non_zero_pos = 0usize;
     let mut abs_pnl_sum = 0.0f64;
     let mut pnl_steps = 0usize;
+    let mut act_buy = 0usize;
+    let mut act_sell = 0usize;
+    let mut act_hold = 0usize;
+    let mut act_revert = 0usize;
+    let mut session_violations = 0usize;
+    let mut margin_violations = 0usize;
+    let mut position_violations = 0usize;
 
     for &(start, end) in windows.iter().take(cfg.eval_windows) {
         if end <= start + 1 {
@@ -86,18 +101,33 @@ pub fn evaluate_candidate(
             });
 
             let action = match action_idx {
-                0 => Action::Buy,
-                1 => Action::Sell,
-                2 => Action::Hold,
-                _ => Action::Revert,
+                0 => {
+                    act_buy += 1;
+                    Action::Buy
+                }
+                1 => {
+                    act_sell += 1;
+                    Action::Sell
+                }
+                2 => {
+                    act_hold += 1;
+                    Action::Hold
+                }
+                _ => {
+                    act_revert += 1;
+                    Action::Revert
+                }
             };
 
-            let session_open = data
-                .session_open
-                .as_ref()
-                .and_then(|m| m.get(t))
-                .copied()
-                .unwrap_or(true);
+            let session_open = if cfg.ignore_session {
+                true
+            } else {
+                data.session_open
+                    .as_ref()
+                    .and_then(|m| m.get(t))
+                    .copied()
+                    .unwrap_or(true)
+            };
             let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
             let (_reward, info) = env.step(
@@ -108,6 +138,15 @@ pub fn evaluate_candidate(
                     margin_ok,
                 },
             );
+            if info.session_closed_violation {
+                session_violations += 1;
+            }
+            if info.margin_call_violation {
+                margin_violations += 1;
+            }
+            if info.position_limit_violation {
+                position_violations += 1;
+            }
             position = env.state().position;
             equity = env.state().cash + env.state().unrealized_pnl;
             pnl_buf.push(info.pnl_change);
@@ -170,6 +209,13 @@ pub fn evaluate_candidate(
         } else {
             0.0
         },
+        debug_buy: act_buy,
+        debug_sell: act_sell,
+        debug_hold: act_hold,
+        debug_revert: act_revert,
+        debug_session_violations: session_violations,
+        debug_margin_violations: margin_violations,
+        debug_position_violations: position_violations,
     }
 }
 
