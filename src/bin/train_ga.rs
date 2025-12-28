@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "tch")]
-fn run(mut args: args::Args) -> anyhow::Result<()> {
+fn run(args: args::Args) -> anyhow::Result<()> {
     use anyhow::Context;
     use rand::prelude::*;
     use rand_distr::{Distribution, Normal};
