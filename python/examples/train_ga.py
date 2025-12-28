@@ -418,32 +418,32 @@ def run_ga(args, outdir, hidden, layers):
     best_overall_fitness = -float("inf")
     best_overall_policy_state = None
 
-    for gen in range(args.generations):
-        gen_start_time = time.time()
-        scored = []
-
-        print(
-            f"\n🚀 Generation {gen} | Evaluating {len(pop)} candidates in parallel (workers={args.workers})"
-        )
-
-        train_func = functools.partial(
+    train_func = functools.partial(
+        evaluate_candidate,
+        base_cfg=base_cfg,
+        windows_eval=windows_train,
+        eval_data=(open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+        capture_history=False,
+    )
+    eval_func = None
+    if not args.skip_val_eval:
+        eval_func = functools.partial(
             evaluate_candidate,
             base_cfg=base_cfg,
-            windows_eval=windows_train,
-            eval_data=(open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
-            capture_history=False,
+            windows_eval=windows_eval,
+            eval_data=(open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
+            capture_history=True,
         )
-        eval_func = None
-        if not args.skip_val_eval:
-            eval_func = functools.partial(
-                evaluate_candidate,
-                base_cfg=base_cfg,
-                windows_eval=windows_eval,
-                eval_data=(open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
-                capture_history=True,
+
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        for gen in range(args.generations):
+            gen_start_time = time.time()
+            scored = []
+
+            print(
+                f"\n🚀 Generation {gen} | Evaluating {len(pop)} candidates in parallel (workers={args.workers})"
             )
 
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
             train_futures = [executor.submit(train_func, g) for g in pop]
             eval_futures = []
             if eval_func is not None:
@@ -479,50 +479,50 @@ def run_ga(args, outdir, hidden, layers):
                         f"train pnl {train_metrics['eval_pnl']:.2f} | val pnl {eval_metrics['eval_pnl']:.2f}"
                     )
 
-        gen_elapsed = time.time() - gen_start_time
-        print(f"⏱ Generation {gen} completed in {gen_elapsed:.2f} seconds")
+            gen_elapsed = time.time() - gen_start_time
+            print(f"⏱ Generation {gen} completed in {gen_elapsed:.2f} seconds")
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+            scored.sort(key=lambda x: x[0], reverse=True)
 
-        import csv
+            import csv
 
-        for i in range(min(5, len(scored))):
-            cand_metrics = scored[i][2] or scored[i][3]
-            cand_fitness = scored[i][0]
+            for i in range(min(5, len(scored))):
+                cand_metrics = scored[i][2] or scored[i][3]
+                cand_fitness = scored[i][0]
 
-            if cand_metrics.get("eval_histories"):
-                trace_path = args.outdir / f"trace_gen{gen}_rank{i}.csv"
-                with trace_path.open("w", newline="") as f:
-                    headers = cand_metrics["eval_histories"][0][0].keys()
-                    writer = csv.DictWriter(f, fieldnames=headers)
-                    writer.writeheader()
-                    for history in cand_metrics["eval_histories"]:
-                        writer.writerows(history)
+                if cand_metrics.get("eval_histories"):
+                    trace_path = args.outdir / f"trace_gen{gen}_rank{i}.csv"
+                    with trace_path.open("w", newline="") as f:
+                        headers = cand_metrics["eval_histories"][0][0].keys()
+                        writer = csv.DictWriter(f, fieldnames=headers)
+                        writer.writeheader()
+                        for history in cand_metrics["eval_histories"]:
+                            writer.writerows(history)
 
-            policy_path = args.outdir / f"policy_gen{gen}_rank{i}.pt"
-            torch.save(cand_metrics["policy_state"], policy_path)
+                policy_path = args.outdir / f"policy_gen{gen}_rank{i}.pt"
+                torch.save(cand_metrics["policy_state"], policy_path)
 
-            if i == 0:
-                print(f"📈 Gen {gen} Top Performer: fitness {cand_fitness:.2f}, trace/weights saved.")
-                if cand_fitness > best_overall_fitness:
-                    best_overall_fitness = cand_fitness
-                    best_overall_policy_state = cand_metrics["policy_state"]
+                if i == 0:
+                    print(f"📈 Gen {gen} Top Performer: fitness {cand_fitness:.2f}, trace/weights saved.")
+                    if cand_fitness > best_overall_fitness:
+                        best_overall_fitness = cand_fitness
+                        best_overall_policy_state = cand_metrics["policy_state"]
 
-        elite_n = max(1, int(args.elite_frac * args.pop_size))
-        elites = [g for _, g, _, _ in scored[:elite_n]]
+            elite_n = max(1, int(args.elite_frac * args.pop_size))
+            elites = [g for _, g, _, _ in scored[:elite_n]]
 
-        new_pop = elites[:]
-        while len(new_pop) < args.pop_size:
-            parent_a = random.choice(elites)
-            parent_b = random.choice(elites)
-            child = crossover(parent_a, parent_b)
-            child = mutate(child, args.mutation_sigma)
-            new_pop.append(child)
-        pop = new_pop
+            new_pop = elites[:]
+            while len(new_pop) < args.pop_size:
+                parent_a = random.choice(elites)
+                parent_b = random.choice(elites)
+                child = crossover(parent_a, parent_b)
+                child = mutate(child, args.mutation_sigma)
+                new_pop.append(child)
+            pop = new_pop
 
-        ckpt_path = args.outdir / f"checkpoint_gen{gen}.pt"
-        torch.save({"gen": gen, "pop": pop}, ckpt_path)
-        print(f"💾 Saved checkpoint for generation {gen} to {ckpt_path}")
+            ckpt_path = args.outdir / f"checkpoint_gen{gen}.pt"
+            torch.save({"gen": gen, "pop": pop}, ckpt_path)
+            print(f"💾 Saved checkpoint for generation {gen} to {ckpt_path}")
 
     if scored:
         best_genome = scored[0][1]
