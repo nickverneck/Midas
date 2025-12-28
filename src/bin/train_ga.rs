@@ -484,8 +484,8 @@ fn infer_margin(symbol: &str) -> f64 {
 struct DataSet {
     open: Vec<f64>,
     close: Vec<f64>,
-    high: Vec<f64>,
-    low: Vec<f64>,
+    _high: Vec<f64>,
+    _low: Vec<f64>,
     volume: Option<Vec<f64>>,
     datetime_ns: Option<Vec<i64>>,
     session_open: Option<Vec<bool>>,
@@ -550,8 +550,8 @@ fn load_dataset(path: &Path, globex: bool) -> anyhow::Result<DataSet> {
     Ok(DataSet {
         open,
         close,
-        high,
-        low,
+        _high: high,
+        _low: low,
         volume,
         datetime_ns,
         session_open,
@@ -720,7 +720,7 @@ fn evaluate_candidate(
     use tch::{kind::Kind, no_grad, Tensor};
     use tch::nn::Module;
 
-    let mut vs = tch::nn::VarStore::new(cfg.device);
+    let vs = tch::nn::VarStore::new(cfg.device);
     let policy = build_mlp(&vs.root(), data.obs_dim as i64, cfg.hidden as i64, cfg.layers);
     load_params_from_vec(&vs, genome);
 
@@ -970,7 +970,7 @@ fn save_policy(
     genome: &[f32],
     path: &Path,
 ) -> anyhow::Result<()> {
-    let mut vs = tch::nn::VarStore::new(device);
+    let vs = tch::nn::VarStore::new(device);
     let _policy = build_mlp(&vs.root(), obs_dim as i64, hidden as i64, layers);
     load_params_from_vec(&vs, genome);
     vs.save(path)?;
