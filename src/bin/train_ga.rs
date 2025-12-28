@@ -900,6 +900,7 @@ fn build_mlp(p: &tch::nn::Path, input_dim: i64, hidden: i64, layers: usize) -> t
 
 #[cfg(feature = "tch")]
 fn load_params_from_vec(vs: &tch::nn::VarStore, genome: &[f32]) {
+    use tch::no_grad;
     let vars = vs.trainable_variables();
     let mut offset = 0;
     for mut v in vars {
@@ -909,7 +910,9 @@ fn load_params_from_vec(vs: &tch::nn::VarStore, genome: &[f32]) {
             .expect("tensor from genome")
             .reshape(&v.size())
             .to_device(v.device());
-        v.copy_(&t);
+        no_grad(|| {
+            v.copy_(&t);
+        });
         offset += numel as usize;
     }
 }
