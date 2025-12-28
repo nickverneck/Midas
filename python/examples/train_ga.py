@@ -605,6 +605,14 @@ def main():
     args.device = device
     args.outdir.mkdir(parents=True, exist_ok=True)
 
+    if device.type == "cuda":
+        cuda_index = device.index if device.index is not None else 0
+        name = torch.cuda.get_device_name(cuda_index)
+        print(f"🟢 Using CUDA device: {name}")
+        print(f"    torch.version.cuda={torch.version.cuda}")
+    else:
+        print(f"🟡 Using device: {device} (CUDA available={torch.cuda.is_available()})")
+
     hidden_grid = parse_grid(args.hidden_grid) or [args.hidden]
     layers_grid = parse_grid(args.layers_grid) or [args.layers]
 

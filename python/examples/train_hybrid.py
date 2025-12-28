@@ -361,6 +361,13 @@ def main():
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     device = torch.device(args.device or default_device)
+    if device.type == "cuda":
+        cuda_index = device.index if device.index is not None else 0
+        name = torch.cuda.get_device_name(cuda_index)
+        print(f"🟢 Using CUDA device: {name}")
+        print(f"    torch.version.cuda={torch.version.cuda}")
+    else:
+        print(f"🟡 Using device: {device} (CUDA available={torch.cuda.is_available()})")
     args.outdir.mkdir(parents=True, exist_ok=True)
     # Start overall timer
     overall_start_time = time.time()
