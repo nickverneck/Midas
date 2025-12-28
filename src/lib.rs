@@ -95,6 +95,8 @@ mod py_bindings {
                 dict.set_item("realized_pnl_change", info.realized_pnl_change)?;
                 dict.set_item("drawdown_penalty", info.drawdown_penalty)?;
                 dict.set_item("session_close_penalty", info.session_close_penalty)?;
+                dict.set_item("invalid_revert_penalty", info.invalid_revert_penalty)?;
+                dict.set_item("flat_hold_penalty", info.flat_hold_penalty)?;
                 dict.set_item("margin_call_violation", info.margin_call_violation)?;
                 dict.set_item("position_limit_violation", info.position_limit_violation)?;
                 dict.set_item("session_closed_violation", info.session_closed_violation)?;
@@ -158,6 +160,8 @@ mod py_bindings {
                     d.set_item("realized_pnl_change", info.realized_pnl_change)?;
                     d.set_item("drawdown_penalty", info.drawdown_penalty)?;
                     d.set_item("session_close_penalty", info.session_close_penalty)?;
+                    d.set_item("invalid_revert_penalty", info.invalid_revert_penalty)?;
+                    d.set_item("flat_hold_penalty", info.flat_hold_penalty)?;
                     d.set_item("margin_call_violation", info.margin_call_violation)?;
                     d.set_item("position_limit_violation", info.position_limit_violation)?;
                     d.set_item("session_closed_violation", info.session_closed_violation)?;
