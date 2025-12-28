@@ -10,6 +10,7 @@ pub struct DataSet {
     pub volume: Option<Vec<f64>>,
     pub datetime_ns: Option<Vec<i64>>,
     pub session_open: Option<Vec<bool>>,
+    pub minutes_to_close: Option<Vec<f64>>,
     pub margin_ok: Vec<bool>,
     pub feature_cols: Vec<Vec<f64>>,
     pub obs_dim: usize,
@@ -20,6 +21,7 @@ impl DataSet {
     pub fn with_session(mut self, globex: bool) -> Self {
         if let Some(dt) = &self.datetime_ns {
             self.session_open = Some(build_session_mask(dt, globex));
+            self.minutes_to_close = Some(build_minutes_to_close(dt, globex));
         }
         self
     }
@@ -60,6 +62,9 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
     let feature_cols = ordered_feature_cols(feats)?;
 
     let session_open = datetime_ns.as_ref().map(|dt| build_session_mask(dt, globex));
+    let minutes_to_close = datetime_ns
+        .as_ref()
+        .map(|dt| build_minutes_to_close(dt, globex));
     let margin_ok = vec![true; close.len()];
 
     let obs_dim = observation_len(&open, &close, volume.as_deref(), &feature_cols);
@@ -72,6 +77,7 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         volume,
         datetime_ns,
         session_open,
+        minutes_to_close,
         margin_ok,
         feature_cols,
         obs_dim,
@@ -256,6 +262,23 @@ fn build_session_mask(datetimes_ns: &[i64], globex: bool) -> Vec<bool> {
             } else {
                 (hour >= 9.5) && (hour <= 16.0)
             }
+        })
+        .collect()
+}
+
+fn build_minutes_to_close(datetimes_ns: &[i64], globex: bool) -> Vec<f64> {
+    use chrono::Timelike;
+    use chrono_tz::America::New_York;
+
+    datetimes_ns
+        .iter()
+        .map(|ns| {
+            let dt_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(*ns);
+            let dt_et = dt_utc.with_timezone(&New_York);
+            let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
+            let close_hour = if globex { 17.0 } else { 16.0 };
+            let minutes = (close_hour - hour) * 60.0;
+            if minutes.is_finite() { minutes.max(0.0) } else { 0.0 }
         })
         .collect()
 }

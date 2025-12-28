@@ -155,6 +155,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         ignore_session: args.ignore_session,
         drawdown_penalty: args.drawdown_penalty,
         drawdown_penalty_growth: args.drawdown_penalty_growth,
+        session_close_penalty: args.session_close_penalty,
+        max_hold_bars_positive: args.max_hold_bars_positive,
+        max_hold_bars_drawdown: args.max_hold_bars_drawdown,
     };
 
         let eval_results: Vec<(usize, ga::CandidateResult, Option<ga::CandidateResult>)> = pop
@@ -345,6 +348,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             ignore_session: args.ignore_session,
             drawdown_penalty: args.drawdown_penalty,
             drawdown_penalty_growth: args.drawdown_penalty_growth,
+            session_close_penalty: args.session_close_penalty,
+            max_hold_bars_positive: args.max_hold_bars_positive,
+            max_hold_bars_drawdown: args.max_hold_bars_drawdown,
         };
         let metrics = ga::evaluate_candidate(&best_genome, &test, &windows_test, &base_cfg, false);
         println!(
