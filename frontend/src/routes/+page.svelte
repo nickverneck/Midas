@@ -6,52 +6,330 @@
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
     import * as Tabs from "$lib/components/ui/tabs";
     import * as Alert from "$lib/components/ui/alert";
-    import { Separator } from "$lib/components/ui/separator";
     import GaChart from "$lib/components/GaChart.svelte";
     import { AlertCircle, TrendingUp, Info, ListFilter, Bug } from "lucide-svelte";
 
-	let logs = $state([]);
+	type LogRow = Record<string, any>;
+
+	type GenAgg = {
+		gen: number;
+		count: number;
+		fitnessSum: number;
+		fitnessCount: number;
+		bestFitness: number;
+		pnlSum: number;
+		pnlCount: number;
+		bestPnl: number;
+		realizedSum: number;
+		realizedCount: number;
+		bestRealizedPnl: number;
+		totalSum: number;
+		totalCount: number;
+		bestTotalPnl: number;
+		metricSum: number;
+		metricCount: number;
+		bestMetric: number;
+	};
+
+	type IssueState = {
+		highFitnessCount: number;
+		highFitnessItems: string[];
+		cappedCount: number;
+		cappedItems: string[];
+		zeroDdCount: number;
+		zeroDdItems: string[];
+		retCount: number;
+		retNegativeCount: number;
+	};
+
+	type KeySet = {
+		pnlKey: string;
+		pnlRealizedKey: string;
+		pnlTotalKey: string;
+		metricKey: string;
+		drawdownKey: string;
+		retKey: string;
+	};
+
+	const TRAIN_KEYS: KeySet = {
+		pnlKey: 'train_fitness_pnl',
+		pnlRealizedKey: 'train_pnl_realized',
+		pnlTotalKey: 'train_pnl_total',
+		metricKey: 'train_sortino',
+		drawdownKey: 'train_drawdown',
+		retKey: 'train_ret_mean'
+	};
+
+	const EVAL_KEYS: KeySet = {
+		pnlKey: 'eval_fitness_pnl',
+		pnlRealizedKey: 'eval_pnl_realized',
+		pnlTotalKey: 'eval_pnl_total',
+		metricKey: 'eval_sortino',
+		drawdownKey: 'eval_drawdown',
+		retKey: 'eval_ret_mean'
+	};
+
+	const EVAL_PROBE_KEYS = [
+		'eval_fitness_pnl',
+		'eval_pnl_realized',
+		'eval_pnl_total',
+		'eval_sortino',
+		'eval_drawdown',
+		'eval_ret_mean'
+	] as const;
+
+	const logChunk = 1000;
+	const pageSize = 200;
+
+	let logs: LogRow[] = $state([]);
 	let loading = $state(true);
     let error = $state("");
-    const logChunk = 1000;
     let loadingMore = $state(false);
     let doneLoading = $state(false);
     let nextOffset = $state(0);
     let logPage = $state(1);
-    const pageSize = 200;
+	let hasEval = $state(false);
+	let bestFitness = $state(Number.NEGATIVE_INFINITY);
+	let metricSum = $state(0);
+	let genAgg: Map<number, GenAgg> = $state(new Map());
+	let issueState: IssueState = $state({
+		highFitnessCount: 0,
+		highFitnessItems: [],
+		cappedCount: 0,
+		cappedItems: [],
+		zeroDdCount: 0,
+		zeroDdItems: [],
+		retCount: 0,
+		retNegativeCount: 0
+	});
+
+	let loadToken = 0;
+	let hasEvalDetermined = false;
+
+    const toNumber = (value: unknown): number | null => {
+		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+		if (typeof value === 'string' && value.trim() !== '') {
+			const parsed = Number(value);
+			return Number.isFinite(parsed) ? parsed : null;
+		}
+		return null;
+	};
+    const formatNum = (value: unknown, digits = 4) => {
+		const num = toNumber(value);
+		return num === null ? '—' : num.toFixed(digits);
+	};
+	const safeBest = (value: number) => Number.isFinite(value) ? value : 0;
+	const safeAvg = (sum: number, count: number) => count > 0 ? sum / count : 0;
+
+	function resetState() {
+		logs = [];
+		genAgg = new Map();
+		issueState = {
+			highFitnessCount: 0,
+			highFitnessItems: [],
+			cappedCount: 0,
+			cappedItems: [],
+			zeroDdCount: 0,
+			zeroDdItems: [],
+			retCount: 0,
+			retNegativeCount: 0
+		};
+		bestFitness = Number.NEGATIVE_INFINITY;
+		metricSum = 0;
+		logPage = 1;
+		hasEval = false;
+		hasEvalDetermined = false;
+	}
+
+	function detectEval(rows: LogRow[]) {
+		if (hasEvalDetermined || rows.length === 0) return;
+		const first = rows[0];
+		if (first && typeof first === 'object') {
+			hasEval = EVAL_PROBE_KEYS.some((key) => key in first);
+		} else {
+			hasEval = false;
+		}
+		hasEvalDetermined = true;
+	}
+
+	const createAgg = (gen: number): GenAgg => ({
+		gen,
+		count: 0,
+		fitnessSum: 0,
+		fitnessCount: 0,
+		bestFitness: Number.NEGATIVE_INFINITY,
+		pnlSum: 0,
+		pnlCount: 0,
+		bestPnl: Number.NEGATIVE_INFINITY,
+		realizedSum: 0,
+		realizedCount: 0,
+		bestRealizedPnl: Number.NEGATIVE_INFINITY,
+		totalSum: 0,
+		totalCount: 0,
+		bestTotalPnl: Number.NEGATIVE_INFINITY,
+		metricSum: 0,
+		metricCount: 0,
+		bestMetric: Number.NEGATIVE_INFINITY
+	});
+
+	function ensureAgg(map: Map<number, GenAgg>, gen: number) {
+		let agg = map.get(gen);
+		if (!agg) {
+			agg = createAgg(gen);
+			map.set(gen, agg);
+		}
+		return agg;
+	}
+
+	const formatIssueId = (row: LogRow) => {
+		const genLabel = row.gen ?? '—';
+		const idxLabel = row.idx ?? '—';
+		return `Gen ${genLabel}, Idx ${idxLabel}`;
+	};
+
+	function updateFromChunk(rows: LogRow[]) {
+		if (!rows || rows.length === 0) return;
+
+		detectEval(rows);
+		const keys = hasEval ? EVAL_KEYS : TRAIN_KEYS;
+		const aggMap = new Map(genAgg);
+
+		let chunkBestFitness = bestFitness;
+		let chunkMetricSum = metricSum;
+		const nextIssue: IssueState = {
+			highFitnessCount: issueState.highFitnessCount,
+			highFitnessItems: [...issueState.highFitnessItems],
+			cappedCount: issueState.cappedCount,
+			cappedItems: [...issueState.cappedItems],
+			zeroDdCount: issueState.zeroDdCount,
+			zeroDdItems: [...issueState.zeroDdItems],
+			retCount: issueState.retCount,
+			retNegativeCount: issueState.retNegativeCount
+		};
+
+		for (const row of rows) {
+			if (!row || typeof row !== 'object') continue;
+
+			const fitness = toNumber(row.fitness);
+			const pnl = toNumber(row[keys.pnlKey]);
+			const realized = toNumber(row[keys.pnlRealizedKey]);
+			const total = toNumber(row[keys.pnlTotalKey]);
+			const metric = toNumber(row[keys.metricKey]);
+			const drawdown = toNumber(row[keys.drawdownKey]);
+			const ret = toNumber(row[keys.retKey]);
+			const genValue = toNumber(row.gen);
+
+			if (genValue !== null) {
+				const agg = ensureAgg(aggMap, genValue);
+				agg.count += 1;
+
+				if (fitness !== null) {
+					agg.fitnessSum += fitness;
+					agg.fitnessCount += 1;
+					agg.bestFitness = Math.max(agg.bestFitness, fitness);
+					chunkBestFitness = Math.max(chunkBestFitness, fitness);
+				}
+				if (pnl !== null) {
+					agg.pnlSum += pnl;
+					agg.pnlCount += 1;
+					agg.bestPnl = Math.max(agg.bestPnl, pnl);
+				}
+				if (realized !== null) {
+					agg.realizedSum += realized;
+					agg.realizedCount += 1;
+					agg.bestRealizedPnl = Math.max(agg.bestRealizedPnl, realized);
+				}
+				if (total !== null) {
+					agg.totalSum += total;
+					agg.totalCount += 1;
+					agg.bestTotalPnl = Math.max(agg.bestTotalPnl, total);
+				}
+				if (metric !== null) {
+					agg.metricSum += metric;
+					agg.metricCount += 1;
+					agg.bestMetric = Math.max(agg.bestMetric, metric);
+					chunkMetricSum += metric;
+				}
+			}
+
+			const issueId = formatIssueId(row);
+			if (fitness !== null && fitness > 1000) {
+				nextIssue.highFitnessCount += 1;
+				if (nextIssue.highFitnessItems.length < 5) {
+					nextIssue.highFitnessItems.push(`${issueId}: ${fitness.toFixed(2)}`);
+				}
+			}
+			if (metric !== null && metric >= 50.0) {
+				nextIssue.cappedCount += 1;
+				if (nextIssue.cappedItems.length < 5) {
+					nextIssue.cappedItems.push(issueId);
+				}
+			}
+			if (drawdown !== null && pnl !== null && drawdown === 0 && pnl !== 0) {
+				nextIssue.zeroDdCount += 1;
+				if (nextIssue.zeroDdItems.length < 5) {
+					nextIssue.zeroDdItems.push(issueId);
+				}
+			}
+			if (ret !== null) {
+				nextIssue.retCount += 1;
+				if (ret < 0) nextIssue.retNegativeCount += 1;
+			}
+		}
+
+		logs.push(...rows);
+		genAgg = aggMap;
+		bestFitness = chunkBestFitness;
+		metricSum = chunkMetricSum;
+		issueState = nextIssue;
+	}
 
 	async function fetchLogs() {
+		const token = ++loadToken;
         loading = true;
+		error = "";
         doneLoading = false;
         nextOffset = 0;
+		loadingMore = false;
+		resetState();
 		try {
 			const res = await fetch(`/api/logs?limit=${logChunk}&offset=0`);
             if (!res.ok) throw new Error("Failed to fetch logs");
 			const payload = await res.json();
-			logs = payload.data || [];
+			if (token !== loadToken) return;
+			updateFromChunk(payload.data || []);
             nextOffset = payload.nextOffset || logs.length;
             doneLoading = payload.done || false;
-            scheduleLoadMore();
+            if (!doneLoading) {
+				scheduleLoadMore(token);
+			}
 		} catch (e) {
 			console.error('Failed to fetch logs', e);
-            error = e.message;
+            error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			if (token === loadToken) {
+				loading = false;
+			}
 		}
 	}
 
 	onMount(fetchLogs);
 
-    function scheduleLoadMore() {
-        if (doneLoading || loadingMore) return;
+    function scheduleLoadMore(token: number) {
+        if (doneLoading || loadingMore || token !== loadToken) return;
         loadingMore = true;
         setTimeout(async () => {
+			if (token !== loadToken) {
+				loadingMore = false;
+				return;
+			}
             try {
                 const res = await fetch(`/api/logs?limit=${logChunk}&offset=${nextOffset}`);
                 if (!res.ok) throw new Error("Failed to fetch logs");
                 const payload = await res.json();
+				if (token !== loadToken) return;
                 if (payload.data && payload.data.length > 0) {
-                    logs = [...logs, ...payload.data];
+					updateFromChunk(payload.data);
                     nextOffset = payload.nextOffset || (nextOffset + payload.data.length);
                 } else {
                     doneLoading = true;
@@ -65,17 +343,13 @@
             } finally {
                 loadingMore = false;
                 if (!doneLoading) {
-                    scheduleLoadMore();
+                    scheduleLoadMore(token);
                 }
             }
         }, 60);
     }
 
-    const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
-    const formatNum = (v, digits = 4) => isFiniteNumber(v) ? v.toFixed(digits) : '—';
-
     // Dynamic key detection
-    let hasEval = $derived(logs.some(l => isFiniteNumber(l.eval_fitness_pnl) || isFiniteNumber(l.eval_pnl_realized)));
     let sourceLabel = $derived(hasEval ? 'Eval' : 'Train');
     let pnlKey = $derived(hasEval ? 'eval_fitness_pnl' : 'train_fitness_pnl');
     let pnlRealizedKey = $derived(hasEval ? 'eval_pnl_realized' : 'train_pnl_realized');
@@ -85,41 +359,28 @@
     let retKey = $derived(hasEval ? 'eval_ret_mean' : 'train_ret_mean');
     let wMetricKey = $derived('w_sortino');
     let metricLabel = $derived('SORTINO');
+	let avgMetric = $derived(metricSum / (logs.length || 1));
 
     // Data Aggregation by Generation
     let genData = $derived.by(() => {
-        if (logs.length === 0) return [];
-        
-        const gens = new Map();
-        logs.forEach(l => {
-            if (!gens.has(l.gen)) gens.set(l.gen, []);
-            gens.get(l.gen).push(l);
-        });
+        if (genAgg.size === 0) return [];
 
-        return Array.from(gens.entries()).map(([gen, individuals]) => {
-            const fitnesses = individuals.map(i => i.fitness).filter(isFiniteNumber);
-            const pnls = individuals.map(i => i[pnlKey]).filter(isFiniteNumber);
-            const realizedPnls = individuals.map(i => i[pnlRealizedKey]).filter(isFiniteNumber);
-            const totalPnls = individuals.map(i => i[pnlTotalKey]).filter(isFiniteNumber);
-            const metrics = individuals.map(i => i[metricKey]).filter(isFiniteNumber);
-            const meanSafe = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-            const maxSafe = (arr) => arr.length ? Math.max(...arr) : 0;
-            
-            return {
-                gen,
-                count: individuals.length,
-                bestFitness: maxSafe(fitnesses),
-                avgFitness: meanSafe(fitnesses),
-                bestPnl: maxSafe(pnls),
-                avgPnl: meanSafe(pnls),
-                bestRealizedPnl: maxSafe(realizedPnls),
-                avgRealizedPnl: meanSafe(realizedPnls),
-                bestTotalPnl: maxSafe(totalPnls),
-                avgTotalPnl: meanSafe(totalPnls),
-                bestMetric: maxSafe(metrics),
-                avgMetric: meanSafe(metrics),
-            };
-        }).sort((a, b) => a.gen - b.gen);
+        return Array.from(genAgg.values())
+			.map((agg) => ({
+				gen: agg.gen,
+				count: agg.count,
+				bestFitness: safeBest(agg.bestFitness),
+				avgFitness: safeAvg(agg.fitnessSum, agg.fitnessCount),
+				bestPnl: safeBest(agg.bestPnl),
+				avgPnl: safeAvg(agg.pnlSum, agg.pnlCount),
+				bestRealizedPnl: safeBest(agg.bestRealizedPnl),
+				avgRealizedPnl: safeAvg(agg.realizedSum, agg.realizedCount),
+				bestTotalPnl: safeBest(agg.bestTotalPnl),
+				avgTotalPnl: safeAvg(agg.totalSum, agg.totalCount),
+				bestMetric: safeBest(agg.bestMetric),
+				avgMetric: safeAvg(agg.metricSum, agg.metricCount)
+			}))
+			.sort((a, b) => a.gen - b.gen);
     });
 
     // Chart: Fitness Evolution
@@ -180,42 +441,37 @@
         if (logs.length === 0) return list;
 
         // 1. Fitness Outliers
-        const highFitness = logs.filter(l => l.fitness > 1000);
-        if (highFitness.length > 0) {
+        if (issueState.highFitnessCount > 0) {
             list.push({
                 type: 'warning',
                 title: 'Fitness Outliers Detected',
-                message: `${highFitness.length} individuals have fitness > 1000. This may indicate logic errors or extreme lucky outliers corrupting selection.`,
-                items: highFitness.slice(0, 5).map(i => `Gen ${i.gen}, Idx ${i.idx}: ${i.fitness.toFixed(2)}`)
+                message: `${issueState.highFitnessCount} individuals have fitness > 1000. This may indicate logic errors or extreme lucky outliers corrupting selection.`,
+                items: issueState.highFitnessItems
             });
         }
 
         // 2. Metric Capping
-        const capped = logs.filter(l => isFiniteNumber(l[metricKey]) && l[metricKey] >= 50.0);
-        if (capped.length > 0) {
+        if (issueState.cappedCount > 0) {
             list.push({
                 type: 'info',
                 title: `${metricLabel} Cap Hit`,
-                message: `${capped.length} individuals hit the cap of 50.0 for ${metricLabel} (${sourceLabel}). Consider raising the cap if they are consistently flatlining at max.`,
-                items: capped.slice(0, 5).map(i => `Gen ${i.gen}, Idx ${i.idx}`)
+                message: `${issueState.cappedCount} individuals hit the cap of 50.0 for ${metricLabel} (${sourceLabel}). Consider raising the cap if they are consistently flatlining at max.`,
+                items: issueState.cappedItems
             });
         }
 
         // 3. Zero Drawdown
-        const zeroDD = logs.filter(l => isFiniteNumber(l[drawdownKey]) && isFiniteNumber(l[pnlKey]) && l[drawdownKey] === 0 && l[pnlKey] !== 0);
-        if (zeroDD.length > 0) {
+        if (issueState.zeroDdCount > 0) {
             list.push({
                 type: 'warning',
                 title: 'Zero Drawdown (Possible Fake Results)',
-                message: `${zeroDD.length} individuals have 0% drawdown but non-zero PNL. This often indicates insufficient evaluation data or "one-hit wonder" trades.`,
-                items: zeroDD.slice(0, 5).map(i => `Gen ${i.gen}, Idx ${i.idx}`)
+                message: `${issueState.zeroDdCount} individuals have 0% drawdown but non-zero PNL. This often indicates insufficient evaluation data or "one-hit wonder" trades.`,
+                items: issueState.zeroDdItems
             });
         }
 
         // 4. Negative Returns
-        const retValues = logs.map(l => l[retKey]).filter(isFiniteNumber);
-        const negativeRet = retValues.filter(v => v < 0);
-        if (retValues.length > 0 && negativeRet.length === retValues.length) {
+        if (issueState.retCount > 0 && issueState.retNegativeCount === issueState.retCount) {
             list.push({
                 type: 'destructive',
                 title: 'Universal Negative Returns',
@@ -236,6 +492,22 @@
 
         return list;
     });
+
+	let maxLogPage = $derived(Math.max(1, Math.ceil(logs.length / pageSize)));
+
+	let pagedLogs = $derived.by(() => {
+		if (logs.length === 0) return [];
+		const total = logs.length;
+		const end = total - (logPage - 1) * pageSize;
+		const start = Math.max(0, end - pageSize);
+		return logs.slice(start, end).reverse();
+	});
+
+	$effect(() => {
+		if (logPage > maxLogPage) {
+			logPage = maxLogPage;
+		}
+	});
 
 </script>
 
@@ -283,7 +555,7 @@
 					<Card.Title class="text-sm font-medium text-muted-foreground">Global Best Fitness</Card.Title>
 				</Card.Header>
 				<Card.Content>
-					<p class="text-3xl font-bold text-green-500">{Math.max(...logs.map(l => l.fitness)).toFixed(2)}</p>
+					<p class="text-3xl font-bold text-green-500">{formatNum(bestFitness, 2)}</p>
 				</Card.Content>
 			</Card.Root>
             <Card.Root class="border-l-4 border-l-purple-500">
@@ -291,7 +563,7 @@
 					<Card.Title class="text-sm font-medium text-muted-foreground">Avg {metricLabel}</Card.Title>
 				</Card.Header>
 				<Card.Content>
-					<p class="text-3xl font-bold">{(logs.reduce((acc, l) => acc + (isFiniteNumber(l[metricKey]) ? l[metricKey] : 0), 0) / (logs.length || 1)).toFixed(2)}</p>
+					<p class="text-3xl font-bold">{formatNum(avgMetric, 2)}</p>
 				</Card.Content>
 			</Card.Root>
             <Card.Root class="border-l-4 border-l-orange-500">
@@ -458,7 +730,7 @@
                                     </Table.Row>
                                 </Table.Header>
                                 <Table.Body>
-                                {#each logs.slice().reverse().slice((logPage - 1) * pageSize, logPage * pageSize) as log}
+                                {#each pagedLogs as log}
                                         <Table.Row class="hover:bg-muted/30 transition-colors">
                                             <Table.Cell>{log.gen}</Table.Cell>
                                             <Table.Cell>{log.idx}</Table.Cell>
@@ -489,12 +761,12 @@
                                     Prev
                                 </button>
                                 <div class="text-xs">
-                                    Page {logPage} / {Math.max(1, Math.ceil(logs.length / pageSize))}
+                                    Page {logPage} / {maxLogPage}
                                 </div>
                                 <button
                                     class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
-                                    onclick={() => (logPage = Math.min(Math.ceil(logs.length / pageSize), logPage + 1))}
-                                    disabled={logPage >= Math.ceil(logs.length / pageSize)}
+                                    onclick={() => (logPage = Math.min(maxLogPage, logPage + 1))}
+                                    disabled={logPage >= maxLogPage}
                                 >
                                     Next
                                 </button>
