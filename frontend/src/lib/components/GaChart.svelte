@@ -58,7 +58,15 @@
             chart.data = data;
             // Update y1 visibility based on new data
             chart.options.scales.y1.display = data.datasets.some(d => d.yAxisID === 'y1');
-            chart.update();
+            chart.update('none');
+        }
+    });
+
+    $effect(() => {
+        const seriesCount = data?.datasets?.[0]?.data?.length || 0;
+        if (chart) {
+            chart.options.animation = seriesCount > 2000 ? false : undefined;
+            chart.update('none');
         }
     });
 
