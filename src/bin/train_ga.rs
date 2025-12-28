@@ -81,6 +81,8 @@ struct Args {
     disable_margin: bool,
     #[arg(long)]
     skip_val_eval: bool,
+    #[arg(long)]
+    debug_data: bool,
 }
 
 #[cfg(feature = "tch")]
@@ -113,6 +115,11 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     let train = load_dataset(&train_path, args.globex && !args.rth)?;
     let val = load_dataset(&val_path, args.globex && !args.rth)?;
     let test = load_dataset(&test_path, args.globex && !args.rth)?;
+    if args.debug_data {
+        dump_dataset_stats("train", &train);
+        dump_dataset_stats("val", &val);
+        dump_dataset_stats("test", &test);
+    }
 
     let (margin_cfg, session_cfg) = load_symbol_config(&args.symbol_config, &train.symbol)?;
     let margin_per_contract = args.margin_per_contract.or(margin_cfg).unwrap_or_else(|| infer_margin(&train.symbol));
@@ -416,6 +423,25 @@ fn print_device(device: &tch::Device) {
             "ℹ️  torch_cuda.dll exists: {}",
             if cuda_dll.exists() { "yes" } else { "no" }
         );
+        if let Ok(entries) = std::fs::read_dir(std::path::Path::new(&libtorch).join("lib")) {
+            let mut has_cudart = false;
+            let mut has_cublas = false;
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("cudart64_") && name.ends_with(".dll") {
+                        has_cudart = true;
+                    }
+                    if name.starts_with("cublas64_") && name.ends_with(".dll") {
+                        has_cublas = true;
+                    }
+                }
+            }
+            println!(
+                "ℹ️  libtorch cuda runtime: cudart={}, cublas={}",
+                if has_cudart { "yes" } else { "no" },
+                if has_cublas { "yes" } else { "no" }
+            );
+        }
     }
     if let tch::Device::Cuda(idx) = device {
         println!("🟢 Using CUDA device: cuda:{}", idx);
@@ -957,6 +983,38 @@ fn series_to_i64(series: &polars::prelude::Series) -> anyhow::Result<Vec<i64>> {
         })
         .collect();
     Ok(out)
+}
+
+#[cfg(feature = "tch")]
+fn dump_dataset_stats(label: &str, data: &DataSet) {
+    let close = &data.close;
+    if close.is_empty() {
+        println!("ℹ️  {label}: empty dataset");
+        return;
+    }
+    let mut min_v = f64::INFINITY;
+    let mut max_v = f64::NEG_INFINITY;
+    let mut zero_delta = 0usize;
+    let mut total = 0usize;
+    for i in 0..close.len() {
+        let v = close[i];
+        if v < min_v {
+            min_v = v;
+        }
+        if v > max_v {
+            max_v = v;
+        }
+        if i > 0 {
+            total += 1;
+            if (close[i] - close[i - 1]).abs() < 1e-12 {
+                zero_delta += 1;
+            }
+        }
+    }
+    println!(
+        "ℹ️  {label}: close[min={:.6}, max={:.6}], zero_delta={}/{}",
+        min_v, max_v, zero_delta, total
+    );
 }
 
 #[cfg(feature = "tch")]
