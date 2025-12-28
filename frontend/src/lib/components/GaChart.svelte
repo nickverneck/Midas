@@ -34,7 +34,6 @@
         responsive: true,
         maintainAspectRatio: false,
         normalized: true,
-        parsing: false,
         interaction: {
             mode: 'index',
             intersect: false,
@@ -86,12 +85,17 @@
         chart.data.labels = labels;
         chart.data.datasets = datasets;
         chart.options.scales.y1.display = datasets.some(d => d.yAxisID === 'y1');
+        const usesXY = datasets.some((ds) =>
+            Array.isArray(ds.data) &&
+            ds.data.some((point) => point && typeof point === 'object' && ('x' in point || 'y' in point))
+        );
+        chart.options.parsing = usesXY ? false : undefined;
         chart.options.animation = seriesCount > 2000 ? false : undefined;
         if (chart.options.elements?.point) {
             chart.options.elements.point.radius = seriesCount > 1000 ? 0 : 2;
         }
         if (chart.options.plugins?.decimation) {
-            chart.options.plugins.decimation.enabled = seriesCount > 2000;
+            chart.options.plugins.decimation.enabled = usesXY && seriesCount > 2000;
         }
         chart.update('none');
     });
