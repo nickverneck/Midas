@@ -409,6 +409,14 @@ fn resolve_device(requested: Option<&str>) -> tch::Device {
 
 #[cfg(feature = "tch")]
 fn print_device(device: &tch::Device) {
+    if let Ok(libtorch) = std::env::var("LIBTORCH") {
+        let cuda_dll = std::path::Path::new(&libtorch).join("lib").join("torch_cuda.dll");
+        println!("ℹ️  LIBTORCH={}", libtorch);
+        println!(
+            "ℹ️  torch_cuda.dll exists: {}",
+            if cuda_dll.exists() { "yes" } else { "no" }
+        );
+    }
     if let tch::Device::Cuda(idx) = device {
         println!("🟢 Using CUDA device: cuda:{}", idx);
     } else if let tch::Device::Mps = device {
