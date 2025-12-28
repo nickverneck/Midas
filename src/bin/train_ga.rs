@@ -86,17 +86,22 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     let val = val.with_session(use_globex);
     let test = test.with_session(use_globex);
 
-    let windows_train = if args.full_file {
+    let full_file = if args.parquet.is_some() {
+        args.full_file
+    } else {
+        args.full_file || !args.windowed
+    };
+    let windows_train = if full_file {
         vec![(0, train.close.len())]
     } else {
         midas_env::sampler::windows(train.close.len(), args.window, args.step)
     };
-    let windows_val = if args.full_file {
+    let windows_val = if full_file {
         vec![(0, val.close.len())]
     } else {
         midas_env::sampler::windows(val.close.len(), args.window, args.step)
     };
-    let windows_test = if args.full_file {
+    let windows_test = if full_file {
         vec![(0, test.close.len())]
     } else {
         midas_env::sampler::windows(test.close.len(), args.window, args.step)
