@@ -51,6 +51,8 @@ struct Args {
     generations: usize,
     #[arg(long, default_value_t = 6)]
     pop_size: usize,
+    #[arg(long, default_value_t = 0)]
+    workers: usize,
     #[arg(long, default_value_t = 0.33)]
     elite_frac: f64,
     #[arg(long, default_value_t = 0.05)]
@@ -99,6 +101,13 @@ fn run(mut args: Args) -> anyhow::Result<()> {
 
     let device = resolve_device(args.device.as_deref());
     print_device(&device);
+    if args.workers > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.workers)
+            .build_global()
+            .context("configure rayon thread pool")?;
+        println!("🧵 Using {} worker threads", args.workers);
+    }
 
     let (train_path, val_path, test_path) = resolve_paths(&args)?;
     let train = load_dataset(&train_path, args.globex && !args.rth)?;
