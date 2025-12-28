@@ -1,5 +1,5 @@
 use anyhow::Result;
-use polars::prelude::{AnyValue, Series};
+use polars::prelude::{AnyValue, Series, SerReader};
 
 #[derive(Clone)]
 pub struct DataSet {
@@ -36,7 +36,7 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
     let close = series_to_f64(df.column("close")?.as_materialized_series())?;
     let high = series_to_f64(df.column("high")?.as_materialized_series())?;
     let low = series_to_f64(df.column("low")?.as_materialized_series())?;
-    let volume = df
+    let volume: Option<Vec<f64>> = df
         .column("volume")
         .ok()
         .map(|c| series_to_f64(c.as_materialized_series()))
