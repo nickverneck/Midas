@@ -25,6 +25,9 @@ pub struct CandidateConfig {
     pub session_close_penalty: f64,
     pub max_hold_bars_positive: usize,
     pub max_hold_bars_drawdown: usize,
+    pub invalid_revert_penalty: f64,
+    pub flat_hold_penalty: f64,
+    pub max_flat_hold_bars: usize,
 }
 
 #[derive(Clone)]
@@ -71,6 +74,9 @@ pub fn evaluate_candidate(
         session_close_penalty: cfg.session_close_penalty,
         max_hold_bars_positive: cfg.max_hold_bars_positive,
         max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
+        invalid_revert_penalty: cfg.invalid_revert_penalty,
+        flat_hold_penalty: cfg.flat_hold_penalty,
+        max_flat_hold_bars: cfg.max_flat_hold_bars,
         ..EnvConfig::default()
     };
 
