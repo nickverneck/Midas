@@ -75,8 +75,12 @@ pub struct Args {
     pub max_hold_bars_drawdown: usize,
     #[arg(long, default_value_t = 7.0)]
     pub invalid_revert_penalty: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub invalid_revert_penalty_growth: f64,
     #[arg(long, default_value_t = 2.20)]
     pub flat_hold_penalty: f64,
+    #[arg(long, default_value_t = 0.05)]
+    pub flat_hold_penalty_growth: f64,
     #[arg(long, default_value_t = 100)]
     pub max_flat_hold_bars: usize,
     #[arg(long)]
