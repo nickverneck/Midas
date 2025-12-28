@@ -34,9 +34,11 @@
     const formatNum = (v, digits = 4) => isFiniteNumber(v) ? v.toFixed(digits) : '—';
 
     // Dynamic key detection
-    let hasEval = $derived(logs.some(l => isFiniteNumber(l.eval_pnl)));
+    let hasEval = $derived(logs.some(l => isFiniteNumber(l.eval_pnl) || isFiniteNumber(l.eval_pnl_realized)));
     let sourceLabel = $derived(hasEval ? 'Eval' : 'Train');
     let pnlKey = $derived(hasEval ? 'eval_pnl' : 'train_pnl');
+    let pnlRealizedKey = $derived(hasEval ? 'eval_pnl_realized' : 'train_pnl_realized');
+    let pnlTotalKey = $derived(hasEval ? 'eval_pnl_total' : 'train_pnl_total');
     let metricKey = $derived(hasEval ? 'eval_sortino' : 'train_sortino');
     let drawdownKey = $derived(hasEval ? 'eval_drawdown' : 'train_drawdown');
     let retKey = $derived(hasEval ? 'eval_ret_mean' : 'train_ret_mean');
@@ -56,6 +58,8 @@
         return Array.from(gens.entries()).map(([gen, individuals]) => {
             const fitnesses = individuals.map(i => i.fitness).filter(isFiniteNumber);
             const pnls = individuals.map(i => i[pnlKey]).filter(isFiniteNumber);
+            const realizedPnls = individuals.map(i => i[pnlRealizedKey]).filter(isFiniteNumber);
+            const totalPnls = individuals.map(i => i[pnlTotalKey]).filter(isFiniteNumber);
             const metrics = individuals.map(i => i[metricKey]).filter(isFiniteNumber);
             const meanSafe = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
             const maxSafe = (arr) => arr.length ? Math.max(...arr) : 0;
@@ -67,6 +71,10 @@
                 avgFitness: meanSafe(fitnesses),
                 bestPnl: maxSafe(pnls),
                 avgPnl: meanSafe(pnls),
+                bestRealizedPnl: maxSafe(realizedPnls),
+                avgRealizedPnl: meanSafe(realizedPnls),
+                bestTotalPnl: maxSafe(totalPnls),
+                avgTotalPnl: meanSafe(totalPnls),
                 bestMetric: maxSafe(metrics),
                 avgMetric: meanSafe(metrics),
             };
@@ -104,6 +112,14 @@
                 data: genData.map(g => g.bestPnl),
                 borderColor: 'rgb(34, 197, 94)',
                 backgroundColor: 'rgba(34, 197, 94, 0.5)',
+                tension: 0.1
+            },
+            {
+                label: `Best ${sourceLabel} Realized PNL`,
+                data: genData.map(g => g.bestRealizedPnl),
+                borderColor: 'rgb(16, 185, 129)',
+                backgroundColor: 'rgba(16, 185, 129, 0.35)',
+                borderDash: [4, 4],
                 tension: 0.1
             },
             {
@@ -289,12 +305,14 @@
                             {#each genData.slice(-3).reverse() as g}
                                 <div class="p-4 bg-muted/50 rounded-lg border">
                                     <h4 class="font-bold text-lg">Generation {g.gen}</h4>
-                                    <div class="mt-2 space-y-1 text-sm">
-                                        <div class="flex justify-between"><span>Max Fitness:</span> <span class="font-mono text-blue-500">{g.bestFitness.toFixed(2)}</span></div>
+                                        <div class="mt-2 space-y-1 text-sm">
+                                            <div class="flex justify-between"><span>Max Fitness:</span> <span class="font-mono text-blue-500">{g.bestFitness.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max {sourceLabel} PNL:</span> <span class="font-mono text-green-500">{g.bestPnl.toFixed(2)}</span></div>
+                                        <div class="flex justify-between"><span>Max Realized PNL:</span> <span class="font-mono text-emerald-500">{g.bestRealizedPnl.toFixed(2)}</span></div>
+                                        <div class="flex justify-between"><span>Max Total PNL:</span> <span class="font-mono text-teal-500">{g.bestTotalPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max {metricLabel}:</span> <span class="font-mono text-purple-500">{g.bestMetric.toFixed(2)}</span></div>
+                                        </div>
                                     </div>
-                                </div>
                             {/each}
                         </div>
                     </Card.Content>
@@ -315,6 +333,8 @@
                                     <Table.Head>Best Fitness</Table.Head>
                                     <Table.Head>Avg Fitness</Table.Head>
                                     <Table.Head>Best {sourceLabel} PNL</Table.Head>
+                                    <Table.Head>Best Realized</Table.Head>
+                                    <Table.Head>Best Total</Table.Head>
                                     <Table.Head>Best {metricLabel}</Table.Head>
                                 </Table.Row>
                             </Table.Header>
@@ -326,6 +346,8 @@
                                         <Table.Cell class="text-blue-500 font-medium">{g.bestFitness.toFixed(4)}</Table.Cell>
                                         <Table.Cell class="text-muted-foreground">{g.avgFitness.toFixed(4)}</Table.Cell>
                                         <Table.Cell class={g.bestPnl >= 0 ? 'text-green-500' : 'text-red-500'}>{g.bestPnl.toFixed(4)}</Table.Cell>
+                                        <Table.Cell class={g.bestRealizedPnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{formatNum(g.bestRealizedPnl)}</Table.Cell>
+                                        <Table.Cell class={g.bestTotalPnl >= 0 ? 'text-teal-500' : 'text-red-500'}>{formatNum(g.bestTotalPnl)}</Table.Cell>
                                         <Table.Cell class="text-purple-500">{g.bestMetric.toFixed(4)}</Table.Cell>
                                     </Table.Row>
                                 {/each}
@@ -387,6 +409,8 @@
                                         <Table.Head class="w-[80px]">Idx</Table.Head>
                                         <Table.Head>Fitness</Table.Head>
                                     <Table.Head>{sourceLabel} PNL</Table.Head>
+                                    <Table.Head>Realized PNL</Table.Head>
+                                    <Table.Head>Total PNL</Table.Head>
                                     <Table.Head>{metricLabel}</Table.Head>
                                     <Table.Head>{sourceLabel} DD</Table.Head>
                                         <Table.Head class="hidden md:table-cell text-right">Weights (PNL/{metricLabel}/MDD)</Table.Head>
@@ -399,6 +423,8 @@
                                             <Table.Cell>{log.idx}</Table.Cell>
                                             <Table.Cell class="font-medium text-blue-500">{log.fitness.toFixed(4)}</Table.Cell>
                                             <Table.Cell class={log[pnlKey] >= 0 ? 'text-green-500 font-medium' : 'text-red-500'}>{formatNum(log[pnlKey])}</Table.Cell>
+                                            <Table.Cell class={log[pnlRealizedKey] >= 0 ? 'text-emerald-500 font-medium' : 'text-red-500'}>{formatNum(log[pnlRealizedKey])}</Table.Cell>
+                                            <Table.Cell class={log[pnlTotalKey] >= 0 ? 'text-teal-500 font-medium' : 'text-red-500'}>{formatNum(log[pnlTotalKey])}</Table.Cell>
                                             <Table.Cell>{formatNum(log[metricKey])}</Table.Cell>
                                             <Table.Cell class="text-red-400">{formatNum(log[drawdownKey])}%</Table.Cell>
                                             <Table.Cell class="text-right hidden md:table-cell text-[10px] text-muted-foreground font-mono">
