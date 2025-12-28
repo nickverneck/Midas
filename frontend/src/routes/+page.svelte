@@ -13,14 +13,25 @@
 	let logs = $state([]);
 	let loading = $state(true);
     let error = $state("");
-    const logLimit = 10000;
+    const logChunk = 1000;
+    let loadingMore = $state(false);
+    let doneLoading = $state(false);
+    let nextOffset = $state(0);
+    let logPage = $state(1);
+    const pageSize = 200;
 
 	async function fetchLogs() {
         loading = true;
+        doneLoading = false;
+        nextOffset = 0;
 		try {
-			const res = await fetch(`/api/logs?limit=${logLimit}`);
+			const res = await fetch(`/api/logs?limit=${logChunk}&offset=0`);
             if (!res.ok) throw new Error("Failed to fetch logs");
-			logs = await res.json();
+			const payload = await res.json();
+			logs = payload.data || [];
+            nextOffset = payload.nextOffset || logs.length;
+            doneLoading = payload.done || false;
+            scheduleLoadMore();
 		} catch (e) {
 			console.error('Failed to fetch logs', e);
             error = e.message;
@@ -30,6 +41,35 @@
 	}
 
 	onMount(fetchLogs);
+
+    function scheduleLoadMore() {
+        if (doneLoading || loadingMore) return;
+        loadingMore = true;
+        setTimeout(async () => {
+            try {
+                const res = await fetch(`/api/logs?limit=${logChunk}&offset=${nextOffset}`);
+                if (!res.ok) throw new Error("Failed to fetch logs");
+                const payload = await res.json();
+                if (payload.data && payload.data.length > 0) {
+                    logs = [...logs, ...payload.data];
+                    nextOffset = payload.nextOffset || (nextOffset + payload.data.length);
+                } else {
+                    doneLoading = true;
+                }
+                if (payload.done) {
+                    doneLoading = true;
+                }
+            } catch (e) {
+                console.error('Failed to fetch more logs', e);
+                doneLoading = true;
+            } finally {
+                loadingMore = false;
+                if (!doneLoading) {
+                    scheduleLoadMore();
+                }
+            }
+        }, 60);
+    }
 
     const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
     const formatNum = (v, digits = 4) => isFiniteNumber(v) ? v.toFixed(digits) : '—';
@@ -418,7 +458,7 @@
                                     </Table.Row>
                                 </Table.Header>
                                 <Table.Body>
-                                    {#each logs.slice().reverse() as log}
+                                {#each logs.slice().reverse().slice((logPage - 1) * pageSize, logPage * pageSize) as log}
                                         <Table.Row class="hover:bg-muted/30 transition-colors">
                                             <Table.Cell>{log.gen}</Table.Cell>
                                             <Table.Cell>{log.idx}</Table.Cell>
@@ -436,6 +476,30 @@
                                 </Table.Body>
                             </Table.Root>
                         </ScrollArea>
+                        <div class="flex items-center justify-between mt-4">
+                            <div class="text-xs text-muted-foreground">
+                                {logs.length.toLocaleString()} rows loaded
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button
+                                    class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                    on:click={() => (logPage = Math.max(1, logPage - 1))}
+                                    disabled={logPage === 1}
+                                >
+                                    Prev
+                                </button>
+                                <div class="text-xs">
+                                    Page {logPage} / {Math.max(1, Math.ceil(logs.length / pageSize))}
+                                </div>
+                                <button
+                                    class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                    on:click={() => (logPage = Math.min(Math.ceil(logs.length / pageSize), logPage + 1))}
+                                    disabled={logPage >= Math.ceil(logs.length / pageSize)}
+                                >
+                                    Next
+                                </button>
+                            </div>
+                        </div>
                     </Card.Content>
                 </Card.Root>
             </Tabs.Content>

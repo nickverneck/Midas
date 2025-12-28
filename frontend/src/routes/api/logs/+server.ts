@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import Papa from 'papaparse';
 
-const DEFAULT_LIMIT = 10000;
+const DEFAULT_LIMIT = 1000;
 const CHUNK_SIZE = 64 * 1024;
 
 function readHeader(filePath: string): string {
@@ -20,27 +20,34 @@ function readHeader(filePath: string): string {
     }
 }
 
-function readTailLines(filePath: string, limit: number): string[] {
-    const fd = fs.openSync(filePath, 'r');
+async function readLines(filePath: string, offset: number, limit: number): Promise<string[]> {
+    const stream = fs.createReadStream(filePath, { encoding: 'utf-8' });
+    const rl = (await import('readline')).createInterface({ input: stream, crlfDelay: Infinity });
+    const lines: string[] = [];
+    let dataLineIdx = -1;
+
     try {
-        const stat = fs.fstatSync(fd);
-        let pos = stat.size;
-        let buffer = '';
-        let lines: string[] = [];
-
-        while (pos > 0 && lines.length <= limit) {
-            const readSize = Math.min(CHUNK_SIZE, pos);
-            pos -= readSize;
-            const chunk = Buffer.alloc(readSize);
-            fs.readSync(fd, chunk, 0, readSize, pos);
-            buffer = chunk.toString('utf-8') + buffer;
-            lines = buffer.split('\n');
+        for await (const line of rl) {
+            if (dataLineIdx === -1) {
+                dataLineIdx = 0;
+                continue;
+            }
+            if (dataLineIdx < offset) {
+                dataLineIdx += 1;
+                continue;
+            }
+            if (lines.length >= limit) {
+                break;
+            }
+            lines.push(line);
+            dataLineIdx += 1;
         }
-
-        return lines.filter((l) => l.trim().length > 0).slice(-limit);
     } finally {
-        fs.closeSync(fd);
+        rl.close();
+        stream.close();
     }
+
+    return lines;
 }
 
 export const GET = async ({ url }) => {
@@ -51,19 +58,13 @@ export const GET = async ({ url }) => {
     }
 
     const limitParam = url.searchParams.get('limit');
+    const offsetParam = url.searchParams.get('offset');
     const limit = limitParam ? Math.max(parseInt(limitParam, 10) || 0, 0) : DEFAULT_LIMIT;
-    let csvData: string;
+    const offset = offsetParam ? Math.max(parseInt(offsetParam, 10) || 0, 0) : 0;
 
-    if (limit > 0) {
-        const header = readHeader(logPath);
-        let tailLines = readTailLines(logPath, limit);
-        if (tailLines.length > 0 && tailLines[0].trim() === header) {
-            tailLines = tailLines.slice(1);
-        }
-        csvData = [header, ...tailLines].join('\n');
-    } else {
-        csvData = fs.readFileSync(logPath, 'utf-8');
-    }
+    const header = readHeader(logPath);
+    const dataLines = limit > 0 ? await readLines(logPath, offset, limit) : [];
+    const csvData = [header, ...dataLines].join('\n');
 
     const parsed = Papa.parse(csvData, {
         header: true,
@@ -71,5 +72,9 @@ export const GET = async ({ url }) => {
         skipEmptyLines: true
     });
 
-    return json(parsed.data);
+    const data = parsed.data as Record<string, unknown>[];
+    const nextOffset = offset + data.length;
+    const done = data.length < limit;
+
+    return json({ data, nextOffset, done });
 };
