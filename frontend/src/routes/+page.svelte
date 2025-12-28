@@ -13,11 +13,12 @@
 	let logs = $state([]);
 	let loading = $state(true);
     let error = $state("");
+    const logLimit = 10000;
 
 	async function fetchLogs() {
         loading = true;
 		try {
-			const res = await fetch('/api/logs');
+			const res = await fetch(`/api/logs?limit=${logLimit}`);
             if (!res.ok) throw new Error("Failed to fetch logs");
 			logs = await res.json();
 		} catch (e) {
