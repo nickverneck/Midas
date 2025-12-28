@@ -7,9 +7,10 @@ fn main() {
 }
 
 #[cfg(feature = "tch")]
-fn main() -> anyhow::Result<()> {
-    use clap::Parser;
+use clap::Parser;
 
+#[cfg(feature = "tch")]
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     run(args)
 }
@@ -93,7 +94,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
 
     if let Some(seed) = args.seed {
         let mut rng = StdRng::seed_from_u64(seed);
-        let _ = rng.gen::<u64>();
+        let _ = rng.r#gen::<u64>();
     }
 
     args.outdir = args.outdir.clone();
@@ -170,11 +171,11 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     let mut best_overall_fitness = f64::NEG_INFINITY;
     let mut best_overall_genome: Option<Vec<f32>> = None;
 
-    for gen in 0..args.generations {
+    for generation in 0..args.generations {
         let gen_start = std::time::Instant::now();
         println!(
             "\n🚀 Generation {} | Evaluating {} candidates (device={:?})",
-            gen,
+            generation,
             pop.len(),
             device
         );
@@ -209,19 +210,19 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                         genome,
                         &val,
                         &windows_val,
-                    &CandidateConfig {
-                        initial_balance: args.initial_balance,
-                        margin_per_contract,
-                        disable_margin: args.disable_margin,
-                        w_pnl: args.w_pnl,
-                        w_sortino: args.w_sortino,
-                        w_mdd: args.w_mdd,
-                        sortino_annualization: args.sortino_annualization,
-                        hidden: args.hidden,
-                        layers: args.layers,
-                        eval_windows: args.eval_windows,
-                        device,
-                    },
+                        &CandidateConfig {
+                            initial_balance: args.initial_balance,
+                            margin_per_contract,
+                            disable_margin: args.disable_margin,
+                            w_pnl: args.w_pnl,
+                            w_sortino: args.w_sortino,
+                            w_mdd: args.w_mdd,
+                            sortino_annualization: args.sortino_annualization,
+                            hidden: args.hidden,
+                            layers: args.layers,
+                            eval_windows: args.eval_windows,
+                            device,
+                        },
                         true,
                     ))
                 };
@@ -245,7 +246,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
 
             let line = format!(
                 "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4}\n",
-                gen,
+                generation,
                 idx,
                 args.w_pnl,
                 args.w_sortino,
@@ -286,14 +287,20 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             }
         }
 
-        println!("⏱ Generation {} completed in {:.2?}", gen, gen_start.elapsed());
+        println!(
+            "⏱ Generation {} completed in {:.2?}",
+            generation,
+            gen_start.elapsed()
+        );
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let top = scored.iter().take(5).collect::<Vec<_>>();
         for (rank, (_fit, genome, eval_metrics, train_metrics)) in top.iter().enumerate() {
             let metrics = eval_metrics.as_ref().unwrap_or(train_metrics);
-            let policy_path = args.outdir.join(format!("policy_gen{}_rank{}.pt", gen, rank));
+            let policy_path = args
+                .outdir
+                .join(format!("policy_gen{}_rank{}.pt", generation, rank));
             save_policy(
                 obs_dim,
                 args.hidden,
@@ -303,7 +310,10 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                 &policy_path,
             )?;
             if rank == 0 {
-                println!("📈 Gen {} Top Performer: fitness {:.2}", gen, metrics.fitness);
+                println!(
+                    "📈 Gen {} Top Performer: fitness {:.2}",
+                    generation, metrics.fitness
+                );
                 if metrics.fitness > best_overall_fitness {
                     best_overall_fitness = metrics.fitness;
                     best_overall_genome = Some(genome.clone());
@@ -327,7 +337,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         }
         pop = new_pop;
 
-        let ckpt_path = args.outdir.join(format!("checkpoint_gen{}.bin", gen));
+        let ckpt_path = args.outdir.join(format!("checkpoint_gen{}.bin", generation));
         save_checkpoint(&ckpt_path, &pop)?;
     }
 
@@ -401,9 +411,7 @@ fn resolve_device(requested: Option<&str>) -> tch::Device {
 #[cfg(feature = "tch")]
 fn print_device(device: &tch::Device) {
     if let tch::Device::Cuda(idx) = device {
-        let name = tch::Cuda::device_name(*idx).unwrap_or_else(|| "unknown".into());
-        println!("🟢 Using CUDA device: {}", name);
-        println!("    torch.version.cuda={:?}", tch::Cuda::version());
+        println!("🟢 Using CUDA device: cuda:{}", idx);
     } else if let tch::Device::Mps = device {
         println!("🟢 Using MPS device");
     } else {
@@ -504,17 +512,21 @@ fn load_dataset(path: &Path, globex: bool) -> anyhow::Result<DataSet> {
 
     let file = std::fs::File::open(path)?;
     let df = polars::prelude::ParquetReader::new(file).finish()?;
-    let open = if df.get_column("open").is_ok() {
-        df.column("open")?.f64()?.to_vec()
+    let open = if df.column("open").is_ok() {
+        series_to_f64(df.column("open")?)?
     } else {
-        df.column("close")?.f64()?.to_vec()
+        series_to_f64(df.column("close")?)?
     };
-    let close = df.column("close")?.f64()?.to_vec();
-    let high = df.column("high")?.f64()?.to_vec();
-    let low = df.column("low")?.f64()?.to_vec();
-    let volume = df.column("volume").ok().and_then(|s| s.f64().ok()).map(|s| s.to_vec());
-    let datetime_ns = df.column("date").ok().and_then(|s| s.i64().ok()).map(|s| s.to_vec());
-    let symbol = df.column("symbol")?.utf8()?.get(0).unwrap_or("UNKNOWN").to_string();
+    let close = series_to_f64(df.column("close")?)?;
+    let high = series_to_f64(df.column("high")?)?;
+    let low = series_to_f64(df.column("low")?)?;
+    let volume = df.column("volume").ok().map(series_to_f64).transpose()?;
+    let datetime_ns = df.column("date").ok().map(series_to_i64).transpose()?;
+    let symbol = match df.column("symbol")?.get(0) {
+        polars::prelude::AnyValue::Utf8(s) => s.to_string(),
+        polars::prelude::AnyValue::String(s) => s.to_string(),
+        _ => "UNKNOWN".to_string(),
+    };
 
     let feats = midas_env::features::compute_features_ohlcv(
         &close,
@@ -700,6 +712,7 @@ fn evaluate_candidate(
 ) -> CandidateResult {
     use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
     use tch::{kind::Kind, no_grad, Tensor};
+    use tch::nn::Module;
 
     let mut vs = tch::nn::VarStore::new(cfg.device);
     let policy = build_mlp(&vs.root(), data.obs_dim as i64, cfg.hidden as i64, cfg.layers);
@@ -727,7 +740,8 @@ fn evaluate_candidate(
 
         for t in (start + 1)..end {
             let obs = build_observation(data, t, position, equity);
-            let obs_t = Tensor::of_slice(&obs)
+            let obs_t = Tensor::f_from_slice(&obs)
+                .expect("tensor from obs")
                 .to_device(cfg.device)
                 .reshape(&[1, obs.len() as i64]);
 
@@ -789,7 +803,7 @@ fn evaluate_candidate(
     let eval_draw = eval_equity
         .iter()
         .map(|eq| max_drawdown(eq))
-        .fold(0.0, |a, b| a.max(b));
+        .fold(0.0_f64, |a, b| a.max(b));
     let eval_pnl = if eval_pnls.is_empty() {
         0.0
     } else {
@@ -865,7 +879,7 @@ fn param_count(input_dim: usize, hidden: usize, layers: usize) -> usize {
 }
 
 #[cfg(feature = "tch")]
-fn build_mlp<'a>(p: &'a tch::nn::Path, input_dim: i64, hidden: i64, layers: usize) -> tch::nn::Sequential<'a> {
+fn build_mlp(p: &tch::nn::Path, input_dim: i64, hidden: i64, layers: usize) -> tch::nn::Sequential {
     use tch::nn;
     let mut seq = nn::seq();
     let mut in_dim = input_dim;
@@ -885,12 +899,47 @@ fn load_params_from_vec(vs: &tch::nn::VarStore, genome: &[f32]) {
     for v in vars {
         let numel = v.numel();
         let slice = &genome[offset..offset + numel as usize];
-        let t = tch::Tensor::of_slice(slice)
+        let t = tch::Tensor::f_from_slice(slice)
+            .expect("tensor from genome")
             .reshape(&v.size())
             .to_device(v.device());
         v.copy_(&t);
         offset += numel as usize;
     }
+}
+
+#[cfg(feature = "tch")]
+fn series_to_f64(series: &polars::prelude::Series) -> anyhow::Result<Vec<f64>> {
+    use polars::prelude::AnyValue;
+    let out = series
+        .iter()
+        .map(|v| match v {
+            AnyValue::Float64(v) => v,
+            AnyValue::Float32(v) => v as f64,
+            AnyValue::Int64(v) => v as f64,
+            AnyValue::Int32(v) => v as f64,
+            AnyValue::UInt32(v) => v as f64,
+            AnyValue::UInt64(v) => v as f64,
+            _ => f64::NAN,
+        })
+        .collect();
+    Ok(out)
+}
+
+#[cfg(feature = "tch")]
+fn series_to_i64(series: &polars::prelude::Series) -> anyhow::Result<Vec<i64>> {
+    use polars::prelude::AnyValue;
+    let out = series
+        .iter()
+        .map(|v| match v {
+            AnyValue::Int64(v) => v,
+            AnyValue::Int32(v) => v as i64,
+            AnyValue::UInt64(v) => v as i64,
+            AnyValue::UInt32(v) => v as i64,
+            _ => 0_i64,
+        })
+        .collect();
+    Ok(out)
 }
 
 #[cfg(feature = "tch")]
