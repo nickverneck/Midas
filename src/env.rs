@@ -39,6 +39,12 @@ pub struct EnvConfig {
     pub max_hold_bars_positive: usize,
     /// Max holding bars while in drawdown (0 disables).
     pub max_hold_bars_drawdown: usize,
+    /// Penalty for using Revert when flat.
+    pub invalid_revert_penalty: f64,
+    /// Penalty per step after max flat-hold bars.
+    pub flat_hold_penalty: f64,
+    /// Max bars allowed to stay flat with Hold before penalties.
+    pub max_flat_hold_bars: usize,
 }
 
 impl Default for EnvConfig {
@@ -57,6 +63,9 @@ impl Default for EnvConfig {
             session_close_penalty: 0.0,
             max_hold_bars_positive: 0,
             max_hold_bars_drawdown: 0,
+            invalid_revert_penalty: 0.0,
+            flat_hold_penalty: 0.0,
+            max_flat_hold_bars: 0,
         }
     }
 }
@@ -92,6 +101,7 @@ pub struct EnvState {
     pub equity_peak: f64,
     pub drawdown_steps: usize,
     pub position_entry_step: usize,
+    pub flat_steps: usize,
     pub done: bool,
 }
 
@@ -127,6 +137,7 @@ impl TradingEnv {
                 equity_peak: initial_balance,
                 drawdown_steps: 0,
                 position_entry_step: 0,
+                flat_steps: 0,
                 done: false,
             },
         }
@@ -143,6 +154,7 @@ impl TradingEnv {
             equity_peak: initial_balance,
             drawdown_steps: 0,
             position_entry_step: 0,
+            flat_steps: 0,
             done: false,
         };
     }
@@ -189,6 +201,11 @@ impl TradingEnv {
         }
 
         let mut action = action;
+        let mut invalid_revert_penalty = 0.0;
+        if self.state.position == 0 && matches!(action, Action::Revert) {
+            invalid_revert_penalty = self.cfg.invalid_revert_penalty;
+            action = Action::Hold;
+        }
         if self.state.position != 0 {
             let hold_bars = self.state.step.saturating_sub(self.state.position_entry_step);
             if self.cfg.max_hold_bars_drawdown > 0
@@ -290,11 +307,14 @@ impl TradingEnv {
         if self.state.position == 0 {
             self.state.drawdown_steps = 0;
             self.state.equity_peak = equity;
+            self.state.flat_steps = self.state.flat_steps.saturating_add(1);
         } else if equity >= self.state.equity_peak {
             self.state.equity_peak = equity;
             self.state.drawdown_steps = 0;
+            self.state.flat_steps = 0;
         } else {
             self.state.drawdown_steps = self.state.drawdown_steps.saturating_add(1);
+            self.state.flat_steps = 0;
         }
 
         let drawdown_penalty = if self.state.position != 0 && self.state.drawdown_steps > 0 {
@@ -319,6 +339,15 @@ impl TradingEnv {
             0.0
         };
 
+        let flat_hold_penalty = if self.state.position == 0
+            && self.cfg.max_flat_hold_bars > 0
+            && self.state.flat_steps > self.cfg.max_flat_hold_bars
+        {
+            self.cfg.flat_hold_penalty
+        } else {
+            0.0
+        };
+
         let mut reward = pnl_change
             - trade_costs
             - self.cfg.risk_penalty * (self.state.position.abs() as f64 / self.cfg.max_position as f64);
@@ -331,6 +360,12 @@ impl TradingEnv {
         }
         if session_close_penalty > 0.0 {
             reward -= session_close_penalty;
+        }
+        if invalid_revert_penalty > 0.0 {
+            reward -= invalid_revert_penalty;
+        }
+        if flat_hold_penalty > 0.0 {
+            reward -= flat_hold_penalty;
         }
 
         (
