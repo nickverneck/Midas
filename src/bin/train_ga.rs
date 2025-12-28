@@ -291,6 +291,14 @@ fn run(mut args: Args) -> anyhow::Result<()> {
                     train_metrics.eval_pnl
                 );
             }
+            if args.debug_data && idx == 0 {
+                println!(
+                    "  🔎 debug cand0 | non_hold {} | non_zero_pos {} | mean_abs_pnl {:.6}",
+                    train_metrics.debug_non_hold,
+                    train_metrics.debug_non_zero_pos,
+                    train_metrics.debug_mean_abs_pnl
+                );
+            }
         }
 
         println!(
@@ -740,6 +748,9 @@ struct CandidateResult {
     eval_sortino: f64,
     eval_drawdown: f64,
     eval_ret_mean: f64,
+    debug_non_hold: usize,
+    debug_non_zero_pos: usize,
+    debug_mean_abs_pnl: f64,
 }
 
 #[cfg(feature = "tch")]
@@ -767,6 +778,10 @@ fn evaluate_candidate(
     let mut eval_pnls = Vec::new();
     let mut eval_returns = Vec::new();
     let mut eval_equity = Vec::new();
+    let mut non_hold = 0usize;
+    let mut non_zero_pos = 0usize;
+    let mut abs_pnl_sum = 0.0f64;
+    let mut pnl_steps = 0usize;
 
     for &(start, end) in windows.iter().take(cfg.eval_windows) {
         if end <= start + 1 {
@@ -819,6 +834,14 @@ fn evaluate_candidate(
             equity = env.state().cash + env.state().unrealized_pnl;
             pnl_buf.push(info.pnl_change);
             eq_curve.push(equity);
+            if !matches!(action, Action::Hold) {
+                non_hold += 1;
+            }
+            if position != 0 {
+                non_zero_pos += 1;
+            }
+            abs_pnl_sum += info.pnl_change.abs();
+            pnl_steps += 1;
         }
 
         let pnl_sum: f64 = pnl_buf.iter().sum();
@@ -861,6 +884,13 @@ fn evaluate_candidate(
             0.0
         } else {
             eval_returns.iter().sum::<f64>() / eval_returns.len() as f64
+        },
+        debug_non_hold: non_hold,
+        debug_non_zero_pos: non_zero_pos,
+        debug_mean_abs_pnl: if pnl_steps > 0 {
+            abs_pnl_sum / pnl_steps as f64
+        } else {
+            0.0
         },
     }
 }
