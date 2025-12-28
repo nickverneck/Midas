@@ -261,15 +261,24 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
         let top = scored.iter().take(5).collect::<Vec<_>>();
         for (rank, (_fit, genome, eval_metrics, train_metrics)) in top.iter().enumerate() {
-            let metrics = eval_metrics.as_ref().unwrap_or(train_metrics);
             let policy_path = args
                 .outdir
                 .join(format!("policy_gen{}_rank{}.pt", generation, rank));
             model::save_policy(obs_dim, args.hidden, args.layers, device, genome, &policy_path)?;
             if rank == 0 {
-                println!("Gen {} Top Performer: fitness {:.2}", generation, metrics.fitness);
-                if metrics.fitness > best_overall_fitness {
-                    best_overall_fitness = metrics.fitness;
+                if let Some(eval) = eval_metrics.as_ref() {
+                    println!(
+                        "Gen {} Top Performer: train fitness {:.2}, val fitness {:.2}",
+                        generation, train_metrics.fitness, eval.fitness
+                    );
+                } else {
+                    println!(
+                        "Gen {} Top Performer: train fitness {:.2}",
+                        generation, train_metrics.fitness
+                    );
+                }
+                if train_metrics.fitness > best_overall_fitness {
+                    best_overall_fitness = train_metrics.fitness;
                     best_overall_genome = Some(genome.clone());
                 }
             }
