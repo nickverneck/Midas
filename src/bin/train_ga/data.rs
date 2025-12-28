@@ -229,6 +229,8 @@ fn series_to_i64(series: &Series) -> Result<Vec<i64>> {
     let out = series
         .iter()
         .map(|v| match v {
+            AnyValue::Datetime(v, _, _) => v,
+            AnyValue::DatetimeOwned(v, _, _) => v,
             AnyValue::Int64(v) => v,
             AnyValue::Int32(v) => v as i64,
             AnyValue::UInt64(v) => v as i64,
