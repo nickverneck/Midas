@@ -483,7 +483,7 @@
                             <div class="flex items-center gap-2">
                                 <button
                                     class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
-                                    on:click={() => (logPage = Math.max(1, logPage - 1))}
+                                    onclick={() => (logPage = Math.max(1, logPage - 1))}
                                     disabled={logPage === 1}
                                 >
                                     Prev
@@ -493,7 +493,7 @@
                                 </div>
                                 <button
                                     class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
-                                    on:click={() => (logPage = Math.min(Math.ceil(logs.length / pageSize), logPage + 1))}
+                                    onclick={() => (logPage = Math.min(Math.ceil(logs.length / pageSize), logPage + 1))}
                                     disabled={logPage >= Math.ceil(logs.length / pageSize)}
                                 >
                                     Next
