@@ -90,7 +90,6 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     use rand_distr::{Distribution, Normal};
     use rayon::prelude::*;
     use std::io::Write;
-    use tch::{kind::Kind, no_grad, Device, Tensor};
 
     if let Some(seed) = args.seed {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -513,17 +512,24 @@ fn load_dataset(path: &Path, globex: bool) -> anyhow::Result<DataSet> {
     let file = std::fs::File::open(path)?;
     let df = polars::prelude::ParquetReader::new(file).finish()?;
     let open = if df.column("open").is_ok() {
-        series_to_f64(df.column("open")?)?
+        series_to_f64(df.column("open")?.as_materialized_series())?
     } else {
-        series_to_f64(df.column("close")?)?
+        series_to_f64(df.column("close")?.as_materialized_series())?
     };
-    let close = series_to_f64(df.column("close")?)?;
-    let high = series_to_f64(df.column("high")?)?;
-    let low = series_to_f64(df.column("low")?)?;
-    let volume = df.column("volume").ok().map(series_to_f64).transpose()?;
-    let datetime_ns = df.column("date").ok().map(series_to_i64).transpose()?;
-    let symbol = match df.column("symbol")?.get(0) {
-        polars::prelude::AnyValue::Utf8(s) => s.to_string(),
+    let close = series_to_f64(df.column("close")?.as_materialized_series())?;
+    let high = series_to_f64(df.column("high")?.as_materialized_series())?;
+    let low = series_to_f64(df.column("low")?.as_materialized_series())?;
+    let volume = df
+        .column("volume")
+        .ok()
+        .map(|c| series_to_f64(c.as_materialized_series()))
+        .transpose()?;
+    let datetime_ns: Option<Vec<i64>> = df
+        .column("date")
+        .ok()
+        .map(|c| series_to_i64(c.as_materialized_series()))
+        .transpose()?;
+    let symbol = match df.column("symbol")?.get(0)? {
         polars::prelude::AnyValue::String(s) => s.to_string(),
         _ => "UNKNOWN".to_string(),
     };
@@ -896,7 +902,7 @@ fn build_mlp(p: &tch::nn::Path, input_dim: i64, hidden: i64, layers: usize) -> t
 fn load_params_from_vec(vs: &tch::nn::VarStore, genome: &[f32]) {
     let vars = vs.trainable_variables();
     let mut offset = 0;
-    for v in vars {
+    for mut v in vars {
         let numel = v.numel();
         let slice = &genome[offset..offset + numel as usize];
         let t = tch::Tensor::f_from_slice(slice)
