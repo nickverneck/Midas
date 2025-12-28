@@ -193,11 +193,11 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .unwrap_or_default();
             let eval_ret = eval_metrics
                 .as_ref()
-                .map(|m| format!("{:.4}", m.eval_ret_mean))
+                .map(|m| format!("{:.8}", m.eval_ret_mean))
                 .unwrap_or_default();
 
             let line = format!(
-                "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.4}\n",
+                "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.8}\n",
                 generation,
                 idx,
                 args.w_pnl,
