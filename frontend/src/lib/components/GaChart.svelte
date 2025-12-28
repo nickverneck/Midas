@@ -54,10 +54,16 @@
     };
 
     $effect(() => {
-        if (chart) {
-            chart.data = data;
-            // Update y1 visibility based on new data
-            chart.options.scales.y1.display = data.datasets.some(d => d.yAxisID === 'y1');
+        if (chart && data) {
+            const labels = Array.isArray(data.labels) ? [...data.labels] : [];
+            const datasets = Array.isArray(data.datasets)
+                ? data.datasets.map((ds) => ({
+                    ...ds,
+                    data: Array.isArray(ds.data) ? [...ds.data] : []
+                }))
+                : [];
+            chart.config.data = { labels, datasets };
+            chart.options.scales.y1.display = datasets.some(d => d.yAxisID === 'y1');
             chart.update('none');
         }
     });
