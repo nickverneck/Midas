@@ -104,7 +104,15 @@ pub fn evaluate_candidate(
         let mut window_drawdown_penalty = 0.0f64;
 
         for t in (start + 1)..end {
-            let obs = build_observation(data, t, position, equity);
+            let obs = build_observation(
+                data,
+                t,
+                position,
+                equity,
+                env.state().unrealized_pnl,
+                env.state().realized_pnl,
+                cfg.initial_balance,
+            );
             let obs_t = Tensor::f_from_slice(&obs)
                 .expect("tensor from obs")
                 .to_device(cfg.device)

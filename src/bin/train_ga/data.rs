@@ -116,7 +116,15 @@ pub fn dump_dataset_stats(label: &str, data: &DataSet) {
     );
 }
 
-pub fn build_observation(data: &DataSet, idx: usize, position: i32, equity: f64) -> Vec<f32> {
+pub fn build_observation(
+    data: &DataSet,
+    idx: usize,
+    position: i32,
+    equity: f64,
+    unrealized_pnl: f64,
+    realized_pnl: f64,
+    initial_balance: f64,
+) -> Vec<f32> {
     use chrono::Timelike;
     let mut obs = Vec::with_capacity(data.obs_dim);
 
@@ -139,6 +147,9 @@ pub fn build_observation(data: &DataSet, idx: usize, position: i32, equity: f64)
     }
 
     obs.push(equity);
+    let denom = if initial_balance.abs() < 1e-8 { 1.0 } else { initial_balance };
+    obs.push(unrealized_pnl / denom);
+    obs.push(realized_pnl / denom);
 
     for col in data.feature_cols.iter() {
         obs.push(*col.get(idx.saturating_sub(1)).unwrap_or(&f64::NAN));
@@ -198,7 +209,7 @@ fn observation_len(
     feature_cols: &[Vec<f64>],
 ) -> usize {
     let mut len = 0;
-    len += 1;
+    len += 3;
     len += 1;
     if volume.is_some() {
         len += 1;
