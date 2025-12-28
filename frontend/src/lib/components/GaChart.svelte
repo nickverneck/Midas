@@ -13,6 +13,7 @@
         Decimation,
         type ChartConfiguration
     } from 'chart.js';
+    import zoomPlugin from 'chartjs-plugin-zoom';
 
     Chart.register(
         Title,
@@ -23,7 +24,8 @@
         PointElement,
         CategoryScale,
         LineController,
-        Decimation
+        Decimation,
+        zoomPlugin
     );
 
     let { data, options = {} } = $props();
@@ -48,6 +50,23 @@
                 enabled: false,
                 algorithm: 'min-max',
                 samples: 400
+            },
+            zoom: {
+                pan: {
+                    enabled: true,
+                    mode: 'x',
+                    modifierKey: 'shift'
+                },
+                zoom: {
+                    wheel: {
+                        enabled: true,
+                        modifierKey: 'ctrl'
+                    },
+                    pinch: {
+                        enabled: true
+                    },
+                    mode: 'x'
+                }
             }
         },
         scales: {
