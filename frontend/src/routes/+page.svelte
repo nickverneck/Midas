@@ -322,9 +322,7 @@
                             <Card.Description>Maximum and average fitness progress per generation</Card.Description>
                         </Card.Header>
                         <Card.Content class="h-[350px]">
-                            <svelte:key this={genData.length}>
-                                <GaChart data={fitnessChartData} />
-                            </svelte:key>
+                            <GaChart data={fitnessChartData} />
                         </Card.Content>
                     </Card.Root>
 
@@ -334,9 +332,7 @@
                             <Card.Description>Best {sourceLabel} PNL and {metricLabel} across windows</Card.Description>
                         </Card.Header>
                         <Card.Content class="h-[350px]">
-                            <svelte:key this={genData.length}>
-                                <GaChart data={pnlChartData} />
-                            </svelte:key>
+                            <GaChart data={pnlChartData} />
                         </Card.Content>
                     </Card.Root>
                 </div>
