@@ -44,14 +44,14 @@ def build_session_mask(datetimes_ns: np.ndarray, globex: bool = True) -> np.ndar
     return np.asarray(open_mask)
 
 
-def make_mlp(input_dim, hidden=128):
-    return nn.Sequential(
-        nn.Linear(input_dim, hidden),
-        nn.Tanh(),
-        nn.Linear(hidden, hidden),
-        nn.Tanh(),
-        nn.Linear(hidden, len(ACTIONS)),
-    )
+def make_mlp(input_dim, hidden=128, layers=2):
+    if layers < 1:
+        raise ValueError("layers must be >= 1")
+    mods = [nn.Linear(input_dim, hidden), nn.Tanh()]
+    for _ in range(layers - 1):
+        mods.extend([nn.Linear(hidden, hidden), nn.Tanh()])
+    mods.append(nn.Linear(hidden, len(ACTIONS)))
+    return nn.Sequential(*mods)
 
 
 def compute_obs(idx, close, high, low, open, vol, dt_ns, sess, margin, position, equity):
@@ -191,6 +191,7 @@ def evaluate_candidate(
     base_cfg,
     windows_eval,
     eval_data,
+    capture_history=True,
 ):
     device = base_cfg["device"]
 
@@ -218,7 +219,7 @@ def evaluate_candidate(
             equity=base_cfg["initial_balance"],
         )
     )
-    policy = make_mlp(obs_dim, hidden=base_cfg["hidden"]).to(device)
+    policy = make_mlp(obs_dim, hidden=base_cfg["hidden"], layers=base_cfg["layers"]).to(device)
     vector_to_policy(policy, genome, device)
 
     eval_pnls = []
@@ -240,7 +241,7 @@ def evaluate_candidate(
             w,
             base_cfg["initial_balance"],
             debug=base_cfg.get("debug", False),
-            capture_history=True,
+            capture_history=capture_history,
         )
         pnl = b["pnl"]
         eq = np.array(b["equity"], dtype=np.float64)
@@ -252,7 +253,8 @@ def evaluate_candidate(
         eval_returns.extend(returns.tolist())
         eval_pnls.append(float(pnl.sum()))
         eval_equity.append(eq.tolist())
-        eval_histories.append(b["history"])
+        if capture_history:
+            eval_histories.append(b["history"])
         if base_cfg.get("debug", False):
             dbg = b["debug"]
             print(
@@ -281,49 +283,20 @@ def evaluate_candidate(
     }
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--parquet", type=Path, help="Single parquet file (legacy)")
-    ap.add_argument("--train-parquet", type=Path, default=Path("data/train"))
-    ap.add_argument("--val-parquet", type=Path, default=Path("data/val"))
-    ap.add_argument("--test-parquet", type=Path, default=Path("data/test"))
-    ap.add_argument("--full-file", action="store_true", help="Use entire file as a single episode (no windowing)")
-    ap.add_argument("--window", type=int, default=512)
-    ap.add_argument("--step", type=int, default=256)
-    ap.add_argument("--device", type=str, default=None)
-    ap.add_argument("--globex", action="store_true", default=True)
-    ap.add_argument("--rth", action="store_true")
-    ap.add_argument("--initial-balance", type=float, default=10000.0)
-    ap.add_argument("--margin-per-contract", type=float, default=None)
-    ap.add_argument("--symbol-config", type=Path, default=Path("config/symbols.yaml"))
-    ap.add_argument("--outdir", type=Path, default=Path("runs_ga"))
+def parse_grid(value):
+    if value is None:
+        return None
+    items = [v.strip() for v in value.split(",") if v.strip()]
+    if not items:
+        return None
+    return [int(v) for v in items]
 
-    ap.add_argument("--generations", type=int, default=5)
-    ap.add_argument("--pop-size", type=int, default=6)
-    ap.add_argument("--workers", type=int, default=2, help="Number of parallel individuals to evaluate")
-    ap.add_argument("--elite-frac", type=float, default=0.33)
-    ap.add_argument("--mutation-sigma", type=float, default=0.05)
-    ap.add_argument("--init-sigma", type=float, default=0.5)
-    ap.add_argument("--hidden", type=int, default=128)
 
-    ap.add_argument("--eval-windows", type=int, default=2)
-    ap.add_argument("--w-pnl", type=float, default=1.0)
-    ap.add_argument("--w-sortino", type=float, default=1.0)
-    ap.add_argument("--w-mdd", type=float, default=0.5)
-    ap.add_argument("--sortino-annualization", type=float, default=1.0)
-    ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--disable-margin", action="store_true", help="Disable margin enforcement for debugging")
-    args = ap.parse_args()
+def run_ga(args, outdir, hidden, layers):
+    args.outdir = outdir
+    args.hidden = hidden
+    args.layers = layers
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-
-    default_device = (
-        "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    )
-    device = torch.device(args.device or default_device)
     args.outdir.mkdir(parents=True, exist_ok=True)
     overall_start_time = time.time()
 
@@ -382,15 +355,18 @@ def main():
     margin_test = np.ones_like(close_test, dtype=bool)
 
     if args.full_file:
+        windows_train = [(0, len(close_train))]
         windows_eval = [(0, len(close_val))]
         windows_test = [(0, len(close_test))]
     else:
+        windows_train = me.list_windows(len(close_train), args.window, args.step)
         windows_eval = me.list_windows(len(close_val), args.window, args.step)
         windows_test = me.list_windows(len(close_test), args.window, args.step)
+        random.shuffle(windows_train)
         random.shuffle(windows_eval)
 
     base_cfg = {
-        "device": device,
+        "device": args.device,
         "initial_balance": args.initial_balance,
         "margin_per_contract": margin_per_contract,
         "eval_windows": args.eval_windows,
@@ -402,12 +378,13 @@ def main():
         "w_mdd": args.w_mdd,
         "sortino_annualization": args.sortino_annualization,
         "hidden": args.hidden,
+        "layers": args.layers,
     }
 
     log_path = args.outdir / "ga_log.csv"
     if not log_path.exists():
         log_path.write_text(
-            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_pnl,eval_sortino,eval_drawdown,eval_ret_mean\n"
+            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_pnl,eval_sortino,eval_drawdown,eval_ret_mean,train_pnl,train_sortino,train_drawdown,train_ret_mean\n"
         )
 
     obs_dim = len(
@@ -425,7 +402,7 @@ def main():
             equity=args.initial_balance,
         )
     )
-    base_policy = make_mlp(obs_dim, hidden=args.hidden)
+    base_policy = make_mlp(obs_dim, hidden=args.hidden, layers=args.layers)
     base_vec = torch.nn.utils.parameters_to_vector(base_policy.parameters()).detach().cpu().numpy()
 
     pop = [base_vec + np.random.normal(0.0, args.init_sigma, size=base_vec.shape) for _ in range(args.pop_size)]
@@ -441,30 +418,58 @@ def main():
             f"\n🚀 Generation {gen} | Evaluating {len(pop)} candidates in parallel (workers={args.workers})"
         )
 
-        eval_func = functools.partial(
+        train_func = functools.partial(
             evaluate_candidate,
             base_cfg=base_cfg,
-            windows_eval=windows_eval,
-            eval_data=(open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
+            windows_eval=windows_train,
+            eval_data=(open_train, close_train, high_train, low_train, vol_train, dt_train, sess_train, margin_train),
+            capture_history=False,
         )
+        eval_func = None
+        if not args.skip_val_eval:
+            eval_func = functools.partial(
+                evaluate_candidate,
+                base_cfg=base_cfg,
+                windows_eval=windows_eval,
+                eval_data=(open_val, close_val, high_val, low_val, vol_val, dt_val, sess_val, margin_val),
+                capture_history=True,
+            )
 
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = [executor.submit(eval_func, g) for g in pop]
+            train_futures = [executor.submit(train_func, g) for g in pop]
+            eval_futures = []
+            if eval_func is not None:
+                eval_futures = [executor.submit(eval_func, g) for g in pop]
 
-            for idx, future in enumerate(futures):
+            for idx, train_future in enumerate(train_futures):
                 genome = pop[idx]
-                metrics = future.result()
-                scored.append((metrics["fitness"], genome, metrics))
+                train_metrics = train_future.result()
+                eval_metrics = None
+                if eval_futures:
+                    eval_metrics = eval_futures[idx].result()
+                scored.append((train_metrics["fitness"], genome, eval_metrics, train_metrics))
+
+                eval_pnl = "" if eval_metrics is None else f"{eval_metrics['eval_pnl']:.4f}"
+                eval_sortino = "" if eval_metrics is None else f"{eval_metrics['eval_sortino']:.4f}"
+                eval_dd = "" if eval_metrics is None else f"{eval_metrics['eval_drawdown']:.4f}"
+                eval_ret = "" if eval_metrics is None else f"{eval_metrics['eval_ret_mean']:.4f}"
 
                 with log_path.open("a") as f:
                     f.write(
-                        f"{gen},{idx},{args.w_pnl:.4f},{args.w_sortino:.4f},{args.w_mdd:.4f},{metrics['fitness']:.4f},"
-                        f"{metrics['eval_pnl']:.4f},{metrics['eval_sortino']:.4f},{metrics['eval_drawdown']:.4f},{metrics['eval_ret_mean']:.4f}\n"
+                        f"{gen},{idx},{args.w_pnl:.4f},{args.w_sortino:.4f},{args.w_mdd:.4f},{train_metrics['fitness']:.4f},"
+                        f"{eval_pnl},{eval_sortino},{eval_dd},{eval_ret},"
+                        f"{train_metrics['eval_pnl']:.4f},{train_metrics['eval_sortino']:.4f},{train_metrics['eval_drawdown']:.4f},{train_metrics['eval_ret_mean']:.4f}\n"
                     )
-                print(
-                    f"  ✅ cand {idx}/{len(pop)-1} | fitness {metrics['fitness']:.2f} | "
-                    f"pnl {metrics['eval_pnl']:.2f} | sortino {metrics['eval_sortino']:.2f}"
-                )
+                if eval_metrics is None:
+                    print(
+                        f"  ✅ cand {idx}/{len(pop)-1} | fitness {train_metrics['fitness']:.2f} | "
+                        f"train pnl {train_metrics['eval_pnl']:.2f} | val skipped"
+                    )
+                else:
+                    print(
+                        f"  ✅ cand {idx}/{len(pop)-1} | fitness {train_metrics['fitness']:.2f} | "
+                        f"train pnl {train_metrics['eval_pnl']:.2f} | val pnl {eval_metrics['eval_pnl']:.2f}"
+                    )
 
         gen_elapsed = time.time() - gen_start_time
         print(f"⏱ Generation {gen} completed in {gen_elapsed:.2f} seconds")
@@ -474,7 +479,7 @@ def main():
         import csv
 
         for i in range(min(5, len(scored))):
-            cand_metrics = scored[i][2]
+            cand_metrics = scored[i][2] or scored[i][3]
             cand_fitness = scored[i][0]
 
             if cand_metrics.get("eval_histories"):
@@ -496,7 +501,7 @@ def main():
                     best_overall_policy_state = cand_metrics["policy_state"]
 
         elite_n = max(1, int(args.elite_frac * args.pop_size))
-        elites = [g for _, g, _ in scored[:elite_n]]
+        elites = [g for _, g, _, _ in scored[:elite_n]]
 
         new_pop = elites[:]
         while len(new_pop) < args.pop_size:
@@ -518,6 +523,7 @@ def main():
             base_cfg,
             windows_test,
             (open_test, close_test, high_test, low_test, vol_test, dt_test, sess_test, margin_test),
+            capture_history=False,
         )
         print(
             f"test | fitness {test_metrics['fitness']:.2f} | "
@@ -532,6 +538,83 @@ def main():
             print(f"🏆 Saved best overall policy (fitness {best_overall_fitness:.2f}) to {best_policy_path}")
         else:
             print("⚠️ No trained policy available to save.")
+
+    return {
+        "hidden": args.hidden,
+        "layers": args.layers,
+        "best_fitness": best_overall_fitness,
+        "outdir": str(args.outdir),
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--parquet", type=Path, help="Single parquet file (legacy)")
+    ap.add_argument("--train-parquet", type=Path, default=Path("data/train"))
+    ap.add_argument("--val-parquet", type=Path, default=Path("data/val"))
+    ap.add_argument("--test-parquet", type=Path, default=Path("data/test"))
+    ap.add_argument("--full-file", action="store_true", help="Use entire file as a single episode (no windowing)")
+    ap.add_argument("--window", type=int, default=512)
+    ap.add_argument("--step", type=int, default=256)
+    ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--globex", action="store_true", default=True)
+    ap.add_argument("--rth", action="store_true")
+    ap.add_argument("--initial-balance", type=float, default=10000.0)
+    ap.add_argument("--margin-per-contract", type=float, default=None)
+    ap.add_argument("--symbol-config", type=Path, default=Path("config/symbols.yaml"))
+    ap.add_argument("--outdir", type=Path, default=Path("runs_ga"))
+
+    ap.add_argument("--generations", type=int, default=5)
+    ap.add_argument("--pop-size", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=2, help="Number of parallel individuals to evaluate")
+    ap.add_argument("--elite-frac", type=float, default=0.33)
+    ap.add_argument("--mutation-sigma", type=float, default=0.05)
+    ap.add_argument("--init-sigma", type=float, default=0.5)
+    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--hidden-grid", type=str, default=None, help="Comma-separated hidden sizes for sweep")
+    ap.add_argument("--layers-grid", type=str, default=None, help="Comma-separated layer counts for sweep")
+
+    ap.add_argument("--eval-windows", type=int, default=2)
+    ap.add_argument("--w-pnl", type=float, default=1.0)
+    ap.add_argument("--w-sortino", type=float, default=1.0)
+    ap.add_argument("--w-mdd", type=float, default=0.5)
+    ap.add_argument("--sortino-annualization", type=float, default=1.0)
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--disable-margin", action="store_true", help="Disable margin enforcement for debugging")
+    ap.add_argument("--skip-val-eval", action="store_true", help="Skip validation eval during GA (faster)")
+    args = ap.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+
+    default_device = (
+        "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    )
+    device = torch.device(args.device or default_device)
+    args.device = device
+    args.outdir.mkdir(parents=True, exist_ok=True)
+
+    hidden_grid = parse_grid(args.hidden_grid) or [args.hidden]
+    layers_grid = parse_grid(args.layers_grid) or [args.layers]
+
+    sweep_path = args.outdir / "arch_sweep.csv"
+    if (args.hidden_grid or args.layers_grid) and not sweep_path.exists():
+        sweep_path.write_text("hidden,layers,best_fitness,outdir\n")
+
+    for hidden in hidden_grid:
+        for layers in layers_grid:
+            run_outdir = args.outdir
+            if args.hidden_grid or args.layers_grid:
+                run_outdir = args.outdir / f"arch_h{hidden}_l{layers}"
+            result = run_ga(args, run_outdir, hidden, layers)
+            if args.hidden_grid or args.layers_grid:
+                with sweep_path.open("a") as f:
+                    f.write(
+                        f"{result['hidden']},{result['layers']},{result['best_fitness']:.4f},{result['outdir']}\n"
+                    )
 
 
 if __name__ == "__main__":

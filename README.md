@@ -39,6 +39,9 @@ uv run python/examples/train_ga.py \
   --workers 4 \
   --pop-size 12
 ```
+Notes:
+- GA selection fitness uses `train-parquet`; validation metrics use `val-parquet`.
+- Add `--skip-val-eval` to skip validation during GA for faster iterations.
 
 ### PPO Only Training
 `uv run python/examples/train_ppo.py --parquet data/train/SPY0.parquet --epochs 3`
