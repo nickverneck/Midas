@@ -41,8 +41,12 @@ pub struct EnvConfig {
     pub max_hold_bars_drawdown: usize,
     /// Penalty for using Revert when flat.
     pub invalid_revert_penalty: f64,
+    /// Linear growth for consecutive invalid Revert penalties.
+    pub invalid_revert_penalty_growth: f64,
     /// Penalty per step after max flat-hold bars.
     pub flat_hold_penalty: f64,
+    /// Linear growth for flat-hold penalties beyond max.
+    pub flat_hold_penalty_growth: f64,
     /// Max bars allowed to stay flat with Hold before penalties.
     pub max_flat_hold_bars: usize,
 }
@@ -64,7 +68,9 @@ impl Default for EnvConfig {
             max_hold_bars_positive: 0,
             max_hold_bars_drawdown: 0,
             invalid_revert_penalty: 0.0,
+            invalid_revert_penalty_growth: 0.0,
             flat_hold_penalty: 0.0,
+            flat_hold_penalty_growth: 0.0,
             max_flat_hold_bars: 0,
         }
     }
@@ -102,6 +108,7 @@ pub struct EnvState {
     pub drawdown_steps: usize,
     pub position_entry_step: usize,
     pub flat_steps: usize,
+    pub invalid_revert_streak: usize,
     pub done: bool,
 }
 
@@ -138,6 +145,7 @@ impl TradingEnv {
                 drawdown_steps: 0,
                 position_entry_step: 0,
                 flat_steps: 0,
+                invalid_revert_streak: 0,
                 done: false,
             },
         }
@@ -155,6 +163,7 @@ impl TradingEnv {
             drawdown_steps: 0,
             position_entry_step: 0,
             flat_steps: 0,
+            invalid_revert_streak: 0,
             done: false,
         };
     }
@@ -203,8 +212,13 @@ impl TradingEnv {
         let mut action = action;
         let mut invalid_revert_penalty = 0.0;
         if self.state.position == 0 && matches!(action, Action::Revert) {
-            invalid_revert_penalty = self.cfg.invalid_revert_penalty;
+            self.state.invalid_revert_streak = self.state.invalid_revert_streak.saturating_add(1);
+            let streak = self.state.invalid_revert_streak as f64;
+            invalid_revert_penalty =
+                self.cfg.invalid_revert_penalty * (1.0 + self.cfg.invalid_revert_penalty_growth * (streak - 1.0).max(0.0));
             action = Action::Hold;
+        } else {
+            self.state.invalid_revert_streak = 0;
         }
         if self.state.position != 0 {
             let hold_bars = self.state.step.saturating_sub(self.state.position_entry_step);
@@ -343,7 +357,8 @@ impl TradingEnv {
             && self.cfg.max_flat_hold_bars > 0
             && self.state.flat_steps > self.cfg.max_flat_hold_bars
         {
-            self.cfg.flat_hold_penalty
+            let extra = (self.state.flat_steps - self.cfg.max_flat_hold_bars) as f64;
+            self.cfg.flat_hold_penalty * (1.0 + self.cfg.flat_hold_penalty_growth * (extra - 1.0).max(0.0))
         } else {
             0.0
         };
