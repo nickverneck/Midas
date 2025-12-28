@@ -317,14 +317,22 @@ def run_ga(args, outdir, hidden, layers):
         symbol = str(df["symbol"][0])
         return df, open_, close, high, low, vol, dt_ns, symbol
 
+    def resolve_parquet_path(path: Path, fallback: Path) -> Path:
+        if path.is_dir():
+            candidates = sorted(path.glob("*.parquet"))
+            return candidates[0] if candidates else fallback
+        if path.exists():
+            return path
+        return fallback
+
     if args.parquet:
         train_path = args.parquet
         val_path = args.parquet
         test_path = args.parquet
     else:
-        train_path = args.train_parquet
-        val_path = args.val_parquet
-        test_path = args.test_parquet if args.test_parquet.exists() else args.val_parquet
+        train_path = resolve_parquet_path(args.train_parquet, args.train_parquet)
+        val_path = resolve_parquet_path(args.val_parquet, args.train_parquet)
+        test_path = resolve_parquet_path(args.test_parquet, val_path)
 
     df_train, open_train, close_train, high_train, low_train, vol_train, dt_train, symbol = load_dataset(
         train_path
