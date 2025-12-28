@@ -29,6 +29,10 @@ pub struct EnvConfig {
     pub risk_penalty: f64,
     /// Small penalty to discourage idling.
     pub idle_penalty: f64,
+    /// Base penalty per step while in drawdown and holding a position.
+    pub drawdown_penalty: f64,
+    /// Linear growth multiplier for drawdown penalty per consecutive step.
+    pub drawdown_penalty_growth: f64,
 }
 
 impl Default for EnvConfig {
@@ -42,6 +46,8 @@ impl Default for EnvConfig {
             default_session_open: true,
             risk_penalty: 0.0,
             idle_penalty: 0.0,
+            drawdown_penalty: 0.0,
+            drawdown_penalty_growth: 0.0,
         }
     }
 }
@@ -70,6 +76,9 @@ pub struct EnvState {
     pub cash: f64,
     pub last_price: f64,
     pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+    pub equity_peak: f64,
+    pub drawdown_steps: usize,
     pub done: bool,
 }
 
@@ -78,6 +87,8 @@ pub struct StepInfo {
     pub commission_paid: f64,
     pub slippage_paid: f64,
     pub pnl_change: f64,
+    pub realized_pnl_change: f64,
+    pub drawdown_penalty: f64,
     pub margin_call_violation: bool,
     pub position_limit_violation: bool,
     pub session_closed_violation: bool,
@@ -98,6 +109,9 @@ impl TradingEnv {
                 cash: initial_balance,
                 last_price: initial_price,
                 unrealized_pnl: 0.0,
+                realized_pnl: 0.0,
+                equity_peak: initial_balance,
+                drawdown_steps: 0,
                 done: false,
             },
         }
@@ -110,6 +124,9 @@ impl TradingEnv {
             cash: initial_balance,
             last_price: initial_price,
             unrealized_pnl: 0.0,
+            realized_pnl: 0.0,
+            equity_peak: initial_balance,
+            drawdown_steps: 0,
             done: false,
         };
     }
@@ -128,6 +145,8 @@ impl TradingEnv {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
+                    realized_pnl_change: 0.0,
+                    drawdown_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation: false,
                     session_closed_violation: true,
@@ -142,6 +161,8 @@ impl TradingEnv {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
+                    realized_pnl_change: 0.0,
+                    drawdown_penalty: 0.0,
                     margin_call_violation: true,
                     position_limit_violation: false,
                     session_closed_violation: false,
@@ -170,6 +191,8 @@ impl TradingEnv {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
+                    realized_pnl_change: 0.0,
+                    drawdown_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation,
                     session_closed_violation: false,
@@ -188,6 +211,8 @@ impl TradingEnv {
                         commission_paid: 0.0,
                         slippage_paid: 0.0,
                         pnl_change: 0.0,
+                        realized_pnl_change: 0.0,
+                        drawdown_penalty: 0.0,
                         margin_call_violation: true,
                         position_limit_violation: false,
                         session_closed_violation: false,
@@ -206,10 +231,38 @@ impl TradingEnv {
 
         let trade_costs = commission_paid + slippage_paid;
         self.state.cash -= trade_costs;
+        self.state.unrealized_pnl += pnl_change;
+        let closing = self.state.position != 0
+            && (target_position == 0
+                || self.state.position.signum() != target_position.signum());
+        let mut realized_pnl_change = 0.0;
+        if closing {
+            realized_pnl_change = self.state.unrealized_pnl;
+            self.state.cash += self.state.unrealized_pnl;
+            self.state.realized_pnl += self.state.unrealized_pnl;
+            self.state.unrealized_pnl = 0.0;
+        }
         self.state.position = target_position;
         self.state.last_price = next_price;
-        self.state.unrealized_pnl += pnl_change;
         self.state.step += 1;
+
+        let equity = self.state.cash + self.state.unrealized_pnl;
+        if self.state.position == 0 {
+            self.state.drawdown_steps = 0;
+            self.state.equity_peak = equity;
+        } else if equity >= self.state.equity_peak {
+            self.state.equity_peak = equity;
+            self.state.drawdown_steps = 0;
+        } else {
+            self.state.drawdown_steps = self.state.drawdown_steps.saturating_add(1);
+        }
+
+        let drawdown_penalty = if self.state.position != 0 && self.state.drawdown_steps > 0 {
+            let steps = self.state.drawdown_steps as f64;
+            self.cfg.drawdown_penalty * steps * (1.0 + self.cfg.drawdown_penalty_growth * (steps - 1.0).max(0.0))
+        } else {
+            0.0
+        };
 
         let mut reward = pnl_change
             - trade_costs
@@ -218,6 +271,9 @@ impl TradingEnv {
         if self.state.position == 0 && self.cfg.idle_penalty > 0.0 {
             reward -= self.cfg.idle_penalty;
         }
+        if drawdown_penalty > 0.0 {
+            reward -= drawdown_penalty;
+        }
 
         (
             reward,
@@ -225,6 +281,8 @@ impl TradingEnv {
                 commission_paid,
                 slippage_paid,
                 pnl_change,
+                realized_pnl_change,
+                drawdown_penalty,
                 margin_call_violation: false,
                 position_limit_violation: false,
                 session_closed_violation: false,

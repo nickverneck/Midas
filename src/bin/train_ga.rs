@@ -124,7 +124,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     if !log_path.exists() {
         std::fs::write(
             &log_path,
-            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_pnl,eval_sortino,eval_drawdown,eval_ret_mean,train_pnl,train_sortino,train_drawdown,train_ret_mean\n",
+            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
         )?;
     }
 
@@ -153,6 +153,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         eval_windows: args.eval_windows,
         device,
         ignore_session: args.ignore_session,
+        drawdown_penalty: args.drawdown_penalty,
+        drawdown_penalty_growth: args.drawdown_penalty_growth,
     };
 
         let eval_results: Vec<(usize, ga::CandidateResult, Option<ga::CandidateResult>)> = pop
@@ -183,6 +185,14 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| format!("{:.4}", m.eval_pnl))
                 .unwrap_or_default();
+            let eval_pnl_realized = eval_metrics
+                .as_ref()
+                .map(|m| format!("{:.4}", m.eval_pnl_realized))
+                .unwrap_or_default();
+            let eval_pnl_total = eval_metrics
+                .as_ref()
+                .map(|m| format!("{:.4}", m.eval_pnl_total))
+                .unwrap_or_default();
             let eval_sortino = eval_metrics
                 .as_ref()
                 .map(|m| format!("{:.4}", m.eval_sortino))
@@ -197,7 +207,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .unwrap_or_default();
 
             let line = format!(
-                "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.4},{:.4},{:.4},{:.8}\n",
+                "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
                 generation,
                 idx,
                 args.w_pnl,
@@ -205,10 +215,14 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 args.w_mdd,
                 train_metrics.fitness,
                 eval_pnl,
+                eval_pnl_realized,
+                eval_pnl_total,
                 eval_sortino,
                 eval_dd,
                 eval_ret,
                 train_metrics.eval_pnl,
+                train_metrics.eval_pnl_realized,
+                train_metrics.eval_pnl_total,
                 train_metrics.eval_sortino,
                 train_metrics.eval_drawdown,
                 train_metrics.eval_ret_mean
@@ -243,6 +257,12 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                     train_metrics.debug_non_hold,
                     train_metrics.debug_non_zero_pos,
                     train_metrics.debug_mean_abs_pnl
+                );
+                println!(
+                    "  debug cand0 | pnl realized {:.2} | pnl total {:.2} | dd_penalty {:.4}",
+                    train_metrics.eval_pnl_realized,
+                    train_metrics.eval_pnl_total,
+                    train_metrics.debug_drawdown_penalty
                 );
                 println!(
                     "  debug cand0 | buy {} | sell {} | hold {} | revert {}",
@@ -323,6 +343,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             eval_windows: args.eval_windows,
             device,
             ignore_session: args.ignore_session,
+            drawdown_penalty: args.drawdown_penalty,
+            drawdown_penalty_growth: args.drawdown_penalty_growth,
         };
         let metrics = ga::evaluate_candidate(&best_genome, &test, &windows_test, &base_cfg, false);
         println!(

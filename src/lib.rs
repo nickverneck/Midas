@@ -91,10 +91,13 @@ mod py_bindings {
                 dict.set_item("commission_paid", info.commission_paid)?;
                 dict.set_item("slippage_paid", info.slippage_paid)?;
                 dict.set_item("pnl_change", info.pnl_change)?;
+                dict.set_item("realized_pnl_change", info.realized_pnl_change)?;
+                dict.set_item("drawdown_penalty", info.drawdown_penalty)?;
                 dict.set_item("margin_call_violation", info.margin_call_violation)?;
                 dict.set_item("position_limit_violation", info.position_limit_violation)?;
                 dict.set_item("session_closed_violation", info.session_closed_violation)?;
                 dict.set_item("unrealized_pnl", s.unrealized_pnl)?;
+                dict.set_item("realized_pnl", s.realized_pnl)?;
                 dict.set_item("position", s.position)?;
                 dict.set_item("cash", s.cash)?;
                 dict.set_item("last_price", s.last_price)?;
@@ -149,10 +152,13 @@ mod py_bindings {
                     d.set_item("commission_paid", info.commission_paid)?;
                     d.set_item("slippage_paid", info.slippage_paid)?;
                     d.set_item("pnl_change", info.pnl_change)?;
+                    d.set_item("realized_pnl_change", info.realized_pnl_change)?;
+                    d.set_item("drawdown_penalty", info.drawdown_penalty)?;
                     d.set_item("margin_call_violation", info.margin_call_violation)?;
                     d.set_item("position_limit_violation", info.position_limit_violation)?;
                     d.set_item("session_closed_violation", info.session_closed_violation)?;
                     d.set_item("unrealized_pnl", s.unrealized_pnl)?;
+                    d.set_item("realized_pnl", s.realized_pnl)?;
                     d.set_item("position", s.position)?;
                     d.set_item("cash", s.cash)?;
                     d.set_item("last_price", s.last_price)?;

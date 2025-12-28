@@ -20,12 +20,16 @@ pub struct CandidateConfig {
     pub eval_windows: usize,
     pub device: tch::Device,
     pub ignore_session: bool,
+    pub drawdown_penalty: f64,
+    pub drawdown_penalty_growth: f64,
 }
 
 #[derive(Clone)]
 pub struct CandidateResult {
     pub fitness: f64,
     pub eval_pnl: f64,
+    pub eval_pnl_realized: f64,
+    pub eval_pnl_total: f64,
     pub eval_sortino: f64,
     pub eval_drawdown: f64,
     pub eval_ret_mean: f64,
@@ -39,6 +43,7 @@ pub struct CandidateResult {
     pub debug_session_violations: usize,
     pub debug_margin_violations: usize,
     pub debug_position_violations: usize,
+    pub debug_drawdown_penalty: f64,
 }
 
 pub fn evaluate_candidate(
@@ -58,10 +63,14 @@ pub fn evaluate_candidate(
     let env_cfg = EnvConfig {
         margin_per_contract: cfg.margin_per_contract,
         enforce_margin: !cfg.disable_margin,
+        drawdown_penalty: cfg.drawdown_penalty,
+        drawdown_penalty_growth: cfg.drawdown_penalty_growth,
         ..EnvConfig::default()
     };
 
     let mut eval_pnls = Vec::new();
+    let mut eval_pnls_realized = Vec::new();
+    let mut eval_pnls_total = Vec::new();
     let mut eval_returns = Vec::new();
     let mut eval_equity: Vec<Vec<f64>> = Vec::new();
     let mut non_hold = 0usize;
@@ -75,6 +84,7 @@ pub fn evaluate_candidate(
     let mut session_violations = 0usize;
     let mut margin_violations = 0usize;
     let mut position_violations = 0usize;
+    let mut drawdown_penalty_sum = 0.0f64;
 
     for &(start, end) in windows.iter().take(cfg.eval_windows) {
         if end <= start + 1 {
@@ -85,6 +95,7 @@ pub fn evaluate_candidate(
         let mut equity = cfg.initial_balance;
         let mut pnl_buf = Vec::with_capacity(end - start - 1);
         let mut eq_curve = Vec::with_capacity(end - start - 1);
+        let mut window_drawdown_penalty = 0.0f64;
 
         for t in (start + 1)..end {
             let obs = build_observation(data, t, position, equity);
@@ -151,6 +162,7 @@ pub fn evaluate_candidate(
             equity = env.state().cash + env.state().unrealized_pnl;
             pnl_buf.push(info.pnl_change);
             eq_curve.push(equity);
+            window_drawdown_penalty += info.drawdown_penalty;
             if !matches!(action, Action::Hold) {
                 non_hold += 1;
             }
@@ -161,8 +173,13 @@ pub fn evaluate_candidate(
             pnl_steps += 1;
         }
 
-        let pnl_sum: f64 = pnl_buf.iter().sum();
+        let realized_pnl = env.state().realized_pnl;
+        let total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
+        let pnl_sum = realized_pnl - window_drawdown_penalty;
         eval_pnls.push(pnl_sum);
+        eval_pnls_realized.push(realized_pnl);
+        eval_pnls_total.push(total_pnl);
+        drawdown_penalty_sum += window_drawdown_penalty;
 
         let mut prev_eq = cfg.initial_balance;
         for (i, &pnl) in pnl_buf.iter().enumerate() {
@@ -189,12 +206,24 @@ pub fn evaluate_candidate(
     } else {
         eval_pnls.iter().sum::<f64>() / eval_pnls.len() as f64
     };
+    let eval_pnl_realized = if eval_pnls_realized.is_empty() {
+        0.0
+    } else {
+        eval_pnls_realized.iter().sum::<f64>() / eval_pnls_realized.len() as f64
+    };
+    let eval_pnl_total = if eval_pnls_total.is_empty() {
+        0.0
+    } else {
+        eval_pnls_total.iter().sum::<f64>() / eval_pnls_total.len() as f64
+    };
 
     let fitness = cfg.w_pnl * eval_pnl + cfg.w_sortino * eval_sortino - cfg.w_mdd * eval_draw;
 
     CandidateResult {
         fitness,
         eval_pnl,
+        eval_pnl_realized,
+        eval_pnl_total,
         eval_sortino,
         eval_drawdown: eval_draw,
         eval_ret_mean: if eval_returns.is_empty() {
@@ -216,6 +245,7 @@ pub fn evaluate_candidate(
         debug_session_violations: session_violations,
         debug_margin_violations: margin_violations,
         debug_position_violations: position_violations,
+        debug_drawdown_penalty: drawdown_penalty_sum,
     }
 }
 
