@@ -124,7 +124,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     if !log_path.exists() {
         std::fs::write(
             &log_path,
-            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
+            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
         )?;
     }
 
@@ -271,6 +271,12 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                     train_metrics.eval_pnl_realized,
                     train_metrics.eval_pnl_total,
                     train_metrics.debug_drawdown_penalty
+                );
+                println!(
+                    "  debug cand0 | invalid_revert_penalty {:.4} | flat_hold_penalty {:.4} | session_close_penalty {:.4}",
+                    train_metrics.debug_invalid_revert_penalty,
+                    train_metrics.debug_flat_hold_penalty,
+                    train_metrics.debug_session_close_penalty
                 );
                 println!(
                     "  debug cand0 | buy {} | sell {} | hold {} | revert {}",

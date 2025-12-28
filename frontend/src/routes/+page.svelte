@@ -34,9 +34,9 @@
     const formatNum = (v, digits = 4) => isFiniteNumber(v) ? v.toFixed(digits) : '—';
 
     // Dynamic key detection
-    let hasEval = $derived(logs.some(l => isFiniteNumber(l.eval_pnl) || isFiniteNumber(l.eval_pnl_realized)));
+    let hasEval = $derived(logs.some(l => isFiniteNumber(l.eval_fitness_pnl) || isFiniteNumber(l.eval_pnl_realized)));
     let sourceLabel = $derived(hasEval ? 'Eval' : 'Train');
-    let pnlKey = $derived(hasEval ? 'eval_pnl' : 'train_pnl');
+    let pnlKey = $derived(hasEval ? 'eval_fitness_pnl' : 'train_fitness_pnl');
     let pnlRealizedKey = $derived(hasEval ? 'eval_pnl_realized' : 'train_pnl_realized');
     let pnlTotalKey = $derived(hasEval ? 'eval_pnl_total' : 'train_pnl_total');
     let metricKey = $derived(hasEval ? 'eval_sortino' : 'train_sortino');
@@ -108,7 +108,7 @@
         labels: genData.map(g => `Gen ${g.gen}`),
         datasets: [
             {
-                label: `Best ${sourceLabel} PNL`,
+                label: `Best ${sourceLabel} Fitness PNL`,
                 data: genData.map(g => g.bestPnl),
                 borderColor: 'rgb(34, 197, 94)',
                 backgroundColor: 'rgba(34, 197, 94, 0.5)',
@@ -307,7 +307,7 @@
                                     <h4 class="font-bold text-lg">Generation {g.gen}</h4>
                                         <div class="mt-2 space-y-1 text-sm">
                                             <div class="flex justify-between"><span>Max Fitness:</span> <span class="font-mono text-blue-500">{g.bestFitness.toFixed(2)}</span></div>
-                                        <div class="flex justify-between"><span>Max {sourceLabel} PNL:</span> <span class="font-mono text-green-500">{g.bestPnl.toFixed(2)}</span></div>
+                                        <div class="flex justify-between"><span>Max {sourceLabel} Fitness PNL:</span> <span class="font-mono text-green-500">{g.bestPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max Realized PNL:</span> <span class="font-mono text-emerald-500">{g.bestRealizedPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max Total PNL:</span> <span class="font-mono text-teal-500">{g.bestTotalPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max {metricLabel}:</span> <span class="font-mono text-purple-500">{g.bestMetric.toFixed(2)}</span></div>
@@ -332,7 +332,7 @@
                                     <Table.Head>Population</Table.Head>
                                     <Table.Head>Best Fitness</Table.Head>
                                     <Table.Head>Avg Fitness</Table.Head>
-                                    <Table.Head>Best {sourceLabel} PNL</Table.Head>
+                                    <Table.Head>Best {sourceLabel} Fitness PNL</Table.Head>
                                     <Table.Head>Best Realized</Table.Head>
                                     <Table.Head>Best Total</Table.Head>
                                     <Table.Head>Best {metricLabel}</Table.Head>
@@ -408,7 +408,7 @@
                                         <Table.Head class="w-[80px]">Gen</Table.Head>
                                         <Table.Head class="w-[80px]">Idx</Table.Head>
                                         <Table.Head>Fitness</Table.Head>
-                                    <Table.Head>{sourceLabel} PNL</Table.Head>
+                                    <Table.Head>{sourceLabel} Fitness PNL</Table.Head>
                                     <Table.Head>Realized PNL</Table.Head>
                                     <Table.Head>Total PNL</Table.Head>
                                     <Table.Head>{metricLabel}</Table.Head>

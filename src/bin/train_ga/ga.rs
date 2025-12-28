@@ -52,6 +52,9 @@ pub struct CandidateResult {
     pub debug_margin_violations: usize,
     pub debug_position_violations: usize,
     pub debug_drawdown_penalty: f64,
+    pub debug_invalid_revert_penalty: f64,
+    pub debug_flat_hold_penalty: f64,
+    pub debug_session_close_penalty: f64,
 }
 
 pub fn evaluate_candidate(
@@ -101,6 +104,9 @@ pub fn evaluate_candidate(
     let mut margin_violations = 0usize;
     let mut position_violations = 0usize;
     let mut drawdown_penalty_sum = 0.0f64;
+    let mut invalid_revert_penalty_sum = 0.0f64;
+    let mut flat_hold_penalty_sum = 0.0f64;
+    let mut session_close_penalty_sum = 0.0f64;
 
     for &(start, end) in windows.iter().take(cfg.eval_windows) {
         if end <= start + 1 {
@@ -193,6 +199,9 @@ pub fn evaluate_candidate(
             pnl_buf.push(info.pnl_change);
             eq_curve.push(equity);
             window_drawdown_penalty += info.drawdown_penalty;
+            invalid_revert_penalty_sum += info.invalid_revert_penalty;
+            flat_hold_penalty_sum += info.flat_hold_penalty;
+            session_close_penalty_sum += info.session_close_penalty;
             if !matches!(action, Action::Hold) {
                 non_hold += 1;
             }
@@ -205,7 +214,11 @@ pub fn evaluate_candidate(
 
         let realized_pnl = env.state().realized_pnl;
         let total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
-        let pnl_sum = realized_pnl - window_drawdown_penalty;
+        let pnl_sum = realized_pnl
+            - window_drawdown_penalty
+            - invalid_revert_penalty_sum
+            - flat_hold_penalty_sum
+            - session_close_penalty_sum;
         eval_pnls.push(pnl_sum);
         eval_pnls_realized.push(realized_pnl);
         eval_pnls_total.push(total_pnl);
@@ -276,6 +289,9 @@ pub fn evaluate_candidate(
         debug_margin_violations: margin_violations,
         debug_position_violations: position_violations,
         debug_drawdown_penalty: drawdown_penalty_sum,
+        debug_invalid_revert_penalty: invalid_revert_penalty_sum,
+        debug_flat_hold_penalty: flat_hold_penalty_sum,
+        debug_session_close_penalty: session_close_penalty_sum,
     }
 }
 
