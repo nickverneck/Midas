@@ -322,7 +322,9 @@
                             <Card.Description>Maximum and average fitness progress per generation</Card.Description>
                         </Card.Header>
                         <Card.Content class="h-[350px]">
-                            <GaChart data={fitnessChartData} />
+                            {@key genData.length}
+                                <GaChart data={fitnessChartData} />
+                            {/key}
                         </Card.Content>
                     </Card.Root>
 
@@ -332,7 +334,9 @@
                             <Card.Description>Best {sourceLabel} PNL and {metricLabel} across windows</Card.Description>
                         </Card.Header>
                         <Card.Content class="h-[350px]">
-                            <GaChart data={pnlChartData} />
+                            {@key genData.length}
+                                <GaChart data={pnlChartData} />
+                            {/key}
                         </Card.Content>
                     </Card.Root>
                 </div>
