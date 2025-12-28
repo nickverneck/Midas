@@ -23,6 +23,12 @@
 		realizedSum: number;
 		realizedCount: number;
 		bestRealizedPnl: number;
+		trainRealizedSum: number;
+		trainRealizedCount: number;
+		bestTrainRealized: number;
+		evalRealizedSum: number;
+		evalRealizedCount: number;
+		bestEvalRealized: number;
 		totalSum: number;
 		totalCount: number;
 		bestTotalPnl: number;
@@ -80,6 +86,9 @@
 
 	const logChunk = 1000;
 	const pageSize = 200;
+	const MIN_ZOOM_WINDOW = 50;
+	const ZOOM_STEP = 1.5;
+	type ChartTab = 'fitness' | 'performance' | 'realized';
 
 	let logs: LogRow[] = $state([]);
 	let loading = $state(true);
@@ -88,9 +97,19 @@
     let doneLoading = $state(false);
     let nextOffset = $state(0);
     let logPage = $state(1);
+	let chartTab = $state<ChartTab>('fitness');
+	let zoomWindow = $state(0);
+	let zoomStart = $state(0);
 	let hasEval = $state(false);
 	let bestFitness = $state(Number.NEGATIVE_INFINITY);
 	let metricSum = $state(0);
+	let metricCount = $state(0);
+	let trainRealizedSum = $state(0);
+	let trainRealizedCount = $state(0);
+	let trainRealizedBest = $state(Number.NEGATIVE_INFINITY);
+	let evalRealizedSum = $state(0);
+	let evalRealizedCount = $state(0);
+	let evalRealizedBest = $state(Number.NEGATIVE_INFINITY);
 	let genAgg: Map<number, GenAgg> = $state(new Map());
 	let issueState: IssueState = $state({
 		highFitnessCount: 0,
@@ -120,6 +139,7 @@
 	};
 	const safeBest = (value: number) => Number.isFinite(value) ? value : 0;
 	const safeAvg = (sum: number, count: number) => count > 0 ? sum / count : 0;
+	const avgOrNull = (sum: number, count: number) => count > 0 ? sum / count : null;
 
 	function resetState() {
 		logs = [];
@@ -136,6 +156,13 @@
 		};
 		bestFitness = Number.NEGATIVE_INFINITY;
 		metricSum = 0;
+		metricCount = 0;
+		trainRealizedSum = 0;
+		trainRealizedCount = 0;
+		trainRealizedBest = Number.NEGATIVE_INFINITY;
+		evalRealizedSum = 0;
+		evalRealizedCount = 0;
+		evalRealizedBest = Number.NEGATIVE_INFINITY;
 		logPage = 1;
 		hasEval = false;
 		hasEvalDetermined = false;
@@ -164,6 +191,12 @@
 		realizedSum: 0,
 		realizedCount: 0,
 		bestRealizedPnl: Number.NEGATIVE_INFINITY,
+		trainRealizedSum: 0,
+		trainRealizedCount: 0,
+		bestTrainRealized: Number.NEGATIVE_INFINITY,
+		evalRealizedSum: 0,
+		evalRealizedCount: 0,
+		bestEvalRealized: Number.NEGATIVE_INFINITY,
 		totalSum: 0,
 		totalCount: 0,
 		bestTotalPnl: Number.NEGATIVE_INFINITY,
@@ -196,6 +229,13 @@
 
 		let chunkBestFitness = bestFitness;
 		let chunkMetricSum = metricSum;
+		let chunkMetricCount = metricCount;
+		let chunkTrainRealizedSum = trainRealizedSum;
+		let chunkTrainRealizedCount = trainRealizedCount;
+		let chunkTrainRealizedBest = trainRealizedBest;
+		let chunkEvalRealizedSum = evalRealizedSum;
+		let chunkEvalRealizedCount = evalRealizedCount;
+		let chunkEvalRealizedBest = evalRealizedBest;
 		const nextIssue: IssueState = {
 			highFitnessCount: issueState.highFitnessCount,
 			highFitnessItems: [...issueState.highFitnessItems],
@@ -213,6 +253,8 @@
 			const fitness = toNumber(row.fitness);
 			const pnl = toNumber(row[keys.pnlKey]);
 			const realized = toNumber(row[keys.pnlRealizedKey]);
+			const trainRealized = toNumber(row.train_pnl_realized);
+			const evalRealized = toNumber(row.eval_pnl_realized);
 			const total = toNumber(row[keys.pnlTotalKey]);
 			const metric = toNumber(row[keys.metricKey]);
 			const drawdown = toNumber(row[keys.drawdownKey]);
@@ -239,6 +281,16 @@
 					agg.realizedCount += 1;
 					agg.bestRealizedPnl = Math.max(agg.bestRealizedPnl, realized);
 				}
+				if (trainRealized !== null) {
+					agg.trainRealizedSum += trainRealized;
+					agg.trainRealizedCount += 1;
+					agg.bestTrainRealized = Math.max(agg.bestTrainRealized, trainRealized);
+				}
+				if (evalRealized !== null) {
+					agg.evalRealizedSum += evalRealized;
+					agg.evalRealizedCount += 1;
+					agg.bestEvalRealized = Math.max(agg.bestEvalRealized, evalRealized);
+				}
 				if (total !== null) {
 					agg.totalSum += total;
 					agg.totalCount += 1;
@@ -249,7 +301,19 @@
 					agg.metricCount += 1;
 					agg.bestMetric = Math.max(agg.bestMetric, metric);
 					chunkMetricSum += metric;
+					chunkMetricCount += 1;
 				}
+			}
+
+			if (trainRealized !== null) {
+				chunkTrainRealizedSum += trainRealized;
+				chunkTrainRealizedCount += 1;
+				chunkTrainRealizedBest = Math.max(chunkTrainRealizedBest, trainRealized);
+			}
+			if (evalRealized !== null) {
+				chunkEvalRealizedSum += evalRealized;
+				chunkEvalRealizedCount += 1;
+				chunkEvalRealizedBest = Math.max(chunkEvalRealizedBest, evalRealized);
 			}
 
 			const issueId = formatIssueId(row);
@@ -281,6 +345,13 @@
 		genAgg = aggMap;
 		bestFitness = chunkBestFitness;
 		metricSum = chunkMetricSum;
+		metricCount = chunkMetricCount;
+		trainRealizedSum = chunkTrainRealizedSum;
+		trainRealizedCount = chunkTrainRealizedCount;
+		trainRealizedBest = chunkTrainRealizedBest;
+		evalRealizedSum = chunkEvalRealizedSum;
+		evalRealizedCount = chunkEvalRealizedCount;
+		evalRealizedBest = chunkEvalRealizedBest;
 		issueState = nextIssue;
 	}
 
@@ -359,7 +430,11 @@
     let retKey = $derived(hasEval ? 'eval_ret_mean' : 'train_ret_mean');
     let wMetricKey = $derived('w_sortino');
     let metricLabel = $derived('SORTINO');
-	let avgMetric = $derived(metricSum / (logs.length || 1));
+	let avgMetric = $derived(avgOrNull(metricSum, metricCount));
+	let trainRealizedAvg = $derived(avgOrNull(trainRealizedSum, trainRealizedCount));
+	let evalRealizedAvg = $derived(avgOrNull(evalRealizedSum, evalRealizedCount));
+	let hasTrainRealized = $derived(trainRealizedCount > 0);
+	let hasEvalRealized = $derived(evalRealizedCount > 0);
 
     // Data Aggregation by Generation
     let genData = $derived.by(() => {
@@ -375,6 +450,10 @@
 				avgPnl: safeAvg(agg.pnlSum, agg.pnlCount),
 				bestRealizedPnl: safeBest(agg.bestRealizedPnl),
 				avgRealizedPnl: safeAvg(agg.realizedSum, agg.realizedCount),
+				bestTrainRealized: safeBest(agg.bestTrainRealized),
+				avgTrainRealized: safeAvg(agg.trainRealizedSum, agg.trainRealizedCount),
+				bestEvalRealized: safeBest(agg.bestEvalRealized),
+				avgEvalRealized: safeAvg(agg.evalRealizedSum, agg.evalRealizedCount),
 				bestTotalPnl: safeBest(agg.bestTotalPnl),
 				avgTotalPnl: safeAvg(agg.totalSum, agg.totalCount),
 				bestMetric: safeBest(agg.bestMetric),
@@ -383,20 +462,82 @@
 			.sort((a, b) => a.gen - b.gen);
     });
 
+	let zoomWindowSize = $derived(genData.length === 0 ? 0 : (zoomWindow <= 0 ? genData.length : Math.min(zoomWindow, genData.length)));
+	let minZoomWindow = $derived(genData.length === 0 ? 0 : Math.min(MIN_ZOOM_WINDOW, genData.length));
+	let maxZoomStart = $derived(genData.length === 0 ? 0 : Math.max(0, genData.length - zoomWindowSize));
+	let zoomRangeLabel = $derived.by(() => {
+		if (genData.length === 0) return 'No data';
+		if (zoomWindowSize >= genData.length) return `All ${genData.length} generations`;
+		const startIndex = Math.min(zoomStart, maxZoomStart);
+		const endIndex = Math.min(startIndex + zoomWindowSize - 1, genData.length - 1);
+		const startGen = genData[startIndex]?.gen ?? '—';
+		const endGen = genData[endIndex]?.gen ?? '—';
+		return `Gen ${startGen} to Gen ${endGen}`;
+	});
+	let canZoomIn = $derived(genData.length > 0 && zoomWindowSize > minZoomWindow);
+	let canZoomOut = $derived(genData.length > 0 && zoomWindowSize < genData.length);
+
+	let visibleGenData = $derived.by(() => {
+		if (genData.length === 0) return [];
+		if (zoomWindowSize >= genData.length) return genData;
+		const startIndex = Math.min(zoomStart, maxZoomStart);
+		return genData.slice(startIndex, startIndex + zoomWindowSize);
+	});
+
+	function zoomIn() {
+		if (genData.length === 0) return;
+		const base = zoomWindowSize || genData.length;
+		const next = Math.max(minZoomWindow, Math.floor(base / ZOOM_STEP));
+		zoomWindow = next;
+		zoomStart = Math.max(0, genData.length - next);
+	}
+
+	function zoomOut() {
+		if (genData.length === 0) return;
+		const base = zoomWindowSize || genData.length;
+		const next = Math.min(genData.length, Math.ceil(base * ZOOM_STEP));
+		zoomWindow = next >= genData.length ? 0 : next;
+		zoomStart = next >= genData.length ? 0 : Math.max(0, genData.length - next);
+	}
+
+	function zoomReset() {
+		zoomWindow = 0;
+		zoomStart = 0;
+	}
+
+	let activeChartMeta = $derived.by(() => {
+		if (chartTab === 'fitness') {
+			return {
+				title: 'Fitness Evolution',
+				description: 'Maximum and average fitness progress per generation'
+			};
+		}
+		if (chartTab === 'performance') {
+			return {
+				title: 'Performance Evolution',
+				description: `Best ${sourceLabel} PNL, realized PNL, and ${metricLabel} across windows`
+			};
+		}
+		return {
+			title: 'Realized PNL Focus',
+			description: 'Best realized PNL for training and eval tracked independently'
+		};
+	});
+
     // Chart: Fitness Evolution
     let fitnessChartData = $derived({
-        labels: genData.map(g => `Gen ${g.gen}`),
+        labels: visibleGenData.map(g => `Gen ${g.gen}`),
         datasets: [
             {
                 label: 'Best Fitness',
-                data: genData.map(g => g.bestFitness),
+                data: visibleGenData.map(g => g.bestFitness),
                 borderColor: 'rgb(59, 130, 246)',
                 backgroundColor: 'rgba(59, 130, 246, 0.5)',
                 tension: 0.1
             },
             {
                 label: 'Avg Fitness',
-                data: genData.map(g => g.avgFitness),
+                data: visibleGenData.map(g => g.avgFitness),
                 borderColor: 'rgb(147, 197, 253)',
                 backgroundColor: 'rgba(147, 197, 253, 0.2)',
                 borderDash: [5, 5],
@@ -407,18 +548,18 @@
 
     // Chart: PNL Evolution
     let pnlChartData = $derived({
-        labels: genData.map(g => `Gen ${g.gen}`),
+        labels: visibleGenData.map(g => `Gen ${g.gen}`),
         datasets: [
             {
                 label: `Best ${sourceLabel} Fitness PNL`,
-                data: genData.map(g => g.bestPnl),
+                data: visibleGenData.map(g => g.bestPnl),
                 borderColor: 'rgb(34, 197, 94)',
                 backgroundColor: 'rgba(34, 197, 94, 0.5)',
                 tension: 0.1
             },
             {
                 label: `Best ${sourceLabel} Realized PNL`,
-                data: genData.map(g => g.bestRealizedPnl),
+                data: visibleGenData.map(g => g.bestRealizedPnl),
                 borderColor: 'rgb(16, 185, 129)',
                 backgroundColor: 'rgba(16, 185, 129, 0.35)',
                 borderDash: [4, 4],
@@ -426,7 +567,7 @@
             },
             {
                 label: `Best ${metricLabel}`,
-                data: genData.map(g => g.bestMetric),
+                data: visibleGenData.map(g => g.bestMetric),
                 borderColor: 'rgb(168, 85, 247)',
                 backgroundColor: 'rgba(168, 85, 247, 0.5)',
                 yAxisID: 'y1',
@@ -434,6 +575,33 @@
             }
         ]
     });
+
+	let realizedChartData = $derived.by(() => {
+		const labels = visibleGenData.map(g => `Gen ${g.gen}`);
+		const datasets = [];
+
+		if (hasTrainRealized) {
+			datasets.push({
+				label: 'Best Train Realized PNL',
+				data: visibleGenData.map(g => g.bestTrainRealized),
+				borderColor: 'rgb(14, 116, 144)',
+				backgroundColor: 'rgba(14, 116, 144, 0.35)',
+				tension: 0.1
+			});
+		}
+
+		if (hasEvalRealized) {
+			datasets.push({
+				label: 'Best Eval Realized PNL',
+				data: visibleGenData.map(g => g.bestEvalRealized),
+				borderColor: 'rgb(239, 68, 68)',
+				backgroundColor: 'rgba(239, 68, 68, 0.3)',
+				tension: 0.1
+			});
+		}
+
+		return { labels, datasets };
+	});
 
     // Issues Detection
     let issues = $derived.by(() => {
@@ -506,6 +674,24 @@
 	$effect(() => {
 		if (logPage > maxLogPage) {
 			logPage = maxLogPage;
+		}
+	});
+
+	$effect(() => {
+		if (genData.length === 0) {
+			zoomStart = 0;
+			return;
+		}
+		if (zoomWindow > genData.length) {
+			zoomWindow = genData.length;
+		}
+		const maxStart = Math.max(0, genData.length - zoomWindowSize);
+		if (zoomWindowSize >= genData.length) {
+			zoomStart = 0;
+		} else if (zoomStart > maxStart) {
+			zoomStart = maxStart;
+		} else if (zoomStart < 0) {
+			zoomStart = 0;
 		}
 	});
 
@@ -587,24 +773,113 @@
             </Tabs.List>
 
             <Tabs.Content value="overview" class="space-y-6">
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <Card.Root>
-                        <Card.Header>
-                            <Card.Title class="flex items-center gap-2"><TrendingUp size={20} class="text-blue-500"/> Fitness Evolution</Card.Title>
-                            <Card.Description>Maximum and average fitness progress per generation</Card.Description>
+                <Card.Root>
+                    <Card.Header class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                            <Card.Title class="flex items-center gap-2"><TrendingUp size={20} class="text-blue-500"/> {activeChartMeta.title}</Card.Title>
+                            <Card.Description>{activeChartMeta.description}</Card.Description>
+                        </div>
+                        <div class="flex flex-col gap-2 text-xs w-full lg:w-auto lg:items-end">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="text-muted-foreground">{zoomRangeLabel}</span>
+                                <button
+                                    class="px-2.5 py-1 border rounded-md font-medium disabled:opacity-40"
+                                    onclick={zoomIn}
+                                    disabled={!canZoomIn}
+                                >
+                                    Zoom In
+                                </button>
+                                <button
+                                    class="px-2.5 py-1 border rounded-md font-medium disabled:opacity-40"
+                                    onclick={zoomOut}
+                                    disabled={!canZoomOut}
+                                >
+                                    Zoom Out
+                                </button>
+                                <button
+                                    class="px-2.5 py-1 border rounded-md font-medium disabled:opacity-40"
+                                    onclick={zoomReset}
+                                    disabled={genData.length === 0 || (zoomWindowSize >= genData.length && zoomStart === 0)}
+                                >
+                                    Reset Window
+                                </button>
+                            </div>
+                            <div class="flex items-center gap-2 w-full lg:w-auto">
+                                <span class="text-muted-foreground">Window</span>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max={maxZoomStart}
+                                    step="1"
+                                    bind:value={zoomStart}
+                                    disabled={zoomWindowSize >= genData.length || maxZoomStart === 0}
+                                    class="w-full lg:w-48 accent-primary disabled:opacity-40"
+                                    aria-label="Pan window across generations"
+                                />
+                            </div>
+                            <div class="text-[10px] text-muted-foreground">
+                                Ctrl + scroll or pinch to zoom. Shift + drag to pan.
+                            </div>
+                        </div>
+                    </Card.Header>
+                    <Card.Content class="pt-0">
+                        <Tabs.Root bind:value={chartTab} class="w-full">
+                            <Tabs.List class="grid w-full grid-cols-3 lg:w-[720px] mb-4">
+                                <Tabs.Trigger value="fitness">Fitness</Tabs.Trigger>
+                                <Tabs.Trigger value="performance">Performance</Tabs.Trigger>
+                                <Tabs.Trigger value="realized">Realized</Tabs.Trigger>
+                            </Tabs.List>
+
+                            <Tabs.Content value="fitness">
+                                {#if chartTab === 'fitness'}
+                                    <div class="h-[65vh] min-h-[420px]">
+                                        <GaChart data={fitnessChartData} />
+                                    </div>
+                                {/if}
+                            </Tabs.Content>
+
+                            <Tabs.Content value="performance">
+                                {#if chartTab === 'performance'}
+                                    <div class="h-[65vh] min-h-[420px]">
+                                        <GaChart data={pnlChartData} />
+                                    </div>
+                                {/if}
+                            </Tabs.Content>
+
+                            <Tabs.Content value="realized">
+                                {#if chartTab === 'realized'}
+                                    {#if realizedChartData.datasets.length > 0}
+                                        <div class="h-[65vh] min-h-[420px]">
+                                            <GaChart data={realizedChartData} />
+                                        </div>
+                                    {:else}
+                                        <div class="h-[50vh] min-h-[320px] flex items-center justify-center text-muted-foreground">
+                                            No realized PNL columns found in this run.
+                                        </div>
+                                    {/if}
+                                {/if}
+                            </Tabs.Content>
+                        </Tabs.Root>
+                    </Card.Content>
+                </Card.Root>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <Card.Root class="border-l-4 border-l-emerald-500">
+                        <Card.Header class="pb-2">
+                            <Card.Title class="text-sm font-medium text-muted-foreground">Train Realized PNL (Avg)</Card.Title>
                         </Card.Header>
-                        <Card.Content class="h-[350px]">
-                            <GaChart data={fitnessChartData} />
+                        <Card.Content>
+                            <p class="text-3xl font-bold text-emerald-500">{formatNum(trainRealizedAvg, 2)}</p>
+                            <p class="text-xs text-muted-foreground mt-1">Best: {formatNum(trainRealizedBest, 2)}</p>
                         </Card.Content>
                     </Card.Root>
-
-                    <Card.Root>
-                        <Card.Header>
-                            <Card.Title class="flex items-center gap-2"><TrendingUp size={20} class="text-green-500"/> Performance Evolution</Card.Title>
-                            <Card.Description>Best {sourceLabel} PNL and {metricLabel} across windows</Card.Description>
+                    <Card.Root class="border-l-4 border-l-rose-500">
+                        <Card.Header class="pb-2">
+                            <Card.Title class="text-sm font-medium text-muted-foreground">Eval Realized PNL (Avg)</Card.Title>
                         </Card.Header>
-                        <Card.Content class="h-[350px]">
-                            <GaChart data={pnlChartData} />
+                        <Card.Content>
+                            <p class="text-3xl font-bold text-rose-500">{formatNum(evalRealizedAvg, 2)}</p>
+                            <p class="text-xs text-muted-foreground mt-1">Best: {formatNum(evalRealizedBest, 2)}</p>
                         </Card.Content>
                     </Card.Root>
                 </div>
