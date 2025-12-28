@@ -69,4 +69,6 @@ pub struct Args {
     pub skip_val_eval: bool,
     #[arg(long)]
     pub debug_data: bool,
+    #[arg(long)]
+    pub ignore_session: bool,
 }

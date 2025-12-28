@@ -135,19 +135,20 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             device
         );
 
-        let base_cfg = ga::CandidateConfig {
-            initial_balance: args.initial_balance,
-            margin_per_contract,
-            disable_margin: args.disable_margin,
-            w_pnl: args.w_pnl,
-            w_sortino: args.w_sortino,
-            w_mdd: args.w_mdd,
-            sortino_annualization: args.sortino_annualization,
-            hidden: args.hidden,
-            layers: args.layers,
-            eval_windows: args.eval_windows,
-            device,
-        };
+    let base_cfg = ga::CandidateConfig {
+        initial_balance: args.initial_balance,
+        margin_per_contract,
+        disable_margin: args.disable_margin,
+        w_pnl: args.w_pnl,
+        w_sortino: args.w_sortino,
+        w_mdd: args.w_mdd,
+        sortino_annualization: args.sortino_annualization,
+        hidden: args.hidden,
+        layers: args.layers,
+        eval_windows: args.eval_windows,
+        device,
+        ignore_session: args.ignore_session,
+    };
 
         let eval_results: Vec<(usize, ga::CandidateResult, Option<ga::CandidateResult>)> = pop
             .par_iter()
@@ -238,6 +239,19 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                     train_metrics.debug_non_zero_pos,
                     train_metrics.debug_mean_abs_pnl
                 );
+                println!(
+                    "  debug cand0 | buy {} | sell {} | hold {} | revert {}",
+                    train_metrics.debug_buy,
+                    train_metrics.debug_sell,
+                    train_metrics.debug_hold,
+                    train_metrics.debug_revert
+                );
+                println!(
+                    "  debug cand0 | session_violation {} | margin_violation {} | position_violation {}",
+                    train_metrics.debug_session_violations,
+                    train_metrics.debug_margin_violations,
+                    train_metrics.debug_position_violations
+                );
             }
         }
 
@@ -294,6 +308,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             layers: args.layers,
             eval_windows: args.eval_windows,
             device,
+            ignore_session: args.ignore_session,
         };
         let metrics = ga::evaluate_candidate(&best_genome, &test, &windows_test, &base_cfg, false);
         println!(
