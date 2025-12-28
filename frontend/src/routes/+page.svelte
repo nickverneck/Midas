@@ -30,8 +30,16 @@
 
 	onMount(fetchLogs);
 
+    const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+    const formatNum = (v, digits = 4) => isFiniteNumber(v) ? v.toFixed(digits) : '—';
+
     // Dynamic key detection
-    let metricKey = $derived('eval_sortino');
+    let hasEval = $derived(logs.some(l => isFiniteNumber(l.eval_pnl)));
+    let sourceLabel = $derived(hasEval ? 'Eval' : 'Train');
+    let pnlKey = $derived(hasEval ? 'eval_pnl' : 'train_pnl');
+    let metricKey = $derived(hasEval ? 'eval_sortino' : 'train_sortino');
+    let drawdownKey = $derived(hasEval ? 'eval_drawdown' : 'train_drawdown');
+    let retKey = $derived(hasEval ? 'eval_ret_mean' : 'train_ret_mean');
     let wMetricKey = $derived('w_sortino');
     let metricLabel = $derived('SORTINO');
 
@@ -46,19 +54,21 @@
         });
 
         return Array.from(gens.entries()).map(([gen, individuals]) => {
-            const fitnesses = individuals.map(i => i.fitness);
-            const pnls = individuals.map(i => i.eval_pnl);
-            const metrics = individuals.map(i => i[metricKey]);
+            const fitnesses = individuals.map(i => i.fitness).filter(isFiniteNumber);
+            const pnls = individuals.map(i => i[pnlKey]).filter(isFiniteNumber);
+            const metrics = individuals.map(i => i[metricKey]).filter(isFiniteNumber);
+            const meanSafe = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+            const maxSafe = (arr) => arr.length ? Math.max(...arr) : 0;
             
             return {
                 gen,
                 count: individuals.length,
-                bestFitness: Math.max(...fitnesses),
-                avgFitness: fitnesses.reduce((a, b) => a + b, 0) / fitnesses.length,
-                bestPnl: Math.max(...pnls),
-                avgPnl: pnls.reduce((a, b) => a + b, 0) / pnls.length,
-                bestMetric: Math.max(...metrics),
-                avgMetric: metrics.reduce((a, b) => a + b, 0) / metrics.length,
+                bestFitness: maxSafe(fitnesses),
+                avgFitness: meanSafe(fitnesses),
+                bestPnl: maxSafe(pnls),
+                avgPnl: meanSafe(pnls),
+                bestMetric: maxSafe(metrics),
+                avgMetric: meanSafe(metrics),
             };
         }).sort((a, b) => a.gen - b.gen);
     });
@@ -90,7 +100,7 @@
         labels: genData.map(g => `Gen ${g.gen}`),
         datasets: [
             {
-                label: `Best Eval PNL`,
+                label: `Best ${sourceLabel} PNL`,
                 data: genData.map(g => g.bestPnl),
                 borderColor: 'rgb(34, 197, 94)',
                 backgroundColor: 'rgba(34, 197, 94, 0.5)',
@@ -124,18 +134,18 @@
         }
 
         // 2. Metric Capping
-        const capped = logs.filter(l => l[metricKey] >= 50.0);
+        const capped = logs.filter(l => isFiniteNumber(l[metricKey]) && l[metricKey] >= 50.0);
         if (capped.length > 0) {
             list.push({
                 type: 'info',
                 title: `${metricLabel} Cap Hit`,
-                message: `${capped.length} individuals hit the cap of 50.0 for ${metricLabel}. Consider raising the cap if they are consistently flatlining at max.`,
+                message: `${capped.length} individuals hit the cap of 50.0 for ${metricLabel} (${sourceLabel}). Consider raising the cap if they are consistently flatlining at max.`,
                 items: capped.slice(0, 5).map(i => `Gen ${i.gen}, Idx ${i.idx}`)
             });
         }
 
         // 3. Zero Drawdown
-        const zeroDD = logs.filter(l => l.eval_drawdown === 0 && l.eval_pnl !== 0);
+        const zeroDD = logs.filter(l => isFiniteNumber(l[drawdownKey]) && isFiniteNumber(l[pnlKey]) && l[drawdownKey] === 0 && l[pnlKey] !== 0);
         if (zeroDD.length > 0) {
             list.push({
                 type: 'warning',
@@ -146,12 +156,13 @@
         }
 
         // 4. Negative Returns
-        const negativeRet = logs.filter(l => l.eval_ret_mean < 0);
-        if (negativeRet.length === logs.length) {
+        const retValues = logs.map(l => l[retKey]).filter(isFiniteNumber);
+        const negativeRet = retValues.filter(v => v < 0);
+        if (retValues.length > 0 && negativeRet.length === retValues.length) {
             list.push({
                 type: 'destructive',
                 title: 'Universal Negative Returns',
-                message: "Every single individual in the log has a negative return mean. The strategy logic or features might be fundamentally flawed."
+                message: `Every single individual in the log has a negative return mean (${sourceLabel}). The strategy logic or features might be fundamentally flawed.`
             });
         }
 
@@ -223,7 +234,7 @@
 					<Card.Title class="text-sm font-medium text-muted-foreground">Avg {metricLabel}</Card.Title>
 				</Card.Header>
 				<Card.Content>
-					<p class="text-3xl font-bold">{(logs.reduce((acc, l) => acc + (l[metricKey] || 0), 0) / (logs.length || 1)).toFixed(2)}</p>
+					<p class="text-3xl font-bold">{(logs.reduce((acc, l) => acc + (isFiniteNumber(l[metricKey]) ? l[metricKey] : 0), 0) / (logs.length || 1)).toFixed(2)}</p>
 				</Card.Content>
 			</Card.Root>
             <Card.Root class="border-l-4 border-l-orange-500">
@@ -261,7 +272,7 @@
                     <Card.Root>
                         <Card.Header>
                             <Card.Title class="flex items-center gap-2"><TrendingUp size={20} class="text-green-500"/> Performance Evolution</Card.Title>
-                            <Card.Description>Best PNL and {metricLabel} across training windows</Card.Description>
+                            <Card.Description>Best {sourceLabel} PNL and {metricLabel} across windows</Card.Description>
                         </Card.Header>
                         <Card.Content class="h-[350px]">
                             <GaChart data={pnlChartData} />
@@ -280,7 +291,7 @@
                                     <h4 class="font-bold text-lg">Generation {g.gen}</h4>
                                     <div class="mt-2 space-y-1 text-sm">
                                         <div class="flex justify-between"><span>Max Fitness:</span> <span class="font-mono text-blue-500">{g.bestFitness.toFixed(2)}</span></div>
-                                        <div class="flex justify-between"><span>Max PNL:</span> <span class="font-mono text-green-500">{g.bestPnl.toFixed(2)}</span></div>
+                                        <div class="flex justify-between"><span>Max {sourceLabel} PNL:</span> <span class="font-mono text-green-500">{g.bestPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max {metricLabel}:</span> <span class="font-mono text-purple-500">{g.bestMetric.toFixed(2)}</span></div>
                                     </div>
                                 </div>
@@ -303,7 +314,7 @@
                                     <Table.Head>Population</Table.Head>
                                     <Table.Head>Best Fitness</Table.Head>
                                     <Table.Head>Avg Fitness</Table.Head>
-                                    <Table.Head>Best PNL</Table.Head>
+                                    <Table.Head>Best {sourceLabel} PNL</Table.Head>
                                     <Table.Head>Best {metricLabel}</Table.Head>
                                 </Table.Row>
                             </Table.Header>
@@ -375,9 +386,9 @@
                                         <Table.Head class="w-[80px]">Gen</Table.Head>
                                         <Table.Head class="w-[80px]">Idx</Table.Head>
                                         <Table.Head>Fitness</Table.Head>
-                                        <Table.Head>PNL</Table.Head>
-                                        <Table.Head>{metricLabel}</Table.Head>
-                                        <Table.Head>DD</Table.Head>
+                                    <Table.Head>{sourceLabel} PNL</Table.Head>
+                                    <Table.Head>{metricLabel}</Table.Head>
+                                    <Table.Head>{sourceLabel} DD</Table.Head>
                                         <Table.Head class="hidden md:table-cell text-right">Weights (PNL/{metricLabel}/MDD)</Table.Head>
                                     </Table.Row>
                                 </Table.Header>
@@ -387,9 +398,9 @@
                                             <Table.Cell>{log.gen}</Table.Cell>
                                             <Table.Cell>{log.idx}</Table.Cell>
                                             <Table.Cell class="font-medium text-blue-500">{log.fitness.toFixed(4)}</Table.Cell>
-                                            <Table.Cell class={log.eval_pnl >= 0 ? 'text-green-500 font-medium' : 'text-red-500'}>{log.eval_pnl.toFixed(4)}</Table.Cell>
-                                            <Table.Cell>{log[metricKey]?.toFixed(4)}</Table.Cell>
-                                            <Table.Cell class="text-red-400">{log.eval_drawdown.toFixed(4)}%</Table.Cell>
+                                            <Table.Cell class={log[pnlKey] >= 0 ? 'text-green-500 font-medium' : 'text-red-500'}>{formatNum(log[pnlKey])}</Table.Cell>
+                                            <Table.Cell>{formatNum(log[metricKey])}</Table.Cell>
+                                            <Table.Cell class="text-red-400">{formatNum(log[drawdownKey])}%</Table.Cell>
                                             <Table.Cell class="text-right hidden md:table-cell text-[10px] text-muted-foreground font-mono">
                                                 {log.w_pnl.toFixed(2)} / {log[wMetricKey]?.toFixed(2)} / {log.w_mdd.toFixed(2)}
                                             </Table.Cell>
