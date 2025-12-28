@@ -33,6 +33,12 @@ pub struct EnvConfig {
     pub drawdown_penalty: f64,
     /// Linear growth multiplier for drawdown penalty per consecutive step.
     pub drawdown_penalty_growth: f64,
+    /// Penalty applied as session close approaches (scaled within last hour).
+    pub session_close_penalty: f64,
+    /// Max holding bars when unrealized PnL is positive (0 disables).
+    pub max_hold_bars_positive: usize,
+    /// Max holding bars while in drawdown (0 disables).
+    pub max_hold_bars_drawdown: usize,
 }
 
 impl Default for EnvConfig {
@@ -48,6 +54,9 @@ impl Default for EnvConfig {
             idle_penalty: 0.0,
             drawdown_penalty: 0.0,
             drawdown_penalty_growth: 0.0,
+            session_close_penalty: 0.0,
+            max_hold_bars_positive: 0,
+            max_hold_bars_drawdown: 0,
         }
     }
 }
@@ -58,6 +67,8 @@ pub struct StepContext {
     pub session_open: bool,
     /// Whether margin is sufficient. If false, treat as margin call violation.
     pub margin_ok: bool,
+    /// Minutes until session close (if known).
+    pub minutes_to_close: Option<f64>,
 }
 
 impl Default for StepContext {
@@ -65,6 +76,7 @@ impl Default for StepContext {
         Self {
             session_open: true,
             margin_ok: true,
+            minutes_to_close: None,
         }
     }
 }
@@ -79,6 +91,7 @@ pub struct EnvState {
     pub realized_pnl: f64,
     pub equity_peak: f64,
     pub drawdown_steps: usize,
+    pub position_entry_step: usize,
     pub done: bool,
 }
 
@@ -89,6 +102,7 @@ pub struct StepInfo {
     pub pnl_change: f64,
     pub realized_pnl_change: f64,
     pub drawdown_penalty: f64,
+    pub session_close_penalty: f64,
     pub margin_call_violation: bool,
     pub position_limit_violation: bool,
     pub session_closed_violation: bool,
@@ -112,6 +126,7 @@ impl TradingEnv {
                 realized_pnl: 0.0,
                 equity_peak: initial_balance,
                 drawdown_steps: 0,
+                position_entry_step: 0,
                 done: false,
             },
         }
@@ -127,6 +142,7 @@ impl TradingEnv {
             realized_pnl: 0.0,
             equity_peak: initial_balance,
             drawdown_steps: 0,
+            position_entry_step: 0,
             done: false,
         };
     }
@@ -147,6 +163,7 @@ impl TradingEnv {
                     pnl_change: 0.0,
                     realized_pnl_change: 0.0,
                     drawdown_penalty: 0.0,
+                    session_close_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation: false,
                     session_closed_violation: true,
@@ -163,11 +180,27 @@ impl TradingEnv {
                     pnl_change: 0.0,
                     realized_pnl_change: 0.0,
                     drawdown_penalty: 0.0,
+                    session_close_penalty: 0.0,
                     margin_call_violation: true,
                     position_limit_violation: false,
                     session_closed_violation: false,
                 },
             );
+        }
+
+        let mut action = action;
+        if self.state.position != 0 {
+            let hold_bars = self.state.step.saturating_sub(self.state.position_entry_step);
+            if self.cfg.max_hold_bars_drawdown > 0
+                && self.state.drawdown_steps >= self.cfg.max_hold_bars_drawdown
+            {
+                action = Action::Revert;
+            } else if self.cfg.max_hold_bars_positive > 0
+                && self.state.unrealized_pnl > 0.0
+                && hold_bars >= self.cfg.max_hold_bars_positive
+            {
+                action = Action::Revert;
+            }
         }
 
         let target_position = match action {
@@ -193,6 +226,7 @@ impl TradingEnv {
                     pnl_change: 0.0,
                     realized_pnl_change: 0.0,
                     drawdown_penalty: 0.0,
+                    session_close_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation,
                     session_closed_violation: false,
@@ -213,6 +247,7 @@ impl TradingEnv {
                         pnl_change: 0.0,
                         realized_pnl_change: 0.0,
                         drawdown_penalty: 0.0,
+                        session_close_penalty: 0.0,
                         margin_call_violation: true,
                         position_limit_violation: false,
                         session_closed_violation: false,
@@ -243,6 +278,11 @@ impl TradingEnv {
             self.state.unrealized_pnl = 0.0;
         }
         self.state.position = target_position;
+        if self.state.position == 0 {
+            self.state.position_entry_step = self.state.step + 1;
+        } else if delta_pos != 0 {
+            self.state.position_entry_step = self.state.step + 1;
+        }
         self.state.last_price = next_price;
         self.state.step += 1;
 
@@ -264,6 +304,21 @@ impl TradingEnv {
             0.0
         };
 
+        let session_close_penalty = if self.state.position != 0 {
+            if let Some(mins) = ctx.minutes_to_close {
+                if mins >= 0.0 && mins <= 60.0 {
+                    let scale = (60.0 - mins) / 60.0;
+                    self.cfg.session_close_penalty * scale
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
         let mut reward = pnl_change
             - trade_costs
             - self.cfg.risk_penalty * (self.state.position.abs() as f64 / self.cfg.max_position as f64);
@@ -274,6 +329,9 @@ impl TradingEnv {
         if drawdown_penalty > 0.0 {
             reward -= drawdown_penalty;
         }
+        if session_close_penalty > 0.0 {
+            reward -= session_close_penalty;
+        }
 
         (
             reward,
@@ -283,6 +341,7 @@ impl TradingEnv {
                 pnl_change,
                 realized_pnl_change,
                 drawdown_penalty,
+                session_close_penalty,
                 margin_call_violation: false,
                 position_limit_violation: false,
                 session_closed_violation: false,
@@ -405,6 +464,7 @@ mod tests {
             StepContext {
                 session_open: false,
                 margin_ok: true,
+                minutes_to_close: None,
             },
         );
         assert!(info.session_closed_violation);

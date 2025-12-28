@@ -22,6 +22,9 @@ pub struct CandidateConfig {
     pub ignore_session: bool,
     pub drawdown_penalty: f64,
     pub drawdown_penalty_growth: f64,
+    pub session_close_penalty: f64,
+    pub max_hold_bars_positive: usize,
+    pub max_hold_bars_drawdown: usize,
 }
 
 #[derive(Clone)]
@@ -65,6 +68,9 @@ pub fn evaluate_candidate(
         enforce_margin: !cfg.disable_margin,
         drawdown_penalty: cfg.drawdown_penalty,
         drawdown_penalty_growth: cfg.drawdown_penalty_growth,
+        session_close_penalty: cfg.session_close_penalty,
+        max_hold_bars_positive: cfg.max_hold_bars_positive,
+        max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
         ..EnvConfig::default()
     };
 
@@ -139,6 +145,11 @@ pub fn evaluate_candidate(
                     .copied()
                     .unwrap_or(true)
             };
+            let minutes_to_close = data
+                .minutes_to_close
+                .as_ref()
+                .and_then(|m| m.get(t))
+                .copied();
             let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
             let (_reward, info) = env.step(
@@ -147,6 +158,7 @@ pub fn evaluate_candidate(
                 StepContext {
                     session_open,
                     margin_ok,
+                    minutes_to_close,
                 },
             );
             if info.session_closed_violation {
