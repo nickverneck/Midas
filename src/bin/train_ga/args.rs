@@ -15,6 +15,8 @@ pub struct Args {
     pub test_parquet: PathBuf,
     #[arg(long)]
     pub full_file: bool,
+    #[arg(long)]
+    pub windowed: bool,
     #[arg(long, default_value_t = 512)]
     pub window: usize,
     #[arg(long, default_value_t = 256)]
