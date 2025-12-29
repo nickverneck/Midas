@@ -11,30 +11,15 @@
 
 	type LogRow = Record<string, any>;
 
-	type GenAgg = {
-		gen: number;
-		count: number;
-		fitnessSum: number;
-		fitnessCount: number;
-		bestFitness: number;
-		pnlSum: number;
-		pnlCount: number;
-		bestPnl: number;
-		realizedSum: number;
-		realizedCount: number;
-		bestRealizedPnl: number;
-		trainRealizedSum: number;
-		trainRealizedCount: number;
-		bestTrainRealized: number;
-		evalRealizedSum: number;
-		evalRealizedCount: number;
-		bestEvalRealized: number;
-		totalSum: number;
-		totalCount: number;
-		bestTotalPnl: number;
-		metricSum: number;
-		metricCount: number;
-		bestMetric: number;
+	type GenMember = {
+		fitness: number | null;
+		pnl: number | null;
+		realized: number | null;
+		total: number | null;
+		metric: number | null;
+		drawdown: number | null;
+		trainRealized: number | null;
+		evalRealized: number | null;
 	};
 
 	type IssueState = {
@@ -88,7 +73,8 @@
 	const pageSize = 200;
 	const MIN_ZOOM_WINDOW = 50;
 	const ZOOM_STEP = 1.5;
-	type ChartTab = 'fitness' | 'performance' | 'realized';
+	type ChartTab = 'fitness' | 'performance' | 'realized' | 'drawdown' | 'frontier';
+	type PopulationFilter = 'all' | 'top5' | 'top10' | 'top20p';
 
 	let logs: LogRow[] = $state([]);
 	let loading = $state(true);
@@ -98,19 +84,14 @@
     let nextOffset = $state(0);
     let logPage = $state(1);
 	let chartTab = $state<ChartTab>('fitness');
+	let populationFilter = $state<PopulationFilter>('all');
 	let zoomWindow = $state(0);
 	let zoomStart = $state(0);
+	let plateauWindow = $state(300);
+	let plateauMinDelta = $state(0.5);
 	let hasEval = $state(false);
 	let bestFitness = $state(Number.NEGATIVE_INFINITY);
-	let metricSum = $state(0);
-	let metricCount = $state(0);
-	let trainRealizedSum = $state(0);
-	let trainRealizedCount = $state(0);
-	let trainRealizedBest = $state(Number.NEGATIVE_INFINITY);
-	let evalRealizedSum = $state(0);
-	let evalRealizedCount = $state(0);
-	let evalRealizedBest = $state(Number.NEGATIVE_INFINITY);
-	let genAgg: Map<number, GenAgg> = $state(new Map());
+	let genMembers: Map<number, GenMember[]> = $state(new Map());
 	let issueState: IssueState = $state({
 		highFitnessCount: 0,
 		highFitnessItems: [],
@@ -133,17 +114,41 @@
 		}
 		return null;
 	};
-    const formatNum = (value: unknown, digits = 4) => {
+	const formatNum = (value: unknown, digits = 4) => {
 		const num = toNumber(value);
 		return num === null ? '—' : num.toFixed(digits);
 	};
-	const safeBest = (value: number) => Number.isFinite(value) ? value : 0;
-	const safeAvg = (sum: number, count: number) => count > 0 ? sum / count : 0;
 	const avgOrNull = (sum: number, count: number) => count > 0 ? sum / count : null;
+	const finiteValues = (values: Array<number | null>) =>
+		values.filter((value): value is number => value !== null && Number.isFinite(value));
+	const meanValue = (values: number[]) => values.length ? values.reduce((acc, v) => acc + v, 0) / values.length : 0;
+	const maxValue = (values: number[]) => values.length ? Math.max(...values) : 0;
+	const minValue = (values: number[]) => values.length ? Math.min(...values) : 0;
+	const percentileValue = (sortedValues: number[], percentile: number) => {
+		if (sortedValues.length === 0) return null;
+		const index = (sortedValues.length - 1) * percentile;
+		const lower = Math.floor(index);
+		const upper = Math.ceil(index);
+		if (lower === upper) return sortedValues[lower];
+		const weight = index - lower;
+		return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+	};
+	const selectMembers = (members: GenMember[]) => {
+		if (populationFilter === 'all') return members;
+		const ranked = members
+			.filter((member) => member.fitness !== null)
+			.sort((a, b) => (b.fitness ?? Number.NEGATIVE_INFINITY) - (a.fitness ?? Number.NEGATIVE_INFINITY));
+		if (ranked.length === 0) return members;
+		let limit = ranked.length;
+		if (populationFilter === 'top5') limit = Math.min(5, ranked.length);
+		if (populationFilter === 'top10') limit = Math.min(10, ranked.length);
+		if (populationFilter === 'top20p') limit = Math.max(1, Math.round(ranked.length * 0.2));
+		return ranked.slice(0, limit);
+	};
 
 	function resetState() {
 		logs = [];
-		genAgg = new Map();
+		genMembers = new Map();
 		issueState = {
 			highFitnessCount: 0,
 			highFitnessItems: [],
@@ -155,17 +160,11 @@
 			retNegativeCount: 0
 		};
 		bestFitness = Number.NEGATIVE_INFINITY;
-		metricSum = 0;
-		metricCount = 0;
-		trainRealizedSum = 0;
-		trainRealizedCount = 0;
-		trainRealizedBest = Number.NEGATIVE_INFINITY;
-		evalRealizedSum = 0;
-		evalRealizedCount = 0;
-		evalRealizedBest = Number.NEGATIVE_INFINITY;
 		logPage = 1;
 		hasEval = false;
 		hasEvalDetermined = false;
+		zoomWindow = 0;
+		zoomStart = 0;
 	}
 
 	function detectEval(rows: LogRow[]) {
@@ -179,41 +178,6 @@
 		hasEvalDetermined = true;
 	}
 
-	const createAgg = (gen: number): GenAgg => ({
-		gen,
-		count: 0,
-		fitnessSum: 0,
-		fitnessCount: 0,
-		bestFitness: Number.NEGATIVE_INFINITY,
-		pnlSum: 0,
-		pnlCount: 0,
-		bestPnl: Number.NEGATIVE_INFINITY,
-		realizedSum: 0,
-		realizedCount: 0,
-		bestRealizedPnl: Number.NEGATIVE_INFINITY,
-		trainRealizedSum: 0,
-		trainRealizedCount: 0,
-		bestTrainRealized: Number.NEGATIVE_INFINITY,
-		evalRealizedSum: 0,
-		evalRealizedCount: 0,
-		bestEvalRealized: Number.NEGATIVE_INFINITY,
-		totalSum: 0,
-		totalCount: 0,
-		bestTotalPnl: Number.NEGATIVE_INFINITY,
-		metricSum: 0,
-		metricCount: 0,
-		bestMetric: Number.NEGATIVE_INFINITY
-	});
-
-	function ensureAgg(map: Map<number, GenAgg>, gen: number) {
-		let agg = map.get(gen);
-		if (!agg) {
-			agg = createAgg(gen);
-			map.set(gen, agg);
-		}
-		return agg;
-	}
-
 	const formatIssueId = (row: LogRow) => {
 		const genLabel = row.gen ?? '—';
 		const idxLabel = row.idx ?? '—';
@@ -225,17 +189,9 @@
 
 		detectEval(rows);
 		const keys = hasEval ? EVAL_KEYS : TRAIN_KEYS;
-		const aggMap = new Map(genAgg);
+		const membersMap = new Map(genMembers);
 
 		let chunkBestFitness = bestFitness;
-		let chunkMetricSum = metricSum;
-		let chunkMetricCount = metricCount;
-		let chunkTrainRealizedSum = trainRealizedSum;
-		let chunkTrainRealizedCount = trainRealizedCount;
-		let chunkTrainRealizedBest = trainRealizedBest;
-		let chunkEvalRealizedSum = evalRealizedSum;
-		let chunkEvalRealizedCount = evalRealizedCount;
-		let chunkEvalRealizedBest = evalRealizedBest;
 		const nextIssue: IssueState = {
 			highFitnessCount: issueState.highFitnessCount,
 			highFitnessItems: [...issueState.highFitnessItems],
@@ -262,58 +218,26 @@
 			const genValue = toNumber(row.gen);
 
 			if (genValue !== null) {
-				const agg = ensureAgg(aggMap, genValue);
-				agg.count += 1;
-
-				if (fitness !== null) {
-					agg.fitnessSum += fitness;
-					agg.fitnessCount += 1;
-					agg.bestFitness = Math.max(agg.bestFitness, fitness);
-					chunkBestFitness = Math.max(chunkBestFitness, fitness);
-				}
-				if (pnl !== null) {
-					agg.pnlSum += pnl;
-					agg.pnlCount += 1;
-					agg.bestPnl = Math.max(agg.bestPnl, pnl);
-				}
-				if (realized !== null) {
-					agg.realizedSum += realized;
-					agg.realizedCount += 1;
-					agg.bestRealizedPnl = Math.max(agg.bestRealizedPnl, realized);
-				}
-				if (trainRealized !== null) {
-					agg.trainRealizedSum += trainRealized;
-					agg.trainRealizedCount += 1;
-					agg.bestTrainRealized = Math.max(agg.bestTrainRealized, trainRealized);
-				}
-				if (evalRealized !== null) {
-					agg.evalRealizedSum += evalRealized;
-					agg.evalRealizedCount += 1;
-					agg.bestEvalRealized = Math.max(agg.bestEvalRealized, evalRealized);
-				}
-				if (total !== null) {
-					agg.totalSum += total;
-					agg.totalCount += 1;
-					agg.bestTotalPnl = Math.max(agg.bestTotalPnl, total);
-				}
-				if (metric !== null) {
-					agg.metricSum += metric;
-					agg.metricCount += 1;
-					agg.bestMetric = Math.max(agg.bestMetric, metric);
-					chunkMetricSum += metric;
-					chunkMetricCount += 1;
+				const member: GenMember = {
+					fitness,
+					pnl,
+					realized,
+					total,
+					metric,
+					drawdown,
+					trainRealized,
+					evalRealized
+				};
+				const list = membersMap.get(genValue);
+				if (list) {
+					list.push(member);
+				} else {
+					membersMap.set(genValue, [member]);
 				}
 			}
 
-			if (trainRealized !== null) {
-				chunkTrainRealizedSum += trainRealized;
-				chunkTrainRealizedCount += 1;
-				chunkTrainRealizedBest = Math.max(chunkTrainRealizedBest, trainRealized);
-			}
-			if (evalRealized !== null) {
-				chunkEvalRealizedSum += evalRealized;
-				chunkEvalRealizedCount += 1;
-				chunkEvalRealizedBest = Math.max(chunkEvalRealizedBest, evalRealized);
+			if (fitness !== null) {
+				chunkBestFitness = Math.max(chunkBestFitness, fitness);
 			}
 
 			const issueId = formatIssueId(row);
@@ -342,16 +266,8 @@
 		}
 
 		logs.push(...rows);
-		genAgg = aggMap;
+		genMembers = membersMap;
 		bestFitness = chunkBestFitness;
-		metricSum = chunkMetricSum;
-		metricCount = chunkMetricCount;
-		trainRealizedSum = chunkTrainRealizedSum;
-		trainRealizedCount = chunkTrainRealizedCount;
-		trainRealizedBest = chunkTrainRealizedBest;
-		evalRealizedSum = chunkEvalRealizedSum;
-		evalRealizedCount = chunkEvalRealizedCount;
-		evalRealizedBest = chunkEvalRealizedBest;
 		issueState = nextIssue;
 	}
 
@@ -430,37 +346,101 @@
     let retKey = $derived(hasEval ? 'eval_ret_mean' : 'train_ret_mean');
     let wMetricKey = $derived('w_sortino');
     let metricLabel = $derived('SORTINO');
-	let avgMetric = $derived(avgOrNull(metricSum, metricCount));
-	let trainRealizedAvg = $derived(avgOrNull(trainRealizedSum, trainRealizedCount));
-	let evalRealizedAvg = $derived(avgOrNull(evalRealizedSum, evalRealizedCount));
-	let hasTrainRealized = $derived(trainRealizedCount > 0);
-	let hasEvalRealized = $derived(evalRealizedCount > 0);
 
     // Data Aggregation by Generation
     let genData = $derived.by(() => {
-        if (genAgg.size === 0) return [];
+        if (genMembers.size === 0) return [];
 
-        return Array.from(genAgg.values())
-			.map((agg) => ({
-				gen: agg.gen,
-				count: agg.count,
-				bestFitness: safeBest(agg.bestFitness),
-				avgFitness: safeAvg(agg.fitnessSum, agg.fitnessCount),
-				bestPnl: safeBest(agg.bestPnl),
-				avgPnl: safeAvg(agg.pnlSum, agg.pnlCount),
-				bestRealizedPnl: safeBest(agg.bestRealizedPnl),
-				avgRealizedPnl: safeAvg(agg.realizedSum, agg.realizedCount),
-				bestTrainRealized: safeBest(agg.bestTrainRealized),
-				avgTrainRealized: safeAvg(agg.trainRealizedSum, agg.trainRealizedCount),
-				bestEvalRealized: safeBest(agg.bestEvalRealized),
-				avgEvalRealized: safeAvg(agg.evalRealizedSum, agg.evalRealizedCount),
-				bestTotalPnl: safeBest(agg.bestTotalPnl),
-				avgTotalPnl: safeAvg(agg.totalSum, agg.totalCount),
-				bestMetric: safeBest(agg.bestMetric),
-				avgMetric: safeAvg(agg.metricSum, agg.metricCount)
-			}))
-			.sort((a, b) => a.gen - b.gen);
+        return Array.from(genMembers.entries())
+			.sort(([genA], [genB]) => genA - genB)
+			.map(([gen, members]) => {
+				const selected = selectMembers(members);
+				const fitnessValues = finiteValues(selected.map((m) => m.fitness));
+				const pnlValues = finiteValues(selected.map((m) => m.pnl));
+				const realizedValues = finiteValues(selected.map((m) => m.realized));
+				const totalValues = finiteValues(selected.map((m) => m.total));
+				const metricValues = finiteValues(selected.map((m) => m.metric));
+				const drawdownValues = finiteValues(selected.map((m) => m.drawdown));
+				const trainRealizedValues = finiteValues(selected.map((m) => m.trainRealized));
+				const evalRealizedValues = finiteValues(selected.map((m) => m.evalRealized));
+				const sortedFitness = [...fitnessValues].sort((a, b) => a - b);
+				const metricSum = metricValues.reduce((acc, v) => acc + v, 0);
+				const trainRealizedSum = trainRealizedValues.reduce((acc, v) => acc + v, 0);
+				const evalRealizedSum = evalRealizedValues.reduce((acc, v) => acc + v, 0);
+
+				return {
+					gen,
+					population: members.length,
+					count: selected.length,
+					bestFitness: maxValue(fitnessValues),
+					avgFitness: meanValue(fitnessValues),
+					p50Fitness: percentileValue(sortedFitness, 0.5),
+					p90Fitness: percentileValue(sortedFitness, 0.9),
+					bestPnl: maxValue(pnlValues),
+					avgPnl: meanValue(pnlValues),
+					bestRealizedPnl: maxValue(realizedValues),
+					avgRealizedPnl: meanValue(realizedValues),
+					bestTrainRealized: maxValue(trainRealizedValues),
+					avgTrainRealized: meanValue(trainRealizedValues),
+					bestEvalRealized: maxValue(evalRealizedValues),
+					avgEvalRealized: meanValue(evalRealizedValues),
+					bestTotalPnl: maxValue(totalValues),
+					avgTotalPnl: meanValue(totalValues),
+					bestMetric: maxValue(metricValues),
+					avgMetric: meanValue(metricValues),
+					metricSum,
+					metricCount: metricValues.length,
+					trainRealizedSum,
+					trainRealizedCount: trainRealizedValues.length,
+					evalRealizedSum,
+					evalRealizedCount: evalRealizedValues.length,
+					maxDrawdown: maxValue(drawdownValues),
+					minDrawdown: minValue(drawdownValues),
+					avgDrawdown: meanValue(drawdownValues)
+				};
+			});
     });
+
+	let filteredSummary = $derived.by(() => {
+		let metricSum = 0;
+		let metricCount = 0;
+		let trainSum = 0;
+		let trainCount = 0;
+		let trainBest = Number.NEGATIVE_INFINITY;
+		let evalSum = 0;
+		let evalCount = 0;
+		let evalBest = Number.NEGATIVE_INFINITY;
+
+		for (const g of genData) {
+			metricSum += g.metricSum;
+			metricCount += g.metricCount;
+			trainSum += g.trainRealizedSum;
+			trainCount += g.trainRealizedCount;
+			trainBest = Math.max(trainBest, g.bestTrainRealized);
+			evalSum += g.evalRealizedSum;
+			evalCount += g.evalRealizedCount;
+			evalBest = Math.max(evalBest, g.bestEvalRealized);
+		}
+
+		return {
+			metricSum,
+			metricCount,
+			trainSum,
+			trainCount,
+			trainBest,
+			evalSum,
+			evalCount,
+			evalBest
+		};
+	});
+
+	let avgMetric = $derived(avgOrNull(filteredSummary.metricSum, filteredSummary.metricCount));
+	let trainRealizedAvg = $derived(avgOrNull(filteredSummary.trainSum, filteredSummary.trainCount));
+	let evalRealizedAvg = $derived(avgOrNull(filteredSummary.evalSum, filteredSummary.evalCount));
+	let trainRealizedBest = $derived(filteredSummary.trainBest);
+	let evalRealizedBest = $derived(filteredSummary.evalBest);
+	let hasTrainRealized = $derived(filteredSummary.trainCount > 0);
+	let hasEvalRealized = $derived(filteredSummary.evalCount > 0);
 
 	let zoomWindowSize = $derived(genData.length === 0 ? 0 : (zoomWindow <= 0 ? genData.length : Math.min(zoomWindow, genData.length)));
 	let minZoomWindow = $derived(genData.length === 0 ? 0 : Math.min(MIN_ZOOM_WINDOW, genData.length));
@@ -483,6 +463,12 @@
 		const startIndex = Math.min(zoomStart, maxZoomStart);
 		return genData.slice(startIndex, startIndex + zoomWindowSize);
 	});
+
+	const preferredRealized = (member: GenMember) => {
+		if (member.evalRealized !== null) return member.evalRealized;
+		if (member.trainRealized !== null) return member.trainRealized;
+		return member.realized;
+	};
 
 	function zoomIn() {
 		if (genData.length === 0) return;
@@ -518,9 +504,67 @@
 				description: `Best ${sourceLabel} PNL, realized PNL, and ${metricLabel} across windows`
 			};
 		}
+		if (chartTab === 'drawdown') {
+			return {
+				title: 'Drawdown Monitoring',
+				description: 'Worst and average drawdown per generation'
+			};
+		}
+		if (chartTab === 'frontier') {
+			return {
+				title: 'Risk/Return Frontier',
+				description: 'Best realized PNL plotted against max drawdown'
+			};
+		}
 		return {
 			title: 'Realized PNL Focus',
 			description: 'Best realized PNL for training and eval tracked independently'
+		};
+	});
+
+	let plateauMetricLabel = $derived.by(() => {
+		if (hasEvalRealized) return 'Best Eval Realized PNL';
+		if (hasTrainRealized) return 'Best Train Realized PNL';
+		return 'Best Fitness';
+	});
+
+	let plateauResult = $derived.by(() => {
+		if (genData.length === 0) {
+			return { plateauGen: null, lastImprovementGen: null };
+		}
+		const windowSize = Math.max(1, Math.round(plateauWindow));
+		const minDelta = Math.max(0, plateauMinDelta);
+		let best = Number.NEGATIVE_INFINITY;
+		let lastImprovementIndex: number | null = null;
+		let plateauIndex: number | null = null;
+
+		const pickValue = (g) => {
+			if (hasEvalRealized) return g.bestEvalRealized;
+			if (hasTrainRealized) return g.bestTrainRealized;
+			return g.bestFitness;
+		};
+
+		for (let i = 0; i < genData.length; i += 1) {
+			const value = pickValue(genData[i]);
+			if (!Number.isFinite(value)) continue;
+			if (best === Number.NEGATIVE_INFINITY) {
+				best = value;
+				lastImprovementIndex = i;
+				continue;
+			}
+			if (value > best + minDelta) {
+				best = value;
+				lastImprovementIndex = i;
+			}
+			if (lastImprovementIndex !== null && i - lastImprovementIndex >= windowSize) {
+				plateauIndex = i;
+				break;
+			}
+		}
+
+		return {
+			plateauGen: plateauIndex !== null ? genData[plateauIndex]?.gen ?? null : null,
+			lastImprovementGen: lastImprovementIndex !== null ? genData[lastImprovementIndex]?.gen ?? null : null
 		};
 	});
 
@@ -541,6 +585,22 @@
                 borderColor: 'rgb(147, 197, 253)',
                 backgroundColor: 'rgba(147, 197, 253, 0.2)',
                 borderDash: [5, 5],
+                tension: 0.1
+            },
+            {
+                label: 'P90 Fitness',
+                data: visibleGenData.map(g => g.p90Fitness),
+                borderColor: 'rgb(14, 116, 144)',
+                backgroundColor: 'rgba(14, 116, 144, 0.15)',
+                borderDash: [4, 4],
+                tension: 0.1
+            },
+            {
+                label: 'Median Fitness',
+                data: visibleGenData.map(g => g.p50Fitness),
+                borderColor: 'rgb(56, 189, 248)',
+                backgroundColor: 'rgba(56, 189, 248, 0.12)',
+                borderDash: [2, 6],
                 tension: 0.1
             }
         ]
@@ -575,6 +635,79 @@
             }
         ]
     });
+
+	let drawdownChartData = $derived({
+		labels: visibleGenData.map(g => `Gen ${g.gen}`),
+		datasets: [
+			{
+				label: `Worst ${sourceLabel} Drawdown`,
+				data: visibleGenData.map(g => g.maxDrawdown),
+				borderColor: 'rgb(239, 68, 68)',
+				backgroundColor: 'rgba(239, 68, 68, 0.3)',
+				tension: 0.1
+			},
+			{
+				label: `Avg ${sourceLabel} Drawdown`,
+				data: visibleGenData.map(g => g.avgDrawdown),
+				borderColor: 'rgb(251, 146, 60)',
+				backgroundColor: 'rgba(251, 146, 60, 0.2)',
+				borderDash: [4, 4],
+				tension: 0.1
+			}
+		]
+	});
+
+	let frontierChartData = $derived.by(() => {
+		if (visibleGenData.length === 0) return { labels: [], datasets: [] };
+		const points = [];
+		for (const g of visibleGenData) {
+			const members = genMembers.get(g.gen);
+			if (!members) continue;
+			const selected = selectMembers(members);
+			let bestPoint = null;
+			for (const member of selected) {
+				const realized = preferredRealized(member);
+				const drawdown = member.drawdown;
+				if (realized === null || drawdown === null) continue;
+				if (!bestPoint || realized > bestPoint.y) {
+					bestPoint = { x: drawdown, y: realized, gen: g.gen };
+				}
+			}
+			if (bestPoint) points.push(bestPoint);
+		}
+
+		return {
+			labels: [],
+			datasets: [
+				{
+					label: 'Best Realized vs Drawdown',
+					data: points,
+					borderColor: 'rgb(59, 130, 246)',
+					backgroundColor: 'rgba(59, 130, 246, 0.5)',
+					showLine: false,
+					pointRadius: 3
+				}
+			]
+		};
+	});
+
+	const frontierOptions = $derived.by(() => ({
+		scales: {
+			x: {
+				type: 'linear',
+				title: {
+					display: true,
+					text: `Max ${sourceLabel} Drawdown (%)`
+				}
+			},
+			y: {
+				title: {
+					display: true,
+					text: 'Realized PNL'
+				}
+			}
+		}
+	}));
 
 	let realizedChartData = $derived.by(() => {
 		const labels = visibleGenData.map(g => `Gen ${g.gen}`);
@@ -648,7 +781,7 @@
         }
 
         // 5. Inconsistent Population
-        const counts = genData.map(g => g.count);
+        const counts = genData.map(g => g.population);
         const uniqueCounts = new Set(counts);
         if (uniqueCounts.size > 1) {
             list.push({
@@ -727,7 +860,7 @@
 			<p class="text-muted-foreground font-medium animate-pulse">Processing {logs.length || "thousands of"} individuals...</p>
 		</div>
 	{:else}
-		<div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+		<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
 			<Card.Root class="border-l-4 border-l-blue-500">
 				<Card.Header class="pb-2">
 					<Card.Title class="text-sm font-medium text-muted-foreground">Generations</Card.Title>
@@ -752,12 +885,46 @@
 					<p class="text-3xl font-bold">{formatNum(avgMetric, 2)}</p>
 				</Card.Content>
 			</Card.Root>
-            <Card.Root class="border-l-4 border-l-orange-500">
+			<Card.Root class="border-l-4 border-l-orange-500">
 				<Card.Header class="pb-2">
 					<Card.Title class="text-sm font-medium text-muted-foreground">Total Processed</Card.Title>
 				</Card.Header>
 				<Card.Content>
 					<p class="text-3xl font-bold">{logs.length.toLocaleString()}</p>
+				</Card.Content>
+			</Card.Root>
+            <Card.Root class="border-l-4 border-l-slate-500">
+				<Card.Header class="pb-2">
+					<Card.Title class="text-sm font-medium text-muted-foreground">Plateau Gen</Card.Title>
+				</Card.Header>
+				<Card.Content>
+					<p class="text-3xl font-bold">
+						{plateauResult.plateauGen ? `Gen ${plateauResult.plateauGen}` : 'Not reached'}
+					</p>
+					<p class="text-xs text-muted-foreground mt-1">
+						Metric: {plateauMetricLabel}
+					</p>
+					<p class="text-xs text-muted-foreground">
+						Last improvement: {plateauResult.lastImprovementGen ? `Gen ${plateauResult.lastImprovementGen}` : '—'}
+					</p>
+					<div class="flex items-center gap-2 mt-2 text-[10px] text-muted-foreground">
+						<span>Window</span>
+						<input
+							type="number"
+							min="50"
+							step="50"
+							bind:value={plateauWindow}
+							class="w-16 px-1 py-0.5 border rounded-md bg-background text-xs"
+						/>
+						<span>Delta</span>
+						<input
+							type="number"
+							min="0"
+							step="0.1"
+							bind:value={plateauMinDelta}
+							class="w-16 px-1 py-0.5 border rounded-md bg-background text-xs"
+						/>
+					</div>
 				</Card.Content>
 			</Card.Root>
 		</div>
@@ -780,6 +947,18 @@
                             <Card.Description>{activeChartMeta.description}</Card.Description>
                         </div>
                         <div class="flex flex-col gap-2 text-xs w-full lg:w-auto lg:items-end">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="text-muted-foreground">Population</span>
+                                <select
+                                    bind:value={populationFilter}
+                                    class="px-2 py-1 border rounded-md bg-background text-xs"
+                                >
+                                    <option value="all">All individuals</option>
+                                    <option value="top5">Top 5 by fitness</option>
+                                    <option value="top10">Top 10 by fitness</option>
+                                    <option value="top20p">Top 20% by fitness</option>
+                                </select>
+                            </div>
                             <div class="flex flex-wrap items-center gap-2">
                                 <span class="text-muted-foreground">{zoomRangeLabel}</span>
                                 <button
@@ -824,10 +1003,12 @@
                     </Card.Header>
                     <Card.Content class="pt-0">
                         <Tabs.Root bind:value={chartTab} class="w-full">
-                            <Tabs.List class="grid w-full grid-cols-3 lg:w-[720px] mb-4">
+                            <Tabs.List class="grid w-full grid-cols-2 lg:grid-cols-5 lg:w-[900px] mb-4">
                                 <Tabs.Trigger value="fitness">Fitness</Tabs.Trigger>
                                 <Tabs.Trigger value="performance">Performance</Tabs.Trigger>
                                 <Tabs.Trigger value="realized">Realized</Tabs.Trigger>
+                                <Tabs.Trigger value="drawdown">Drawdown</Tabs.Trigger>
+                                <Tabs.Trigger value="frontier">Frontier</Tabs.Trigger>
                             </Tabs.List>
 
                             <Tabs.Content value="fitness">
@@ -855,6 +1036,28 @@
                                     {:else}
                                         <div class="h-[50vh] min-h-[320px] flex items-center justify-center text-muted-foreground">
                                             No realized PNL columns found in this run.
+                                        </div>
+                                    {/if}
+                                {/if}
+                            </Tabs.Content>
+
+                            <Tabs.Content value="drawdown">
+                                {#if chartTab === 'drawdown'}
+                                    <div class="h-[65vh] min-h-[420px]">
+                                        <GaChart data={drawdownChartData} />
+                                    </div>
+                                {/if}
+                            </Tabs.Content>
+
+                            <Tabs.Content value="frontier">
+                                {#if chartTab === 'frontier'}
+                                    {#if frontierChartData.datasets.length > 0}
+                                        <div class="h-[65vh] min-h-[420px]">
+                                            <GaChart data={frontierChartData} options={frontierOptions} type="scatter" />
+                                        </div>
+                                    {:else}
+                                        <div class="h-[50vh] min-h-[320px] flex items-center justify-center text-muted-foreground">
+                                            Not enough data to build the frontier yet.
                                         </div>
                                     {/if}
                                 {/if}
@@ -899,6 +1102,7 @@
                                         <div class="flex justify-between"><span>Max Realized PNL:</span> <span class="font-mono text-emerald-500">{g.bestRealizedPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max Total PNL:</span> <span class="font-mono text-teal-500">{g.bestTotalPnl.toFixed(2)}</span></div>
                                         <div class="flex justify-between"><span>Max {metricLabel}:</span> <span class="font-mono text-purple-500">{g.bestMetric.toFixed(2)}</span></div>
+                                        <div class="flex justify-between"><span>Worst Drawdown:</span> <span class="font-mono text-red-500">{formatNum(g.maxDrawdown, 2)}%</span></div>
                                         </div>
                                     </div>
                             {/each}
@@ -917,12 +1121,14 @@
                             <Table.Header>
                                 <Table.Row>
                                     <Table.Head>Gen</Table.Head>
-                                    <Table.Head>Population</Table.Head>
+                                    <Table.Head>Selected</Table.Head>
                                     <Table.Head>Best Fitness</Table.Head>
                                     <Table.Head>Avg Fitness</Table.Head>
                                     <Table.Head>Best {sourceLabel} Fitness PNL</Table.Head>
                                     <Table.Head>Best Realized</Table.Head>
                                     <Table.Head>Best Total</Table.Head>
+                                    <Table.Head>Worst DD</Table.Head>
+                                    <Table.Head>Avg DD</Table.Head>
                                     <Table.Head>Best {metricLabel}</Table.Head>
                                 </Table.Row>
                             </Table.Header>
@@ -930,12 +1136,14 @@
                                 {#each genData.slice().reverse() as g}
                                     <Table.Row>
                                         <Table.Cell class="font-bold">{g.gen}</Table.Cell>
-                                        <Table.Cell>{g.count}</Table.Cell>
+                                        <Table.Cell>{g.count === g.population ? g.population : `${g.count}/${g.population}`}</Table.Cell>
                                         <Table.Cell class="text-blue-500 font-medium">{g.bestFitness.toFixed(4)}</Table.Cell>
                                         <Table.Cell class="text-muted-foreground">{g.avgFitness.toFixed(4)}</Table.Cell>
                                         <Table.Cell class={g.bestPnl >= 0 ? 'text-green-500' : 'text-red-500'}>{g.bestPnl.toFixed(4)}</Table.Cell>
                                         <Table.Cell class={g.bestRealizedPnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{formatNum(g.bestRealizedPnl)}</Table.Cell>
                                         <Table.Cell class={g.bestTotalPnl >= 0 ? 'text-teal-500' : 'text-red-500'}>{formatNum(g.bestTotalPnl)}</Table.Cell>
+                                        <Table.Cell class="text-red-500">{formatNum(g.maxDrawdown)}%</Table.Cell>
+                                        <Table.Cell class="text-muted-foreground">{formatNum(g.avgDrawdown)}%</Table.Cell>
                                         <Table.Cell class="text-purple-500">{g.bestMetric.toFixed(4)}</Table.Cell>
                                     </Table.Row>
                                 {/each}
