@@ -11,7 +11,8 @@
         CategoryScale,
         LineController,
         Decimation,
-        type ChartConfiguration
+        type ChartConfiguration,
+        type ChartType
     } from 'chart.js';
     import zoomPlugin from 'chartjs-plugin-zoom';
 
@@ -28,7 +29,7 @@
         zoomPlugin
     );
 
-    let { data, options = {} } = $props();
+    let { data, options = {}, type = 'line' } = $props();
     let canvas: HTMLCanvasElement;
     let chart: Chart;
 
@@ -87,6 +88,27 @@
         }
     };
 
+    const mergeOptions = () => ({
+        ...defaultOptions,
+        ...options,
+        interaction: {
+            ...defaultOptions.interaction,
+            ...(options?.interaction ?? {})
+        },
+        elements: {
+            ...defaultOptions.elements,
+            ...(options?.elements ?? {})
+        },
+        plugins: {
+            ...defaultOptions.plugins,
+            ...(options?.plugins ?? {})
+        },
+        scales: {
+            ...defaultOptions.scales,
+            ...(options?.scales ?? {})
+        }
+    });
+
     $effect(() => {
         if (!chart) return;
         const labels = Array.isArray(data?.labels) ? [...data.labels] : [];
@@ -103,7 +125,14 @@
 
         chart.data.labels = labels;
         chart.data.datasets = datasets;
-        chart.options.scales.y1.display = datasets.some(d => d.yAxisID === 'y1');
+        chart.options = mergeOptions();
+        if (chart.options.scales?.y1) {
+            chart.options.scales.y1.display = datasets.some(d => d.yAxisID === 'y1');
+        }
+        chart.options.interaction = {
+            ...(chart.options.interaction ?? {}),
+            mode: type === 'scatter' ? 'nearest' : 'index'
+        };
         const usesXY = datasets.some((ds) =>
             Array.isArray(ds.data) &&
             ds.data.some((point) => point && typeof point === 'object' && ('x' in point || 'y' in point))
@@ -115,6 +144,11 @@
         }
         if (chart.options.plugins?.decimation) {
             chart.options.plugins.decimation.enabled = usesXY && seriesCount > 2000;
+        }
+        if (chart.options.plugins?.zoom) {
+            const zoomMode = type === 'scatter' ? 'xy' : 'x';
+            chart.options.plugins.zoom.pan.mode = zoomMode;
+            chart.options.plugins.zoom.zoom.mode = zoomMode;
         }
         chart.update('none');
     });
@@ -128,9 +162,9 @@
             }))
             : [];
         const config: ChartConfiguration = {
-            type: 'line',
+            type: type as ChartType,
             data: { labels, datasets },
-            options: { ...defaultOptions, ...options }
+            options: mergeOptions()
         };
         chart = new Chart(canvas, config);
     });
