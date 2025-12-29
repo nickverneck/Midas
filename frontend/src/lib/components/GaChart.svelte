@@ -14,7 +14,6 @@
         type ChartConfiguration,
         type ChartType
     } from 'chart.js';
-    import zoomPlugin from 'chartjs-plugin-zoom';
 
     Chart.register(
         Title,
@@ -25,13 +24,30 @@
         PointElement,
         CategoryScale,
         LineController,
-        Decimation,
-        zoomPlugin
+        Decimation
     );
 
     let { data, options = {}, type = 'line' } = $props();
     let canvas: HTMLCanvasElement;
     let chart: Chart;
+    let destroyed = false;
+    let zoomRegistered = false;
+    let zoomRegisterPromise: Promise<void> | null = null;
+
+    const ensureZoomPlugin = async () => {
+        if (zoomRegistered || typeof window === 'undefined') return;
+        if (!zoomRegisterPromise) {
+            zoomRegisterPromise = import('chartjs-plugin-zoom')
+                .then((mod) => {
+                    Chart.register(mod.default ?? mod);
+                    zoomRegistered = true;
+                })
+                .catch(() => {
+                    // Zoom is optional; charts still render without it.
+                });
+        }
+        await zoomRegisterPromise;
+    };
 
     const defaultOptions = {
         responsive: true,
@@ -154,22 +170,28 @@
     });
 
     onMount(() => {
-        const labels = Array.isArray(data?.labels) ? [...data.labels] : [];
-        const datasets = Array.isArray(data?.datasets)
-            ? data.datasets.map((ds) => ({
-                ...ds,
-                data: Array.isArray(ds.data) ? [...ds.data] : []
-            }))
-            : [];
-        const config: ChartConfiguration = {
-            type: type as ChartType,
-            data: { labels, datasets },
-            options: mergeOptions()
+        const setup = async () => {
+            await ensureZoomPlugin();
+            if (destroyed) return;
+            const labels = Array.isArray(data?.labels) ? [...data.labels] : [];
+            const datasets = Array.isArray(data?.datasets)
+                ? data.datasets.map((ds) => ({
+                    ...ds,
+                    data: Array.isArray(ds.data) ? [...ds.data] : []
+                }))
+                : [];
+            const config: ChartConfiguration = {
+                type: type as ChartType,
+                data: { labels, datasets },
+                options: mergeOptions()
+            };
+            chart = new Chart(canvas, config);
         };
-        chart = new Chart(canvas, config);
+        void setup();
     });
 
     onDestroy(() => {
+        destroyed = true;
         if (chart) chart.destroy();
     });
 </script>
