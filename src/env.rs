@@ -29,6 +29,26 @@ pub struct EnvConfig {
     pub risk_penalty: f64,
     /// Small penalty to discourage idling.
     pub idle_penalty: f64,
+    /// Base penalty per step while in drawdown and holding a position.
+    pub drawdown_penalty: f64,
+    /// Linear growth multiplier for drawdown penalty per consecutive step.
+    pub drawdown_penalty_growth: f64,
+    /// Penalty applied as session close approaches (scaled within last hour).
+    pub session_close_penalty: f64,
+    /// Max holding bars when unrealized PnL is positive (0 disables).
+    pub max_hold_bars_positive: usize,
+    /// Max holding bars while in drawdown (0 disables).
+    pub max_hold_bars_drawdown: usize,
+    /// Penalty for using Revert when flat.
+    pub invalid_revert_penalty: f64,
+    /// Linear growth for consecutive invalid Revert penalties.
+    pub invalid_revert_penalty_growth: f64,
+    /// Penalty per step after max flat-hold bars.
+    pub flat_hold_penalty: f64,
+    /// Linear growth for flat-hold penalties beyond max.
+    pub flat_hold_penalty_growth: f64,
+    /// Max bars allowed to stay flat with Hold before penalties.
+    pub max_flat_hold_bars: usize,
 }
 
 impl Default for EnvConfig {
@@ -42,6 +62,16 @@ impl Default for EnvConfig {
             default_session_open: true,
             risk_penalty: 0.0,
             idle_penalty: 0.0,
+            drawdown_penalty: 0.0,
+            drawdown_penalty_growth: 0.0,
+            session_close_penalty: 0.0,
+            max_hold_bars_positive: 0,
+            max_hold_bars_drawdown: 0,
+            invalid_revert_penalty: 0.0,
+            invalid_revert_penalty_growth: 0.0,
+            flat_hold_penalty: 0.0,
+            flat_hold_penalty_growth: 0.0,
+            max_flat_hold_bars: 0,
         }
     }
 }
@@ -52,6 +82,8 @@ pub struct StepContext {
     pub session_open: bool,
     /// Whether margin is sufficient. If false, treat as margin call violation.
     pub margin_ok: bool,
+    /// Minutes until session close (if known).
+    pub minutes_to_close: Option<f64>,
 }
 
 impl Default for StepContext {
@@ -59,6 +91,7 @@ impl Default for StepContext {
         Self {
             session_open: true,
             margin_ok: true,
+            minutes_to_close: None,
         }
     }
 }
@@ -70,6 +103,12 @@ pub struct EnvState {
     pub cash: f64,
     pub last_price: f64,
     pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+    pub equity_peak: f64,
+    pub drawdown_steps: usize,
+    pub position_entry_step: usize,
+    pub flat_steps: usize,
+    pub invalid_revert_streak: usize,
     pub done: bool,
 }
 
@@ -78,6 +117,11 @@ pub struct StepInfo {
     pub commission_paid: f64,
     pub slippage_paid: f64,
     pub pnl_change: f64,
+    pub realized_pnl_change: f64,
+    pub drawdown_penalty: f64,
+    pub session_close_penalty: f64,
+    pub invalid_revert_penalty: f64,
+    pub flat_hold_penalty: f64,
     pub margin_call_violation: bool,
     pub position_limit_violation: bool,
     pub session_closed_violation: bool,
@@ -98,6 +142,12 @@ impl TradingEnv {
                 cash: initial_balance,
                 last_price: initial_price,
                 unrealized_pnl: 0.0,
+                realized_pnl: 0.0,
+                equity_peak: initial_balance,
+                drawdown_steps: 0,
+                position_entry_step: 0,
+                flat_steps: 0,
+                invalid_revert_streak: 0,
                 done: false,
             },
         }
@@ -110,6 +160,12 @@ impl TradingEnv {
             cash: initial_balance,
             last_price: initial_price,
             unrealized_pnl: 0.0,
+            realized_pnl: 0.0,
+            equity_peak: initial_balance,
+            drawdown_steps: 0,
+            position_entry_step: 0,
+            flat_steps: 0,
+            invalid_revert_streak: 0,
             done: false,
         };
     }
@@ -128,6 +184,11 @@ impl TradingEnv {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
+                    realized_pnl_change: 0.0,
+                    drawdown_penalty: 0.0,
+                    session_close_penalty: 0.0,
+                    invalid_revert_penalty: 0.0,
+                    flat_hold_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation: false,
                     session_closed_violation: true,
@@ -142,11 +203,41 @@ impl TradingEnv {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
+                    realized_pnl_change: 0.0,
+                    drawdown_penalty: 0.0,
+                    session_close_penalty: 0.0,
+                    invalid_revert_penalty: 0.0,
+                    flat_hold_penalty: 0.0,
                     margin_call_violation: true,
                     position_limit_violation: false,
                     session_closed_violation: false,
                 },
             );
+        }
+
+        let mut action = action;
+        let mut invalid_revert_penalty = 0.0;
+        if self.state.position == 0 && matches!(action, Action::Revert) {
+            self.state.invalid_revert_streak = self.state.invalid_revert_streak.saturating_add(1);
+            let streak = self.state.invalid_revert_streak as f64;
+            invalid_revert_penalty =
+                self.cfg.invalid_revert_penalty * (1.0 + self.cfg.invalid_revert_penalty_growth * (streak - 1.0).max(0.0));
+            action = Action::Hold;
+        } else {
+            self.state.invalid_revert_streak = 0;
+        }
+        if self.state.position != 0 {
+            let hold_bars = self.state.step.saturating_sub(self.state.position_entry_step);
+            if self.cfg.max_hold_bars_drawdown > 0
+                && self.state.drawdown_steps >= self.cfg.max_hold_bars_drawdown
+            {
+                action = Action::Revert;
+            } else if self.cfg.max_hold_bars_positive > 0
+                && self.state.unrealized_pnl > 0.0
+                && hold_bars >= self.cfg.max_hold_bars_positive
+            {
+                action = Action::Revert;
+            }
         }
 
         let target_position = match action {
@@ -170,6 +261,11 @@ impl TradingEnv {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
+                    realized_pnl_change: 0.0,
+                    drawdown_penalty: 0.0,
+                    session_close_penalty: 0.0,
+                    invalid_revert_penalty: 0.0,
+                    flat_hold_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation,
                     session_closed_violation: false,
@@ -188,6 +284,11 @@ impl TradingEnv {
                         commission_paid: 0.0,
                         slippage_paid: 0.0,
                         pnl_change: 0.0,
+                        realized_pnl_change: 0.0,
+                        drawdown_penalty: 0.0,
+                        session_close_penalty: 0.0,
+                        invalid_revert_penalty: 0.0,
+                        flat_hold_penalty: 0.0,
                         margin_call_violation: true,
                         position_limit_violation: false,
                         session_closed_violation: false,
@@ -206,10 +307,71 @@ impl TradingEnv {
 
         let trade_costs = commission_paid + slippage_paid;
         self.state.cash -= trade_costs;
-        self.state.position = target_position;
-        self.state.last_price = next_price;
         self.state.unrealized_pnl += pnl_change;
+        let closing = self.state.position != 0
+            && (target_position == 0
+                || self.state.position.signum() != target_position.signum());
+        let mut realized_pnl_change = 0.0;
+        if closing {
+            realized_pnl_change = self.state.unrealized_pnl;
+            self.state.cash += self.state.unrealized_pnl;
+            self.state.realized_pnl += self.state.unrealized_pnl;
+            self.state.unrealized_pnl = 0.0;
+        }
+        self.state.position = target_position;
+        if self.state.position == 0 {
+            self.state.position_entry_step = self.state.step + 1;
+        } else if delta_pos != 0 {
+            self.state.position_entry_step = self.state.step + 1;
+        }
+        self.state.last_price = next_price;
         self.state.step += 1;
+
+        let equity = self.state.cash + self.state.unrealized_pnl;
+        if self.state.position == 0 {
+            self.state.drawdown_steps = 0;
+            self.state.equity_peak = equity;
+            self.state.flat_steps = self.state.flat_steps.saturating_add(1);
+        } else if equity >= self.state.equity_peak {
+            self.state.equity_peak = equity;
+            self.state.drawdown_steps = 0;
+            self.state.flat_steps = 0;
+        } else {
+            self.state.drawdown_steps = self.state.drawdown_steps.saturating_add(1);
+            self.state.flat_steps = 0;
+        }
+
+        let drawdown_penalty = if self.state.position != 0 && self.state.drawdown_steps > 0 {
+            let steps = self.state.drawdown_steps as f64;
+            self.cfg.drawdown_penalty * steps * (1.0 + self.cfg.drawdown_penalty_growth * (steps - 1.0).max(0.0))
+        } else {
+            0.0
+        };
+
+        let session_close_penalty = if self.state.position != 0 {
+            if let Some(mins) = ctx.minutes_to_close {
+                if mins >= 0.0 && mins <= 60.0 {
+                    let scale = (60.0 - mins) / 60.0;
+                    self.cfg.session_close_penalty * scale
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let flat_hold_penalty = if self.state.position == 0
+            && self.cfg.max_flat_hold_bars > 0
+            && self.state.flat_steps > self.cfg.max_flat_hold_bars
+        {
+            let extra = (self.state.flat_steps - self.cfg.max_flat_hold_bars) as f64;
+            self.cfg.flat_hold_penalty * (1.0 + self.cfg.flat_hold_penalty_growth * (extra - 1.0).max(0.0))
+        } else {
+            0.0
+        };
 
         let mut reward = pnl_change
             - trade_costs
@@ -218,6 +380,18 @@ impl TradingEnv {
         if self.state.position == 0 && self.cfg.idle_penalty > 0.0 {
             reward -= self.cfg.idle_penalty;
         }
+        if drawdown_penalty > 0.0 {
+            reward -= drawdown_penalty;
+        }
+        if session_close_penalty > 0.0 {
+            reward -= session_close_penalty;
+        }
+        if invalid_revert_penalty > 0.0 {
+            reward -= invalid_revert_penalty;
+        }
+        if flat_hold_penalty > 0.0 {
+            reward -= flat_hold_penalty;
+        }
 
         (
             reward,
@@ -225,6 +399,11 @@ impl TradingEnv {
                 commission_paid,
                 slippage_paid,
                 pnl_change,
+                realized_pnl_change,
+                drawdown_penalty,
+                session_close_penalty,
+                invalid_revert_penalty,
+                flat_hold_penalty,
                 margin_call_violation: false,
                 position_limit_violation: false,
                 session_closed_violation: false,
@@ -347,6 +526,7 @@ mod tests {
             StepContext {
                 session_open: false,
                 margin_ok: true,
+                minutes_to_close: None,
             },
         );
         assert!(info.session_closed_violation);
