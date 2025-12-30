@@ -5,6 +5,31 @@ import Papa from 'papaparse';
 
 const DEFAULT_LIMIT = 1000;
 const CHUNK_SIZE = 64 * 1024;
+const DEFAULT_LOG_DIR = 'runs_ga';
+
+const resolveProjectRoot = () => {
+    const cwd = process.cwd();
+    if (fs.existsSync(path.join(cwd, 'Cargo.toml'))) {
+        return cwd;
+    }
+    const parent = path.resolve(cwd, '..');
+    if (fs.existsSync(path.join(parent, 'Cargo.toml'))) {
+        return parent;
+    }
+    return cwd;
+};
+
+const resolveLogPath = (dirParam: string | null) => {
+    const root = resolveProjectRoot();
+    const dir = dirParam && dirParam.trim() !== '' ? dirParam.trim() : DEFAULT_LOG_DIR;
+    const candidate = path.isAbsolute(dir) ? dir : path.join(root, dir);
+    const resolved = path.resolve(candidate);
+    const relative = path.relative(root, resolved);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        return null;
+    }
+    return path.join(resolved, 'ga_log.csv');
+};
 
 function readHeader(filePath: string): string {
     const fd = fs.openSync(filePath, 'r');
@@ -51,7 +76,11 @@ async function readLines(filePath: string, offset: number, limit: number): Promi
 }
 
 export const GET = async ({ url }) => {
-    const logPath = path.resolve('../runs_ga/ga_log.csv');
+    const logPath = resolveLogPath(url.searchParams.get('dir'));
+
+    if (!logPath) {
+        return json({ error: 'Invalid log directory' }, { status: 400 });
+    }
 
     if (!fs.existsSync(logPath)) {
         return json({ error: 'Log file not found' }, { status: 404 });

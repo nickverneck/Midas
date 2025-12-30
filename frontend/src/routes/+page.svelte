@@ -4,6 +4,7 @@
 	import * as Table from "$lib/components/ui/table";
 	import { Badge } from "$lib/components/ui/badge";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
+	import { Input } from "$lib/components/ui/input";
     import * as Tabs from "$lib/components/ui/tabs";
     import * as Alert from "$lib/components/ui/alert";
     import GaChart from "$lib/components/GaChart.svelte";
@@ -83,6 +84,8 @@
     let doneLoading = $state(false);
     let nextOffset = $state(0);
     let logPage = $state(1);
+	let logDir = $state("runs_ga");
+	let activeLogDir = $state("runs_ga");
 	let chartTab = $state<ChartTab>('fitness');
 	let populationFilter = $state<PopulationFilter>('all');
 	let zoomWindow = $state(0);
@@ -124,6 +127,15 @@
 	const meanValue = (values: number[]) => values.length ? values.reduce((acc, v) => acc + v, 0) / values.length : 0;
 	const maxValue = (values: number[]) => values.length ? Math.max(...values) : 0;
 	const minValue = (values: number[]) => values.length ? Math.min(...values) : 0;
+	const normalizeLogDir = (value: string) => value.trim() || "runs_ga";
+	const buildLogsUrl = (offset: number, dir: string) => {
+		const params = new URLSearchParams({
+			limit: String(logChunk),
+			offset: String(offset),
+			dir
+		});
+		return `/api/logs?${params.toString()}`;
+	};
 	const percentileValue = (sortedValues: number[], percentile: number) => {
 		if (sortedValues.length === 0) return null;
 		const index = (sortedValues.length - 1) * percentile;
@@ -280,15 +292,20 @@
 		loadingMore = false;
 		resetState();
 		try {
-			const res = await fetch(`/api/logs?limit=${logChunk}&offset=0`);
-            if (!res.ok) throw new Error("Failed to fetch logs");
+			const dir = normalizeLogDir(logDir);
+			activeLogDir = dir;
+			const res = await fetch(buildLogsUrl(0, dir));
+            if (!res.ok) {
+				const errPayload = await res.json().catch(() => null);
+				throw new Error(errPayload?.error || `Failed to fetch logs (${res.status})`);
+			}
 			const payload = await res.json();
 			if (token !== loadToken) return;
 			updateFromChunk(payload.data || []);
             nextOffset = payload.nextOffset || logs.length;
             doneLoading = payload.done || false;
             if (!doneLoading) {
-				scheduleLoadMore(token);
+				scheduleLoadMore(token, dir);
 			}
 		} catch (e) {
 			console.error('Failed to fetch logs', e);
@@ -302,19 +319,19 @@
 
 	onMount(fetchLogs);
 
-    function scheduleLoadMore(token: number) {
-        if (doneLoading || loadingMore || token !== loadToken) return;
+    function scheduleLoadMore(token: number, dir: string) {
+        if (doneLoading || loadingMore || token !== loadToken || dir !== activeLogDir) return;
         loadingMore = true;
         setTimeout(async () => {
-			if (token !== loadToken) {
+			if (token !== loadToken || dir !== activeLogDir) {
 				loadingMore = false;
 				return;
 			}
             try {
-                const res = await fetch(`/api/logs?limit=${logChunk}&offset=${nextOffset}`);
+                const res = await fetch(buildLogsUrl(nextOffset, dir));
                 if (!res.ok) throw new Error("Failed to fetch logs");
                 const payload = await res.json();
-				if (token !== loadToken) return;
+				if (token !== loadToken || dir !== activeLogDir) return;
                 if (payload.data && payload.data.length > 0) {
 					updateFromChunk(payload.data);
                     nextOffset = payload.nextOffset || (nextOffset + payload.data.length);
@@ -330,7 +347,7 @@
             } finally {
                 loadingMore = false;
                 if (!doneLoading) {
-                    scheduleLoadMore(token);
+                    scheduleLoadMore(token, dir);
                 }
             }
         }, 60);
@@ -831,18 +848,27 @@
 </script>
 
 <div class="p-8 space-y-8 max-w-[1600px] mx-auto">
-	<div class="flex justify-between items-center bg-card p-6 rounded-xl border shadow-sm">
+	<div class="flex flex-wrap justify-between items-center gap-4 bg-card p-6 rounded-xl border shadow-sm">
 		<div>
             <h1 class="text-4xl font-bold tracking-tight bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">Midas Dashboard</h1>
             <p class="text-muted-foreground mt-1">Analyzing Training Performance & Evolution</p>
         </div>
-        <div class="flex gap-4">
+        <div class="flex flex-wrap items-center gap-3 justify-end">
+            <div class="flex items-center gap-2">
+                <span class="text-xs text-muted-foreground">Log folder</span>
+                <Input
+                    class="h-9 w-48"
+                    placeholder="runs_ga"
+                    bind:value={logDir}
+                    aria-label="Log folder for charts"
+                />
+            </div>
+		    <button onclick={fetchLogs} class="px-5 py-2.5 bg-secondary text-secondary-foreground rounded-lg font-semibold hover:bg-secondary/80 transition-all flex items-center gap-2 border">
+                <ListFilter size={18} /> Load Logs
+            </button>
             <a href="/train" class="px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-all flex items-center gap-2 shadow-sm">
                 <TrendingUp size={18} /> New Run
             </a>
-		    <button onclick={fetchLogs} class="px-5 py-2.5 bg-secondary text-secondary-foreground rounded-lg font-semibold hover:bg-secondary/80 transition-all flex items-center gap-2 border">
-                <ListFilter size={18} /> Refresh
-            </button>
         </div>
 	</div>
 

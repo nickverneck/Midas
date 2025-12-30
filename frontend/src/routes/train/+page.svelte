@@ -5,11 +5,39 @@
 	import { Label } from "$lib/components/ui/label";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Badge } from "$lib/components/ui/badge";
+	import * as Tabs from "$lib/components/ui/tabs";
 
-	let consoleOutput = $state([]);
+	type TrainMode = 'rust' | 'python';
+	type ConsoleLine = { type: string; text: string };
+
+	let trainMode = $state<TrainMode>('rust');
+	let consoleOutput = $state<ConsoleLine[]>([]);
 	let training = $state(false);
 	
-	let params = $state({
+	let rustParams = $state({
+		outdir: "runs_ga",
+		generations: 5,
+		"pop-size": 6,
+		workers: 2,
+		window: 512,
+		step: 256,
+		"initial-balance": 10000,
+		"elite-frac": 0.33,
+		"mutation-sigma": 0.05,
+		"init-sigma": 0.5,
+		hidden: 128,
+		layers: 2,
+		"eval-windows": 2,
+		"w-pnl": 1.0,
+		"w-sortino": 1.0,
+		"w-mdd": 0.5,
+		"save-top-n": 5,
+		"save-every": 1,
+		"checkpoint-every": 1
+	});
+
+	let pythonParams = $state({
+		outdir: "runs_ga",
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
@@ -21,20 +49,28 @@
 		lr: 0.0003,
 		gamma: 0.99,
 		lam: 0.95,
-        "initial-balance": 10000,
-        "mutation-sigma": 0.25
+		"initial-balance": 10000,
+		"mutation-sigma": 0.25,
+		"save-top-n": 5,
+		"save-every": 1,
+		"checkpoint-every": 1
 	});
 
-	async function startTraining() {
+	async function startTraining(mode: TrainMode) {
+		const params = mode === 'rust' ? rustParams : pythonParams;
 		training = true;
-		consoleOutput = [];
+		consoleOutput = [{ type: 'system', text: `Starting ${mode.toUpperCase()} training...` }];
 		
 		try {
 			const response = await fetch('/api/train', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(params)
+				body: JSON.stringify({ engine: mode, params })
 			});
+
+			if (!response.ok || !response.body) {
+				throw new Error(`Training request failed (${response.status})`);
+			}
 
 			const reader = response.body.getReader();
 			const decoder = new TextDecoder();
@@ -51,6 +87,8 @@
 						const data = JSON.parse(line.substring(6));
 						if (data.type === 'stdout' || data.type === 'stderr') {
 							consoleOutput = [...consoleOutput, { type: data.type, text: data.content }];
+						} else if (data.type === 'error') {
+							consoleOutput = [...consoleOutput, { type: 'error', text: data.content }];
 						} else if (data.type === 'exit') {
 							training = false;
 							consoleOutput = [...consoleOutput, { type: 'system', text: `Process exited with code ${data.code}` }];
@@ -59,7 +97,8 @@
 				}
 			}
 		} catch (e) {
-			consoleOutput = [...consoleOutput, { type: 'error', text: e.message }];
+			const message = e instanceof Error ? e.message : String(e);
+			consoleOutput = [...consoleOutput, { type: 'error', text: message }];
 			training = false;
 		}
 	}
@@ -77,36 +116,176 @@
 				<Card.Title>Parameters</Card.Title>
 			</Card.Header>
 			<Card.Content>
-				<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining(); }}>
-					<div class="grid gap-2">
-                        <Label for="generations">Generations</Label>
-                        <Input id="generations" type="number" bind:value={params.generations} />
-                    </div>
-                    <div class="grid gap-2">
-                        <Label for="pop-size">Population Size</Label>
-                        <Input id="pop-size" type="number" bind:value={params["pop-size"]} />
-                    </div>
-                    <div class="grid gap-2">
-                        <Label for="workers">Workers</Label>
-                        <Input id="workers" type="number" bind:value={params.workers} />
-                    </div>
-                    <div class="grid gap-2">
-                        <Label for="lr">Learning Rate</Label>
-                        <Input id="lr" type="number" step="0.0001" bind:value={params.lr} />
-                    </div>
-                    <div class="grid gap-2">
-                        <Label for="window">Window Size</Label>
-                        <Input id="window" type="number" bind:value={params.window} />
-                    </div>
-                    <div class="grid gap-2">
-                        <Label for="step">Step Size</Label>
-                        <Input id="step" type="number" bind:value={params.step} />
-                    </div>
-                    
-					<Button type="submit" disabled={training} class="w-full">
-						{training ? 'Training...' : 'Start Training'}
-					</Button>
-				</form>
+				<Tabs.Root bind:value={trainMode} class="w-full">
+					<Tabs.List class="grid w-full grid-cols-2 mb-4">
+						<Tabs.Trigger value="rust">Rust (Primary)</Tabs.Trigger>
+						<Tabs.Trigger value="python">Python (Legacy)</Tabs.Trigger>
+					</Tabs.List>
+
+					<Tabs.Content value="rust">
+						<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining('rust'); }}>
+							<div class="grid gap-4 md:grid-cols-2">
+								<div class="grid gap-2">
+									<Label for="rust-outdir">Output Folder</Label>
+									<Input id="rust-outdir" type="text" bind:value={rustParams.outdir} placeholder="runs_ga" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-generations">Generations</Label>
+									<Input id="rust-generations" type="number" min="1" bind:value={rustParams.generations} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-pop-size">Population Size</Label>
+									<Input id="rust-pop-size" type="number" min="1" bind:value={rustParams["pop-size"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-workers">Workers</Label>
+									<Input id="rust-workers" type="number" min="0" bind:value={rustParams.workers} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-window">Window Size</Label>
+									<Input id="rust-window" type="number" min="1" bind:value={rustParams.window} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-step">Step Size</Label>
+									<Input id="rust-step" type="number" min="1" bind:value={rustParams.step} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-initial-balance">Initial Balance</Label>
+									<Input id="rust-initial-balance" type="number" step="0.01" bind:value={rustParams["initial-balance"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-elite-frac">Elite Fraction</Label>
+									<Input id="rust-elite-frac" type="number" step="0.01" min="0" max="1" bind:value={rustParams["elite-frac"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-mutation-sigma">Mutation Sigma</Label>
+									<Input id="rust-mutation-sigma" type="number" step="0.01" min="0" bind:value={rustParams["mutation-sigma"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-init-sigma">Init Sigma</Label>
+									<Input id="rust-init-sigma" type="number" step="0.01" min="0" bind:value={rustParams["init-sigma"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-hidden">Hidden Units</Label>
+									<Input id="rust-hidden" type="number" min="1" bind:value={rustParams.hidden} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-layers">Layers</Label>
+									<Input id="rust-layers" type="number" min="1" bind:value={rustParams.layers} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-eval-windows">Eval Windows</Label>
+									<Input id="rust-eval-windows" type="number" min="1" bind:value={rustParams["eval-windows"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-w-pnl">Fitness Weight (PNL)</Label>
+									<Input id="rust-w-pnl" type="number" step="0.01" bind:value={rustParams["w-pnl"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-w-sortino">Fitness Weight (Sortino)</Label>
+									<Input id="rust-w-sortino" type="number" step="0.01" bind:value={rustParams["w-sortino"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-w-mdd">Fitness Weight (Max DD)</Label>
+									<Input id="rust-w-mdd" type="number" step="0.01" bind:value={rustParams["w-mdd"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-save-top-n">Save Top N</Label>
+									<Input id="rust-save-top-n" type="number" min="0" bind:value={rustParams["save-top-n"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-save-every">Save Every (gens)</Label>
+									<Input id="rust-save-every" type="number" min="0" bind:value={rustParams["save-every"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-checkpoint-every">Checkpoint Every (gens)</Label>
+									<Input id="rust-checkpoint-every" type="number" min="0" bind:value={rustParams["checkpoint-every"]} />
+								</div>
+							</div>
+							<Button type="submit" disabled={training} class="w-full">
+								{training ? 'Training...' : 'Start Rust Training'}
+							</Button>
+						</form>
+					</Tabs.Content>
+
+					<Tabs.Content value="python">
+						<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining('python'); }}>
+							<div class="grid gap-4 md:grid-cols-2">
+								<div class="grid gap-2">
+									<Label for="py-outdir">Output Folder</Label>
+									<Input id="py-outdir" type="text" bind:value={pythonParams.outdir} placeholder="runs_ga" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-generations">Generations</Label>
+									<Input id="py-generations" type="number" min="1" bind:value={pythonParams.generations} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-pop-size">Population Size</Label>
+									<Input id="py-pop-size" type="number" min="1" bind:value={pythonParams["pop-size"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-workers">Workers</Label>
+									<Input id="py-workers" type="number" min="0" bind:value={pythonParams.workers} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-window">Window Size</Label>
+									<Input id="py-window" type="number" min="1" bind:value={pythonParams.window} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-step">Step Size</Label>
+									<Input id="py-step" type="number" min="1" bind:value={pythonParams.step} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-train-epochs">Train Epochs</Label>
+									<Input id="py-train-epochs" type="number" min="1" bind:value={pythonParams["train-epochs"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-train-windows">Train Windows</Label>
+									<Input id="py-train-windows" type="number" min="1" bind:value={pythonParams["train-windows"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-eval-windows">Eval Windows</Label>
+									<Input id="py-eval-windows" type="number" min="1" bind:value={pythonParams["eval-windows"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-lr">Learning Rate</Label>
+									<Input id="py-lr" type="number" step="0.0001" bind:value={pythonParams.lr} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-gamma">Gamma</Label>
+									<Input id="py-gamma" type="number" step="0.01" min="0" max="1" bind:value={pythonParams.gamma} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-lam">Lambda</Label>
+									<Input id="py-lam" type="number" step="0.01" min="0" max="1" bind:value={pythonParams.lam} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-initial-balance">Initial Balance</Label>
+									<Input id="py-initial-balance" type="number" step="0.01" bind:value={pythonParams["initial-balance"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-mutation-sigma">Mutation Sigma</Label>
+									<Input id="py-mutation-sigma" type="number" step="0.01" min="0" bind:value={pythonParams["mutation-sigma"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-save-top-n">Save Top N</Label>
+									<Input id="py-save-top-n" type="number" min="0" bind:value={pythonParams["save-top-n"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-save-every">Save Every (gens)</Label>
+									<Input id="py-save-every" type="number" min="0" bind:value={pythonParams["save-every"]} />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-checkpoint-every">Checkpoint Every (gens)</Label>
+									<Input id="py-checkpoint-every" type="number" min="0" bind:value={pythonParams["checkpoint-every"]} />
+								</div>
+							</div>
+							<Button type="submit" disabled={training} class="w-full">
+								{training ? 'Training...' : 'Start Python Training'}
+							</Button>
+						</form>
+					</Tabs.Content>
+				</Tabs.Root>
 			</Card.Content>
 		</Card.Root>
 
@@ -120,7 +299,7 @@
 			<Card.Content>
 				<ScrollArea class="h-[600px] w-full bg-zinc-950 p-4 rounded-md border border-zinc-800 font-mono text-sm">
 					{#each consoleOutput as line}
-						<div class={line.type === 'stderr' ? 'text-red-400' : line.type === 'system' ? 'text-blue-400' : 'text-zinc-300'}>
+						<div class={line.type === 'stderr' || line.type === 'error' ? 'text-red-400' : line.type === 'system' ? 'text-blue-400' : 'text-zinc-300'}>
 							<span class="opacity-50 mr-2">[{new Date().toLocaleTimeString()}]</span>
 							{line.text}
 						</div>

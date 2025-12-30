@@ -1,13 +1,23 @@
-import { json } from '@sveltejs/kit';
 import { spawn } from 'child_process';
-import { Readable } from 'stream';
+import fs from 'fs';
+import path from 'path';
 
-export const POST = async ({ request }) => {
-    const params = await request.json();
+type TrainEngine = 'rust' | 'python';
 
-    // Construct arguments for the python script
-    const args = ['python/examples/train_hybrid.py'];
+const resolveProjectRoot = () => {
+    const cwd = process.cwd();
+    if (fs.existsSync(path.join(cwd, 'Cargo.toml'))) {
+        return cwd;
+    }
+    const parent = path.resolve(cwd, '..');
+    if (fs.existsSync(path.join(parent, 'Cargo.toml'))) {
+        return parent;
+    }
+    return cwd;
+};
 
+const buildCliArgs = (params: Record<string, unknown>) => {
+    const args: string[] = [];
     for (const [key, value] of Object.entries(params)) {
         if (value === true) {
             args.push(`--${key}`);
@@ -15,11 +25,32 @@ export const POST = async ({ request }) => {
             args.push(`--${key}`, String(value));
         }
     }
+    return args;
+};
+
+export const POST = async ({ request }) => {
+    const payload = await request.json();
+    const engine = (payload?.engine ?? 'rust') as TrainEngine;
+    const params = (payload?.params ?? payload ?? {}) as Record<string, unknown>;
+
+    const root = resolveProjectRoot();
+    const cliArgs = buildCliArgs(params);
+
+    let command = '';
+    let args: string[] = [];
+    if (engine === 'python') {
+        command = 'python3';
+        args = ['python/examples/train_hybrid.py', ...cliArgs];
+    } else {
+        command = 'cargo';
+        args = ['run', '--bin', 'train_ga', '--features', 'tch', '--', ...cliArgs];
+    }
 
     const stream = new ReadableStream({
         start(controller) {
-            const process = spawn('python3', args, {
-                cwd: '../../' // Root of the project
+            const process = spawn(command, args, {
+                cwd: root,
+                env: process.env
             });
 
             process.stdout.on('data', (data) => {

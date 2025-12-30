@@ -344,6 +344,9 @@ def main():
     ap.add_argument("--mutation-sigma", type=float, default=0.25)
     ap.add_argument("--weight-min", type=float, default=0.0)
     ap.add_argument("--weight-max", type=float, default=2.0)
+    ap.add_argument("--save-top-n", type=int, default=5)
+    ap.add_argument("--save-every", type=int, default=1)
+    ap.add_argument("--checkpoint-every", type=int, default=1)
 
     ap.add_argument("--train-epochs", type=int, default=2)
     ap.add_argument("--train-windows", type=int, default=3)
@@ -514,37 +517,40 @@ def main():
         print(f"⏱ Generation {gen} completed in {gen_elapsed:.2f} seconds")
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        
-        # Save evaluation traces and NN weights for the top 5 candidates of this generation
-        import csv
-        for i in range(min(5, len(scored))):
-            cand_metrics = scored[i][2]
-            cand_fitness = scored[i][0]
-            
-            # Trace saving
-            if cand_metrics.get("eval_histories"):
-                trace_path = args.outdir / f"trace_gen{gen}_rank{i}.csv"
-                with trace_path.open("w", newline="") as f:
-                    headers = cand_metrics["eval_histories"][0][0].keys()
-                    writer = csv.DictWriter(f, fieldnames=headers)
-                    writer.writeheader()
-                    for history in cand_metrics["eval_histories"]:
-                        writer.writerows(history)
-            
-            # Weight saving
-            policy_path = args.outdir / f"policy_gen{gen}_rank{i}.pt"
-            value_path = args.outdir / f"value_gen{gen}_rank{i}.pt"
-            torch.save(cand_metrics["policy_state"], policy_path)
-            torch.save(cand_metrics["value_state"], value_path)
+        if scored:
+            best_fitness, _, best_metrics = scored[0]
+            global best_overall_fitness, best_overall_policy_state, best_overall_value_state
+            if best_fitness > best_overall_fitness:
+                best_overall_fitness = best_fitness
+                best_overall_policy_state = best_metrics["policy_state"]
+                best_overall_value_state = best_metrics["value_state"]
 
-            if i == 0:
-                print(f"📈 Gen {gen} Top Performer: fitness {cand_fitness:.2f}, trace/weights saved.")
-                # Update best overall
-                global best_overall_fitness, best_overall_policy_state, best_overall_value_state
-                if cand_fitness > best_overall_fitness:
-                    best_overall_fitness = cand_fitness
-                    best_overall_policy_state = cand_metrics["policy_state"]
-                    best_overall_value_state = cand_metrics["value_state"]
+        should_save = args.save_top_n > 0 and args.save_every > 0 and gen % args.save_every == 0
+        if should_save:
+            # Save evaluation traces and NN weights for the top candidates of this generation
+            import csv
+            for i in range(min(args.save_top_n, len(scored))):
+                cand_metrics = scored[i][2]
+                cand_fitness = scored[i][0]
+                
+                # Trace saving
+                if cand_metrics.get("eval_histories"):
+                    trace_path = args.outdir / f"trace_gen{gen}_rank{i}.csv"
+                    with trace_path.open("w", newline="") as f:
+                        headers = cand_metrics["eval_histories"][0][0].keys()
+                        writer = csv.DictWriter(f, fieldnames=headers)
+                        writer.writeheader()
+                        for history in cand_metrics["eval_histories"]:
+                            writer.writerows(history)
+                
+                # Weight saving
+                policy_path = args.outdir / f"policy_gen{gen}_rank{i}.pt"
+                value_path = args.outdir / f"value_gen{gen}_rank{i}.pt"
+                torch.save(cand_metrics["policy_state"], policy_path)
+                torch.save(cand_metrics["value_state"], value_path)
+
+                if i == 0:
+                    print(f"📈 Gen {gen} Top Performer: fitness {cand_fitness:.2f}, trace/weights saved.")
 
         elite_n = max(1, int(args.elite_frac * args.pop_size))
         elites = [w for _, w, _ in scored[:elite_n]]
@@ -557,12 +563,13 @@ def main():
             new_pop.append(child)
         pop = new_pop
         # Save a checkpoint at the end of each generation (policy/value not persisted here)
-        ckpt_path = args.outdir / f"checkpoint_gen{gen}.pt"
-        torch.save({
-            "gen": gen,
-            "pop": pop,
-        }, ckpt_path)
-        print(f"💾 Saved checkpoint for generation {gen} to {ckpt_path}")
+        if args.checkpoint_every > 0 and gen % args.checkpoint_every == 0:
+            ckpt_path = args.outdir / f"checkpoint_gen{gen}.pt"
+            torch.save({
+                "gen": gen,
+                "pop": pop,
+            }, ckpt_path)
+            print(f"💾 Saved checkpoint for generation {gen} to {ckpt_path}")
 
     # Final evaluation on test set using best weights from last generation
     if scored:
