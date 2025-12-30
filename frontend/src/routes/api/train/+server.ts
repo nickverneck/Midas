@@ -32,6 +32,7 @@ export const POST = async ({ request }) => {
     const payload = await request.json();
     const engine = (payload?.engine ?? 'rust') as TrainEngine;
     const params = (payload?.params ?? payload ?? {}) as Record<string, unknown>;
+    const { signal } = request;
 
     const root = resolveProjectRoot();
     const cliArgs = buildCliArgs(params);
@@ -53,6 +54,14 @@ export const POST = async ({ request }) => {
                 env: process.env
             });
 
+            const onAbort = () => {
+                if (!child.killed) {
+                    child.kill('SIGTERM');
+                }
+            };
+
+            signal.addEventListener('abort', onAbort);
+
             child.stdout.on('data', (data) => {
                 controller.enqueue(`data: ${JSON.stringify({ type: 'stdout', content: data.toString() })}\n\n`);
             });
@@ -62,11 +71,13 @@ export const POST = async ({ request }) => {
             });
 
             child.on('close', (code) => {
+                signal.removeEventListener('abort', onAbort);
                 controller.enqueue(`data: ${JSON.stringify({ type: 'exit', code })}\n\n`);
                 controller.close();
             });
 
             child.on('error', (err) => {
+                signal.removeEventListener('abort', onAbort);
                 controller.enqueue(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
                 controller.close();
             });
