@@ -19,6 +19,7 @@
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
+		device: "",
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
@@ -44,6 +45,7 @@
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
+		device: "",
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
@@ -151,6 +153,19 @@
 									<Input id="rust-test-parquet" type="text" bind:value={rustParams["test-parquet"]} placeholder="data/test" />
 								</div>
 								<div class="grid gap-2">
+									<Label for="rust-device">Device</Label>
+									<select
+										id="rust-device"
+										bind:value={rustParams.device}
+										class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+									>
+										<option value="">Auto</option>
+										<option value="cpu">CPU</option>
+										<option value="mps">MPS</option>
+										<option value="cuda">CUDA</option>
+									</select>
+								</div>
+								<div class="grid gap-2">
 									<Label for="rust-generations">Generations</Label>
 									<Input id="rust-generations" type="number" min="1" bind:value={rustParams.generations} />
 								</div>
@@ -247,6 +262,19 @@
 								<div class="grid gap-2">
 									<Label for="py-test-parquet">Test Parquet</Label>
 									<Input id="py-test-parquet" type="text" bind:value={pythonParams["test-parquet"]} placeholder="data/test" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-device">Device</Label>
+									<select
+										id="py-device"
+										bind:value={pythonParams.device}
+										class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+									>
+										<option value="">Auto</option>
+										<option value="cpu">CPU</option>
+										<option value="mps">MPS</option>
+										<option value="cuda">CUDA</option>
+									</select>
 								</div>
 								<div class="grid gap-2">
 									<Label for="py-generations">Generations</Label>
