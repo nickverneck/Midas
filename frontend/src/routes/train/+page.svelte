@@ -224,23 +224,23 @@
 			{#if !paramsCollapsed}
 				<Card.Header class="flex items-center justify-between">
 					<Card.Title>Training Controls</Card.Title>
-					<Button variant="ghost" size="sm" on:click={() => (paramsCollapsed = true)}>
+					<Button variant="ghost" size="sm" onclick={() => (paramsCollapsed = true)}>
 						Collapse
 					</Button>
 				</Card.Header>
 			{/if}
 			<Card.Content
 				class={paramsCollapsed ? "cursor-pointer" : ""}
-				on:click={() => {
+				onclick={() => {
 					if (paramsCollapsed) paramsCollapsed = false;
 				}}
 				title={paramsCollapsed ? "Click to expand parameters" : undefined}
 			>
-				<div class="space-y-2" on:click|stopPropagation>
-					<Button on:click={() => startTraining(trainMode)} disabled={training} class="w-full">
+				<div class="space-y-2" onclick={(event) => event.stopPropagation()}>
+					<Button onclick={() => startTraining(trainMode)} disabled={training} class="w-full">
 						{startLabel}
 					</Button>
-					<Button variant="destructive" on:click={stopTraining} disabled={!training} class="w-full">
+					<Button variant="destructive" onclick={stopTraining} disabled={!training} class="w-full">
 						Stop Training
 					</Button>
 				</div>
