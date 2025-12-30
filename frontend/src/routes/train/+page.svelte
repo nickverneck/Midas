@@ -16,6 +16,9 @@
 	
 	let rustParams = $state({
 		outdir: "runs_ga",
+		"train-parquet": "data/train",
+		"val-parquet": "data/val",
+		"test-parquet": "data/test",
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
@@ -38,6 +41,9 @@
 
 	let pythonParams = $state({
 		outdir: "runs_ga",
+		"train-parquet": "data/train",
+		"val-parquet": "data/val",
+		"test-parquet": "data/test",
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
@@ -124,10 +130,25 @@
 
 					<Tabs.Content value="rust">
 						<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining('rust'); }}>
+							<Button type="submit" disabled={training} class="w-full">
+								{training ? 'Training...' : 'Start Rust Training'}
+							</Button>
 							<div class="grid gap-4 md:grid-cols-2">
 								<div class="grid gap-2">
 									<Label for="rust-outdir">Output Folder</Label>
 									<Input id="rust-outdir" type="text" bind:value={rustParams.outdir} placeholder="runs_ga" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-train-parquet">Train Parquet</Label>
+									<Input id="rust-train-parquet" type="text" bind:value={rustParams["train-parquet"]} placeholder="data/train" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-val-parquet">Val Parquet</Label>
+									<Input id="rust-val-parquet" type="text" bind:value={rustParams["val-parquet"]} placeholder="data/val" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="rust-test-parquet">Test Parquet</Label>
+									<Input id="rust-test-parquet" type="text" bind:value={rustParams["test-parquet"]} placeholder="data/test" />
 								</div>
 								<div class="grid gap-2">
 									<Label for="rust-generations">Generations</Label>
@@ -202,18 +223,30 @@
 									<Input id="rust-checkpoint-every" type="number" min="0" bind:value={rustParams["checkpoint-every"]} />
 								</div>
 							</div>
-							<Button type="submit" disabled={training} class="w-full">
-								{training ? 'Training...' : 'Start Rust Training'}
-							</Button>
 						</form>
 					</Tabs.Content>
 
 					<Tabs.Content value="python">
 						<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining('python'); }}>
+							<Button type="submit" disabled={training} class="w-full">
+								{training ? 'Training...' : 'Start Python Training'}
+							</Button>
 							<div class="grid gap-4 md:grid-cols-2">
 								<div class="grid gap-2">
 									<Label for="py-outdir">Output Folder</Label>
 									<Input id="py-outdir" type="text" bind:value={pythonParams.outdir} placeholder="runs_ga" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-train-parquet">Train Parquet</Label>
+									<Input id="py-train-parquet" type="text" bind:value={pythonParams["train-parquet"]} placeholder="data/train" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-val-parquet">Val Parquet</Label>
+									<Input id="py-val-parquet" type="text" bind:value={pythonParams["val-parquet"]} placeholder="data/val" />
+								</div>
+								<div class="grid gap-2">
+									<Label for="py-test-parquet">Test Parquet</Label>
+									<Input id="py-test-parquet" type="text" bind:value={pythonParams["test-parquet"]} placeholder="data/test" />
 								</div>
 								<div class="grid gap-2">
 									<Label for="py-generations">Generations</Label>
@@ -280,9 +313,6 @@
 									<Input id="py-checkpoint-every" type="number" min="0" bind:value={pythonParams["checkpoint-every"]} />
 								</div>
 							</div>
-							<Button type="submit" disabled={training} class="w-full">
-								{training ? 'Training...' : 'Start Python Training'}
-							</Button>
 						</form>
 					</Tabs.Content>
 				</Tabs.Root>
