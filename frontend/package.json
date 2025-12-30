@@ -33,6 +33,7 @@
 		"@types/node": "^25.0.3",
 		"@types/papaparse": "^5.5.2",
 		"chart.js": "^4.5.1",
+		"chartjs-plugin-zoom": "^2.2.0",
 		"clsx": "^2.1.1",
 		"lucide-svelte": "^0.562.0",
 		"papaparse": "^5.5.3",
