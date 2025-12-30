@@ -298,28 +298,33 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let top = scored.iter().take(5).collect::<Vec<_>>();
-        for (rank, (_fit, genome, eval_metrics, train_metrics)) in top.iter().enumerate() {
-            let policy_path = args
-                .outdir
-                .join(format!("policy_gen{}_rank{}.pt", generation, rank));
-            model::save_policy(obs_dim, args.hidden, args.layers, device, genome, &policy_path)?;
-            if rank == 0 {
-                if let Some(eval) = eval_metrics.as_ref() {
-                    println!(
-                        "Gen {} Top Performer: train fitness {:.2}, val fitness {:.2}",
-                        generation, train_metrics.fitness, eval.fitness
-                    );
-                } else {
-                    println!(
-                        "Gen {} Top Performer: train fitness {:.2}",
-                        generation, train_metrics.fitness
-                    );
-                }
-                if train_metrics.fitness > best_overall_fitness {
-                    best_overall_fitness = train_metrics.fitness;
-                    best_overall_genome = Some(genome.clone());
-                }
+        if let Some((_fit, genome, eval_metrics, train_metrics)) = scored.first() {
+            if train_metrics.fitness > best_overall_fitness {
+                best_overall_fitness = train_metrics.fitness;
+                best_overall_genome = Some(genome.clone());
+            }
+            if let Some(eval) = eval_metrics.as_ref() {
+                println!(
+                    "Gen {} Top Performer: train fitness {:.2}, val fitness {:.2}",
+                    generation, train_metrics.fitness, eval.fitness
+                );
+            } else {
+                println!(
+                    "Gen {} Top Performer: train fitness {:.2}",
+                    generation, train_metrics.fitness
+                );
+            }
+        }
+
+        let should_save = args.save_top_n > 0 && args.save_every > 0 && generation % args.save_every == 0;
+        if should_save {
+            for (rank, (_fit, genome, _eval_metrics, _train_metrics)) in
+                scored.iter().take(args.save_top_n).enumerate()
+            {
+                let policy_path = args
+                    .outdir
+                    .join(format!("policy_gen{}_rank{}.pt", generation, rank));
+                model::save_policy(obs_dim, args.hidden, args.layers, device, genome, &policy_path)?;
             }
         }
 
@@ -339,8 +344,10 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         }
         pop = new_pop;
 
-        let ckpt_path = args.outdir.join(format!("checkpoint_gen{}.bin", generation));
-        ga::save_checkpoint(&ckpt_path, &pop)?;
+        if args.checkpoint_every > 0 && generation % args.checkpoint_every == 0 {
+            let ckpt_path = args.outdir.join(format!("checkpoint_gen{}.bin", generation));
+            ga::save_checkpoint(&ckpt_path, &pop)?;
+        }
     }
 
     if let Some(best_genome) = best_overall_genome {

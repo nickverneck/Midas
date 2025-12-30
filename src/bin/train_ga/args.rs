@@ -55,6 +55,12 @@ pub struct Args {
 
     #[arg(long, default_value_t = 2)]
     pub eval_windows: usize,
+    #[arg(long, default_value_t = 5)]
+    pub save_top_n: usize,
+    #[arg(long, default_value_t = 1)]
+    pub save_every: usize,
+    #[arg(long, default_value_t = 1)]
+    pub checkpoint_every: usize,
     #[arg(long, default_value_t = 1.0)]
     pub w_pnl: f64,
     #[arg(long, default_value_t = 1.0)]
