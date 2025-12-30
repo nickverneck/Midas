@@ -10,6 +10,7 @@
         PointElement,
         CategoryScale,
         LineController,
+        ScatterController,
         Decimation,
         type ChartConfiguration,
         type ChartType
@@ -24,6 +25,7 @@
         PointElement,
         CategoryScale,
         LineController,
+        ScatterController,
         Decimation
     );
 
