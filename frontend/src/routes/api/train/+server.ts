@@ -48,25 +48,25 @@ export const POST = async ({ request }) => {
 
     const stream = new ReadableStream({
         start(controller) {
-            const process = spawn(command, args, {
+            const child = spawn(command, args, {
                 cwd: root,
                 env: process.env
             });
 
-            process.stdout.on('data', (data) => {
+            child.stdout.on('data', (data) => {
                 controller.enqueue(`data: ${JSON.stringify({ type: 'stdout', content: data.toString() })}\n\n`);
             });
 
-            process.stderr.on('data', (data) => {
+            child.stderr.on('data', (data) => {
                 controller.enqueue(`data: ${JSON.stringify({ type: 'stderr', content: data.toString() })}\n\n`);
             });
 
-            process.on('close', (code) => {
+            child.on('close', (code) => {
                 controller.enqueue(`data: ${JSON.stringify({ type: 'exit', code })}\n\n`);
                 controller.close();
             });
 
-            process.on('error', (err) => {
+            child.on('error', (err) => {
                 controller.enqueue(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
                 controller.close();
             });
