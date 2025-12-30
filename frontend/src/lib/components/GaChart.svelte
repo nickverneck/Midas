@@ -29,10 +29,11 @@
         Decimation
     );
 
-    let { data, options = {}, type = 'line' } = $props();
+    const props = $props();
     let canvas: HTMLCanvasElement;
-    let chart: Chart;
+    let chart: Chart | null = null;
     let destroyed = false;
+    let mounted = $state(false);
     let zoomRegistered = false;
     let zoomRegisterPromise: Promise<void> | null = null;
 
@@ -106,95 +107,113 @@
         }
     };
 
-    const mergeOptions = () => ({
+    const mergeOptions = (customOptions?: ChartConfiguration['options']) => ({
         ...defaultOptions,
-        ...options,
+        ...(customOptions ?? {}),
         interaction: {
             ...defaultOptions.interaction,
-            ...(options?.interaction ?? {})
+            ...(customOptions?.interaction ?? {})
         },
         elements: {
             ...defaultOptions.elements,
-            ...(options?.elements ?? {})
+            ...(customOptions?.elements ?? {})
         },
         plugins: {
             ...defaultOptions.plugins,
-            ...(options?.plugins ?? {})
+            ...(customOptions?.plugins ?? {})
         },
         scales: {
             ...defaultOptions.scales,
-            ...(options?.scales ?? {})
+            ...(customOptions?.scales ?? {})
         }
     });
 
-    $effect(() => {
-        if (!chart) return;
-        const labels = Array.isArray(data?.labels) ? [...data.labels] : [];
-        const datasets = Array.isArray(data?.datasets)
-            ? data.datasets.map((ds) => ({
+    const snapshotData = (raw: any) => {
+        const labels = Array.isArray(raw?.labels) ? [...raw.labels] : [];
+        const datasets = Array.isArray(raw?.datasets)
+            ? raw.datasets.map((ds: any) => ({
                 ...ds,
                 data: Array.isArray(ds.data) ? [...ds.data] : []
             }))
             : [];
-        const seriesCount = datasets.reduce((max, ds) => {
+        const seriesCount = datasets.reduce((max: number, ds: any) => {
             const len = Array.isArray(ds.data) ? ds.data.length : 0;
             return Math.max(max, len);
         }, 0);
-
-        chart.data.labels = labels;
-        chart.data.datasets = datasets;
-        chart.options = mergeOptions();
-        if (chart.options.scales?.y1) {
-            chart.options.scales.y1.display = datasets.some(d => d.yAxisID === 'y1');
-        }
-        chart.options.interaction = {
-            ...(chart.options.interaction ?? {}),
-            mode: type === 'scatter' ? 'nearest' : 'index'
-        };
-        const usesXY = datasets.some((ds) =>
+        const usesXY = datasets.some((ds: any) =>
             Array.isArray(ds.data) &&
-            ds.data.some((point) => point && typeof point === 'object' && ('x' in point || 'y' in point))
+            ds.data.some((point: any) => point && typeof point === 'object' && ('x' in point || 'y' in point))
         );
-        chart.options.parsing = usesXY ? false : undefined;
-        chart.options.animation = seriesCount > 2000 ? false : undefined;
-        if (chart.options.elements?.point) {
-            chart.options.elements.point.radius = seriesCount > 1000 ? 0 : 2;
-        }
-        if (chart.options.plugins?.decimation) {
-            chart.options.plugins.decimation.enabled = usesXY && seriesCount > 2000;
-        }
-        if (chart.options.plugins?.zoom) {
-            const zoomMode = type === 'scatter' ? 'xy' : 'x';
-            chart.options.plugins.zoom.pan.mode = zoomMode;
-            chart.options.plugins.zoom.zoom.mode = zoomMode;
-        }
-        chart.update('none');
+
+        return { labels, datasets, seriesCount, usesXY };
+    };
+
+    $effect(() => {
+        if (!mounted || !canvas) return;
+        let cancelled = false;
+
+        const setup = async () => {
+            await ensureZoomPlugin();
+            if (cancelled || destroyed || !mounted || !canvas) return;
+
+            const { labels, datasets, seriesCount, usesXY } = snapshotData(props.data);
+            const nextOptions = mergeOptions(props.options);
+            const nextType = (props.type ?? 'line') as ChartType;
+
+            if (!chart || chart.config.type !== nextType) {
+                if (chart) chart.destroy();
+                chart = new Chart(canvas, {
+                    type: nextType,
+                    data: { labels, datasets },
+                    options: nextOptions
+                });
+            } else {
+                chart.data.labels = labels;
+                chart.data.datasets = datasets;
+                chart.options = nextOptions;
+            }
+
+            if (!chart) return;
+            if (chart.options.scales?.y1) {
+                chart.options.scales.y1.display = datasets.some((d: any) => d.yAxisID === 'y1');
+            }
+            chart.options.interaction = {
+                ...(chart.options.interaction ?? {}),
+                mode: nextType === 'scatter' ? 'nearest' : 'index'
+            };
+            chart.options.parsing = usesXY ? false : undefined;
+            chart.options.animation = seriesCount > 2000 ? false : undefined;
+            if (chart.options.elements?.point) {
+                chart.options.elements.point.radius = seriesCount > 1000 ? 0 : 2;
+            }
+            if (chart.options.plugins?.decimation) {
+                chart.options.plugins.decimation.enabled = usesXY && seriesCount > 2000;
+            }
+            if (chart.options.plugins?.zoom) {
+                const zoomMode = nextType === 'scatter' ? 'xy' : 'x';
+                chart.options.plugins.zoom.pan.mode = zoomMode;
+                chart.options.plugins.zoom.zoom.mode = zoomMode;
+            }
+            chart.update('none');
+        };
+
+        void setup();
+        return () => {
+            cancelled = true;
+        };
     });
 
     onMount(() => {
-        const setup = async () => {
-            await ensureZoomPlugin();
-            if (destroyed) return;
-            const labels = Array.isArray(data?.labels) ? [...data.labels] : [];
-            const datasets = Array.isArray(data?.datasets)
-                ? data.datasets.map((ds) => ({
-                    ...ds,
-                    data: Array.isArray(ds.data) ? [...ds.data] : []
-                }))
-                : [];
-            const config: ChartConfiguration = {
-                type: type as ChartType,
-                data: { labels, datasets },
-                options: mergeOptions()
-            };
-            chart = new Chart(canvas, config);
+        mounted = true;
+        return () => {
+            mounted = false;
         };
-        void setup();
     });
 
     onDestroy(() => {
         destroyed = true;
         if (chart) chart.destroy();
+        chart = null;
     });
 </script>
 
