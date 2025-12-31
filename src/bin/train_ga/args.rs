@@ -61,6 +61,8 @@ pub struct Args {
     pub save_every: usize,
     #[arg(long, default_value_t = 1)]
     pub checkpoint_every: usize,
+    #[arg(long)]
+    pub load_checkpoint: Option<PathBuf>,
     #[arg(long, default_value_t = 1.0)]
     pub w_pnl: f64,
     #[arg(long, default_value_t = 1.0)]

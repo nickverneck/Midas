@@ -116,9 +116,45 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
     let mut rng = StdRng::from_entropy();
     let normal = Normal::<f32>::new(0.0, args.init_sigma as f32)?;
-    let mut pop: Vec<Vec<f32>> = (0..args.pop_size)
-        .map(|_| (0..genome_len).map(|_| normal.sample(&mut rng)).collect())
-        .collect();
+    let mut start_gen = 0usize;
+    let mut target_pop_size = args.pop_size;
+    let mut pop: Vec<Vec<f32>> = if let Some(checkpoint) = args.load_checkpoint.as_ref() {
+        if !checkpoint.exists() {
+            anyhow::bail!("checkpoint not found: {}", checkpoint.display());
+        }
+        let (resume_gen, loaded_pop) = ga::load_checkpoint(checkpoint)
+            .with_context(|| format!("load checkpoint {}", checkpoint.display()))?;
+        start_gen = resume_gen;
+        if loaded_pop.is_empty() {
+            anyhow::bail!("checkpoint population is empty");
+        }
+        if loaded_pop.len() != target_pop_size {
+            println!(
+                "warn: checkpoint population size {} does not match --pop-size {}; using {}",
+                loaded_pop.len(),
+                target_pop_size,
+                loaded_pop.len()
+            );
+            target_pop_size = loaded_pop.len();
+        }
+        println!(
+            "info: resuming from checkpoint {} at generation {}",
+            checkpoint.display(),
+            start_gen
+        );
+        loaded_pop
+    } else {
+        (0..target_pop_size)
+            .map(|_| (0..genome_len).map(|_| normal.sample(&mut rng)).collect())
+            .collect()
+    };
+    if pop.iter().any(|genome| genome.len() != genome_len) {
+        anyhow::bail!(
+            "checkpoint genome length mismatch (expected {}, found {})",
+            genome_len,
+            pop.first().map(|g| g.len()).unwrap_or(0)
+        );
+    }
 
     let log_path = args.outdir.join("ga_log.csv");
     if !log_path.exists() {
@@ -131,7 +167,15 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     let mut best_overall_fitness = f64::NEG_INFINITY;
     let mut best_overall_genome: Option<Vec<f32>> = None;
 
-    for generation in 0..args.generations {
+    if start_gen >= args.generations {
+        println!(
+            "info: checkpoint generation {} is >= requested generations {}; nothing to run",
+            start_gen, args.generations
+        );
+        return Ok(());
+    }
+
+    for generation in start_gen..args.generations {
         let gen_start = std::time::Instant::now();
         println!(
             "\nGeneration {} | Evaluating {} candidates (device={:?})",
@@ -328,12 +372,12 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             }
         }
 
-        let elite_n = (args.elite_frac * args.pop_size as f64).round().max(1.0) as usize;
+        let elite_n = (args.elite_frac * target_pop_size as f64).round().max(1.0) as usize;
         let elites: Vec<Vec<f32>> = scored.iter().take(elite_n).map(|(_, g, _, _)| g.clone()).collect();
         let mut new_pop = elites.clone();
 
         let normal_mut = Normal::<f32>::new(0.0, args.mutation_sigma as f32)?;
-        while new_pop.len() < args.pop_size {
+        while new_pop.len() < target_pop_size {
             let parent_a = elites.choose(&mut rng).unwrap();
             let parent_b = elites.choose(&mut rng).unwrap();
             let mut child = ga::crossover(parent_a, parent_b, &mut rng);
@@ -346,7 +390,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
         if args.checkpoint_every > 0 && generation % args.checkpoint_every == 0 {
             let ckpt_path = args.outdir.join(format!("checkpoint_gen{}.bin", generation));
-            ga::save_checkpoint(&ckpt_path, &pop)?;
+            ga::save_checkpoint(&ckpt_path, generation, &pop)?;
         }
     }
 
