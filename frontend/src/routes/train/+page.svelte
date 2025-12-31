@@ -11,11 +11,14 @@
 	type TrainMode = 'rust' | 'python';
 	type ConsoleLine = { type: string; text: string };
 	type DataMode = 'full' | 'windowed';
+	type StartChoice = 'new' | 'resume';
 
 	let trainMode = $state<TrainMode>('rust');
 	let consoleOutput = $state<ConsoleLine[]>([]);
 	let training = $state(false);
 	let paramsCollapsed = $state(false);
+	let startChoice = $state<StartChoice | null>(null);
+	let checkpointPath = $state('');
 	let rustDataMode = $state<DataMode>('windowed');
 	let pythonDataMode = $state<DataMode>('windowed');
 	let abortController: AbortController | null = null;
@@ -85,14 +88,30 @@
 		}
 		return null;
 	};
-	const startLabel = $derived.by(() => {
-		if (training) return paramsCollapsed ? 'Stop' : 'Stop Training';
-		if (paramsCollapsed) return 'Start';
-		return trainMode === 'rust' ? 'Start Rust Training' : 'Start Python Training';
+	const trimmedCheckpoint = $derived.by(() => checkpointPath.trim());
+	const canStartTraining = $derived.by(() => {
+		if (!startChoice) return false;
+		if (startChoice === 'resume') return trimmedCheckpoint.length > 0;
+		return true;
 	});
-	const startTitle = $derived.by(() =>
-		training ? 'Stop Training' : trainMode === 'rust' ? 'Start Rust Training' : 'Start Python Training'
-	);
+	const runLabel = $derived.by(() => {
+		if (training) return 'Stop Training';
+		if (startChoice === 'resume') {
+			return trainMode === 'rust' ? 'Resume Rust Training' : 'Resume Python Training';
+		}
+		if (startChoice === 'new') {
+			return trainMode === 'rust' ? 'Start Rust Training' : 'Start Python Training';
+		}
+		return 'Start Training';
+	});
+	const runTitle = $derived.by(() => {
+		if (training) return 'Stop Training';
+		if (startChoice === 'resume') return 'Resume Training';
+		if (startChoice === 'new') return 'Start Training';
+		return 'Start Training';
+	});
+	const collapsedLabel = $derived.by(() => (training ? 'Stop' : 'Setup'));
+	const collapsedTitle = $derived.by(() => (training ? 'Stop Training' : 'Open Setup'));
 	const fitnessSeries = $derived.by(() =>
 		Array.from(fitnessByGen.entries())
 			.sort(([a], [b]) => a - b)
@@ -195,6 +214,30 @@
 		logTimer = null;
 	};
 
+	const selectStartChoice = (choice: StartChoice) => {
+		if (training) return;
+		startChoice = choice;
+		if (choice === 'new') {
+			checkpointPath = '';
+		}
+	};
+
+	const resetTrainingSetup = () => {
+		if (training) return;
+		startChoice = null;
+		checkpointPath = '';
+	};
+
+	const attachCheckpoint = (params: Record<string, unknown>) => {
+		if (startChoice === 'resume') {
+			const trimmed = checkpointPath.trim();
+			if (trimmed) {
+				params["load-checkpoint"] = trimmed;
+			}
+		}
+		return params;
+	};
+
 	const buildRustParams = () => {
 		const params = { ...rustParams } as Record<string, unknown>;
 		if (rustDataMode === 'full') {
@@ -202,7 +245,7 @@
 		} else {
 			params.windowed = true;
 		}
-		return params;
+		return attachCheckpoint(params);
 	};
 
 	const buildPythonParams = () => {
@@ -210,25 +253,45 @@
 		if (pythonDataMode === 'full') {
 			params["full-file"] = true;
 		}
-		return params;
+		return attachCheckpoint(params);
 	};
 
 	const toggleTraining = () => {
 		if (training) {
 			stopTraining();
 		} else {
+			if (!canStartTraining) {
+				const message = startChoice
+					? 'Add a checkpoint path to resume training.'
+					: 'Choose new training or resume from a checkpoint first.';
+				consoleOutput = [...consoleOutput, { type: 'error', text: message }];
+				return;
+			}
 			startTraining(trainMode);
 		}
 	};
 
 	async function startTraining(mode: TrainMode) {
 		if (training) return;
+		if (!startChoice) {
+			consoleOutput = [
+				...consoleOutput,
+				{ type: 'error', text: 'Choose new training or resume from a checkpoint first.' }
+			];
+			return;
+		}
+		if (startChoice === 'resume' && !checkpointPath.trim()) {
+			consoleOutput = [...consoleOutput, { type: 'error', text: 'Checkpoint path is required to resume.' }];
+			return;
+		}
 		const params = mode === 'rust' ? buildRustParams() : buildPythonParams();
 		const outdir = typeof params.outdir === 'string' ? params.outdir : "runs_ga";
 		abortController?.abort();
 		abortController = new AbortController();
 		training = true;
-		consoleOutput = [{ type: 'system', text: `Starting ${mode.toUpperCase()} training...` }];
+		const verb = startChoice === 'resume' ? 'Resuming' : 'Starting';
+		const suffix = startChoice === 'resume' ? ' from checkpoint' : '';
+		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()} training${suffix}...` }];
 		fitnessByGen = new Map();
 		startLogPolling(outdir);
 		
@@ -287,6 +350,14 @@
 		if (!training) return;
 		abortController?.abort();
 		stopLogPolling();
+	};
+
+	const handleCollapsedAction = () => {
+		if (training) {
+			stopTraining();
+		} else {
+			paramsCollapsed = false;
+		}
 	};
 </script>
 
