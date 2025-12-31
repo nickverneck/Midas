@@ -364,7 +364,7 @@
 <div class="min-h-screen bg-background">
 	<aside
 		class={`bg-card border-r shadow-sm transition-[width] duration-200 ease-out w-full lg:fixed lg:inset-y-0 lg:left-0 ${paramsCollapsed ? 'lg:w-[120px]' : 'lg:w-[360px]'}`}
-		onclick={() => {
+		on:click={() => {
 			if (paramsCollapsed) paramsCollapsed = false;
 		}}
 		title={paramsCollapsed ? "Click to expand parameters" : undefined}
@@ -373,264 +373,398 @@
 			{#if !paramsCollapsed}
 				<div class="flex items-center justify-between px-6 py-4 border-b">
 					<div class="text-sm font-semibold tracking-tight">Training Controls</div>
-					<Button variant="ghost" size="sm" onclick={() => (paramsCollapsed = true)}>
+					<Button variant="ghost" size="sm" on:click|stopPropagation={() => (paramsCollapsed = true)}>
 						Collapse
 					</Button>
 				</div>
 			{/if}
-			<div class={paramsCollapsed ? "px-4 py-4" : "px-6 py-4"} onclick={(event) => event.stopPropagation()}>
-				<Button
-					variant={training ? "destructive" : "default"}
-					onclick={toggleTraining}
-					class="w-full"
-					title={startTitle}
-				>
-					{startLabel}
-				</Button>
-			</div>
-
-			{#if !paramsCollapsed}
-				<div class="flex-1 overflow-y-auto px-6 pb-6" onclick={(event) => event.stopPropagation()}>
-					<Tabs.Root bind:value={trainMode} class="w-full">
-						<Tabs.List class="grid w-full grid-cols-2 mb-4">
-							<Tabs.Trigger value="rust">Rust (Primary)</Tabs.Trigger>
-							<Tabs.Trigger value="python">Python (Legacy)</Tabs.Trigger>
-						</Tabs.List>
-
-						<Tabs.Content value="rust">
-							<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining('rust'); }}>
-								<div class="grid gap-4 md:grid-cols-2">
-									<div class="grid gap-2">
-										<Label for="rust-outdir">Output Folder</Label>
-										<Input id="rust-outdir" type="text" bind:value={rustParams.outdir} placeholder="runs_ga" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-train-parquet">Train Parquet</Label>
-										<Input id="rust-train-parquet" type="text" bind:value={rustParams["train-parquet"]} placeholder="data/train" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-val-parquet">Val Parquet</Label>
-										<Input id="rust-val-parquet" type="text" bind:value={rustParams["val-parquet"]} placeholder="data/val" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-test-parquet">Test Parquet</Label>
-										<Input id="rust-test-parquet" type="text" bind:value={rustParams["test-parquet"]} placeholder="data/test" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-data-mode">Data Mode</Label>
-										<select
-											id="rust-data-mode"
-											bind:value={rustDataMode}
-											class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-										>
-											<option value="windowed">Windowed</option>
-											<option value="full">Full file</option>
-										</select>
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-device">Device</Label>
-										<select
-											id="rust-device"
-											bind:value={rustParams.device}
-											class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-										>
-											<option value="">Auto</option>
-											<option value="cpu">CPU</option>
-											<option value="mps">MPS</option>
-											<option value="cuda">CUDA</option>
-										</select>
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-generations">Generations</Label>
-										<Input id="rust-generations" type="number" min="1" bind:value={rustParams.generations} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-pop-size">Population Size</Label>
-										<Input id="rust-pop-size" type="number" min="1" bind:value={rustParams["pop-size"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-workers">Workers</Label>
-										<Input id="rust-workers" type="number" min="0" bind:value={rustParams.workers} />
-									</div>
-									{#if rustDataMode === 'windowed'}
-										<div class="grid gap-2">
-											<Label for="rust-window">Window Size</Label>
-											<Input id="rust-window" type="number" min="1" bind:value={rustParams.window} />
-										</div>
-										<div class="grid gap-2">
-											<Label for="rust-step">Step Size</Label>
-											<Input id="rust-step" type="number" min="1" bind:value={rustParams.step} />
-										</div>
-									{/if}
-									<div class="grid gap-2">
-										<Label for="rust-initial-balance">Initial Balance</Label>
-										<Input id="rust-initial-balance" type="number" step="0.01" bind:value={rustParams["initial-balance"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-elite-frac">Elite Fraction</Label>
-										<Input id="rust-elite-frac" type="number" step="0.01" min="0" max="1" bind:value={rustParams["elite-frac"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-mutation-sigma">Mutation Sigma</Label>
-										<Input id="rust-mutation-sigma" type="number" step="0.01" min="0" bind:value={rustParams["mutation-sigma"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-init-sigma">Init Sigma</Label>
-										<Input id="rust-init-sigma" type="number" step="0.01" min="0" bind:value={rustParams["init-sigma"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-hidden">Hidden Units</Label>
-										<Input id="rust-hidden" type="number" min="1" bind:value={rustParams.hidden} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-layers">Layers</Label>
-										<Input id="rust-layers" type="number" min="1" bind:value={rustParams.layers} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-eval-windows">Eval Windows</Label>
-										<Input id="rust-eval-windows" type="number" min="1" bind:value={rustParams["eval-windows"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-w-pnl">Fitness Weight (PNL)</Label>
-										<Input id="rust-w-pnl" type="number" step="0.01" bind:value={rustParams["w-pnl"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-w-sortino">Fitness Weight (Sortino)</Label>
-										<Input id="rust-w-sortino" type="number" step="0.01" bind:value={rustParams["w-sortino"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-w-mdd">Fitness Weight (Max DD)</Label>
-										<Input id="rust-w-mdd" type="number" step="0.01" bind:value={rustParams["w-mdd"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-save-top-n">Save Top N</Label>
-										<Input id="rust-save-top-n" type="number" min="0" bind:value={rustParams["save-top-n"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-save-every">Save Every (gens)</Label>
-										<Input id="rust-save-every" type="number" min="0" bind:value={rustParams["save-every"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="rust-checkpoint-every">Checkpoint Every (gens)</Label>
-										<Input id="rust-checkpoint-every" type="number" min="0" bind:value={rustParams["checkpoint-every"]} />
-									</div>
+			{#if paramsCollapsed}
+				<div class="px-4 py-4" on:click|stopPropagation>
+					<Button
+						variant={training ? "destructive" : "secondary"}
+						on:click={handleCollapsedAction}
+						class="w-full"
+						title={collapsedTitle}
+					>
+						{collapsedLabel}
+					</Button>
+				</div>
+			{:else}
+				<div class="flex-1 overflow-y-auto px-6 pb-6" on:click|stopPropagation>
+					<div class="space-y-6">
+						<div class="rounded-lg border bg-card/50 p-4 space-y-3">
+							<div class="flex items-start justify-between gap-3">
+								<div>
+									<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 1</div>
+									<div class="text-sm font-semibold">Choose a starting point</div>
 								</div>
-							</form>
-						</Tabs.Content>
-
-						<Tabs.Content value="python">
-							<form class="space-y-4" onsubmit={(e) => { e.preventDefault(); startTraining('python'); }}>
-								<div class="grid gap-4 md:grid-cols-2">
-									<div class="grid gap-2">
-										<Label for="py-outdir">Output Folder</Label>
-										<Input id="py-outdir" type="text" bind:value={pythonParams.outdir} placeholder="runs_ga" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-train-parquet">Train Parquet</Label>
-										<Input id="py-train-parquet" type="text" bind:value={pythonParams["train-parquet"]} placeholder="data/train" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-val-parquet">Val Parquet</Label>
-										<Input id="py-val-parquet" type="text" bind:value={pythonParams["val-parquet"]} placeholder="data/val" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-test-parquet">Test Parquet</Label>
-										<Input id="py-test-parquet" type="text" bind:value={pythonParams["test-parquet"]} placeholder="data/test" />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-data-mode">Data Mode</Label>
-										<select
-											id="py-data-mode"
-											bind:value={pythonDataMode}
-											class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-										>
-											<option value="windowed">Windowed</option>
-											<option value="full">Full file</option>
-										</select>
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-device">Device</Label>
-										<select
-											id="py-device"
-											bind:value={pythonParams.device}
-											class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-										>
-											<option value="">Auto</option>
-											<option value="cpu">CPU</option>
-											<option value="mps">MPS</option>
-											<option value="cuda">CUDA</option>
-										</select>
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-generations">Generations</Label>
-										<Input id="py-generations" type="number" min="1" bind:value={pythonParams.generations} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-pop-size">Population Size</Label>
-										<Input id="py-pop-size" type="number" min="1" bind:value={pythonParams["pop-size"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-workers">Workers</Label>
-										<Input id="py-workers" type="number" min="0" bind:value={pythonParams.workers} />
-									</div>
-									{#if pythonDataMode === 'windowed'}
-										<div class="grid gap-2">
-											<Label for="py-window">Window Size</Label>
-											<Input id="py-window" type="number" min="1" bind:value={pythonParams.window} />
-										</div>
-										<div class="grid gap-2">
-											<Label for="py-step">Step Size</Label>
-											<Input id="py-step" type="number" min="1" bind:value={pythonParams.step} />
-										</div>
-									{/if}
-									<div class="grid gap-2">
-										<Label for="py-train-epochs">Train Epochs</Label>
-										<Input id="py-train-epochs" type="number" min="1" bind:value={pythonParams["train-epochs"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-train-windows">Train Windows</Label>
-										<Input id="py-train-windows" type="number" min="1" bind:value={pythonParams["train-windows"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-eval-windows">Eval Windows</Label>
-										<Input id="py-eval-windows" type="number" min="1" bind:value={pythonParams["eval-windows"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-lr">Learning Rate</Label>
-										<Input id="py-lr" type="number" step="0.0001" bind:value={pythonParams.lr} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-gamma">Gamma</Label>
-										<Input id="py-gamma" type="number" step="0.01" min="0" max="1" bind:value={pythonParams.gamma} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-lam">Lambda</Label>
-										<Input id="py-lam" type="number" step="0.01" bind:value={pythonParams.lam} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-initial-balance">Initial Balance</Label>
-										<Input id="py-initial-balance" type="number" step="0.01" bind:value={pythonParams["initial-balance"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-mutation-sigma">Mutation Sigma</Label>
-										<Input id="py-mutation-sigma" type="number" step="0.01" min="0" bind:value={pythonParams["mutation-sigma"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-save-top-n">Save Top N</Label>
-										<Input id="py-save-top-n" type="number" min="0" bind:value={pythonParams["save-top-n"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-save-every">Save Every (gens)</Label>
-										<Input id="py-save-every" type="number" min="0" bind:value={pythonParams["save-every"]} />
-									</div>
-									<div class="grid gap-2">
-										<Label for="py-checkpoint-every">Checkpoint Every (gens)</Label>
-										<Input id="py-checkpoint-every" type="number" min="0" bind:value={pythonParams["checkpoint-every"]} />
-									</div>
+								{#if startChoice}
+									<Button variant="ghost" size="sm" on:click={resetTrainingSetup} disabled={training}>
+										New Training
+									</Button>
+								{/if}
+							</div>
+							{#if !startChoice}
+								<p class="text-xs text-muted-foreground">
+									Do you want to start fresh or continue from a checkpoint?
+								</p>
+								<div class="grid gap-2">
+									<Button on:click={() => selectStartChoice('new')} disabled={training}>
+										New Training
+									</Button>
+									<Button variant="outline" on:click={() => selectStartChoice('resume')} disabled={training}>
+										Continue from Checkpoint
+									</Button>
 								</div>
-							</form>
-						</Tabs.Content>
-					</Tabs.Root>
+							{:else}
+								<div class="flex items-center gap-2 text-sm">
+									<span class="text-muted-foreground">Selected:</span>
+									<Badge variant="secondary">
+										{startChoice === 'resume' ? 'Resume from Checkpoint' : 'New Training'}
+									</Badge>
+								</div>
+								{#if startChoice === 'resume'}
+									<div class="grid gap-2">
+										<Label for="checkpoint-path">Checkpoint Path</Label>
+										<Input
+											id="checkpoint-path"
+											type="text"
+											bind:value={checkpointPath}
+											placeholder={trainMode === 'rust' ? "runs_ga/checkpoint_gen4.bin" : "runs_ga/checkpoint_gen4.pt"}
+										/>
+										<div class="text-xs text-muted-foreground">
+											Rust checkpoints use .bin; Python checkpoints use .pt.
+										</div>
+									</div>
+								{/if}
+							{/if}
+						</div>
+
+						{#if startChoice}
+							<div class="rounded-lg border bg-card/50 p-4 space-y-4">
+								<div class="flex items-center justify-between">
+									<div>
+										<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 2</div>
+										<div class="text-sm font-semibold">Configure your run</div>
+									</div>
+									<Badge variant="outline">{trainMode === 'rust' ? 'Rust' : 'Python'}</Badge>
+								</div>
+
+								<Tabs.Root bind:value={trainMode} class="w-full">
+									<Tabs.List class="grid w-full grid-cols-2 mb-4">
+										<Tabs.Trigger value="rust">Rust (Primary)</Tabs.Trigger>
+										<Tabs.Trigger value="python">Python (Legacy)</Tabs.Trigger>
+									</Tabs.List>
+
+									<Tabs.Content value="rust">
+										<form class="space-y-4" on:submit|preventDefault={() => startTraining('rust')}>
+											<div class="space-y-4">
+												<details class="rounded-lg border bg-background/60 p-4" open>
+													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rust-train-parquet">Train Parquet</Label>
+															<Input id="rust-train-parquet" type="text" bind:value={rustParams["train-parquet"]} placeholder="data/train" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-val-parquet">Val Parquet</Label>
+															<Input id="rust-val-parquet" type="text" bind:value={rustParams["val-parquet"]} placeholder="data/val" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-test-parquet">Test Parquet</Label>
+															<Input id="rust-test-parquet" type="text" bind:value={rustParams["test-parquet"]} placeholder="data/test" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-data-mode">Data Mode</Label>
+															<select
+																id="rust-data-mode"
+																bind:value={rustDataMode}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="windowed">Windowed</option>
+																<option value="full">Full file</option>
+															</select>
+														</div>
+														{#if rustDataMode === 'windowed'}
+															<div class="grid gap-2">
+																<Label for="rust-window">Window Size</Label>
+																<Input id="rust-window" type="number" min="1" bind:value={rustParams.window} />
+															</div>
+															<div class="grid gap-2">
+																<Label for="rust-step">Step Size</Label>
+																<Input id="rust-step" type="number" min="1" bind:value={rustParams.step} />
+															</div>
+														{/if}
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Evolution Settings</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rust-generations">Generations</Label>
+															<Input id="rust-generations" type="number" min="1" bind:value={rustParams.generations} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-pop-size">Population Size</Label>
+															<Input id="rust-pop-size" type="number" min="1" bind:value={rustParams["pop-size"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-workers">Workers</Label>
+															<Input id="rust-workers" type="number" min="0" bind:value={rustParams.workers} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-elite-frac">Elite Fraction</Label>
+															<Input id="rust-elite-frac" type="number" step="0.01" min="0" max="1" bind:value={rustParams["elite-frac"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-mutation-sigma">Mutation Sigma</Label>
+															<Input id="rust-mutation-sigma" type="number" step="0.01" min="0" bind:value={rustParams["mutation-sigma"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-init-sigma">Init Sigma</Label>
+															<Input id="rust-init-sigma" type="number" step="0.01" min="0" bind:value={rustParams["init-sigma"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-eval-windows">Eval Windows</Label>
+															<Input id="rust-eval-windows" type="number" min="1" bind:value={rustParams["eval-windows"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rust-device">Device</Label>
+															<select
+																id="rust-device"
+																bind:value={rustParams.device}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="">Auto</option>
+																<option value="cpu">CPU</option>
+																<option value="mps">MPS</option>
+																<option value="cuda">CUDA</option>
+															</select>
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-hidden">Hidden Units</Label>
+															<Input id="rust-hidden" type="number" min="1" bind:value={rustParams.hidden} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-layers">Layers</Label>
+															<Input id="rust-layers" type="number" min="1" bind:value={rustParams.layers} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-initial-balance">Initial Balance</Label>
+															<Input id="rust-initial-balance" type="number" step="0.01" bind:value={rustParams["initial-balance"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-w-pnl">Fitness Weight (PNL)</Label>
+															<Input id="rust-w-pnl" type="number" step="0.01" bind:value={rustParams["w-pnl"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-w-sortino">Fitness Weight (Sortino)</Label>
+															<Input id="rust-w-sortino" type="number" step="0.01" bind:value={rustParams["w-sortino"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-w-mdd">Fitness Weight (Max DD)</Label>
+															<Input id="rust-w-mdd" type="number" step="0.01" bind:value={rustParams["w-mdd"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Checkpoints</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rust-outdir">Output Folder</Label>
+															<Input id="rust-outdir" type="text" bind:value={rustParams.outdir} placeholder="runs_ga" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-save-top-n">Save Top N</Label>
+															<Input id="rust-save-top-n" type="number" min="0" bind:value={rustParams["save-top-n"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-save-every">Save Every (gens)</Label>
+															<Input id="rust-save-every" type="number" min="0" bind:value={rustParams["save-every"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-checkpoint-every">Checkpoint Every (gens)</Label>
+															<Input id="rust-checkpoint-every" type="number" min="0" bind:value={rustParams["checkpoint-every"]} />
+														</div>
+													</div>
+												</details>
+											</div>
+										</form>
+									</Tabs.Content>
+
+									<Tabs.Content value="python">
+										<form class="space-y-4" on:submit|preventDefault={() => startTraining('python')}>
+											<div class="space-y-4">
+												<details class="rounded-lg border bg-background/60 p-4" open>
+													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="py-train-parquet">Train Parquet</Label>
+															<Input id="py-train-parquet" type="text" bind:value={pythonParams["train-parquet"]} placeholder="data/train" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-val-parquet">Val Parquet</Label>
+															<Input id="py-val-parquet" type="text" bind:value={pythonParams["val-parquet"]} placeholder="data/val" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-test-parquet">Test Parquet</Label>
+															<Input id="py-test-parquet" type="text" bind:value={pythonParams["test-parquet"]} placeholder="data/test" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-data-mode">Data Mode</Label>
+															<select
+																id="py-data-mode"
+																bind:value={pythonDataMode}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="windowed">Windowed</option>
+																<option value="full">Full file</option>
+															</select>
+														</div>
+														{#if pythonDataMode === 'windowed'}
+															<div class="grid gap-2">
+																<Label for="py-window">Window Size</Label>
+																<Input id="py-window" type="number" min="1" bind:value={pythonParams.window} />
+															</div>
+															<div class="grid gap-2">
+																<Label for="py-step">Step Size</Label>
+																<Input id="py-step" type="number" min="1" bind:value={pythonParams.step} />
+															</div>
+														{/if}
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">GA Settings</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="py-generations">Generations</Label>
+															<Input id="py-generations" type="number" min="1" bind:value={pythonParams.generations} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-pop-size">Population Size</Label>
+															<Input id="py-pop-size" type="number" min="1" bind:value={pythonParams["pop-size"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-workers">Workers</Label>
+															<Input id="py-workers" type="number" min="0" bind:value={pythonParams.workers} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-mutation-sigma">Mutation Sigma</Label>
+															<Input id="py-mutation-sigma" type="number" step="0.01" min="0" bind:value={pythonParams["mutation-sigma"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-eval-windows">Eval Windows</Label>
+															<Input id="py-eval-windows" type="number" min="1" bind:value={pythonParams["eval-windows"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">PPO Settings</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="py-train-epochs">Train Epochs</Label>
+															<Input id="py-train-epochs" type="number" min="1" bind:value={pythonParams["train-epochs"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-train-windows">Train Windows</Label>
+															<Input id="py-train-windows" type="number" min="1" bind:value={pythonParams["train-windows"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-lr">Learning Rate</Label>
+															<Input id="py-lr" type="number" step="0.0001" bind:value={pythonParams.lr} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-gamma">Gamma</Label>
+															<Input id="py-gamma" type="number" step="0.01" min="0" max="1" bind:value={pythonParams.gamma} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-lam">Lambda</Label>
+															<Input id="py-lam" type="number" step="0.01" bind:value={pythonParams.lam} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-initial-balance">Initial Balance</Label>
+															<Input id="py-initial-balance" type="number" step="0.01" bind:value={pythonParams["initial-balance"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Runtime</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="py-outdir">Output Folder</Label>
+															<Input id="py-outdir" type="text" bind:value={pythonParams.outdir} placeholder="runs_ga" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-device">Device</Label>
+															<select
+																id="py-device"
+																bind:value={pythonParams.device}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="">Auto</option>
+																<option value="cpu">CPU</option>
+																<option value="mps">MPS</option>
+																<option value="cuda">CUDA</option>
+															</select>
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-save-top-n">Save Top N</Label>
+															<Input id="py-save-top-n" type="number" min="0" bind:value={pythonParams["save-top-n"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-save-every">Save Every (gens)</Label>
+															<Input id="py-save-every" type="number" min="0" bind:value={pythonParams["save-every"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="py-checkpoint-every">Checkpoint Every (gens)</Label>
+															<Input id="py-checkpoint-every" type="number" min="0" bind:value={pythonParams["checkpoint-every"]} />
+														</div>
+													</div>
+												</details>
+											</div>
+										</form>
+									</Tabs.Content>
+								</Tabs.Root>
+							</div>
+
+							<div class="rounded-lg border bg-card/50 p-4 space-y-3">
+								<div class="flex items-center justify-between">
+									<div>
+										<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 3</div>
+										<div class="text-sm font-semibold">Run training</div>
+									</div>
+									{#if training}
+										<Badge variant="outline" class="animate-pulse">Active</Badge>
+									{/if}
+								</div>
+								<Button
+									variant={training ? "destructive" : "default"}
+									on:click={toggleTraining}
+									class="w-full"
+									title={runTitle}
+									disabled={!training && !canStartTraining}
+								>
+									{runLabel}
+								</Button>
+								{#if startChoice === 'resume' && !trimmedCheckpoint}
+									<div class="text-xs text-muted-foreground">
+										Add a checkpoint path to resume training.
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</div>
 				</div>
 			{/if}
 		</div>
