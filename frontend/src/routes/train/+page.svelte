@@ -373,9 +373,11 @@
 			{#if !paramsCollapsed}
 				<div class="flex items-center justify-between px-6 py-4 border-b">
 					<div class="text-sm font-semibold tracking-tight">Training Controls</div>
-					<Button variant="ghost" size="sm" on:click|stopPropagation={() => (paramsCollapsed = true)}>
-						Collapse
-					</Button>
+					<span on:click|stopPropagation>
+						<Button variant="ghost" size="sm" on:click={() => (paramsCollapsed = true)}>
+							Collapse
+						</Button>
+					</span>
 				</div>
 			{/if}
 			{#if paramsCollapsed}
