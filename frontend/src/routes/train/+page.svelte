@@ -363,28 +363,31 @@
 
 <div class="min-h-screen bg-background">
 	<aside
-		class={`bg-card border-r shadow-sm transition-[width] duration-200 ease-out w-full lg:fixed lg:inset-y-0 lg:left-0 ${paramsCollapsed ? 'lg:w-[120px]' : 'lg:w-[360px]'}`}
-		on:click={() => {
-			if (paramsCollapsed) paramsCollapsed = false;
-		}}
-		title={paramsCollapsed ? "Click to expand parameters" : undefined}
+		class={`bg-card border-r shadow-sm transition-[width] duration-200 ease-out w-full lg:fixed lg:inset-y-0 lg:left-0 relative ${paramsCollapsed ? 'lg:w-[120px]' : 'lg:w-[360px]'}`}
 	>
-		<div class="flex h-full flex-col">
+		{#if paramsCollapsed}
+			<button
+				type="button"
+				class="absolute inset-0 cursor-pointer bg-transparent border-0 p-0 appearance-none z-0"
+				aria-label="Expand training parameters"
+				title="Expand parameters"
+				onclick={() => (paramsCollapsed = false)}
+			></button>
+		{/if}
+		<div class="relative z-10 flex h-full flex-col">
 			{#if !paramsCollapsed}
 				<div class="flex items-center justify-between px-6 py-4 border-b">
 					<div class="text-sm font-semibold tracking-tight">Training Controls</div>
-					<span on:click|stopPropagation>
-						<Button variant="ghost" size="sm" on:click={() => (paramsCollapsed = true)}>
-							Collapse
-						</Button>
-					</span>
+					<Button variant="ghost" size="sm" onclick={() => (paramsCollapsed = true)}>
+						Collapse
+					</Button>
 				</div>
 			{/if}
 			{#if paramsCollapsed}
-				<div class="px-4 py-4" on:click|stopPropagation>
+				<div class="px-4 py-4">
 					<Button
 						variant={training ? "destructive" : "secondary"}
-						on:click={handleCollapsedAction}
+						onclick={handleCollapsedAction}
 						class="w-full"
 						title={collapsedTitle}
 					>
@@ -392,7 +395,7 @@
 					</Button>
 				</div>
 			{:else}
-				<div class="flex-1 overflow-y-auto px-6 pb-6" on:click|stopPropagation>
+				<div class="flex-1 overflow-y-auto px-6 pb-6">
 					<div class="space-y-6">
 						<div class="rounded-lg border bg-card/50 p-4 space-y-3">
 							<div class="flex items-start justify-between gap-3">
@@ -401,7 +404,7 @@
 									<div class="text-sm font-semibold">Choose a starting point</div>
 								</div>
 								{#if startChoice}
-									<Button variant="ghost" size="sm" on:click={resetTrainingSetup} disabled={training}>
+									<Button variant="ghost" size="sm" onclick={resetTrainingSetup} disabled={training}>
 										New Training
 									</Button>
 								{/if}
@@ -411,10 +414,10 @@
 									Do you want to start fresh or continue from a checkpoint?
 								</p>
 								<div class="grid gap-2">
-									<Button on:click={() => selectStartChoice('new')} disabled={training}>
+									<Button onclick={() => selectStartChoice('new')} disabled={training}>
 										New Training
 									</Button>
-									<Button variant="outline" on:click={() => selectStartChoice('resume')} disabled={training}>
+									<Button variant="outline" onclick={() => selectStartChoice('resume')} disabled={training}>
 										Continue from Checkpoint
 									</Button>
 								</div>
@@ -459,7 +462,13 @@
 									</Tabs.List>
 
 									<Tabs.Content value="rust">
-										<form class="space-y-4" on:submit|preventDefault={() => startTraining('rust')}>
+										<form
+											class="space-y-4"
+											onsubmit={(event) => {
+												event.preventDefault();
+												startTraining('rust');
+											}}
+										>
 											<div class="space-y-4">
 												<details class="rounded-lg border bg-background/60 p-4" open>
 													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
@@ -603,7 +612,13 @@
 									</Tabs.Content>
 
 									<Tabs.Content value="python">
-										<form class="space-y-4" on:submit|preventDefault={() => startTraining('python')}>
+										<form
+											class="space-y-4"
+											onsubmit={(event) => {
+												event.preventDefault();
+												startTraining('python');
+											}}
+										>
 											<div class="space-y-4">
 												<details class="rounded-lg border bg-background/60 p-4" open>
 													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
@@ -752,7 +767,7 @@
 								</div>
 								<Button
 									variant={training ? "destructive" : "default"}
-									on:click={toggleTraining}
+									onclick={toggleTraining}
 									class="w-full"
 									title={runTitle}
 									disabled={!training && !canStartTraining}
