@@ -123,7 +123,9 @@ export const GET = async ({ url }) => {
 
     const data = parsed.data as Record<string, unknown>[];
     const nextOffset = offset + dataLines.length;
-    const done = dataLines.length < limit;
+    const stats = fs.statSync(logPath);
+    const recentlyModified = Date.now() - stats.mtimeMs < 2000;
+    const done = dataLines.length < limit && !recentlyModified;
 
     return json({ data, nextOffset, done }, { headers });
 };
