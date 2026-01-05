@@ -509,6 +509,24 @@
 													</div>
 												</details>
 
+												<details class="rounded-lg border bg-background/60 p-4" open>
+													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rust-device">Device</Label>
+															<select
+																id="rust-device"
+																bind:value={rustParams.device}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="cpu">CPU</option>
+																<option value="mps">MPS</option>
+																<option value="cuda">CUDA</option>
+															</select>
+														</div>
+													</div>
+												</details>
+
 												<details class="rounded-lg border bg-background/60 p-4">
 													<summary class="cursor-pointer text-sm font-semibold">Evolution Settings</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
@@ -546,19 +564,6 @@
 												<details class="rounded-lg border bg-background/60 p-4">
 													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rust-device">Device</Label>
-															<select
-																id="rust-device"
-																bind:value={rustParams.device}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="">Auto</option>
-																<option value="cpu">CPU</option>
-																<option value="mps">MPS</option>
-																<option value="cuda">CUDA</option>
-															</select>
-														</div>
 														<div class="grid gap-2">
 															<Label for="rust-hidden">Hidden Units</Label>
 															<Input id="rust-hidden" type="number" min="1" bind:value={rustParams.hidden} />
@@ -659,6 +664,24 @@
 													</div>
 												</details>
 
+												<details class="rounded-lg border bg-background/60 p-4" open>
+													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="py-device">Device</Label>
+															<select
+																id="py-device"
+																bind:value={pythonParams.device}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="cpu">CPU</option>
+																<option value="mps">MPS</option>
+																<option value="cuda">CUDA</option>
+															</select>
+														</div>
+													</div>
+												</details>
+
 												<details class="rounded-lg border bg-background/60 p-4">
 													<summary class="cursor-pointer text-sm font-semibold">GA Settings</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
@@ -721,19 +744,6 @@
 														<div class="grid gap-2">
 															<Label for="py-outdir">Output Folder</Label>
 															<Input id="py-outdir" type="text" bind:value={pythonParams.outdir} placeholder="runs_ga" />
-														</div>
-														<div class="grid gap-2">
-															<Label for="py-device">Device</Label>
-															<select
-																id="py-device"
-																bind:value={pythonParams.device}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="">Auto</option>
-																<option value="cpu">CPU</option>
-																<option value="mps">MPS</option>
-																<option value="cuda">CUDA</option>
-															</select>
 														</div>
 														<div class="grid gap-2">
 															<Label for="py-save-top-n">Save Top N</Label>
