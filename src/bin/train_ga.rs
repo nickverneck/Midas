@@ -264,6 +264,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         let mut results = eval_results;
         results.sort_by_key(|(idx, _, _)| *idx);
 
+        let mut log_buffer = String::new();
         for (idx, train_metrics, eval_metrics) in results.into_iter() {
             let genome = pop[idx].clone();
             scored.push((train_metrics.fitness, genome.clone(), eval_metrics.clone(), train_metrics.clone()));
@@ -314,11 +315,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 train_metrics.eval_drawdown,
                 train_metrics.eval_ret_mean
             );
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(&log_path)?
-                .write_all(line.as_bytes())
-                .context("write ga_log")?;
+            log_buffer.push_str(&line);
 
             if let Some(eval) = eval_metrics {
                 println!(
@@ -371,6 +368,14 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                     train_metrics.debug_position_violations
                 );
             }
+        }
+
+        if !log_buffer.is_empty() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)?
+                .write_all(log_buffer.as_bytes())
+                .context("write ga_log")?;
         }
 
         println!("Generation {} completed in {:.2?}", generation, gen_start.elapsed());
