@@ -28,6 +28,18 @@ const buildCliArgs = (params: Record<string, unknown>) => {
     return args;
 };
 
+const findVenvTorchRoot = (venvDir: string) => {
+    const libDir = path.join(venvDir, 'lib');
+    if (!fs.existsSync(libDir)) return null;
+    const entries = fs.readdirSync(libDir, { withFileTypes: true });
+    for (const entry of entries) {
+        if (!entry.isDirectory() || !entry.name.startsWith('python')) continue;
+        const torchRoot = path.join(libDir, entry.name, 'site-packages', 'torch');
+        if (fs.existsSync(torchRoot)) return torchRoot;
+    }
+    return null;
+};
+
 const resolveTorchEnv = (root: string) => {
     const env = { ...process.env };
     const venvDir = path.join(root, '.venv');
@@ -51,21 +63,36 @@ const resolveTorchEnv = (root: string) => {
                 .trim();
             if (torchRoot) {
                 env.LIBTORCH = env.LIBTORCH ?? torchRoot;
-                const torchLib = path.join(torchRoot, 'lib');
-                if (fs.existsSync(torchLib)) {
-                    const libKey =
-                        process.platform === 'darwin'
-                            ? 'DYLD_LIBRARY_PATH'
-                            : process.platform === 'linux'
-                              ? 'LD_LIBRARY_PATH'
-                              : 'PATH';
-                    env[libKey] = env[libKey]
-                        ? `${torchLib}${path.delimiter}${env[libKey]}`
-                        : torchLib;
-                }
             }
         } catch {
             // Fall back to default env when torch isn't available in the venv.
+        }
+
+        if (!env.LIBTORCH) {
+            const torchRoot = findVenvTorchRoot(venvDir);
+            if (torchRoot) {
+                env.LIBTORCH = torchRoot;
+            }
+        }
+
+        if (env.LIBTORCH) {
+            const torchLib = path.join(env.LIBTORCH, 'lib');
+            if (fs.existsSync(torchLib)) {
+                const libKey =
+                    process.platform === 'darwin'
+                        ? 'DYLD_LIBRARY_PATH'
+                        : process.platform === 'linux'
+                          ? 'LD_LIBRARY_PATH'
+                          : 'PATH';
+                env[libKey] = env[libKey]
+                    ? `${torchLib}${path.delimiter}${env[libKey]}`
+                    : torchLib;
+                if (process.platform === 'darwin') {
+                    env.DYLD_FALLBACK_LIBRARY_PATH = env.DYLD_FALLBACK_LIBRARY_PATH
+                        ? `${torchLib}${path.delimiter}${env.DYLD_FALLBACK_LIBRARY_PATH}`
+                        : torchLib;
+                }
+            }
         }
     }
     return env;
