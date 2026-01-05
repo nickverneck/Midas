@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -28,6 +28,49 @@ const buildCliArgs = (params: Record<string, unknown>) => {
     return args;
 };
 
+const resolveTorchEnv = (root: string) => {
+    const env = { ...process.env };
+    const venvDir = path.join(root, '.venv');
+    const venvBin = path.join(venvDir, 'bin');
+    const venvPython = path.join(venvBin, 'python');
+    if (fs.existsSync(venvPython)) {
+        env.VIRTUAL_ENV = env.VIRTUAL_ENV ?? venvDir;
+        env.PATH = `${venvBin}${path.delimiter}${env.PATH ?? ''}`;
+        env.PYTHON = env.PYTHON ?? venvPython;
+        env.LIBTORCH_USE_PYTORCH = env.LIBTORCH_USE_PYTORCH ?? '1';
+        env.LIBTORCH_BYPASS_VERSION_CHECK = env.LIBTORCH_BYPASS_VERSION_CHECK ?? '1';
+
+        const python = env.PYTHON ?? venvPython;
+        try {
+            const torchRoot = execFileSync(
+                python,
+                ['-c', 'import torch; from pathlib import Path; print(Path(torch.__file__).parent)'],
+                { env }
+            )
+                .toString()
+                .trim();
+            if (torchRoot) {
+                env.LIBTORCH = env.LIBTORCH ?? torchRoot;
+                const torchLib = path.join(torchRoot, 'lib');
+                if (fs.existsSync(torchLib)) {
+                    const libKey =
+                        process.platform === 'darwin'
+                            ? 'DYLD_LIBRARY_PATH'
+                            : process.platform === 'linux'
+                              ? 'LD_LIBRARY_PATH'
+                              : 'PATH';
+                    env[libKey] = env[libKey]
+                        ? `${torchLib}${path.delimiter}${env[libKey]}`
+                        : torchLib;
+                }
+            }
+        } catch {
+            // Fall back to default env when torch isn't available in the venv.
+        }
+    }
+    return env;
+};
+
 export const POST = async ({ request }) => {
     const payload = await request.json();
     const engine = (payload?.engine ?? 'rust') as TrainEngine;
@@ -36,11 +79,12 @@ export const POST = async ({ request }) => {
 
     const root = resolveProjectRoot();
     const cliArgs = buildCliArgs(params);
+    const env = resolveTorchEnv(root);
 
     let command = '';
     let args: string[] = [];
     if (engine === 'python') {
-        command = 'python3';
+        command = env.PYTHON ?? 'python3';
         args = ['python/examples/train_hybrid.py', ...cliArgs];
     } else {
         command = 'cargo';
@@ -51,7 +95,7 @@ export const POST = async ({ request }) => {
         start(controller) {
             const child = spawn(command, args, {
                 cwd: root,
-                env: process.env
+                env
             });
 
             const onAbort = () => {
