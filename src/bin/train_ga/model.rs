@@ -88,8 +88,12 @@ pub fn build_batched_policy(
 ) -> BatchedPolicy {
     assert!(!genomes.is_empty(), "batch policy requires genomes");
     let layer_count = layers + 1;
-    let mut weight_layers: Vec<Vec<Tensor>> = vec![Vec::with_capacity(genomes.len()); layer_count];
-    let mut bias_layers: Vec<Vec<Tensor>> = vec![Vec::with_capacity(genomes.len()); layer_count];
+    let mut weight_layers: Vec<Vec<Tensor>> = (0..layer_count)
+        .map(|_| Vec::with_capacity(genomes.len()))
+        .collect();
+    let mut bias_layers: Vec<Vec<Tensor>> = (0..layer_count)
+        .map(|_| Vec::with_capacity(genomes.len()))
+        .collect();
 
     for genome in genomes {
         let mut offset = 0usize;
@@ -97,11 +101,13 @@ pub fn build_batched_policy(
         for layer in 0..layers {
             let w_len = in_dim * hidden;
             let b_len = hidden;
-            let w = Tensor::of_slice(&genome[offset..offset + w_len])
+            let w = Tensor::f_from_slice(&genome[offset..offset + w_len])
+                .expect("tensor from genome")
                 .reshape(&[hidden as i64, in_dim as i64])
                 .to_device(device);
             offset += w_len;
-            let b = Tensor::of_slice(&genome[offset..offset + b_len])
+            let b = Tensor::f_from_slice(&genome[offset..offset + b_len])
+                .expect("tensor from genome")
                 .reshape(&[hidden as i64])
                 .to_device(device);
             offset += b_len;
@@ -112,11 +118,13 @@ pub fn build_batched_policy(
 
         let w_len = in_dim * 4;
         let b_len = 4;
-        let w = Tensor::of_slice(&genome[offset..offset + w_len])
+        let w = Tensor::f_from_slice(&genome[offset..offset + w_len])
+            .expect("tensor from genome")
             .reshape(&[4, in_dim as i64])
             .to_device(device);
         offset += w_len;
-        let b = Tensor::of_slice(&genome[offset..offset + b_len])
+        let b = Tensor::f_from_slice(&genome[offset..offset + b_len])
+            .expect("tensor from genome")
             .reshape(&[4])
             .to_device(device);
         offset += b_len;
