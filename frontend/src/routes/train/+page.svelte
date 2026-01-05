@@ -238,6 +238,12 @@
 		logOffset = offset;
 	};
 
+	const rebuildFitnessFromLogs = async (dir: string) => {
+		fitnessByGen = new Map();
+		logOffset = 0;
+		await loadAllLogs(dir);
+	};
+
 	const pollLogs = async () => {
 		if (!logPolling) return;
 		try {
@@ -398,9 +404,9 @@
 							stopLogPolling();
 							if (liveLogUpdates) {
 								await drainLogs(activeLogDir);
-							} else {
-								await loadAllLogs(activeLogDir);
 							}
+							await sleep(300);
+							await rebuildFitnessFromLogs(activeLogDir);
 							consoleOutput = [...consoleOutput, { type: 'system', text: `Process exited with code ${data.code}` }];
 						}
 					}
