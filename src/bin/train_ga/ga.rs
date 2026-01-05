@@ -242,7 +242,9 @@ pub fn evaluate_candidate(
                 env.state().realized_pnl,
                 cfg.initial_balance,
             );
-            let obs_cpu = Tensor::of_slice(&obs).reshape(&[1, obs_dim]);
+            let obs_cpu = Tensor::f_from_slice(&obs)
+                .expect("tensor from obs")
+                .reshape(&[1, obs_dim]);
             obs_device.copy_(&obs_cpu);
 
             let action_idx = no_grad(|| {
@@ -477,7 +479,9 @@ pub fn evaluate_candidates_batch(
                 obs_batch.extend_from_slice(&obs);
             }
 
-            let obs_cpu = Tensor::of_slice(&obs_batch).reshape(&[batch_dim, obs_dim]);
+            let obs_cpu = Tensor::f_from_slice(&obs_batch)
+                .expect("tensor from obs batch")
+                .reshape(&[batch_dim, obs_dim]);
             obs_device.copy_(&obs_cpu);
 
             let logits = no_grad(|| policy.forward(&obs_device));
