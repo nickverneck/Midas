@@ -45,11 +45,25 @@ function readHeader(filePath: string): string {
     }
 }
 
+function fileEndsWithNewline(filePath: string): boolean {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+        const stat = fs.fstatSync(fd);
+        if (stat.size === 0) return true;
+        const buf = Buffer.alloc(1);
+        fs.readSync(fd, buf, 0, 1, stat.size - 1);
+        return buf.toString() === '\n';
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
 async function readLines(filePath: string, offset: number, limit: number): Promise<string[]> {
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' });
     const rl = (await import('readline')).createInterface({ input: stream, crlfDelay: Infinity });
     const lines: string[] = [];
     let dataLineIdx = -1;
+    let hitLimit = false;
 
     try {
         for await (const line of rl) {
@@ -62,6 +76,7 @@ async function readLines(filePath: string, offset: number, limit: number): Promi
                 continue;
             }
             if (lines.length >= limit) {
+                hitLimit = true;
                 break;
             }
             lines.push(line);
@@ -72,18 +87,23 @@ async function readLines(filePath: string, offset: number, limit: number): Promi
         stream.close();
     }
 
+    if (!hitLimit && lines.length > 0 && !fileEndsWithNewline(filePath)) {
+        lines.pop();
+    }
+
     return lines;
 }
 
 export const GET = async ({ url }) => {
+    const headers = { 'Cache-Control': 'no-store' };
     const logPath = resolveLogPath(url.searchParams.get('dir'));
 
     if (!logPath) {
-        return json({ error: 'Invalid log directory' }, { status: 400 });
+        return json({ error: 'Invalid log directory' }, { status: 400, headers });
     }
 
     if (!fs.existsSync(logPath)) {
-        return json({ error: 'Log file not found' }, { status: 404 });
+        return json({ error: 'Log file not found' }, { status: 404, headers });
     }
 
     const limitParam = url.searchParams.get('limit');
@@ -105,5 +125,5 @@ export const GET = async ({ url }) => {
     const nextOffset = offset + dataLines.length;
     const done = dataLines.length < limit;
 
-    return json({ data, nextOffset, done });
+    return json({ data, nextOffset, done }, { headers });
 };

@@ -163,6 +163,8 @@
 		}
 	};
 
+	const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 	const buildLogUrl = (dir: string, offset: number) => {
 		const params = new URLSearchParams({
 			limit: String(logChunk),
@@ -178,9 +180,25 @@
 		if (!res.ok) throw new Error(`Log fetch failed (${res.status})`);
 		const payload = await res.json();
 		const rows = Array.isArray(payload.data) ? payload.data : [];
-		const nextOffset = typeof payload.nextOffset === 'number' ? payload.nextOffset : logOffset + rows.length;
-		logOffset = nextOffset;
+		if (rows.length > 0) {
+			const nextOffset = typeof payload.nextOffset === 'number' ? payload.nextOffset : logOffset + rows.length;
+			logOffset = nextOffset;
+		}
 		return rows as Array<Record<string, unknown>>;
+	};
+
+	const drainLogs = async (dir: string) => {
+		let emptyReads = 0;
+		while (emptyReads < 5) {
+			const rows = await readLogChunk(dir);
+			if (rows.length > 0) {
+				updateFitnessFromRows(rows);
+				emptyReads = 0;
+				continue;
+			}
+			emptyReads += 1;
+			await sleep(200);
+		}
 	};
 
 	const pollLogs = async () => {
@@ -329,6 +347,7 @@
 							training = false;
 							abortController = null;
 							stopLogPolling();
+							await drainLogs(activeLogDir);
 							consoleOutput = [...consoleOutput, { type: 'system', text: `Process exited with code ${data.code}` }];
 						}
 					}
