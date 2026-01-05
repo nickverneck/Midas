@@ -25,6 +25,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     use rayon::prelude::*;
     use std::io::Write;
 
+    let overall_start = std::time::Instant::now();
+
     if let Some(seed) = args.seed {
         let mut rng = StdRng::seed_from_u64(seed);
         let _ = rng.r#gen::<u64>();
@@ -156,6 +158,10 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         println!(
             "info: checkpoint generation {} is >= requested generations {}; nothing to run",
             start_gen, args.generations
+        );
+        println!(
+            "info: total training time {:.2?}",
+            overall_start.elapsed()
         );
         return Ok(());
     }
@@ -459,5 +465,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         println!("Saved best overall policy to {}", best_path.display());
     }
 
+    println!(
+        "info: total training time {:.2?}",
+        overall_start.elapsed()
+    );
     Ok(())
 }
