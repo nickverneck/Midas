@@ -36,6 +36,7 @@
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
 		device: "cpu",
+		"batch-candidates": 0,
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
@@ -523,6 +524,16 @@
 																<option value="mps">MPS</option>
 																<option value="cuda">CUDA</option>
 															</select>
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-batch-candidates">Batch Candidates</Label>
+															<Input
+																id="rust-batch-candidates"
+																type="number"
+																min="0"
+																bind:value={rustParams["batch-candidates"]}
+															/>
+															<p class="text-xs text-muted-foreground">0 uses auto batching.</p>
 														</div>
 													</div>
 												</details>

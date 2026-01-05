@@ -335,7 +335,9 @@
                 if (payload.data && payload.data.length > 0) {
 					updateFromChunk(payload.data);
                     nextOffset = payload.nextOffset || (nextOffset + payload.data.length);
-                } else {
+                } else if (typeof payload.nextOffset === 'number' && payload.nextOffset !== nextOffset) {
+                    nextOffset = payload.nextOffset;
+                } else if (payload.done) {
                     doneLoading = true;
                 }
                 if (payload.done) {
