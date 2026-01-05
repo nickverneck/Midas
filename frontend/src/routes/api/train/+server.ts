@@ -44,7 +44,7 @@ export const POST = async ({ request }) => {
         args = ['python/examples/train_hybrid.py', ...cliArgs];
     } else {
         command = 'cargo';
-        args = ['run', '--bin', 'train_ga', '--features', 'tch', '--', ...cliArgs];
+        args = ['run', '--bin', 'train_ga', '--', ...cliArgs];
     }
 
     const stream = new ReadableStream({

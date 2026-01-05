@@ -7,6 +7,8 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - Install `uv` for Python management if not already installed.
 - Build and install Python bindings:  
   `uv run maturin develop --features python`
+- Build Rust with torch from the local uv venv:  
+  `scripts/cargo-build.sh`
 
 ## CLI examples (Rust)
 - Load parquet + compute features (default feature-only mode):  
@@ -14,7 +16,7 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - EMA rule backtest:  
   `cargo run -- --file data/train/SPY0.parquet --mode ema_rule --ema-fast 5 --ema-slow 21 --commission 1.6 --slippage 0.25`
 - Rust GA-only trainer (requires libtorch, CUDA/MPS optional):  
-  `LIBTORCH=/path/to/libtorch cargo run --bin train_ga --features tch -- --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga --device cuda --workers 8 --drawdown-penalty 0.05 --drawdown-penalty-growth 0.02`
+  `LIBTORCH=/path/to/libtorch cargo run --bin train_ga -- --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga --device cuda --workers 8 --drawdown-penalty 0.05 --drawdown-penalty-growth 0.02`
 
 ## Python examples
 

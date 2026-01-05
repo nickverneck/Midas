@@ -1,38 +1,23 @@
-#[cfg(not(feature = "tch"))]
-fn main() {
-    eprintln!("train_ga requires the 'tch' feature. Rebuild with --features tch and ensure LIBTORCH is set.");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "tch")]
 #[path = "train_ga/args.rs"]
 mod args;
-#[cfg(feature = "tch")]
 #[path = "train_ga/data.rs"]
 mod data;
-#[cfg(feature = "tch")]
 #[path = "train_ga/ga.rs"]
 mod ga;
-#[cfg(feature = "tch")]
 #[path = "train_ga/metrics.rs"]
 mod metrics;
-#[cfg(feature = "tch")]
 #[path = "train_ga/model.rs"]
 mod model;
-#[cfg(feature = "tch")]
 #[path = "train_ga/util.rs"]
 mod util;
 
-#[cfg(feature = "tch")]
 use clap::Parser;
 
-#[cfg(feature = "tch")]
 fn main() -> anyhow::Result<()> {
     let args = args::Args::parse();
     run(args)
 }
 
-#[cfg(feature = "tch")]
 fn run(args: args::Args) -> anyhow::Result<()> {
     use anyhow::Context;
     use rand::prelude::*;
