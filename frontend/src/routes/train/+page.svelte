@@ -31,6 +31,7 @@
 	const logPollInterval = 1500;
 	const logPollMaxInterval = 6000;
 	let logPollDelay = logPollInterval;
+	let liveLogUpdates = $state(true);
 	
 	let rustParams = $state({
 		outdir: "runs_ga",
@@ -176,17 +177,30 @@
 		return `/api/logs?${params.toString()}`;
 	};
 
-	const readLogChunk = async (dir: string) => {
-		const res = await fetch(buildLogUrl(dir, logOffset));
-		if (res.status === 404) return { rows: [], notFound: true };
+	const fetchLogPayload = async (dir: string, offset: number) => {
+		const res = await fetch(buildLogUrl(dir, offset));
+		if (res.status === 404) {
+			return { rows: [], nextOffset: offset, done: false, notFound: true };
+		}
 		if (!res.ok) throw new Error(`Log fetch failed (${res.status})`);
 		const payload = await res.json();
 		const rows = Array.isArray(payload.data) ? payload.data : [];
-		if (rows.length > 0) {
-			const nextOffset = typeof payload.nextOffset === 'number' ? payload.nextOffset : logOffset + rows.length;
-			logOffset = nextOffset;
+		const nextOffset = typeof payload.nextOffset === 'number' ? payload.nextOffset : offset + rows.length;
+		const done = Boolean(payload.done);
+		return {
+			rows: rows as Array<Record<string, unknown>>,
+			nextOffset,
+			done,
+			notFound: false
+		};
+	};
+
+	const readLogChunk = async (dir: string) => {
+		const payload = await fetchLogPayload(dir, logOffset);
+		if (payload.rows.length > 0) {
+			logOffset = payload.nextOffset;
 		}
-		return { rows: rows as Array<Record<string, unknown>>, notFound: false };
+		return payload;
 	};
 
 	const drainLogs = async (dir: string) => {
@@ -201,6 +215,27 @@
 			emptyReads += 1;
 			await sleep(200);
 		}
+	};
+
+	const loadAllLogs = async (dir: string) => {
+		let offset = 0;
+		let done = false;
+		let emptyReads = 0;
+		while (!done && emptyReads < 20) {
+			const payload = await fetchLogPayload(dir, offset);
+			if (payload.rows.length > 0) {
+				updateFitnessFromRows(payload.rows);
+				offset = payload.nextOffset;
+				emptyReads = 0;
+			} else {
+				emptyReads += 1;
+			}
+			done = payload.done;
+			if (!done) {
+				await sleep(200);
+			}
+		}
+		logOffset = offset;
 	};
 
 	const pollLogs = async () => {
@@ -321,7 +356,12 @@
 		const suffix = startChoice === 'resume' ? ' from checkpoint' : '';
 		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()} training${suffix}...` }];
 		fitnessByGen = new Map();
-		startLogPolling(outdir);
+		if (liveLogUpdates) {
+			startLogPolling(outdir);
+		} else {
+			activeLogDir = outdir;
+			logOffset = 0;
+		}
 		
 		try {
 			const response = await fetch('/api/train', {
@@ -356,7 +396,11 @@
 							training = false;
 							abortController = null;
 							stopLogPolling();
-							await drainLogs(activeLogDir);
+							if (liveLogUpdates) {
+								await drainLogs(activeLogDir);
+							} else {
+								await loadAllLogs(activeLogDir);
+							}
 							consoleOutput = [...consoleOutput, { type: 'system', text: `Process exited with code ${data.code}` }];
 						}
 					}
@@ -814,6 +858,18 @@
 										<Badge variant="outline" class="animate-pulse">Active</Badge>
 									{/if}
 								</div>
+								<div class="flex items-center gap-2 text-sm">
+									<input
+										id="live-log-updates"
+										type="checkbox"
+										class="h-4 w-4 rounded border-input"
+										bind:checked={liveLogUpdates}
+									/>
+									<Label for="live-log-updates">Live log updates</Label>
+								</div>
+								<p class="text-xs text-muted-foreground">
+									Disable to load logs only after training completes.
+								</p>
 								<Button
 									variant={training ? "destructive" : "default"}
 									onclick={toggleTraining}
