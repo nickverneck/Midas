@@ -29,6 +29,8 @@
 	let activeLogDir = $state("runs_ga");
 	const logChunk = 500;
 	const logPollInterval = 1500;
+	const logPollMaxInterval = 6000;
+	let logPollDelay = logPollInterval;
 	
 	let rustParams = $state({
 		outdir: "runs_ga",
@@ -176,7 +178,7 @@
 
 	const readLogChunk = async (dir: string) => {
 		const res = await fetch(buildLogUrl(dir, logOffset));
-		if (res.status === 404) return [];
+		if (res.status === 404) return { rows: [], notFound: true };
 		if (!res.ok) throw new Error(`Log fetch failed (${res.status})`);
 		const payload = await res.json();
 		const rows = Array.isArray(payload.data) ? payload.data : [];
@@ -184,13 +186,13 @@
 			const nextOffset = typeof payload.nextOffset === 'number' ? payload.nextOffset : logOffset + rows.length;
 			logOffset = nextOffset;
 		}
-		return rows as Array<Record<string, unknown>>;
+		return { rows: rows as Array<Record<string, unknown>>, notFound: false };
 	};
 
 	const drainLogs = async (dir: string) => {
 		let emptyReads = 0;
 		while (emptyReads < 5) {
-			const rows = await readLogChunk(dir);
+			const { rows } = await readLogChunk(dir);
 			if (rows.length > 0) {
 				updateFitnessFromRows(rows);
 				emptyReads = 0;
@@ -204,9 +206,15 @@
 	const pollLogs = async () => {
 		if (!logPolling) return;
 		try {
-			const rows = await readLogChunk(activeLogDir);
+			const { rows, notFound } = await readLogChunk(activeLogDir);
 			if (rows.length > 0) {
 				updateFitnessFromRows(rows);
+				logPollDelay = logPollInterval;
+			} else {
+				logPollDelay = Math.min(
+					logPollDelay + (notFound ? 1000 : 500),
+					logPollMaxInterval
+				);
 			}
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
@@ -214,7 +222,7 @@
 			stopLogPolling();
 		} finally {
 			if (logPolling) {
-				logTimer = setTimeout(pollLogs, logPollInterval);
+				logTimer = setTimeout(pollLogs, logPollDelay);
 			}
 		}
 	};
@@ -223,6 +231,7 @@
 		activeLogDir = dir.trim() || "runs_ga";
 		logOffset = 0;
 		logPolling = true;
+		logPollDelay = logPollInterval;
 		if (logTimer) clearTimeout(logTimer);
 		void pollLogs();
 	};
