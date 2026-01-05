@@ -102,8 +102,8 @@ export const GET = async ({ url }) => {
     });
 
     const data = parsed.data as Record<string, unknown>[];
-    const nextOffset = offset + data.length;
-    const done = data.length < limit;
+    const nextOffset = offset + dataLines.length;
+    const done = dataLines.length < limit;
 
     return json({ data, nextOffset, done });
 };
