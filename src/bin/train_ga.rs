@@ -169,44 +169,88 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             device
         );
 
-    let base_cfg = ga::CandidateConfig {
-        initial_balance: args.initial_balance,
-        margin_per_contract,
-        disable_margin: args.disable_margin,
-        w_pnl: args.w_pnl,
-        w_sortino: args.w_sortino,
-        w_mdd: args.w_mdd,
-        sortino_annualization: args.sortino_annualization,
-        hidden: args.hidden,
-        layers: args.layers,
-        eval_windows: args.eval_windows,
-        device,
-        ignore_session: args.ignore_session,
-        drawdown_penalty: args.drawdown_penalty,
-        drawdown_penalty_growth: args.drawdown_penalty_growth,
-        session_close_penalty: args.session_close_penalty,
-        max_hold_bars_positive: args.max_hold_bars_positive,
-        max_hold_bars_drawdown: args.max_hold_bars_drawdown,
-        invalid_revert_penalty: args.invalid_revert_penalty,
-        flat_hold_penalty: args.flat_hold_penalty,
-        max_flat_hold_bars: args.max_flat_hold_bars,
-        invalid_revert_penalty_growth: args.invalid_revert_penalty_growth,
-        flat_hold_penalty_growth: args.flat_hold_penalty_growth,
-    };
+        let base_cfg = ga::CandidateConfig {
+            initial_balance: args.initial_balance,
+            margin_per_contract,
+            disable_margin: args.disable_margin,
+            w_pnl: args.w_pnl,
+            w_sortino: args.w_sortino,
+            w_mdd: args.w_mdd,
+            sortino_annualization: args.sortino_annualization,
+            hidden: args.hidden,
+            layers: args.layers,
+            eval_windows: args.eval_windows,
+            device,
+            ignore_session: args.ignore_session,
+            drawdown_penalty: args.drawdown_penalty,
+            drawdown_penalty_growth: args.drawdown_penalty_growth,
+            session_close_penalty: args.session_close_penalty,
+            max_hold_bars_positive: args.max_hold_bars_positive,
+            max_hold_bars_drawdown: args.max_hold_bars_drawdown,
+            invalid_revert_penalty: args.invalid_revert_penalty,
+            flat_hold_penalty: args.flat_hold_penalty,
+            max_flat_hold_bars: args.max_flat_hold_bars,
+            invalid_revert_penalty_growth: args.invalid_revert_penalty_growth,
+            flat_hold_penalty_growth: args.flat_hold_penalty_growth,
+        };
 
-        let eval_results: Vec<(usize, ga::CandidateResult, Option<ga::CandidateResult>)> = pop
-            .par_iter()
-            .enumerate()
-            .map(|(idx, genome)| {
-                let train_metrics = ga::evaluate_candidate(genome, &train, &windows_train, &base_cfg, false);
-                let eval_metrics = if args.skip_val_eval {
-                    None
-                } else {
-                    Some(ga::evaluate_candidate(genome, &val, &windows_val, &base_cfg, true))
-                };
-                (idx, train_metrics, eval_metrics)
-            })
-            .collect();
+        let mut batch_candidates = if args.batch_candidates > 0 {
+            args.batch_candidates
+        } else if matches!(device, tch::Device::Cuda(_) | tch::Device::Mps) {
+            pop.len()
+        } else {
+            1
+        };
+        if batch_candidates == 0 {
+            batch_candidates = 1;
+        }
+        if batch_candidates > pop.len() {
+            batch_candidates = pop.len();
+        }
+        if batch_candidates > 1 {
+            println!(
+                "info: using batched inference across {} candidates per step",
+                batch_candidates
+            );
+        }
+
+        let eval_results: Vec<(usize, ga::CandidateResult, Option<ga::CandidateResult>)> =
+            if batch_candidates > 1 {
+                let mut results = Vec::with_capacity(pop.len());
+                let mut offset = 0usize;
+                for chunk in pop.chunks(batch_candidates) {
+                    let train_results =
+                        ga::evaluate_candidates_batch(chunk, &train, &windows_train, &base_cfg, false);
+                    let mut eval_iter = if args.skip_val_eval {
+                        None
+                    } else {
+                        Some(
+                            ga::evaluate_candidates_batch(chunk, &val, &windows_val, &base_cfg, true)
+                                .into_iter(),
+                        )
+                    };
+                    for (i, train_metrics) in train_results.into_iter().enumerate() {
+                        let eval_metrics = eval_iter.as_mut().and_then(|iter| iter.next());
+                        results.push((offset + i, train_metrics, eval_metrics));
+                    }
+                    offset += chunk.len();
+                }
+                results
+            } else {
+                pop.par_iter()
+                    .enumerate()
+                    .map(|(idx, genome)| {
+                        let train_metrics =
+                            ga::evaluate_candidate(genome, &train, &windows_train, &base_cfg, false);
+                        let eval_metrics = if args.skip_val_eval {
+                            None
+                        } else {
+                            Some(ga::evaluate_candidate(genome, &val, &windows_val, &base_cfg, true))
+                        };
+                        (idx, train_metrics, eval_metrics)
+                    })
+                    .collect()
+            };
 
         let mut scored: Vec<(f64, Vec<f32>, Option<ga::CandidateResult>, ga::CandidateResult)> =
             Vec::with_capacity(pop.len());

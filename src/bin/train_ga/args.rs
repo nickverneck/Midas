@@ -41,6 +41,8 @@ pub struct Args {
     #[arg(long, default_value_t = 6)]
     pub pop_size: usize,
     #[arg(long, default_value_t = 0)]
+    pub batch_candidates: usize,
+    #[arg(long, default_value_t = 0)]
     pub workers: usize,
     #[arg(long, default_value_t = 0.33)]
     pub elite_frac: f64,

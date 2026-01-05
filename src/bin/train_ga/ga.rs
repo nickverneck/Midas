@@ -2,11 +2,11 @@ use anyhow::Result;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tch::{kind::Kind, no_grad, Tensor};
+use tch::{kind::Kind, no_grad, Device, Tensor};
 
 use crate::data::{build_observation, DataSet};
 use crate::metrics::{compute_sortino, max_drawdown};
-use crate::model::{build_mlp, load_params_from_vec};
+use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
 
 #[derive(Clone)]
 pub struct CandidateConfig {
@@ -59,6 +59,114 @@ pub struct CandidateResult {
     pub debug_session_close_penalty: f64,
 }
 
+struct CandidateStats {
+    eval_pnls: Vec<f64>,
+    eval_pnls_realized: Vec<f64>,
+    eval_pnls_total: Vec<f64>,
+    eval_returns: Vec<f64>,
+    eval_equity: Vec<Vec<f64>>,
+    non_hold: usize,
+    non_zero_pos: usize,
+    abs_pnl_sum: f64,
+    pnl_steps: usize,
+    act_buy: usize,
+    act_sell: usize,
+    act_hold: usize,
+    act_revert: usize,
+    session_violations: usize,
+    margin_violations: usize,
+    position_violations: usize,
+    drawdown_penalty_sum: f64,
+    invalid_revert_penalty_sum: f64,
+    flat_hold_penalty_sum: f64,
+    session_close_penalty_sum: f64,
+}
+
+impl CandidateStats {
+    fn new() -> Self {
+        Self {
+            eval_pnls: Vec::new(),
+            eval_pnls_realized: Vec::new(),
+            eval_pnls_total: Vec::new(),
+            eval_returns: Vec::new(),
+            eval_equity: Vec::new(),
+            non_hold: 0,
+            non_zero_pos: 0,
+            abs_pnl_sum: 0.0,
+            pnl_steps: 0,
+            act_buy: 0,
+            act_sell: 0,
+            act_hold: 0,
+            act_revert: 0,
+            session_violations: 0,
+            margin_violations: 0,
+            position_violations: 0,
+            drawdown_penalty_sum: 0.0,
+            invalid_revert_penalty_sum: 0.0,
+            flat_hold_penalty_sum: 0.0,
+            session_close_penalty_sum: 0.0,
+        }
+    }
+
+    fn finish(self, cfg: &CandidateConfig) -> CandidateResult {
+        let eval_sortino = compute_sortino(&self.eval_returns, cfg.sortino_annualization, 0.0, 50.0);
+        let eval_draw = self
+            .eval_equity
+            .iter()
+            .map(|eq| max_drawdown(eq))
+            .fold(0.0_f64, |a, b| a.max(b));
+        let eval_pnl = if self.eval_pnls.is_empty() {
+            0.0
+        } else {
+            self.eval_pnls.iter().sum::<f64>() / self.eval_pnls.len() as f64
+        };
+        let eval_pnl_realized = if self.eval_pnls_realized.is_empty() {
+            0.0
+        } else {
+            self.eval_pnls_realized.iter().sum::<f64>() / self.eval_pnls_realized.len() as f64
+        };
+        let eval_pnl_total = if self.eval_pnls_total.is_empty() {
+            0.0
+        } else {
+            self.eval_pnls_total.iter().sum::<f64>() / self.eval_pnls_total.len() as f64
+        };
+
+        let fitness = cfg.w_pnl * eval_pnl + cfg.w_sortino * eval_sortino - cfg.w_mdd * eval_draw;
+
+        CandidateResult {
+            fitness,
+            eval_pnl,
+            eval_pnl_realized,
+            eval_pnl_total,
+            eval_sortino,
+            eval_drawdown: eval_draw,
+            eval_ret_mean: if self.eval_returns.is_empty() {
+                0.0
+            } else {
+                self.eval_returns.iter().sum::<f64>() / self.eval_returns.len() as f64
+            },
+            debug_non_hold: self.non_hold,
+            debug_non_zero_pos: self.non_zero_pos,
+            debug_mean_abs_pnl: if self.pnl_steps > 0 {
+                self.abs_pnl_sum / self.pnl_steps as f64
+            } else {
+                0.0
+            },
+            debug_buy: self.act_buy,
+            debug_sell: self.act_sell,
+            debug_hold: self.act_hold,
+            debug_revert: self.act_revert,
+            debug_session_violations: self.session_violations,
+            debug_margin_violations: self.margin_violations,
+            debug_position_violations: self.position_violations,
+            debug_drawdown_penalty: self.drawdown_penalty_sum,
+            debug_invalid_revert_penalty: self.invalid_revert_penalty_sum,
+            debug_flat_hold_penalty: self.flat_hold_penalty_sum,
+            debug_session_close_penalty: self.session_close_penalty_sum,
+        }
+    }
+}
+
 pub fn evaluate_candidate(
     genome: &[f32],
     data: &DataSet,
@@ -88,6 +196,9 @@ pub fn evaluate_candidate(
         max_flat_hold_bars: cfg.max_flat_hold_bars,
         ..EnvConfig::default()
     };
+
+    let obs_dim = data.obs_dim as i64;
+    let mut obs_device = Tensor::zeros(&[1, obs_dim], (Kind::Float, cfg.device));
 
     let mut eval_pnls = Vec::new();
     let mut eval_pnls_realized = Vec::new();
@@ -131,13 +242,11 @@ pub fn evaluate_candidate(
                 env.state().realized_pnl,
                 cfg.initial_balance,
             );
-            let obs_t = Tensor::f_from_slice(&obs)
-                .expect("tensor from obs")
-                .to_device(cfg.device)
-                .reshape(&[1, obs.len() as i64]);
+            let obs_cpu = Tensor::of_slice(&obs).reshape(&[1, obs_dim]);
+            obs_device.copy_(&obs_cpu);
 
             let action_idx = no_grad(|| {
-                let logits = policy.forward(&obs_t);
+                let logits = policy.forward(&obs_device);
                 let probs = logits.softmax(-1, Kind::Float);
                 let sample = probs.multinomial(1, true);
                 sample.int64_value(&[0, 0]) as i32
@@ -295,6 +404,192 @@ pub fn evaluate_candidate(
         debug_flat_hold_penalty: flat_hold_penalty_sum,
         debug_session_close_penalty: session_close_penalty_sum,
     }
+}
+
+pub fn evaluate_candidates_batch(
+    genomes: &[Vec<f32>],
+    data: &DataSet,
+    windows: &[(usize, usize)],
+    cfg: &CandidateConfig,
+    capture_history: bool,
+) -> Vec<CandidateResult> {
+    use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
+
+    if genomes.is_empty() {
+        return Vec::new();
+    }
+
+    let batch = genomes.len();
+    let policy = build_batched_policy(genomes, data.obs_dim, cfg.hidden, cfg.layers, cfg.device);
+
+    let env_cfg = EnvConfig {
+        margin_per_contract: cfg.margin_per_contract,
+        enforce_margin: !cfg.disable_margin,
+        drawdown_penalty: cfg.drawdown_penalty,
+        drawdown_penalty_growth: cfg.drawdown_penalty_growth,
+        session_close_penalty: cfg.session_close_penalty,
+        max_hold_bars_positive: cfg.max_hold_bars_positive,
+        max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
+        invalid_revert_penalty: cfg.invalid_revert_penalty,
+        flat_hold_penalty: cfg.flat_hold_penalty,
+        invalid_revert_penalty_growth: cfg.invalid_revert_penalty_growth,
+        flat_hold_penalty_growth: cfg.flat_hold_penalty_growth,
+        max_flat_hold_bars: cfg.max_flat_hold_bars,
+        ..EnvConfig::default()
+    };
+
+    let mut stats: Vec<CandidateStats> = (0..batch).map(|_| CandidateStats::new()).collect();
+    let obs_dim = data.obs_dim as i64;
+    let batch_dim = batch as i64;
+    let mut obs_device = Tensor::zeros(&[batch_dim, obs_dim], (Kind::Float, cfg.device));
+
+    for &(start, end) in windows.iter().take(cfg.eval_windows) {
+        if end <= start + 1 {
+            continue;
+        }
+
+        let mut envs: Vec<TradingEnv> = (0..batch)
+            .map(|_| TradingEnv::new(data.close[start], cfg.initial_balance, env_cfg.clone()))
+            .collect();
+        let mut positions = vec![0i32; batch];
+        let mut equities = vec![cfg.initial_balance; batch];
+        let mut pnl_bufs: Vec<Vec<f64>> = (0..batch)
+            .map(|_| Vec::with_capacity(end - start - 1))
+            .collect();
+        let mut eq_curves: Vec<Vec<f64>> = (0..batch)
+            .map(|_| Vec::with_capacity(end - start - 1))
+            .collect();
+        let mut window_drawdown_penalty = vec![0.0f64; batch];
+
+        for t in (start + 1)..end {
+            let mut obs_batch: Vec<f32> = Vec::with_capacity(batch * data.obs_dim);
+            for i in 0..batch {
+                let env = &envs[i];
+                let obs = build_observation(
+                    data,
+                    t,
+                    positions[i],
+                    equities[i],
+                    env.state().unrealized_pnl,
+                    env.state().realized_pnl,
+                    cfg.initial_balance,
+                );
+                obs_batch.extend_from_slice(&obs);
+            }
+
+            let obs_cpu = Tensor::of_slice(&obs_batch).reshape(&[batch_dim, obs_dim]);
+            obs_device.copy_(&obs_cpu);
+
+            let logits = no_grad(|| policy.forward(&obs_device));
+            let probs = logits.softmax(-1, Kind::Float);
+            let sample = probs.multinomial(1, true);
+            let sample_cpu = sample.squeeze_dim(-1).to_device(Device::Cpu);
+
+            let session_open = if cfg.ignore_session {
+                true
+            } else {
+                data.session_open
+                    .as_ref()
+                    .and_then(|m| m.get(t))
+                    .copied()
+                    .unwrap_or(true)
+            };
+            let minutes_to_close = data
+                .minutes_to_close
+                .as_ref()
+                .and_then(|m| m.get(t))
+                .copied();
+            let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
+
+            for i in 0..batch {
+                let action_idx = sample_cpu.int64_value(&[i as i64]) as i32;
+                let action = match action_idx {
+                    0 => {
+                        stats[i].act_buy += 1;
+                        Action::Buy
+                    }
+                    1 => {
+                        stats[i].act_sell += 1;
+                        Action::Sell
+                    }
+                    2 => {
+                        stats[i].act_hold += 1;
+                        Action::Hold
+                    }
+                    _ => {
+                        stats[i].act_revert += 1;
+                        Action::Revert
+                    }
+                };
+
+                let (_reward, info) = envs[i].step(
+                    action,
+                    data.close[t],
+                    StepContext {
+                        session_open,
+                        margin_ok,
+                        minutes_to_close,
+                    },
+                );
+                if info.session_closed_violation {
+                    stats[i].session_violations += 1;
+                }
+                if info.margin_call_violation {
+                    stats[i].margin_violations += 1;
+                }
+                if info.position_limit_violation {
+                    stats[i].position_violations += 1;
+                }
+
+                positions[i] = envs[i].state().position;
+                equities[i] = envs[i].state().cash + envs[i].state().unrealized_pnl;
+                pnl_bufs[i].push(info.pnl_change);
+                eq_curves[i].push(equities[i]);
+                window_drawdown_penalty[i] += info.drawdown_penalty;
+                stats[i].invalid_revert_penalty_sum += info.invalid_revert_penalty;
+                stats[i].flat_hold_penalty_sum += info.flat_hold_penalty;
+                stats[i].session_close_penalty_sum += info.session_close_penalty;
+                if !matches!(action, Action::Hold) {
+                    stats[i].non_hold += 1;
+                }
+                if positions[i] != 0 {
+                    stats[i].non_zero_pos += 1;
+                }
+                stats[i].abs_pnl_sum += info.pnl_change.abs();
+                stats[i].pnl_steps += 1;
+            }
+        }
+
+        for i in 0..batch {
+            let realized_pnl = envs[i].state().realized_pnl;
+            let total_pnl = envs[i].state().cash + envs[i].state().unrealized_pnl - cfg.initial_balance;
+            let pnl_sum = realized_pnl
+                - window_drawdown_penalty[i]
+                - stats[i].invalid_revert_penalty_sum
+                - stats[i].flat_hold_penalty_sum
+                - stats[i].session_close_penalty_sum;
+            stats[i].eval_pnls.push(pnl_sum);
+            stats[i].eval_pnls_realized.push(realized_pnl);
+            stats[i].eval_pnls_total.push(total_pnl);
+            stats[i].drawdown_penalty_sum += window_drawdown_penalty[i];
+
+            let mut prev_eq = cfg.initial_balance;
+            for (idx, pnl) in pnl_bufs[i].iter().enumerate() {
+                let eq = eq_curves[i].get(idx).copied().unwrap_or(prev_eq);
+                let denom = if prev_eq.abs() < 1e-8 { 1e-8 } else { prev_eq };
+                stats[i].eval_returns.push(pnl / denom);
+                prev_eq = eq;
+            }
+
+            stats[i].eval_equity.push(eq_curves[i].clone());
+
+            if capture_history {
+                let _ = capture_history;
+            }
+        }
+    }
+
+    stats.into_iter().map(|s| s.finish(cfg)).collect()
 }
 
 pub fn crossover(a: &[f32], b: &[f32], rng: &mut impl Rng) -> Vec<f32> {

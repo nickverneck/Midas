@@ -1,5 +1,6 @@
 use anyhow::Result;
 use tch::nn;
+use tch::Tensor;
 
 pub fn param_count(input_dim: usize, hidden: usize, layers: usize) -> usize {
     let mut count = 0;
@@ -55,4 +56,83 @@ pub fn save_policy(
     load_params_from_vec(&vs, genome);
     vs.save(path)?;
     Ok(())
+}
+
+pub struct BatchedPolicy {
+    weights: Vec<Tensor>,
+    biases: Vec<Tensor>,
+}
+
+impl BatchedPolicy {
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let last = self.weights.len().saturating_sub(1);
+        let mut x = input.shallow_clone();
+        for (idx, (w, b)) in self.weights.iter().zip(self.biases.iter()).enumerate() {
+            let x_batched = x.unsqueeze(-1);
+            let mut y = w.bmm(&x_batched).squeeze_dim(-1) + b;
+            if idx != last {
+                y = y.tanh();
+            }
+            x = y;
+        }
+        x
+    }
+}
+
+pub fn build_batched_policy(
+    genomes: &[Vec<f32>],
+    input_dim: usize,
+    hidden: usize,
+    layers: usize,
+    device: tch::Device,
+) -> BatchedPolicy {
+    assert!(!genomes.is_empty(), "batch policy requires genomes");
+    let layer_count = layers + 1;
+    let mut weight_layers: Vec<Vec<Tensor>> = vec![Vec::with_capacity(genomes.len()); layer_count];
+    let mut bias_layers: Vec<Vec<Tensor>> = vec![Vec::with_capacity(genomes.len()); layer_count];
+
+    for genome in genomes {
+        let mut offset = 0usize;
+        let mut in_dim = input_dim;
+        for layer in 0..layers {
+            let w_len = in_dim * hidden;
+            let b_len = hidden;
+            let w = Tensor::of_slice(&genome[offset..offset + w_len])
+                .reshape(&[hidden as i64, in_dim as i64])
+                .to_device(device);
+            offset += w_len;
+            let b = Tensor::of_slice(&genome[offset..offset + b_len])
+                .reshape(&[hidden as i64])
+                .to_device(device);
+            offset += b_len;
+            weight_layers[layer].push(w);
+            bias_layers[layer].push(b);
+            in_dim = hidden;
+        }
+
+        let w_len = in_dim * 4;
+        let b_len = 4;
+        let w = Tensor::of_slice(&genome[offset..offset + w_len])
+            .reshape(&[4, in_dim as i64])
+            .to_device(device);
+        offset += w_len;
+        let b = Tensor::of_slice(&genome[offset..offset + b_len])
+            .reshape(&[4])
+            .to_device(device);
+        offset += b_len;
+        weight_layers[layers].push(w);
+        bias_layers[layers].push(b);
+        debug_assert_eq!(offset, genome.len(), "genome length mismatch");
+    }
+
+    let weights = weight_layers
+        .into_iter()
+        .map(|ws| Tensor::stack(&ws, 0))
+        .collect();
+    let biases = bias_layers
+        .into_iter()
+        .map(|bs| Tensor::stack(&bs, 0))
+        .collect();
+
+    BatchedPolicy { weights, biases }
 }
