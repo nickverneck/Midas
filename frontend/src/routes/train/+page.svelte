@@ -241,7 +241,17 @@
 	const rebuildFitnessFromLogs = async (dir: string) => {
 		fitnessByGen = new Map();
 		logOffset = 0;
-		await loadAllLogs(dir);
+		try {
+			const params = new URLSearchParams({ dir, mode: "summary" });
+			const res = await fetch(`/api/logs?${params.toString()}`);
+			if (!res.ok) throw new Error(`Log summary failed (${res.status})`);
+			const payload = await res.json();
+			const rows = Array.isArray(payload.data) ? payload.data : [];
+			updateFitnessFromRows(rows);
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			consoleOutput = [...consoleOutput, { type: 'error', text: message }];
+		}
 	};
 
 	const pollLogs = async () => {
