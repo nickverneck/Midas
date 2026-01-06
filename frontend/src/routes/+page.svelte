@@ -8,9 +8,19 @@
     import * as Tabs from "$lib/components/ui/tabs";
     import * as Alert from "$lib/components/ui/alert";
     import GaChart from "$lib/components/GaChart.svelte";
+    import Papa from 'papaparse';
     import { AlertCircle, TrendingUp, Info, ListFilter, Bug } from "lucide-svelte";
 
 	type LogRow = Record<string, any>;
+	type BehaviorRow = Record<string, any>;
+	type ParquetRow = Record<string, any>;
+
+	type BehaviorFile = {
+		name: string;
+		split: 'train' | 'val' | 'unknown';
+		gen: number | null;
+		idx: number | null;
+	};
 
 	type GenMember = {
 		fitness: number | null;
@@ -76,6 +86,8 @@
 	const ZOOM_STEP = 1.5;
 	type ChartTab = 'fitness' | 'performance' | 'realized' | 'drawdown' | 'frontier';
 	type PopulationFilter = 'all' | 'top5' | 'top10' | 'top20p';
+	type MainTab = 'overview' | 'evolution' | 'issues' | 'data' | 'behavior';
+	type BehaviorFilter = 'all' | 'trades' | 'buy' | 'sell' | 'hold' | 'revert';
 
 	let logs: LogRow[] = $state([]);
 	let loading = $state(true);
@@ -88,6 +100,7 @@
 	let activeLogDir = $state("runs_ga");
 	let chartTab = $state<ChartTab>('fitness');
 	let populationFilter = $state<PopulationFilter>('all');
+	let mainTab = $state<MainTab>('overview');
 	let zoomWindow = $state(0);
 	let zoomStart = $state(0);
 	let plateauWindow = $state(300);
@@ -105,6 +118,29 @@
 		retCount: 0,
 		retNegativeCount: 0
 	});
+
+	let behaviorFiles: BehaviorFile[] = $state([]);
+	let behaviorListLoading = $state(false);
+	let behaviorError = $state("");
+	let behaviorListDir = $state("");
+	let behaviorFilter = $state<BehaviorFilter>('trades');
+	let behaviorRowLimit = $state(500);
+
+	let selectedTrainBehavior = $state("");
+	let selectedValBehavior = $state("");
+	let lastTrainBehavior = $state("");
+	let lastValBehavior = $state("");
+	let trainBehaviorRows: BehaviorRow[] = $state([]);
+	let valBehaviorRows: BehaviorRow[] = $state([]);
+	let trainBehaviorLoading = $state(false);
+	let valBehaviorLoading = $state(false);
+
+	let trainDataRows: ParquetRow[] = $state([]);
+	let valDataRows: ParquetRow[] = $state([]);
+	let trainDataMap: Map<number, ParquetRow> = $state(new Map());
+	let valDataMap: Map<number, ParquetRow> = $state(new Map());
+	let trainDataLoading = $state(false);
+	let valDataLoading = $state(false);
 
 	let loadToken = 0;
 	let hasEvalDetermined = false;
@@ -156,6 +192,108 @@
 		if (populationFilter === 'top10') limit = Math.min(10, ranked.length);
 		if (populationFilter === 'top20p') limit = Math.max(1, Math.round(ranked.length * 0.2));
 		return ranked.slice(0, limit);
+	};
+
+	const parseBehaviorFile = (name: string): BehaviorFile => {
+		const lower = name.toLowerCase();
+		let split: BehaviorFile['split'] = 'unknown';
+		if (lower.startsWith('train_') || lower.includes('train')) {
+			split = 'train';
+		} else if (lower.startsWith('val_') || lower.includes('eval') || lower.includes('val')) {
+			split = 'val';
+		}
+		const genMatch = lower.match(/gen(\d+)/);
+		const idxMatch = lower.match(/idx(\d+)/);
+		return {
+			name,
+			split,
+			gen: genMatch ? Number(genMatch[1]) : null,
+			idx: idxMatch ? Number(idxMatch[1]) : null
+		};
+	};
+
+	const formatBehaviorLabel = (file: BehaviorFile) => {
+		if (file.gen !== null && file.idx !== null) {
+			const splitLabel = file.split === 'train' ? 'Train' : file.split === 'val' ? 'Eval' : 'Run';
+			return `${splitLabel} Gen ${file.gen} (Idx ${file.idx})`;
+		}
+		return file.name;
+	};
+
+	const normalizeAction = (value: unknown) =>
+		typeof value === 'string' ? value.trim().toLowerCase() : '';
+	const toIndex = (value: unknown): number | null => {
+		if (typeof value === 'number' && Number.isFinite(value)) return value;
+		if (typeof value === 'string' && value.trim() !== '') {
+			const parsed = Number(value);
+			return Number.isFinite(parsed) ? parsed : null;
+		}
+		return null;
+	};
+	const matchesBehaviorFilter = (action: string) => {
+		if (behaviorFilter === 'all') return true;
+		if (behaviorFilter === 'trades') return action !== 'hold';
+		return action === behaviorFilter;
+	};
+	const formatTimestamp = (value: unknown) => {
+		if (value === null || value === undefined) return '—';
+		if (typeof value === 'string' && value.trim() !== '') return value;
+		const num = toNumber(value);
+		if (num === null) return '—';
+		let ms = num;
+		if (num > 1e14) {
+			ms = Math.round(num / 1e6);
+		} else if (num > 1e12) {
+			ms = num;
+		} else if (num > 1e9) {
+			ms = num * 1000;
+		}
+		const date = new Date(ms);
+		if (Number.isNaN(date.getTime())) return String(value);
+		return date.toISOString().replace('T', ' ').replace('Z', '');
+	};
+	const parseCsvRows = <T,>(text: string): T[] => {
+		const parsed = Papa.parse(text, {
+			header: true,
+			dynamicTyping: true,
+			skipEmptyLines: true
+		});
+		return (parsed.data as T[]).filter((row) => row && typeof row === 'object');
+	};
+	const buildBehaviorDisplay = (rows: BehaviorRow[], dataMap: Map<number, ParquetRow>) => {
+		const filtered = rows.filter((row) => matchesBehaviorFilter(normalizeAction(row.action)));
+		const limited = behaviorRowLimit > 0 ? filtered.slice(0, behaviorRowLimit) : filtered;
+		const display = limited.map((row) => {
+			const idx = toIndex(row.data_idx ?? row.row_idx ?? row.idx);
+			const data = idx === null ? null : dataMap.get(idx) ?? null;
+			return { row, data };
+		});
+		return { total: filtered.length, rows: display };
+	};
+	const resolveBehaviorTimestamp = (row: BehaviorRow, data: ParquetRow | null) =>
+		formatTimestamp(
+			data?.date ??
+				data?.datetime ??
+				row.datetime_ns ??
+				row.date ??
+				data?.datetime_ns ??
+				data?.timestamp
+		);
+	const resolveBehaviorClose = (row: BehaviorRow, data: ParquetRow | null) =>
+		data?.close ?? row.close ?? row.price ?? null;
+	const actionClass = (action: string) => {
+		switch (action) {
+			case 'buy':
+				return 'text-emerald-500 font-semibold';
+			case 'sell':
+				return 'text-rose-500 font-semibold';
+			case 'revert':
+				return 'text-orange-500 font-semibold';
+			case 'hold':
+				return 'text-muted-foreground';
+			default:
+				return 'text-muted-foreground';
+		}
 	};
 
 	function resetState() {
@@ -319,6 +457,38 @@
 
 	onMount(fetchLogs);
 
+	$effect(() => {
+		if (mainTab !== 'behavior') return;
+		if (behaviorListDir !== activeLogDir) {
+			behaviorListDir = activeLogDir;
+			trainBehaviorRows = [];
+			valBehaviorRows = [];
+			lastTrainBehavior = '';
+			lastValBehavior = '';
+			fetchBehaviorList();
+		}
+		if (trainDataRows.length === 0 && !trainDataLoading) {
+			fetchParquetData('train');
+		}
+		if (valDataRows.length === 0 && !valDataLoading) {
+			fetchParquetData('val');
+		}
+	});
+
+	$effect(() => {
+		if (mainTab !== 'behavior') return;
+		if (!selectedTrainBehavior || selectedTrainBehavior === lastTrainBehavior) return;
+		lastTrainBehavior = selectedTrainBehavior;
+		fetchBehaviorCsv('train', selectedTrainBehavior);
+	});
+
+	$effect(() => {
+		if (mainTab !== 'behavior') return;
+		if (!selectedValBehavior || selectedValBehavior === lastValBehavior) return;
+		lastValBehavior = selectedValBehavior;
+		fetchBehaviorCsv('val', selectedValBehavior);
+	});
+
     function scheduleLoadMore(token: number, dir: string) {
         if (doneLoading || loadingMore || token !== loadToken || dir !== activeLogDir) return;
         loadingMore = true;
@@ -355,6 +525,117 @@
         }, 60);
     }
 
+	async function fetchBehaviorList() {
+		behaviorListLoading = true;
+		behaviorError = '';
+		try {
+			const params = new URLSearchParams({
+				mode: 'list',
+				dir: activeLogDir
+			});
+			const res = await fetch(`/api/behavior?${params.toString()}`);
+			if (!res.ok) {
+				const payload = await res.json().catch(() => ({}));
+				throw new Error(payload?.error || `Failed to list behavior CSVs (${res.status})`);
+			}
+			const payload = await res.json();
+			const files = Array.isArray(payload.files) ? payload.files : [];
+			behaviorFiles = files
+				.map((name: string) => parseBehaviorFile(name))
+				.sort((a, b) => {
+					const genA = a.gen ?? -1;
+					const genB = b.gen ?? -1;
+					if (genA !== genB) return genB - genA;
+					return a.name.localeCompare(b.name);
+				});
+
+			if (!behaviorFiles.some((file) => file.name === selectedTrainBehavior)) {
+				const trainFile = behaviorFiles.find((file) => file.split === 'train');
+				selectedTrainBehavior = trainFile?.name ?? '';
+			}
+			if (!behaviorFiles.some((file) => file.name === selectedValBehavior)) {
+				const valFile = behaviorFiles.find((file) => file.split === 'val');
+				selectedValBehavior = valFile?.name ?? '';
+			}
+		} catch (e) {
+			behaviorError = e instanceof Error ? e.message : String(e);
+		} finally {
+			behaviorListLoading = false;
+		}
+	}
+
+	async function fetchBehaviorCsv(split: 'train' | 'val', file: string) {
+		if (!file) return;
+		if (split === 'train') {
+			trainBehaviorLoading = true;
+		} else {
+			valBehaviorLoading = true;
+		}
+		try {
+			const params = new URLSearchParams({
+				dir: activeLogDir,
+				file
+			});
+			const res = await fetch(`/api/behavior?${params.toString()}`);
+			if (!res.ok) {
+				throw new Error(`Failed to load ${split} behavior CSV (${res.status})`);
+			}
+			const text = await res.text();
+			const rows = parseCsvRows<BehaviorRow>(text);
+			if (split === 'train') {
+				trainBehaviorRows = rows;
+			} else {
+				valBehaviorRows = rows;
+			}
+		} catch (e) {
+			behaviorError = e instanceof Error ? e.message : String(e);
+		} finally {
+			if (split === 'train') {
+				trainBehaviorLoading = false;
+			} else {
+				valBehaviorLoading = false;
+			}
+		}
+	}
+
+	async function fetchParquetData(split: 'train' | 'val') {
+		if (split === 'train') {
+			trainDataLoading = true;
+		} else {
+			valDataLoading = true;
+		}
+		try {
+			const params = new URLSearchParams({ dataset: split });
+			const res = await fetch(`/api/parquet?${params.toString()}`);
+			if (!res.ok) {
+				throw new Error(`Failed to load ${split} parquet (${res.status})`);
+			}
+			const text = await res.text();
+			const rows = parseCsvRows<ParquetRow>(text);
+			const map = new Map<number, ParquetRow>();
+			for (const row of rows) {
+				const idx = toIndex(row.row_idx ?? row.index ?? row.idx);
+				if (idx === null) continue;
+				map.set(idx, row);
+			}
+			if (split === 'train') {
+				trainDataRows = rows;
+				trainDataMap = map;
+			} else {
+				valDataRows = rows;
+				valDataMap = map;
+			}
+		} catch (e) {
+			behaviorError = e instanceof Error ? e.message : String(e);
+		} finally {
+			if (split === 'train') {
+				trainDataLoading = false;
+			} else {
+				valDataLoading = false;
+			}
+		}
+	}
+
     // Dynamic key detection
     let sourceLabel = $derived(hasEval ? 'Eval' : 'Train');
     let pnlKey = $derived(hasEval ? 'eval_fitness_pnl' : 'train_fitness_pnl');
@@ -365,6 +646,10 @@
     let retKey = $derived(hasEval ? 'eval_ret_mean' : 'train_ret_mean');
     let wMetricKey = $derived('w_sortino');
     let metricLabel = $derived('SORTINO');
+	let trainBehaviorFiles = $derived(behaviorFiles.filter((file) => file.split === 'train'));
+	let valBehaviorFiles = $derived(behaviorFiles.filter((file) => file.split === 'val'));
+	let trainBehaviorDisplay = $derived.by(() => buildBehaviorDisplay(trainBehaviorRows, trainDataMap));
+	let valBehaviorDisplay = $derived.by(() => buildBehaviorDisplay(valBehaviorRows, valDataMap));
 
     // Data Aggregation by Generation
     let genData = $derived.by(() => {
@@ -957,13 +1242,14 @@
 			</Card.Root>
 		</div>
 
-        <Tabs.Root value="overview" class="w-full">
-            <Tabs.List class="grid w-full grid-cols-4 lg:w-[600px] mb-6">
+        <Tabs.Root bind:value={mainTab} class="w-full">
+            <Tabs.List class="grid w-full grid-cols-5 lg:w-[760px] mb-6">
                 <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
                 <Tabs.Trigger value="evolution">Evolution</Tabs.Trigger>
                 <Tabs.Trigger value="issues" class="flex gap-2 items-center">
                     Issues {#if issues.length > 0}<Badge variant="destructive" class="ml-1 px-1.5 py-0 text-[10px]">{issues.length}</Badge>{/if}
                 </Tabs.Trigger>
+                <Tabs.Trigger value="behavior">Behavior</Tabs.Trigger>
                 <Tabs.Trigger value="data">Full Log</Tabs.Trigger>
             </Tabs.List>
 
@@ -1214,6 +1500,271 @@
                         {/each}
                     </div>
                 {/if}
+            </Tabs.Content>
+
+            <Tabs.Content value="behavior" class="space-y-6">
+                <Card.Root>
+                    <Card.Header class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                            <Card.Title>Behavior Trace Compare</Card.Title>
+                            <Card.Description>
+                                Load the best-gen behavior CSVs and compare actions against SPY parquet bars.
+                            </Card.Description>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2 text-xs">
+                            <span class="text-muted-foreground">Run dir</span>
+                            <span class="px-2 py-1 rounded-md border bg-muted/40">{activeLogDir}</span>
+                            <button
+                                class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                onclick={fetchBehaviorList}
+                                disabled={behaviorListLoading}
+                            >
+                                {behaviorListLoading ? 'Loading...' : 'Refresh CSVs'}
+                            </button>
+                        </div>
+                    </Card.Header>
+                    <Card.Content class="space-y-4">
+                        {#if behaviorError}
+                            <Alert.Root variant="destructive">
+                                <AlertCircle class="h-4 w-4" />
+                                <Alert.Title>Behavior Load Error</Alert.Title>
+                                <Alert.Description>{behaviorError}</Alert.Description>
+                            </Alert.Root>
+                        {/if}
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="space-y-2">
+                                <div class="text-xs text-muted-foreground">Train behavior CSV</div>
+                                <div class="flex items-center gap-2">
+                                    <select
+                                        bind:value={selectedTrainBehavior}
+                                        class="flex-1 px-2 py-1 border rounded-md bg-background text-xs"
+                                    >
+                                        <option value="">Select train CSV</option>
+                                        {#each trainBehaviorFiles as file}
+                                            <option value={file.name}>{formatBehaviorLabel(file)}</option>
+                                        {/each}
+                                    </select>
+                                    <button
+                                        class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                        onclick={() => fetchBehaviorCsv('train', selectedTrainBehavior)}
+                                        disabled={!selectedTrainBehavior || trainBehaviorLoading}
+                                    >
+                                        {trainBehaviorLoading ? 'Loading...' : 'Load'}
+                                    </button>
+                                </div>
+                                <div class="text-xs text-muted-foreground">
+                                    Rows: {trainBehaviorRows.length.toLocaleString()} | Parquet:{' '}
+                                    {trainDataRows.length.toLocaleString()}
+                                </div>
+                            </div>
+                            <div class="space-y-2">
+                                <div class="text-xs text-muted-foreground">Eval behavior CSV</div>
+                                <div class="flex items-center gap-2">
+                                    <select
+                                        bind:value={selectedValBehavior}
+                                        class="flex-1 px-2 py-1 border rounded-md bg-background text-xs"
+                                    >
+                                        <option value="">Select eval CSV</option>
+                                        {#each valBehaviorFiles as file}
+                                            <option value={file.name}>{formatBehaviorLabel(file)}</option>
+                                        {/each}
+                                    </select>
+                                    <button
+                                        class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                        onclick={() => fetchBehaviorCsv('val', selectedValBehavior)}
+                                        disabled={!selectedValBehavior || valBehaviorLoading}
+                                    >
+                                        {valBehaviorLoading ? 'Loading...' : 'Load'}
+                                    </button>
+                                </div>
+                                <div class="text-xs text-muted-foreground">
+                                    Rows: {valBehaviorRows.length.toLocaleString()} | Parquet:{' '}
+                                    {valDataRows.length.toLocaleString()}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-3 text-xs">
+                            <span class="text-muted-foreground">Action filter</span>
+                            <select
+                                bind:value={behaviorFilter}
+                                class="px-2 py-1 border rounded-md bg-background text-xs"
+                            >
+                                <option value="trades">Trades only</option>
+                                <option value="all">All actions</option>
+                                <option value="buy">Buy only</option>
+                                <option value="sell">Sell only</option>
+                                <option value="hold">Hold only</option>
+                                <option value="revert">Revert only</option>
+                            </select>
+                            <span class="text-muted-foreground">Row limit</span>
+                            <input
+                                type="number"
+                                min="0"
+                                step="100"
+                                bind:value={behaviorRowLimit}
+                                class="w-24 px-2 py-1 border rounded-md bg-background text-xs"
+                            />
+                            <button
+                                class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                onclick={() => {
+                                    fetchParquetData('train');
+                                    fetchParquetData('val');
+                                }}
+                                disabled={trainDataLoading || valDataLoading}
+                            >
+                                Reload Parquet
+                            </button>
+                        </div>
+                    </Card.Content>
+                </Card.Root>
+
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                    <Card.Root>
+                        <Card.Header>
+                            <Card.Title>Train Behavior</Card.Title>
+                            <Card.Description>
+                                Showing {trainBehaviorDisplay.rows.length.toLocaleString()} of{' '}
+                                {trainBehaviorDisplay.total.toLocaleString()} rows
+                            </Card.Description>
+                        </Card.Header>
+                        <Card.Content>
+                            {#if trainBehaviorLoading || trainDataLoading}
+                                <div class="py-10 text-center text-muted-foreground">
+                                    Loading train behavior...
+                                </div>
+                            {:else if trainBehaviorDisplay.rows.length === 0}
+                                <div class="py-10 text-center text-muted-foreground">
+                                    Select a train behavior CSV to view actions.
+                                </div>
+                            {:else}
+                                <ScrollArea class="h-[540px] rounded-md border">
+                                    <Table.Root>
+                                        <Table.Header class="sticky top-0 bg-background z-10 shadow-sm border-b">
+                                            <Table.Row>
+                                                <Table.Head>Idx</Table.Head>
+                                                <Table.Head>Window</Table.Head>
+                                                <Table.Head>Time</Table.Head>
+                                                <Table.Head class="text-right">Close</Table.Head>
+                                                <Table.Head>Action</Table.Head>
+                                                <Table.Head class="text-right">Pos</Table.Head>
+                                                <Table.Head class="text-right">PNL</Table.Head>
+                                                <Table.Head class="text-right">Realized</Table.Head>
+                                                <Table.Head class="text-right">Reward</Table.Head>
+                                                <Table.Head class="text-right">Equity</Table.Head>
+                                            </Table.Row>
+                                        </Table.Header>
+                                        <Table.Body>
+                                            {#each trainBehaviorDisplay.rows as entry}
+                                                {@const action = normalizeAction(entry.row.action)}
+                                                <Table.Row class="hover:bg-muted/30 transition-colors">
+                                                    <Table.Cell>{entry.row.data_idx ?? entry.row.idx}</Table.Cell>
+                                                    <Table.Cell>{entry.row.window ?? entry.row.window_idx ?? '—'}</Table.Cell>
+                                                    <Table.Cell class="font-mono text-[11px]">
+                                                        {resolveBehaviorTimestamp(entry.row, entry.data)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(resolveBehaviorClose(entry.row, entry.data), 4)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class={actionClass(action)}>
+                                                        {action || '—'}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {entry.row.position_after ?? entry.row.position ?? '—'}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.pnl_change)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.realized_pnl_change)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.reward)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.equity_after)}
+                                                    </Table.Cell>
+                                                </Table.Row>
+                                            {/each}
+                                        </Table.Body>
+                                    </Table.Root>
+                                </ScrollArea>
+                            {/if}
+                        </Card.Content>
+                    </Card.Root>
+
+                    <Card.Root>
+                        <Card.Header>
+                            <Card.Title>Eval Behavior</Card.Title>
+                            <Card.Description>
+                                Showing {valBehaviorDisplay.rows.length.toLocaleString()} of{' '}
+                                {valBehaviorDisplay.total.toLocaleString()} rows
+                            </Card.Description>
+                        </Card.Header>
+                        <Card.Content>
+                            {#if valBehaviorLoading || valDataLoading}
+                                <div class="py-10 text-center text-muted-foreground">
+                                    Loading eval behavior...
+                                </div>
+                            {:else if valBehaviorDisplay.rows.length === 0}
+                                <div class="py-10 text-center text-muted-foreground">
+                                    Select an eval behavior CSV to view actions.
+                                </div>
+                            {:else}
+                                <ScrollArea class="h-[540px] rounded-md border">
+                                    <Table.Root>
+                                        <Table.Header class="sticky top-0 bg-background z-10 shadow-sm border-b">
+                                            <Table.Row>
+                                                <Table.Head>Idx</Table.Head>
+                                                <Table.Head>Window</Table.Head>
+                                                <Table.Head>Time</Table.Head>
+                                                <Table.Head class="text-right">Close</Table.Head>
+                                                <Table.Head>Action</Table.Head>
+                                                <Table.Head class="text-right">Pos</Table.Head>
+                                                <Table.Head class="text-right">PNL</Table.Head>
+                                                <Table.Head class="text-right">Realized</Table.Head>
+                                                <Table.Head class="text-right">Reward</Table.Head>
+                                                <Table.Head class="text-right">Equity</Table.Head>
+                                            </Table.Row>
+                                        </Table.Header>
+                                        <Table.Body>
+                                            {#each valBehaviorDisplay.rows as entry}
+                                                {@const action = normalizeAction(entry.row.action)}
+                                                <Table.Row class="hover:bg-muted/30 transition-colors">
+                                                    <Table.Cell>{entry.row.data_idx ?? entry.row.idx}</Table.Cell>
+                                                    <Table.Cell>{entry.row.window ?? entry.row.window_idx ?? '—'}</Table.Cell>
+                                                    <Table.Cell class="font-mono text-[11px]">
+                                                        {resolveBehaviorTimestamp(entry.row, entry.data)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(resolveBehaviorClose(entry.row, entry.data), 4)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class={actionClass(action)}>
+                                                        {action || '—'}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {entry.row.position_after ?? entry.row.position ?? '—'}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.pnl_change)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.realized_pnl_change)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.reward)}
+                                                    </Table.Cell>
+                                                    <Table.Cell class="text-right">
+                                                        {formatNum(entry.row.equity_after)}
+                                                    </Table.Cell>
+                                                </Table.Row>
+                                            {/each}
+                                        </Table.Body>
+                                    </Table.Root>
+                                </ScrollArea>
+                            {/if}
+                        </Card.Content>
+                    </Card.Root>
+                </div>
             </Tabs.Content>
 
             <Tabs.Content value="data">

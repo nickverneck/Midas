@@ -97,6 +97,7 @@ async function readLines(filePath: string, offset: number, limit: number): Promi
 export const GET = async ({ url }) => {
     const headers = { 'Cache-Control': 'no-store' };
     const logPath = resolveLogPath(url.searchParams.get('dir'));
+    const mode = url.searchParams.get('mode');
 
     if (!logPath) {
         return json({ error: 'Invalid log directory' }, { status: 400, headers });
@@ -104,6 +105,30 @@ export const GET = async ({ url }) => {
 
     if (!fs.existsSync(logPath)) {
         return json({ error: 'Log file not found' }, { status: 404, headers });
+    }
+
+    if (mode === 'summary') {
+        const text = fs.readFileSync(logPath, 'utf-8');
+        const parsed = Papa.parse(text, {
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true
+        });
+        const data = parsed.data as Record<string, unknown>[];
+        const byGen = new Map<number, number>();
+        for (const row of data) {
+            const gen = Number(row.gen);
+            const fitness = Number(row.fitness);
+            if (!Number.isFinite(gen) || !Number.isFinite(fitness)) continue;
+            const existing = byGen.get(gen);
+            if (existing === undefined || fitness > existing) {
+                byGen.set(gen, fitness);
+            }
+        }
+        const summary = Array.from(byGen.entries())
+            .sort(([a], [b]) => a - b)
+            .map(([gen, fitness]) => ({ gen, fitness }));
+        return json({ data: summary, nextOffset: 0, done: true }, { headers });
     }
 
     const limitParam = url.searchParams.get('limit');

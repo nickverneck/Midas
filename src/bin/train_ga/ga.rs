@@ -59,6 +59,37 @@ pub struct CandidateResult {
     pub debug_session_close_penalty: f64,
 }
 
+#[derive(Clone)]
+pub struct BehaviorRow {
+    pub window_idx: usize,
+    pub step: usize,
+    pub data_idx: usize,
+    pub action_idx: i32,
+    pub action: String,
+    pub position_before: i32,
+    pub position_after: i32,
+    pub equity_before: f64,
+    pub equity_after: f64,
+    pub cash: f64,
+    pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+    pub pnl_change: f64,
+    pub realized_pnl_change: f64,
+    pub reward: f64,
+    pub commission_paid: f64,
+    pub slippage_paid: f64,
+    pub drawdown_penalty: f64,
+    pub session_close_penalty: f64,
+    pub invalid_revert_penalty: f64,
+    pub flat_hold_penalty: f64,
+    pub session_open: bool,
+    pub margin_ok: bool,
+    pub minutes_to_close: Option<f64>,
+    pub session_closed_violation: bool,
+    pub margin_call_violation: bool,
+    pub position_limit_violation: bool,
+}
+
 struct CandidateStats {
     eval_pnls: Vec<f64>,
     eval_pnls_realized: Vec<f64>,
@@ -167,12 +198,12 @@ impl CandidateStats {
     }
 }
 
-pub fn evaluate_candidate(
+fn evaluate_candidate_internal(
     genome: &[f32],
     data: &DataSet,
     windows: &[(usize, usize)],
     cfg: &CandidateConfig,
-    capture_history: bool,
+    mut history: Option<&mut Vec<BehaviorRow>>,
 ) -> CandidateResult {
     use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
     use tch::nn::Module;
@@ -221,7 +252,7 @@ pub fn evaluate_candidate(
     let mut flat_hold_penalty_sum = 0.0f64;
     let mut session_close_penalty_sum = 0.0f64;
 
-    for &(start, end) in windows.iter().take(cfg.eval_windows) {
+    for (window_idx, &(start, end)) in windows.iter().take(cfg.eval_windows).enumerate() {
         if end <= start + 1 {
             continue;
         }
@@ -231,8 +262,11 @@ pub fn evaluate_candidate(
         let mut pnl_buf = Vec::with_capacity(end - start - 1);
         let mut eq_curve = Vec::with_capacity(end - start - 1);
         let mut window_drawdown_penalty = 0.0f64;
+        let mut step_idx = 0usize;
 
         for t in (start + 1)..end {
+            let position_before = position;
+            let equity_before = equity;
             let obs = build_observation(
                 data,
                 t,
@@ -254,22 +288,22 @@ pub fn evaluate_candidate(
                 sample.int64_value(&[0, 0]) as i32
             });
 
-            let action = match action_idx {
+            let (action, action_label) = match action_idx {
                 0 => {
                     act_buy += 1;
-                    Action::Buy
+                    (Action::Buy, "buy")
                 }
                 1 => {
                     act_sell += 1;
-                    Action::Sell
+                    (Action::Sell, "sell")
                 }
                 2 => {
                     act_hold += 1;
-                    Action::Hold
+                    (Action::Hold, "hold")
                 }
                 _ => {
                     act_revert += 1;
-                    Action::Revert
+                    (Action::Revert, "revert")
                 }
             };
 
@@ -289,7 +323,7 @@ pub fn evaluate_candidate(
                 .copied();
             let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
-            let (_reward, info) = env.step(
+            let (reward, info) = env.step(
                 action,
                 data.close[t],
                 StepContext {
@@ -309,6 +343,38 @@ pub fn evaluate_candidate(
             }
             position = env.state().position;
             equity = env.state().cash + env.state().unrealized_pnl;
+            if let Some(hist) = history.as_deref_mut() {
+                let state = env.state();
+                hist.push(BehaviorRow {
+                    window_idx,
+                    step: step_idx,
+                    data_idx: t,
+                    action_idx,
+                    action: action_label.to_string(),
+                    position_before,
+                    position_after: state.position,
+                    equity_before,
+                    equity_after: equity,
+                    cash: state.cash,
+                    unrealized_pnl: state.unrealized_pnl,
+                    realized_pnl: state.realized_pnl,
+                    pnl_change: info.pnl_change,
+                    realized_pnl_change: info.realized_pnl_change,
+                    reward,
+                    commission_paid: info.commission_paid,
+                    slippage_paid: info.slippage_paid,
+                    drawdown_penalty: info.drawdown_penalty,
+                    session_close_penalty: info.session_close_penalty,
+                    invalid_revert_penalty: info.invalid_revert_penalty,
+                    flat_hold_penalty: info.flat_hold_penalty,
+                    session_open,
+                    margin_ok,
+                    minutes_to_close,
+                    session_closed_violation: info.session_closed_violation,
+                    margin_call_violation: info.margin_call_violation,
+                    position_limit_violation: info.position_limit_violation,
+                });
+            }
             pnl_buf.push(info.pnl_change);
             eq_curve.push(equity);
             window_drawdown_penalty += info.drawdown_penalty;
@@ -323,6 +389,7 @@ pub fn evaluate_candidate(
             }
             abs_pnl_sum += info.pnl_change.abs();
             pnl_steps += 1;
+            step_idx += 1;
         }
 
         let realized_pnl = env.state().realized_pnl;
@@ -347,9 +414,6 @@ pub fn evaluate_candidate(
 
         eval_equity.push(eq_curve);
 
-        if capture_history {
-            let _ = capture_history;
-        }
     }
 
     let eval_sortino = compute_sortino(&eval_returns, cfg.sortino_annualization, 0.0, 50.0);
@@ -406,6 +470,27 @@ pub fn evaluate_candidate(
         debug_flat_hold_penalty: flat_hold_penalty_sum,
         debug_session_close_penalty: session_close_penalty_sum,
     }
+}
+
+pub fn evaluate_candidate(
+    genome: &[f32],
+    data: &DataSet,
+    windows: &[(usize, usize)],
+    cfg: &CandidateConfig,
+    _capture_history: bool,
+) -> CandidateResult {
+    evaluate_candidate_internal(genome, data, windows, cfg, None)
+}
+
+pub fn evaluate_candidate_with_history(
+    genome: &[f32],
+    data: &DataSet,
+    windows: &[(usize, usize)],
+    cfg: &CandidateConfig,
+) -> (CandidateResult, Vec<BehaviorRow>) {
+    let mut history = Vec::new();
+    let metrics = evaluate_candidate_internal(genome, data, windows, cfg, Some(&mut history));
+    (metrics, history)
 }
 
 pub fn evaluate_candidates_batch(

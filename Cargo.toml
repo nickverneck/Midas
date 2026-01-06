@@ -10,7 +10,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
-polars = { version = "0.51.0", features = ["parquet", "timezones"] }
+polars = { version = "0.51.0", features = ["csv", "parquet", "timezones"] }
 anyhow = "1.0"
 velora-ta = "0.0.1"
 pyo3 = { version = "0.23", features = ["macros"], optional = true }
