@@ -7,7 +7,7 @@ use tch::{kind::Kind, no_grad, Device, Tensor};
 use crate::data::{build_observation, DataSet};
 use crate::metrics::{compute_sortino, max_drawdown};
 use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
-use midas_env::env::MarginMode;
+use midas_env::env::{MarginMode, VIOLATION_PENALTY};
 
 #[derive(Clone)]
 pub struct CandidateConfig {
@@ -115,6 +115,7 @@ struct CandidateStats {
     invalid_revert_penalty_sum: f64,
     flat_hold_penalty_sum: f64,
     session_close_penalty_sum: f64,
+    violation_penalty_sum: f64,
 }
 
 impl CandidateStats {
@@ -140,6 +141,7 @@ impl CandidateStats {
             invalid_revert_penalty_sum: 0.0,
             flat_hold_penalty_sum: 0.0,
             session_close_penalty_sum: 0.0,
+            violation_penalty_sum: 0.0,
         }
     }
 
@@ -197,9 +199,9 @@ impl CandidateStats {
             debug_drawdown_penalty: self.drawdown_penalty_sum,
             debug_invalid_revert_penalty: self.invalid_revert_penalty_sum,
             debug_flat_hold_penalty: self.flat_hold_penalty_sum,
-            debug_session_close_penalty: self.session_close_penalty_sum,
-        }
+        debug_session_close_penalty: self.session_close_penalty_sum,
     }
+}
 }
 
 fn evaluate_candidate_internal(
@@ -256,6 +258,7 @@ fn evaluate_candidate_internal(
     let mut position_violations = 0usize;
     let mut drawdown_penalty_sum = 0.0f64;
     let mut invalid_revert_penalty_sum = 0.0f64;
+    let mut violation_penalty_sum = 0.0f64;
     let mut flat_hold_penalty_sum = 0.0f64;
     let mut session_close_penalty_sum = 0.0f64;
 
@@ -341,12 +344,15 @@ fn evaluate_candidate_internal(
             );
             if info.session_closed_violation {
                 session_violations += 1;
+                violation_penalty_sum += VIOLATION_PENALTY;
             }
             if info.margin_call_violation {
                 margin_violations += 1;
+                violation_penalty_sum += VIOLATION_PENALTY;
             }
             if info.position_limit_violation {
                 position_violations += 1;
+                violation_penalty_sum += VIOLATION_PENALTY;
             }
             position = env.state().position;
             equity = env.state().cash + env.state().unrealized_pnl;
@@ -405,7 +411,8 @@ fn evaluate_candidate_internal(
             - window_drawdown_penalty
             - invalid_revert_penalty_sum
             - flat_hold_penalty_sum
-            - session_close_penalty_sum;
+            - session_close_penalty_sum
+            - violation_penalty_sum;
         eval_pnls.push(pnl_sum);
         eval_pnls_realized.push(realized_pnl);
         eval_pnls_total.push(total_pnl);
@@ -632,12 +639,15 @@ pub fn evaluate_candidates_batch(
                 );
                 if info.session_closed_violation {
                     stats[i].session_violations += 1;
+                    stats[i].violation_penalty_sum += VIOLATION_PENALTY;
                 }
                 if info.margin_call_violation {
                     stats[i].margin_violations += 1;
+                    stats[i].violation_penalty_sum += VIOLATION_PENALTY;
                 }
                 if info.position_limit_violation {
                     stats[i].position_violations += 1;
+                    stats[i].violation_penalty_sum += VIOLATION_PENALTY;
                 }
 
                 positions[i] = envs[i].state().position;
@@ -666,7 +676,8 @@ pub fn evaluate_candidates_batch(
                 - window_drawdown_penalty[i]
                 - stats[i].invalid_revert_penalty_sum
                 - stats[i].flat_hold_penalty_sum
-                - stats[i].session_close_penalty_sum;
+                - stats[i].session_close_penalty_sum
+                - stats[i].violation_penalty_sum;
             stats[i].eval_pnls.push(pnl_sum);
             stats[i].eval_pnls_realized.push(realized_pnl);
             stats[i].eval_pnls_total.push(total_pnl);
