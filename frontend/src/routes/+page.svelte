@@ -26,6 +26,7 @@
 		idx: number | null;
 		fitness: number | null;
 		evalFitness: number | null;
+		selectionFitness: number | null;
 		pnl: number | null;
 		realized: number | null;
 		total: number | null;
@@ -370,12 +371,14 @@
 			const genValue = toNumber(row.gen);
 			const idxValue = toNumber(row.idx);
 			const evalFitness = toNumber(row.eval_fitness);
+			const selectionFitness = toNumber(row.selection_fitness);
 
 			if (genValue !== null) {
 				const member: GenMember = {
 					idx: idxValue,
 					fitness,
 					evalFitness,
+					selectionFitness,
 					pnl,
 					realized,
 					total,
@@ -667,6 +670,7 @@
 				const selected = selectMembers(members);
 				const fitnessValues = finiteValues(selected.map((m) => m.fitness));
 				const evalFitnessValues = finiteValues(selected.map((m) => m.evalFitness));
+				const selectionFitnessValues = finiteValues(selected.map((m) => m.selectionFitness));
 				const pnlValues = finiteValues(selected.map((m) => m.pnl));
 				const realizedValues = finiteValues(selected.map((m) => m.realized));
 				const totalValues = finiteValues(selected.map((m) => m.total));
@@ -689,6 +693,8 @@
 					p90Fitness: percentileValue(sortedFitness, 0.9),
 					bestEvalFitness: evalFitnessValues.length ? maxValue(evalFitnessValues) : null,
 					avgEvalFitness: evalFitnessValues.length ? meanValue(evalFitnessValues) : null,
+					bestSelectionFitness: selectionFitnessValues.length ? maxValue(selectionFitnessValues) : null,
+					avgSelectionFitness: selectionFitnessValues.length ? meanValue(selectionFitnessValues) : null,
 					bestPnl: maxValue(pnlValues),
 					avgPnl: meanValue(pnlValues),
 					bestRealizedPnl: maxValue(realizedValues),
@@ -885,14 +891,14 @@
     let fitnessChartData = $derived.by(() => {
         const datasets = [
             {
-                label: 'Best Fitness',
+                label: 'Best Fitness (Train)',
                 data: visibleGenData.map(g => g.bestFitness),
                 borderColor: 'rgb(59, 130, 246)',
                 backgroundColor: 'rgba(59, 130, 246, 0.5)',
                 tension: 0.1
             },
             {
-                label: 'Avg Fitness',
+                label: 'Avg Fitness (Train)',
                 data: visibleGenData.map(g => g.avgFitness),
                 borderColor: 'rgb(147, 197, 253)',
                 backgroundColor: 'rgba(147, 197, 253, 0.2)',
@@ -900,7 +906,7 @@
                 tension: 0.1
             },
             {
-                label: 'P90 Fitness',
+                label: 'P90 Fitness (Train)',
                 data: visibleGenData.map(g => g.p90Fitness),
                 borderColor: 'rgb(14, 116, 144)',
                 backgroundColor: 'rgba(14, 116, 144, 0.15)',
@@ -908,7 +914,7 @@
                 tension: 0.1
             },
             {
-                label: 'Median Fitness',
+                label: 'Median Fitness (Train)',
                 data: visibleGenData.map(g => g.p50Fitness),
                 borderColor: 'rgb(56, 189, 248)',
                 backgroundColor: 'rgba(56, 189, 248, 0.12)',
@@ -920,11 +926,23 @@
         const hasEvalFitness = visibleGenData.some((g) => g.bestEvalFitness !== null);
         if (hasEvalFitness) {
             datasets.push({
-                label: 'Best Eval Fitness',
+                label: 'Best Fitness (Eval)',
                 data: visibleGenData.map(g => g.bestEvalFitness),
                 borderColor: 'rgb(244, 114, 182)',
                 backgroundColor: 'rgba(244, 114, 182, 0.25)',
                 borderDash: [3, 5],
+                tension: 0.1
+            });
+        }
+
+        const hasSelectionFitness = visibleGenData.some((g) => g.bestSelectionFitness !== null);
+        if (hasSelectionFitness) {
+            datasets.push({
+                label: 'Best Fitness (Selection)',
+                data: visibleGenData.map(g => g.bestSelectionFitness),
+                borderColor: 'rgb(251, 146, 60)',
+                backgroundColor: 'rgba(251, 146, 60, 0.2)',
+                borderDash: [6, 3],
                 tension: 0.1
             });
         }

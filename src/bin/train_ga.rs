@@ -286,35 +286,39 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
     let log_path = args.outdir.join("ga_log.csv");
     let mut log_has_eval_fitness = false;
+    let mut log_has_selection_fitness = false;
     if log_path.exists() {
         let meta = std::fs::metadata(&log_path)?;
         if meta.len() == 0 {
             std::fs::write(
                 &log_path,
-                "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
+                "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness,selection_fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
             )?;
             log_has_eval_fitness = true;
+            log_has_selection_fitness = true;
         } else {
             let file = std::fs::File::open(&log_path)?;
             let mut reader = BufReader::new(file);
             let mut header = String::new();
             let _ = reader.read_line(&mut header)?;
             log_has_eval_fitness = header.split(',').any(|col| col.trim() == "eval_fitness");
-            if !log_has_eval_fitness {
+            log_has_selection_fitness = header.split(',').any(|col| col.trim() == "selection_fitness");
+            if !log_has_eval_fitness || !log_has_selection_fitness {
                 println!(
-                    "warn: ga_log.csv missing eval_fitness column; delete the log to enable eval fitness tracking"
+                    "warn: ga_log.csv missing selection columns; delete the log to enable eval/selection fitness tracking"
                 );
             }
         }
     } else {
         std::fs::write(
             &log_path,
-            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
+            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness,selection_fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
         )?;
         log_has_eval_fitness = true;
+        log_has_selection_fitness = true;
     }
 
-    let mut best_overall_fitness = f64::NEG_INFINITY;
+    let mut best_overall_score = f64::NEG_INFINITY;
     let mut best_overall_genome: Option<Vec<f32>> = None;
 
     if start_gen >= args.generations {
@@ -437,8 +441,17 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         let mut log_buffer = String::new();
         for (idx, train_metrics, eval_metrics) in results.into_iter() {
             let genome = pop[idx].clone();
+            let selection_score = eval_metrics
+                .as_ref()
+                .map(|m| {
+                    let gap = (train_metrics.fitness - m.fitness).max(0.0);
+                    args.selection_train_weight * train_metrics.fitness
+                        + args.selection_eval_weight * m.fitness
+                        - args.selection_gap_penalty * gap
+                })
+                .unwrap_or(train_metrics.fitness);
             scored.push((
-                train_metrics.fitness,
+                selection_score,
                 idx,
                 genome.clone(),
                 eval_metrics.clone(),
@@ -453,6 +466,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| format!("{:.4}", m.fitness))
                 .unwrap_or_default();
+            let selection_fitness = format!("{:.4}", selection_score);
             let eval_pnl_realized = eval_metrics
                 .as_ref()
                 .map(|m| format!("{:.4}", m.eval_pnl_realized))
@@ -474,9 +488,33 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .map(|m| format!("{:.8}", m.eval_ret_mean))
                 .unwrap_or_default();
 
-            let line = if log_has_eval_fitness {
+            let line = if log_has_eval_fitness && log_has_selection_fitness {
                 format!(
-                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
+                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
+                    generation,
+                    idx,
+                    args.w_pnl,
+                    args.w_sortino,
+                    args.w_mdd,
+                    train_metrics.fitness,
+                    eval_fitness,
+                    selection_fitness,
+                    eval_pnl,
+                    eval_pnl_realized,
+                    eval_pnl_total,
+                    eval_sortino,
+                    eval_dd,
+                    eval_ret,
+                    train_metrics.eval_pnl,
+                    train_metrics.eval_pnl_realized,
+                    train_metrics.eval_pnl_total,
+                    train_metrics.eval_sortino,
+                    train_metrics.eval_drawdown,
+                    train_metrics.eval_ret_mean
+                )
+            } else if log_has_eval_fitness {
+                format!(
+                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
                     generation,
                     idx,
                     args.w_pnl,
@@ -524,20 +562,20 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
             if let Some(eval) = eval_metrics {
                 println!(
-                    "  cand {}/{} | fitness {:.2} | train pnl {:.2} | val pnl {:.2}",
+                    "  cand {}/{} | sel {:.2} | train {:.2} | eval {:.2}",
                     idx,
                     pop.len().saturating_sub(1),
+                    selection_score,
                     train_metrics.fitness,
-                    train_metrics.eval_pnl,
-                    eval.eval_pnl
+                    eval.fitness
                 );
             } else {
                 println!(
-                    "  cand {}/{} | fitness {:.2} | train pnl {:.2} | val skipped",
+                    "  cand {}/{} | sel {:.2} | train {:.2} | val skipped",
                     idx,
                     pop.len().saturating_sub(1),
-                    train_metrics.fitness,
-                    train_metrics.eval_pnl
+                    selection_score,
+                    train_metrics.fitness
                 );
             }
             if args.debug_data && idx == 0 {
@@ -588,9 +626,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        if let Some((_fit, best_idx, genome, eval_metrics, train_metrics)) = scored.first() {
-            if train_metrics.fitness > best_overall_fitness {
-                best_overall_fitness = train_metrics.fitness;
+        if let Some((score, best_idx, genome, eval_metrics, train_metrics)) = scored.first() {
+            if *score > best_overall_score {
+                best_overall_score = *score;
                 best_overall_genome = Some(genome.clone());
             }
             if let Some(eval) = eval_metrics.as_ref() {
