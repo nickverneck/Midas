@@ -25,6 +25,7 @@
 	type GenMember = {
 		idx: number | null;
 		fitness: number | null;
+		evalFitness: number | null;
 		pnl: number | null;
 		realized: number | null;
 		total: number | null;
@@ -368,11 +369,13 @@
 			const ret = toNumber(row[keys.retKey]);
 			const genValue = toNumber(row.gen);
 			const idxValue = toNumber(row.idx);
+			const evalFitness = toNumber(row.eval_fitness);
 
 			if (genValue !== null) {
 				const member: GenMember = {
 					idx: idxValue,
 					fitness,
+					evalFitness,
 					pnl,
 					realized,
 					total,
@@ -663,6 +666,7 @@
 			.map(([gen, members]) => {
 				const selected = selectMembers(members);
 				const fitnessValues = finiteValues(selected.map((m) => m.fitness));
+				const evalFitnessValues = finiteValues(selected.map((m) => m.evalFitness));
 				const pnlValues = finiteValues(selected.map((m) => m.pnl));
 				const realizedValues = finiteValues(selected.map((m) => m.realized));
 				const totalValues = finiteValues(selected.map((m) => m.total));
@@ -683,6 +687,8 @@
 					avgFitness: meanValue(fitnessValues),
 					p50Fitness: percentileValue(sortedFitness, 0.5),
 					p90Fitness: percentileValue(sortedFitness, 0.9),
+					bestEvalFitness: evalFitnessValues.length ? maxValue(evalFitnessValues) : null,
+					avgEvalFitness: evalFitnessValues.length ? meanValue(evalFitnessValues) : null,
 					bestPnl: maxValue(pnlValues),
 					avgPnl: meanValue(pnlValues),
 					bestRealizedPnl: maxValue(realizedValues),
@@ -876,9 +882,8 @@
 	});
 
     // Chart: Fitness Evolution
-    let fitnessChartData = $derived({
-        labels: visibleGenData.map(g => `Gen ${g.gen}`),
-        datasets: [
+    let fitnessChartData = $derived.by(() => {
+        const datasets = [
             {
                 label: 'Best Fitness',
                 data: visibleGenData.map(g => g.bestFitness),
@@ -910,7 +915,24 @@
                 borderDash: [2, 6],
                 tension: 0.1
             }
-        ]
+        ];
+
+        const hasEvalFitness = visibleGenData.some((g) => g.bestEvalFitness !== null);
+        if (hasEvalFitness) {
+            datasets.push({
+                label: 'Best Eval Fitness',
+                data: visibleGenData.map(g => g.bestEvalFitness),
+                borderColor: 'rgb(244, 114, 182)',
+                backgroundColor: 'rgba(244, 114, 182, 0.25)',
+                borderDash: [3, 5],
+                tension: 0.1
+            });
+        }
+
+        return {
+            labels: visibleGenData.map(g => `Gen ${g.gen}`),
+            datasets
+        };
     });
 
     // Chart: PNL Evolution

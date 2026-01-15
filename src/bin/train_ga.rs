@@ -152,7 +152,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     use rand::prelude::*;
     use rand_distr::{Distribution, Normal};
     use rayon::prelude::*;
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
 
     let overall_start = std::time::Instant::now();
 
@@ -285,11 +285,33 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     }
 
     let log_path = args.outdir.join("ga_log.csv");
-    if !log_path.exists() {
+    let mut log_has_eval_fitness = false;
+    if log_path.exists() {
+        let meta = std::fs::metadata(&log_path)?;
+        if meta.len() == 0 {
+            std::fs::write(
+                &log_path,
+                "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
+            )?;
+            log_has_eval_fitness = true;
+        } else {
+            let file = std::fs::File::open(&log_path)?;
+            let mut reader = BufReader::new(file);
+            let mut header = String::new();
+            let _ = reader.read_line(&mut header)?;
+            log_has_eval_fitness = header.split(',').any(|col| col.trim() == "eval_fitness");
+            if !log_has_eval_fitness {
+                println!(
+                    "warn: ga_log.csv missing eval_fitness column; delete the log to enable eval fitness tracking"
+                );
+            }
+        }
+    } else {
         std::fs::write(
             &log_path,
-            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
+            "gen,idx,w_pnl,w_sortino,w_mdd,fitness,eval_fitness,eval_fitness_pnl,eval_pnl_realized,eval_pnl_total,eval_sortino,eval_drawdown,eval_ret_mean,train_fitness_pnl,train_pnl_realized,train_pnl_total,train_sortino,train_drawdown,train_ret_mean\n",
         )?;
+        log_has_eval_fitness = true;
     }
 
     let mut best_overall_fitness = f64::NEG_INFINITY;
@@ -427,6 +449,10 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| format!("{:.4}", m.eval_pnl))
                 .unwrap_or_default();
+            let eval_fitness = eval_metrics
+                .as_ref()
+                .map(|m| format!("{:.4}", m.fitness))
+                .unwrap_or_default();
             let eval_pnl_realized = eval_metrics
                 .as_ref()
                 .map(|m| format!("{:.4}", m.eval_pnl_realized))
@@ -448,27 +474,52 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .map(|m| format!("{:.8}", m.eval_ret_mean))
                 .unwrap_or_default();
 
-            let line = format!(
-                "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
-                generation,
-                idx,
-                args.w_pnl,
-                args.w_sortino,
-                args.w_mdd,
-                train_metrics.fitness,
-                eval_pnl,
-                eval_pnl_realized,
-                eval_pnl_total,
-                eval_sortino,
-                eval_dd,
-                eval_ret,
-                train_metrics.eval_pnl,
-                train_metrics.eval_pnl_realized,
-                train_metrics.eval_pnl_total,
-                train_metrics.eval_sortino,
-                train_metrics.eval_drawdown,
-                train_metrics.eval_ret_mean
-            );
+            let line = if log_has_eval_fitness {
+                format!(
+                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
+                    generation,
+                    idx,
+                    args.w_pnl,
+                    args.w_sortino,
+                    args.w_mdd,
+                    train_metrics.fitness,
+                    eval_fitness,
+                    eval_pnl,
+                    eval_pnl_realized,
+                    eval_pnl_total,
+                    eval_sortino,
+                    eval_dd,
+                    eval_ret,
+                    train_metrics.eval_pnl,
+                    train_metrics.eval_pnl_realized,
+                    train_metrics.eval_pnl_total,
+                    train_metrics.eval_sortino,
+                    train_metrics.eval_drawdown,
+                    train_metrics.eval_ret_mean
+                )
+            } else {
+                format!(
+                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
+                    generation,
+                    idx,
+                    args.w_pnl,
+                    args.w_sortino,
+                    args.w_mdd,
+                    train_metrics.fitness,
+                    eval_pnl,
+                    eval_pnl_realized,
+                    eval_pnl_total,
+                    eval_sortino,
+                    eval_dd,
+                    eval_ret,
+                    train_metrics.eval_pnl,
+                    train_metrics.eval_pnl_realized,
+                    train_metrics.eval_pnl_total,
+                    train_metrics.eval_sortino,
+                    train_metrics.eval_drawdown,
+                    train_metrics.eval_ret_mean
+                )
+            };
             log_buffer.push_str(&line);
 
             if let Some(eval) = eval_metrics {
