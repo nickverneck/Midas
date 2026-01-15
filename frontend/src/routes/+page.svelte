@@ -171,7 +171,8 @@
 		const params = new URLSearchParams({
 			limit: String(logChunk),
 			offset: String(offset),
-			dir
+			dir,
+			log: "ga"
 		});
 		return `/api/logs?${params.toString()}`;
 	};
@@ -1197,9 +1198,9 @@
 
 <div class="p-8 space-y-8 max-w-[1600px] mx-auto">
 	<div class="flex flex-wrap justify-between items-center gap-4 bg-card p-6 rounded-xl border shadow-sm">
-		<div>
-            <h1 class="text-4xl font-bold tracking-tight bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">Midas Dashboard</h1>
-            <p class="text-muted-foreground mt-1">Analyzing Training Performance & Evolution</p>
+        <div>
+            <h1 class="text-4xl font-bold tracking-tight bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">GA Analytics</h1>
+            <p class="text-muted-foreground mt-1">Genetic algorithm training performance & evolution.</p>
         </div>
         <div class="flex flex-wrap items-center gap-3 justify-end">
             <div class="flex items-center gap-2">

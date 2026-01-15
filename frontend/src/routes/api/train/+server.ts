@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-type TrainEngine = 'rust' | 'python';
+type TrainEngine = 'ga' | 'rl';
 
 const resolveProjectRoot = () => {
     const cwd = process.cwd();
@@ -100,7 +100,7 @@ const resolveTorchEnv = (root: string) => {
 
 export const POST = async ({ request }) => {
     const payload = await request.json();
-    const engine = (payload?.engine ?? 'rust') as TrainEngine;
+    const engine = (payload?.engine ?? 'ga') as TrainEngine;
     const params = (payload?.params ?? payload ?? {}) as Record<string, unknown>;
     const { signal } = request;
 
@@ -108,15 +108,11 @@ export const POST = async ({ request }) => {
     const cliArgs = buildCliArgs(params);
     const env = resolveTorchEnv(root);
 
-    let command = '';
-    let args: string[] = [];
-    if (engine === 'python') {
-        command = env.PYTHON ?? 'python3';
-        args = ['python/examples/train_hybrid.py', ...cliArgs];
-    } else {
-        command = 'cargo';
-        args = ['run', '--features', 'torch', '--bin', 'train_ga', '--', ...cliArgs];
-    }
+    const command = 'cargo';
+    const args: string[] =
+        engine === 'rl'
+            ? ['run', '--features', 'torch', '--bin', 'train_rl', '--', ...cliArgs]
+            : ['run', '--features', 'torch', '--bin', 'train_ga', '--', ...cliArgs];
 
     const stream = new ReadableStream({
         start(controller) {
