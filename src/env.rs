@@ -55,10 +55,18 @@ pub struct EnvConfig {
     pub drawdown_penalty_growth: f64,
     /// Penalty applied as session close approaches (scaled within last hour).
     pub session_close_penalty: f64,
-    /// Max holding bars when unrealized PnL is positive (0 disables).
+    /// Hold-bar threshold when unrealized PnL is positive (0 disables hold penalty).
     pub max_hold_bars_positive: usize,
-    /// Max holding bars while in drawdown (0 disables).
+    /// Hold-bar threshold while in drawdown (0 disables hold penalty).
     pub max_hold_bars_drawdown: usize,
+    /// Base penalty per step for holding a position beyond max hold bars.
+    pub hold_duration_penalty: f64,
+    /// Linear growth multiplier for hold-duration penalties.
+    pub hold_duration_penalty_growth: f64,
+    /// Scale factor when PnL is increasing after max hold bars.
+    pub hold_duration_penalty_positive_scale: f64,
+    /// Scale factor when PnL is decreasing after max hold bars.
+    pub hold_duration_penalty_negative_scale: f64,
     /// Penalty for using Revert when flat.
     pub invalid_revert_penalty: f64,
     /// Linear growth for consecutive invalid Revert penalties.
@@ -89,6 +97,10 @@ impl Default for EnvConfig {
             session_close_penalty: 0.0,
             max_hold_bars_positive: 0,
             max_hold_bars_drawdown: 0,
+            hold_duration_penalty: 0.0,
+            hold_duration_penalty_growth: 0.0,
+            hold_duration_penalty_positive_scale: 0.5,
+            hold_duration_penalty_negative_scale: 1.5,
             invalid_revert_penalty: 0.0,
             invalid_revert_penalty_growth: 0.0,
             flat_hold_penalty: 0.0,
@@ -145,6 +157,7 @@ pub struct StepInfo {
     pub drawdown_penalty: f64,
     pub session_close_penalty: f64,
     pub invalid_revert_penalty: f64,
+    pub hold_duration_penalty: f64,
     pub flat_hold_penalty: f64,
     pub margin_call_violation: bool,
     pub position_limit_violation: bool,
@@ -215,6 +228,7 @@ impl TradingEnv {
                     drawdown_penalty: 0.0,
                     session_close_penalty: 0.0,
                     invalid_revert_penalty: 0.0,
+                    hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation: false,
@@ -236,6 +250,7 @@ impl TradingEnv {
                     drawdown_penalty: 0.0,
                     session_close_penalty: 0.0,
                     invalid_revert_penalty: 0.0,
+                    hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
                     margin_call_violation: true,
                     position_limit_violation: false,
@@ -255,19 +270,11 @@ impl TradingEnv {
         } else {
             self.state.invalid_revert_streak = 0;
         }
-        if self.state.position != 0 {
-            let hold_bars = self.state.step.saturating_sub(self.state.position_entry_step);
-            if self.cfg.max_hold_bars_drawdown > 0
-                && self.state.drawdown_steps >= self.cfg.max_hold_bars_drawdown
-            {
-                action = Action::Revert;
-            } else if self.cfg.max_hold_bars_positive > 0
-                && self.state.unrealized_pnl > 0.0
-                && hold_bars >= self.cfg.max_hold_bars_positive
-            {
-                action = Action::Revert;
-            }
-        }
+        let hold_bars = if self.state.position != 0 {
+            self.state.step.saturating_sub(self.state.position_entry_step)
+        } else {
+            0
+        };
 
         let action_overridden = action != requested_action;
         let target_position = match action {
@@ -298,6 +305,7 @@ impl TradingEnv {
                     drawdown_penalty: 0.0,
                     session_close_penalty: 0.0,
                     invalid_revert_penalty: 0.0,
+                    hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
                     margin_call_violation: false,
                     position_limit_violation,
@@ -332,6 +340,7 @@ impl TradingEnv {
                         drawdown_penalty: 0.0,
                         session_close_penalty: 0.0,
                         invalid_revert_penalty: 0.0,
+                        hold_duration_penalty: 0.0,
                         flat_hold_penalty: 0.0,
                         margin_call_violation: true,
                         position_limit_violation: false,
@@ -417,6 +426,28 @@ impl TradingEnv {
             0.0
         };
 
+        let mut hold_duration_penalty = 0.0;
+        if self.state.position != 0 && matches!(action, Action::Hold) {
+            let threshold = if self.state.unrealized_pnl >= 0.0 {
+                self.cfg.max_hold_bars_positive
+            } else {
+                self.cfg.max_hold_bars_drawdown
+            };
+            if threshold > 0 && hold_bars >= threshold {
+                let extra = (hold_bars - threshold) as f64 + 1.0;
+                let base = self.cfg.hold_duration_penalty
+                    * (1.0 + self.cfg.hold_duration_penalty_growth * (extra - 1.0).max(0.0));
+                let scale = if pnl_change > 0.0 {
+                    self.cfg.hold_duration_penalty_positive_scale
+                } else if pnl_change < 0.0 {
+                    self.cfg.hold_duration_penalty_negative_scale
+                } else {
+                    1.0
+                };
+                hold_duration_penalty = base * scale;
+            }
+        }
+
         let denom = if self.cfg.max_position > 0 {
             self.cfg.max_position as f64
         } else {
@@ -437,6 +468,9 @@ impl TradingEnv {
         if invalid_revert_penalty > 0.0 {
             reward -= invalid_revert_penalty;
         }
+        if hold_duration_penalty > 0.0 {
+            reward -= hold_duration_penalty;
+        }
         if flat_hold_penalty > 0.0 {
             reward -= flat_hold_penalty;
         }
@@ -453,6 +487,7 @@ impl TradingEnv {
                 drawdown_penalty,
                 session_close_penalty,
                 invalid_revert_penalty,
+                hold_duration_penalty,
                 flat_hold_penalty,
                 margin_call_violation: false,
                 position_limit_violation: false,
@@ -623,6 +658,28 @@ mod tests {
         let (_r2, info2) = env.step(Action::Buy, 100.0, StepContext::default());
         assert!(info2.margin_call_violation);
         assert_eq!(env.state.position, 1);
+    }
+
+    #[test]
+    fn hold_penalty_does_not_flip_position() {
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                max_hold_bars_positive: 1,
+                hold_duration_penalty: 1.0,
+                hold_duration_penalty_positive_scale: 1.0,
+                enforce_margin: false,
+                ..Default::default()
+            },
+        );
+        let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
+        let (_r2, info2) = env.step(Action::Hold, 100.0, StepContext::default());
+        assert_eq!(env.state.position, 1);
+        let (_r3, info3) = env.step(Action::Hold, 100.0, StepContext::default());
+        assert_eq!(env.state.position, 1);
+        assert!(info2.hold_duration_penalty == 0.0);
+        assert!(info3.hold_duration_penalty > 0.0);
     }
 
     #[test]

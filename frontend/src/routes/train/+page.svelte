@@ -50,6 +50,12 @@
 		"margin-mode": "auto",
 		"contract-multiplier": 1.0,
 		"margin-per-contract": "",
+		"max-hold-bars-positive": 15,
+		"max-hold-bars-drawdown": 15,
+		"hold-duration-penalty": 1.0,
+		"hold-duration-penalty-growth": 0.05,
+		"hold-duration-penalty-positive-scale": 0.5,
+		"hold-duration-penalty-negative-scale": 1.5,
 		"elite-frac": 0.33,
 		"mutation-sigma": 0.05,
 		"init-sigma": 0.5,
@@ -714,6 +720,36 @@
 														<div class="grid gap-2">
 															<Label for="rust-w-mdd">Fitness Weight (Max DD)</Label>
 															<Input id="rust-w-mdd" type="number" step="0.01" bind:value={rustParams["w-mdd"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Position Hold Penalties</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rust-max-hold-bars-positive">Max Hold Bars (Profit)</Label>
+															<Input id="rust-max-hold-bars-positive" type="number" min="0" bind:value={rustParams["max-hold-bars-positive"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-max-hold-bars-drawdown">Max Hold Bars (Drawdown)</Label>
+															<Input id="rust-max-hold-bars-drawdown" type="number" min="0" bind:value={rustParams["max-hold-bars-drawdown"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-hold-duration-penalty">Hold Penalty</Label>
+															<Input id="rust-hold-duration-penalty" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-hold-duration-penalty-growth">Hold Penalty Growth</Label>
+															<Input id="rust-hold-duration-penalty-growth" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty-growth"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-hold-duration-penalty-positive-scale">Hold Penalty Scale (Profit)</Label>
+															<Input id="rust-hold-duration-penalty-positive-scale" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty-positive-scale"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
+															<Input id="rust-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty-negative-scale"]} />
 														</div>
 													</div>
 												</details>

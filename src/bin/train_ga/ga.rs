@@ -31,6 +31,10 @@ pub struct CandidateConfig {
     pub session_close_penalty: f64,
     pub max_hold_bars_positive: usize,
     pub max_hold_bars_drawdown: usize,
+    pub hold_duration_penalty: f64,
+    pub hold_duration_penalty_growth: f64,
+    pub hold_duration_penalty_positive_scale: f64,
+    pub hold_duration_penalty_negative_scale: f64,
     pub invalid_revert_penalty: f64,
     pub invalid_revert_penalty_growth: f64,
     pub flat_hold_penalty: f64,
@@ -59,6 +63,7 @@ pub struct CandidateResult {
     pub debug_position_violations: usize,
     pub debug_drawdown_penalty: f64,
     pub debug_invalid_revert_penalty: f64,
+    pub debug_hold_duration_penalty: f64,
     pub debug_flat_hold_penalty: f64,
     pub debug_session_close_penalty: f64,
 }
@@ -85,6 +90,7 @@ pub struct BehaviorRow {
     pub drawdown_penalty: f64,
     pub session_close_penalty: f64,
     pub invalid_revert_penalty: f64,
+    pub hold_duration_penalty: f64,
     pub flat_hold_penalty: f64,
     pub session_open: bool,
     pub margin_ok: bool,
@@ -113,6 +119,7 @@ struct CandidateStats {
     position_violations: usize,
     drawdown_penalty_sum: f64,
     invalid_revert_penalty_sum: f64,
+    hold_duration_penalty_sum: f64,
     flat_hold_penalty_sum: f64,
     session_close_penalty_sum: f64,
     violation_penalty_sum: f64,
@@ -139,6 +146,7 @@ impl CandidateStats {
             position_violations: 0,
             drawdown_penalty_sum: 0.0,
             invalid_revert_penalty_sum: 0.0,
+            hold_duration_penalty_sum: 0.0,
             flat_hold_penalty_sum: 0.0,
             session_close_penalty_sum: 0.0,
             violation_penalty_sum: 0.0,
@@ -198,10 +206,11 @@ impl CandidateStats {
             debug_position_violations: self.position_violations,
             debug_drawdown_penalty: self.drawdown_penalty_sum,
             debug_invalid_revert_penalty: self.invalid_revert_penalty_sum,
+            debug_hold_duration_penalty: self.hold_duration_penalty_sum,
             debug_flat_hold_penalty: self.flat_hold_penalty_sum,
-        debug_session_close_penalty: self.session_close_penalty_sum,
+            debug_session_close_penalty: self.session_close_penalty_sum,
+        }
     }
-}
 }
 
 fn evaluate_candidate_internal(
@@ -229,6 +238,10 @@ fn evaluate_candidate_internal(
         session_close_penalty: cfg.session_close_penalty,
         max_hold_bars_positive: cfg.max_hold_bars_positive,
         max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
+        hold_duration_penalty: cfg.hold_duration_penalty,
+        hold_duration_penalty_growth: cfg.hold_duration_penalty_growth,
+        hold_duration_penalty_positive_scale: cfg.hold_duration_penalty_positive_scale,
+        hold_duration_penalty_negative_scale: cfg.hold_duration_penalty_negative_scale,
         invalid_revert_penalty: cfg.invalid_revert_penalty,
         flat_hold_penalty: cfg.flat_hold_penalty,
         invalid_revert_penalty_growth: cfg.invalid_revert_penalty_growth,
@@ -258,6 +271,7 @@ fn evaluate_candidate_internal(
     let mut position_violations = 0usize;
     let mut drawdown_penalty_sum = 0.0f64;
     let mut invalid_revert_penalty_sum = 0.0f64;
+    let mut hold_duration_penalty_sum = 0.0f64;
     let mut violation_penalty_sum = 0.0f64;
     let mut flat_hold_penalty_sum = 0.0f64;
     let mut session_close_penalty_sum = 0.0f64;
@@ -385,6 +399,7 @@ fn evaluate_candidate_internal(
                     drawdown_penalty: info.drawdown_penalty,
                     session_close_penalty: info.session_close_penalty,
                     invalid_revert_penalty: info.invalid_revert_penalty,
+                    hold_duration_penalty: info.hold_duration_penalty,
                     flat_hold_penalty: info.flat_hold_penalty,
                     session_open,
                     margin_ok,
@@ -398,6 +413,7 @@ fn evaluate_candidate_internal(
             eq_curve.push(equity);
             window_drawdown_penalty += info.drawdown_penalty;
             invalid_revert_penalty_sum += info.invalid_revert_penalty;
+            hold_duration_penalty_sum += info.hold_duration_penalty;
             flat_hold_penalty_sum += info.flat_hold_penalty;
             session_close_penalty_sum += info.session_close_penalty;
             if !matches!(action, Action::Hold) {
@@ -416,6 +432,7 @@ fn evaluate_candidate_internal(
         let pnl_sum = realized_pnl
             - window_drawdown_penalty
             - invalid_revert_penalty_sum
+            - hold_duration_penalty_sum
             - flat_hold_penalty_sum
             - session_close_penalty_sum
             - violation_penalty_sum;
@@ -487,6 +504,7 @@ fn evaluate_candidate_internal(
         debug_position_violations: position_violations,
         debug_drawdown_penalty: drawdown_penalty_sum,
         debug_invalid_revert_penalty: invalid_revert_penalty_sum,
+        debug_hold_duration_penalty: hold_duration_penalty_sum,
         debug_flat_hold_penalty: flat_hold_penalty_sum,
         debug_session_close_penalty: session_close_penalty_sum,
     }
@@ -540,6 +558,10 @@ pub fn evaluate_candidates_batch(
         session_close_penalty: cfg.session_close_penalty,
         max_hold_bars_positive: cfg.max_hold_bars_positive,
         max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
+        hold_duration_penalty: cfg.hold_duration_penalty,
+        hold_duration_penalty_growth: cfg.hold_duration_penalty_growth,
+        hold_duration_penalty_positive_scale: cfg.hold_duration_penalty_positive_scale,
+        hold_duration_penalty_negative_scale: cfg.hold_duration_penalty_negative_scale,
         invalid_revert_penalty: cfg.invalid_revert_penalty,
         flat_hold_penalty: cfg.flat_hold_penalty,
         invalid_revert_penalty_growth: cfg.invalid_revert_penalty_growth,
@@ -662,6 +684,7 @@ pub fn evaluate_candidates_batch(
                 eq_curves[i].push(equities[i]);
                 window_drawdown_penalty[i] += info.drawdown_penalty;
                 stats[i].invalid_revert_penalty_sum += info.invalid_revert_penalty;
+                stats[i].hold_duration_penalty_sum += info.hold_duration_penalty;
                 stats[i].flat_hold_penalty_sum += info.flat_hold_penalty;
                 stats[i].session_close_penalty_sum += info.session_close_penalty;
                 if !matches!(action, Action::Hold) {
@@ -681,6 +704,7 @@ pub fn evaluate_candidates_batch(
             let pnl_sum = realized_pnl
                 - window_drawdown_penalty[i]
                 - stats[i].invalid_revert_penalty_sum
+                - stats[i].hold_duration_penalty_sum
                 - stats[i].flat_hold_penalty_sum
                 - stats[i].session_close_penalty_sum
                 - stats[i].violation_penalty_sum;

@@ -56,6 +56,7 @@ fn write_behavior_csv(
         "drawdown_penalty",
         "session_close_penalty",
         "invalid_revert_penalty",
+        "hold_duration_penalty",
         "flat_hold_penalty",
         "session_open",
         "margin_ok",
@@ -120,6 +121,7 @@ fn write_behavior_csv(
             row.drawdown_penalty.to_string(),
             row.session_close_penalty.to_string(),
             row.invalid_revert_penalty.to_string(),
+            row.hold_duration_penalty.to_string(),
             row.flat_hold_penalty.to_string(),
             row.session_open.to_string(),
             row.margin_ok.to_string(),
@@ -335,6 +337,10 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             session_close_penalty: args.session_close_penalty,
             max_hold_bars_positive: args.max_hold_bars_positive,
             max_hold_bars_drawdown: args.max_hold_bars_drawdown,
+            hold_duration_penalty: args.hold_duration_penalty,
+            hold_duration_penalty_growth: args.hold_duration_penalty_growth,
+            hold_duration_penalty_positive_scale: args.hold_duration_penalty_positive_scale,
+            hold_duration_penalty_negative_scale: args.hold_duration_penalty_negative_scale,
             invalid_revert_penalty: args.invalid_revert_penalty,
             flat_hold_penalty: args.flat_hold_penalty,
             max_flat_hold_bars: args.max_flat_hold_bars,
@@ -497,8 +503,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                     train_metrics.debug_drawdown_penalty
                 );
                 println!(
-                    "  debug cand0 | invalid_revert_penalty {:.4} | flat_hold_penalty {:.4} | session_close_penalty {:.4}",
+                    "  debug cand0 | invalid_revert_penalty {:.4} | hold_duration_penalty {:.4} | flat_hold_penalty {:.4} | session_close_penalty {:.4}",
                     train_metrics.debug_invalid_revert_penalty,
+                    train_metrics.debug_hold_duration_penalty,
                     train_metrics.debug_flat_hold_penalty,
                     train_metrics.debug_session_close_penalty
                 );
@@ -637,6 +644,10 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             session_close_penalty: args.session_close_penalty,
             max_hold_bars_positive: args.max_hold_bars_positive,
             max_hold_bars_drawdown: args.max_hold_bars_drawdown,
+            hold_duration_penalty: args.hold_duration_penalty,
+            hold_duration_penalty_growth: args.hold_duration_penalty_growth,
+            hold_duration_penalty_positive_scale: args.hold_duration_penalty_positive_scale,
+            hold_duration_penalty_negative_scale: args.hold_duration_penalty_negative_scale,
             invalid_revert_penalty: args.invalid_revert_penalty,
             flat_hold_penalty: args.flat_hold_penalty,
             max_flat_hold_bars: args.max_flat_hold_bars,
