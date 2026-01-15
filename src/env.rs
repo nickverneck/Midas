@@ -3,6 +3,8 @@
 use crate::features::{compute_features_ohlcv, periods, ATR_PERIODS};
 use chrono::{DateTime, Timelike, Utc};
 
+pub const VIOLATION_PENALTY: f64 = 1000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Buy,
@@ -199,7 +201,7 @@ impl TradingEnv {
         let session_open = ctx.session_open && self.cfg.default_session_open;
         if !session_open && !matches!(action, Action::Hold) {
             return (
-                -1000.0,
+                -VIOLATION_PENALTY,
                 StepInfo {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
@@ -218,7 +220,7 @@ impl TradingEnv {
 
         if !ctx.margin_ok {
             return (
-                -1000.0,
+                -VIOLATION_PENALTY,
                 StepInfo {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
@@ -277,7 +279,7 @@ impl TradingEnv {
             self.cfg.max_position > 0 && target_position.abs() > self.cfg.max_position;
         if position_limit_violation {
             return (
-                -1000.0,
+                -VIOLATION_PENALTY,
                 StepInfo {
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
@@ -309,7 +311,7 @@ impl TradingEnv {
             let equity = self.state.cash + self.state.unrealized_pnl;
             if equity < required_margin {
                 return (
-                    -1000.0,
+                    -VIOLATION_PENALTY,
                     StepInfo {
                         commission_paid: 0.0,
                         slippage_paid: 0.0,
