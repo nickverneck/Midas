@@ -56,6 +56,9 @@
 		"hold-duration-penalty-growth": 0.05,
 		"hold-duration-penalty-positive-scale": 0.5,
 		"hold-duration-penalty-negative-scale": 1.5,
+		"selection-train-weight": 0.3,
+		"selection-eval-weight": 0.7,
+		"selection-gap-penalty": 0.2,
 		"elite-frac": 0.33,
 		"mutation-sigma": 0.05,
 		"init-sigma": 0.5,
@@ -720,6 +723,18 @@
 														<div class="grid gap-2">
 															<Label for="rust-w-mdd">Fitness Weight (Max DD)</Label>
 															<Input id="rust-w-mdd" type="number" step="0.01" bind:value={rustParams["w-mdd"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-selection-train-weight">Selection Weight (Train)</Label>
+															<Input id="rust-selection-train-weight" type="number" step="0.01" min="0" bind:value={rustParams["selection-train-weight"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-selection-eval-weight">Selection Weight (Eval)</Label>
+															<Input id="rust-selection-eval-weight" type="number" step="0.01" min="0" bind:value={rustParams["selection-eval-weight"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-selection-gap-penalty">Selection Gap Penalty</Label>
+															<Input id="rust-selection-gap-penalty" type="number" step="0.01" min="0" bind:value={rustParams["selection-gap-penalty"]} />
 														</div>
 													</div>
 												</details>
