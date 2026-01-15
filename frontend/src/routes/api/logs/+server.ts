@@ -19,16 +19,18 @@ const resolveProjectRoot = () => {
     return cwd;
 };
 
-const resolveLogPath = (dirParam: string | null) => {
+const resolveLogPath = (dirParam: string | null, logParam: string | null) => {
     const root = resolveProjectRoot();
     const dir = dirParam && dirParam.trim() !== '' ? dirParam.trim() : DEFAULT_LOG_DIR;
+    const logType = logParam && logParam.trim() !== '' ? logParam.trim() : 'ga';
+    const fileName = logType === 'rl' ? 'rl_log.csv' : 'ga_log.csv';
     const candidate = path.isAbsolute(dir) ? dir : path.join(root, dir);
     const resolved = path.resolve(candidate);
     const relative = path.relative(root, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
         return null;
     }
-    return path.join(resolved, 'ga_log.csv');
+    return path.join(resolved, fileName);
 };
 
 function readHeader(filePath: string): string {
@@ -96,7 +98,7 @@ async function readLines(filePath: string, offset: number, limit: number): Promi
 
 export const GET = async ({ url }) => {
     const headers = { 'Cache-Control': 'no-store' };
-    const logPath = resolveLogPath(url.searchParams.get('dir'));
+    const logPath = resolveLogPath(url.searchParams.get('dir'), url.searchParams.get('log'));
     const mode = url.searchParams.get('mode');
 
     if (!logPath) {
@@ -115,9 +117,10 @@ export const GET = async ({ url }) => {
             skipEmptyLines: true
         });
         const data = parsed.data as Record<string, unknown>[];
+        const key = url.searchParams.get('key') || 'gen';
         const byGen = new Map<number, number>();
         for (const row of data) {
-            const gen = Number(row.gen);
+            const gen = Number(row[key]);
             const fitness = Number(row.fitness);
             if (!Number.isFinite(gen) || !Number.isFinite(fitness)) continue;
             const existing = byGen.get(gen);

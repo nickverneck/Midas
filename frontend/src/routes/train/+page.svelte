@@ -8,19 +8,19 @@
 	import * as Tabs from "$lib/components/ui/tabs";
 	import GaChart from "$lib/components/GaChart.svelte";
 
-	type TrainMode = 'rust' | 'python';
+	type TrainMode = 'ga' | 'rl';
 	type ConsoleLine = { type: string; text: string };
 	type DataMode = 'full' | 'windowed';
 	type StartChoice = 'new' | 'resume';
 
-	let trainMode = $state<TrainMode>('rust');
+	let trainMode = $state<TrainMode>('ga');
 	let consoleOutput = $state<ConsoleLine[]>([]);
 	let training = $state(false);
 	let paramsCollapsed = $state(false);
 	let startChoice = $state<StartChoice | null>(null);
 	let checkpointPath = $state('');
-	let rustDataMode = $state<DataMode>('windowed');
-	let pythonDataMode = $state<DataMode>('windowed');
+	let gaDataMode = $state<DataMode>('windowed');
+	let rlDataMode = $state<DataMode>('windowed');
 	let abortController: AbortController | null = null;
 	let fitnessByGen = $state(new Map<number, number>());
 	let logOffset = $state(0);
@@ -33,7 +33,7 @@
 	let logPollDelay = logPollInterval;
 	let liveLogUpdates = $state(true);
 	
-	let rustParams = $state({
+	let gaParams = $state({
 		outdir: "runs_ga",
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
@@ -73,27 +73,41 @@
 		"checkpoint-every": 1
 	});
 
-	let pythonParams = $state({
-		outdir: "runs_ga",
+	let rlParams = $state({
+		outdir: "runs_rl",
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
 		device: "cpu",
-		generations: 5,
-		"pop-size": 6,
-		workers: 2,
 		window: 512,
 		step: 256,
-		"train-epochs": 2,
+		epochs: 10,
 		"train-windows": 3,
-		"eval-windows": 2,
+		"ppo-epochs": 4,
 		lr: 0.0003,
 		gamma: 0.99,
 		lam: 0.95,
+		clip: 0.2,
+		"vf-coef": 0.5,
+		"ent-coef": 0.01,
+		hidden: 128,
+		layers: 2,
+		"eval-windows": 2,
 		"initial-balance": 10000,
-		"mutation-sigma": 0.25,
-		"save-top-n": 5,
-		"save-every": 1,
+		"max-position": 0,
+		"margin-mode": "auto",
+		"contract-multiplier": 1.0,
+		"margin-per-contract": "",
+		"max-hold-bars-positive": 15,
+		"max-hold-bars-drawdown": 15,
+		"hold-duration-penalty": 1.0,
+		"hold-duration-penalty-growth": 0.05,
+		"hold-duration-penalty-positive-scale": 0.5,
+		"hold-duration-penalty-negative-scale": 1.5,
+		"w-pnl": 1.0,
+		"w-sortino": 1.0,
+		"w-mdd": 0.5,
+		"log-interval": 1,
 		"checkpoint-every": 1
 	});
 
@@ -114,10 +128,10 @@
 	const runLabel = $derived.by(() => {
 		if (training) return 'Stop Training';
 		if (startChoice === 'resume') {
-			return trainMode === 'rust' ? 'Resume Rust Training' : 'Resume Python Training';
+			return trainMode === 'ga' ? 'Resume GA Training' : 'Resume RL Training';
 		}
 		if (startChoice === 'new') {
-			return trainMode === 'rust' ? 'Start Rust Training' : 'Start Python Training';
+			return trainMode === 'ga' ? 'Start GA Training' : 'Start RL Training';
 		}
 		return 'Start Training';
 	});
@@ -129,13 +143,16 @@
 	});
 	const collapsedLabel = $derived.by(() => (training ? 'Stop' : 'Setup'));
 	const collapsedTitle = $derived.by(() => (training ? 'Stop Training' : 'Open Setup'));
+	const logKey = $derived.by(() => (trainMode === 'rl' ? 'epoch' : 'gen'));
+	const logLabel = $derived.by(() => (trainMode === 'rl' ? 'Epoch' : 'Gen'));
+	const logType = $derived.by(() => (trainMode === 'rl' ? 'rl' : 'ga'));
 	const fitnessSeries = $derived.by(() =>
 		Array.from(fitnessByGen.entries())
 			.sort(([a], [b]) => a - b)
 			.map(([gen, fitness]) => ({ gen, fitness }))
 	);
 	const fitnessChartData = $derived.by(() => ({
-		labels: fitnessSeries.map((point) => `Gen ${point.gen}`),
+		labels: fitnessSeries.map((point) => `${logLabel} ${point.gen}`),
 		datasets: [
 			{
 				label: 'Best Fitness',
@@ -171,7 +188,7 @@
 	const updateFitnessFromRows = (rows: Array<Record<string, unknown>>) => {
 		for (const row of rows) {
 			if (!row || typeof row !== 'object') continue;
-			const gen = toNumber(row.gen);
+			const gen = toNumber(row[logKey]);
 			const fitness = toNumber(row.fitness);
 			if (gen !== null && fitness !== null) {
 				updateFitness(gen, fitness);
@@ -185,7 +202,8 @@
 		const params = new URLSearchParams({
 			limit: String(logChunk),
 			offset: String(offset),
-			dir
+			dir,
+			log: logType
 		});
 		return `/api/logs?${params.toString()}`;
 	};
@@ -255,7 +273,7 @@
 		fitnessByGen = new Map();
 		logOffset = 0;
 		try {
-			const params = new URLSearchParams({ dir, mode: "summary" });
+			const params = new URLSearchParams({ dir, mode: "summary", log: logType, key: logKey });
 			const res = await fetch(`/api/logs?${params.toString()}`);
 			if (!res.ok) throw new Error(`Log summary failed (${res.status})`);
 			const payload = await res.json();
@@ -292,7 +310,8 @@
 	};
 
 	const startLogPolling = (dir: string) => {
-		activeLogDir = dir.trim() || "runs_ga";
+		const fallbackDir = trainMode === 'rl' ? "runs_rl" : "runs_ga";
+		activeLogDir = dir.trim() || fallbackDir;
 		logOffset = 0;
 		logPolling = true;
 		logPollDelay = logPollInterval;
@@ -330,9 +349,9 @@
 		return params;
 	};
 
-	const buildRustParams = () => {
-		const params = { ...rustParams } as Record<string, unknown>;
-		if (rustDataMode === 'full') {
+	const buildGaParams = () => {
+		const params = { ...gaParams } as Record<string, unknown>;
+		if (gaDataMode === 'full') {
 			params["full-file"] = true;
 		} else {
 			params.windowed = true;
@@ -340,10 +359,12 @@
 		return attachCheckpoint(params);
 	};
 
-	const buildPythonParams = () => {
-		const params = { ...pythonParams } as Record<string, unknown>;
-		if (pythonDataMode === 'full') {
+	const buildRlParams = () => {
+		const params = { ...rlParams } as Record<string, unknown>;
+		if (rlDataMode === 'full') {
 			params["full-file"] = true;
+		} else {
+			params.windowed = true;
 		}
 		return attachCheckpoint(params);
 	};
@@ -376,8 +397,9 @@
 			consoleOutput = [...consoleOutput, { type: 'error', text: 'Checkpoint path is required to resume.' }];
 			return;
 		}
-		const params = mode === 'rust' ? buildRustParams() : buildPythonParams();
-		const outdir = typeof params.outdir === 'string' ? params.outdir : "runs_ga";
+		const params = mode === 'ga' ? buildGaParams() : buildRlParams();
+		const fallbackDir = trainMode === 'rl' ? "runs_rl" : "runs_ga";
+		const outdir = typeof params.outdir === 'string' ? params.outdir : fallbackDir;
 		abortController?.abort();
 		abortController = new AbortController();
 		training = true;
@@ -465,7 +487,7 @@
 
 <div class="min-h-screen bg-background">
 	<aside
-		class={`bg-card border-r shadow-sm transition-[width] duration-200 ease-out w-full lg:fixed lg:inset-y-0 lg:left-0 relative ${paramsCollapsed ? 'lg:w-[120px]' : 'lg:w-[360px]'}`}
+		class={`bg-card border-r shadow-sm transition-[width] duration-200 ease-out w-full lg:fixed lg:inset-y-0 lg:left-0 lg:pt-14 relative ${paramsCollapsed ? 'lg:w-[120px]' : 'lg:w-[360px]'}`}
 	>
 		{#if paramsCollapsed}
 			<button
@@ -537,10 +559,10 @@
 											id="checkpoint-path"
 											type="text"
 											bind:value={checkpointPath}
-											placeholder={trainMode === 'rust' ? "runs_ga/checkpoint_gen4.bin" : "runs_ga/checkpoint_gen4.pt"}
+											placeholder={trainMode === 'ga' ? "runs_ga/checkpoint_gen4.bin" : "runs_rl/checkpoint_epoch4.pt"}
 										/>
 										<div class="text-xs text-muted-foreground">
-											Rust checkpoints use .bin; Python checkpoints use .pt.
+											GA checkpoints use .bin; RL checkpoints use .pt.
 										</div>
 									</div>
 								{/if}
@@ -554,21 +576,21 @@
 										<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 2</div>
 										<div class="text-sm font-semibold">Configure your run</div>
 									</div>
-									<Badge variant="outline">{trainMode === 'rust' ? 'Rust' : 'Python'}</Badge>
+									<Badge variant="outline">{trainMode === 'ga' ? 'GA' : 'RL'}</Badge>
 								</div>
 
 								<Tabs.Root bind:value={trainMode} class="w-full">
 									<Tabs.List class="grid w-full grid-cols-2 mb-4">
-										<Tabs.Trigger value="rust">Rust (Primary)</Tabs.Trigger>
-										<Tabs.Trigger value="python">Python (Legacy)</Tabs.Trigger>
+										<Tabs.Trigger value="ga">GA (Primary)</Tabs.Trigger>
+										<Tabs.Trigger value="rl">RL (PPO)</Tabs.Trigger>
 									</Tabs.List>
 
-									<Tabs.Content value="rust">
+									<Tabs.Content value="ga">
 										<form
 											class="space-y-4"
 											onsubmit={(event) => {
 												event.preventDefault();
-												startTraining('rust');
+												startTraining('ga');
 											}}
 										>
 											<div class="space-y-4">
@@ -576,36 +598,36 @@
 													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="rust-train-parquet">Train Parquet</Label>
-															<Input id="rust-train-parquet" type="text" bind:value={rustParams["train-parquet"]} placeholder="data/train" />
+															<Label for="ga-train-parquet">Train Parquet</Label>
+															<Input id="ga-train-parquet" type="text" bind:value={gaParams["train-parquet"]} placeholder="data/train" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-val-parquet">Val Parquet</Label>
-															<Input id="rust-val-parquet" type="text" bind:value={rustParams["val-parquet"]} placeholder="data/val" />
+															<Label for="ga-val-parquet">Val Parquet</Label>
+															<Input id="ga-val-parquet" type="text" bind:value={gaParams["val-parquet"]} placeholder="data/val" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-test-parquet">Test Parquet</Label>
-															<Input id="rust-test-parquet" type="text" bind:value={rustParams["test-parquet"]} placeholder="data/test" />
+															<Label for="ga-test-parquet">Test Parquet</Label>
+															<Input id="ga-test-parquet" type="text" bind:value={gaParams["test-parquet"]} placeholder="data/test" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-data-mode">Data Mode</Label>
+															<Label for="ga-data-mode">Data Mode</Label>
 															<select
-																id="rust-data-mode"
-																bind:value={rustDataMode}
+																id="ga-data-mode"
+																bind:value={gaDataMode}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
 																<option value="windowed">Windowed</option>
 																<option value="full">Full file</option>
 															</select>
 														</div>
-														{#if rustDataMode === 'windowed'}
+														{#if gaDataMode === 'windowed'}
 															<div class="grid gap-2">
-																<Label for="rust-window">Window Size</Label>
-																<Input id="rust-window" type="number" min="1" bind:value={rustParams.window} />
+																<Label for="ga-window">Window Size</Label>
+																<Input id="ga-window" type="number" min="1" bind:value={gaParams.window} />
 															</div>
 															<div class="grid gap-2">
-																<Label for="rust-step">Step Size</Label>
-																<Input id="rust-step" type="number" min="1" bind:value={rustParams.step} />
+																<Label for="ga-step">Step Size</Label>
+																<Input id="ga-step" type="number" min="1" bind:value={gaParams.step} />
 															</div>
 														{/if}
 													</div>
@@ -615,10 +637,10 @@
 													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="rust-device">Device</Label>
+															<Label for="ga-device">Device</Label>
 															<select
-																id="rust-device"
-																bind:value={rustParams.device}
+																id="ga-device"
+																bind:value={gaParams.device}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
 																<option value="cpu">CPU</option>
@@ -627,12 +649,12 @@
 															</select>
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-batch-candidates">Batch Candidates</Label>
+															<Label for="ga-batch-candidates">Batch Candidates</Label>
 															<Input
-																id="rust-batch-candidates"
+																id="ga-batch-candidates"
 																type="number"
 																min="0"
-																bind:value={rustParams["batch-candidates"]}
+																bind:value={gaParams["batch-candidates"]}
 															/>
 															<p class="text-xs text-muted-foreground">0 uses auto batching.</p>
 														</div>
@@ -643,32 +665,32 @@
 													<summary class="cursor-pointer text-sm font-semibold">Evolution Settings</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="rust-generations">Generations</Label>
-															<Input id="rust-generations" type="number" min="1" bind:value={rustParams.generations} />
+															<Label for="ga-generations">Generations</Label>
+															<Input id="ga-generations" type="number" min="1" bind:value={gaParams.generations} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-pop-size">Population Size</Label>
-															<Input id="rust-pop-size" type="number" min="1" bind:value={rustParams["pop-size"]} />
+															<Label for="ga-pop-size">Population Size</Label>
+															<Input id="ga-pop-size" type="number" min="1" bind:value={gaParams["pop-size"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-workers">Workers</Label>
-															<Input id="rust-workers" type="number" min="0" bind:value={rustParams.workers} />
+															<Label for="ga-workers">Workers</Label>
+															<Input id="ga-workers" type="number" min="0" bind:value={gaParams.workers} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-elite-frac">Elite Fraction</Label>
-															<Input id="rust-elite-frac" type="number" step="0.01" min="0" max="1" bind:value={rustParams["elite-frac"]} />
+															<Label for="ga-elite-frac">Elite Fraction</Label>
+															<Input id="ga-elite-frac" type="number" step="0.01" min="0" max="1" bind:value={gaParams["elite-frac"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-mutation-sigma">Mutation Sigma</Label>
-															<Input id="rust-mutation-sigma" type="number" step="0.01" min="0" bind:value={rustParams["mutation-sigma"]} />
+															<Label for="ga-mutation-sigma">Mutation Sigma</Label>
+															<Input id="ga-mutation-sigma" type="number" step="0.01" min="0" bind:value={gaParams["mutation-sigma"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-init-sigma">Init Sigma</Label>
-															<Input id="rust-init-sigma" type="number" step="0.01" min="0" bind:value={rustParams["init-sigma"]} />
+															<Label for="ga-init-sigma">Init Sigma</Label>
+															<Input id="ga-init-sigma" type="number" step="0.01" min="0" bind:value={gaParams["init-sigma"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-eval-windows">Eval Windows</Label>
-															<Input id="rust-eval-windows" type="number" min="1" bind:value={rustParams["eval-windows"]} />
+															<Label for="ga-eval-windows">Eval Windows</Label>
+															<Input id="ga-eval-windows" type="number" min="1" bind:value={gaParams["eval-windows"]} />
 														</div>
 													</div>
 												</details>
@@ -677,26 +699,26 @@
 													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="rust-hidden">Hidden Units</Label>
-															<Input id="rust-hidden" type="number" min="1" bind:value={rustParams.hidden} />
+															<Label for="ga-hidden">Hidden Units</Label>
+															<Input id="ga-hidden" type="number" min="1" bind:value={gaParams.hidden} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-layers">Layers</Label>
-															<Input id="rust-layers" type="number" min="1" bind:value={rustParams.layers} />
+															<Label for="ga-layers">Layers</Label>
+															<Input id="ga-layers" type="number" min="1" bind:value={gaParams.layers} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-initial-balance">Initial Balance</Label>
-															<Input id="rust-initial-balance" type="number" step="0.01" bind:value={rustParams["initial-balance"]} />
+															<Label for="ga-initial-balance">Initial Balance</Label>
+															<Input id="ga-initial-balance" type="number" step="0.01" bind:value={gaParams["initial-balance"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-max-position">Max Position (0 = no cap)</Label>
-															<Input id="rust-max-position" type="number" min="0" bind:value={rustParams["max-position"]} />
+															<Label for="ga-max-position">Max Position (0 = no cap)</Label>
+															<Input id="ga-max-position" type="number" min="0" bind:value={gaParams["max-position"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-margin-mode">Margin Mode</Label>
+															<Label for="ga-margin-mode">Margin Mode</Label>
 															<select
-																id="rust-margin-mode"
-																bind:value={rustParams["margin-mode"]}
+																id="ga-margin-mode"
+																bind:value={gaParams["margin-mode"]}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
 																<option value="auto">Auto</option>
@@ -705,36 +727,36 @@
 															</select>
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-contract-multiplier">Contract Multiplier</Label>
-															<Input id="rust-contract-multiplier" type="number" step="0.01" min="0" bind:value={rustParams["contract-multiplier"]} />
+															<Label for="ga-contract-multiplier">Contract Multiplier</Label>
+															<Input id="ga-contract-multiplier" type="number" step="0.01" min="0" bind:value={gaParams["contract-multiplier"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-margin-per-contract">Margin Per Contract</Label>
-															<Input id="rust-margin-per-contract" type="number" step="0.01" min="0" bind:value={rustParams["margin-per-contract"]} placeholder="auto from config" />
+															<Label for="ga-margin-per-contract">Margin Per Contract</Label>
+															<Input id="ga-margin-per-contract" type="number" step="0.01" min="0" bind:value={gaParams["margin-per-contract"]} placeholder="auto from config" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-w-pnl">Fitness Weight (PNL)</Label>
-															<Input id="rust-w-pnl" type="number" step="0.01" bind:value={rustParams["w-pnl"]} />
+															<Label for="ga-w-pnl">Fitness Weight (PNL)</Label>
+															<Input id="ga-w-pnl" type="number" step="0.01" bind:value={gaParams["w-pnl"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-w-sortino">Fitness Weight (Sortino)</Label>
-															<Input id="rust-w-sortino" type="number" step="0.01" bind:value={rustParams["w-sortino"]} />
+															<Label for="ga-w-sortino">Fitness Weight (Sortino)</Label>
+															<Input id="ga-w-sortino" type="number" step="0.01" bind:value={gaParams["w-sortino"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-w-mdd">Fitness Weight (Max DD)</Label>
-															<Input id="rust-w-mdd" type="number" step="0.01" bind:value={rustParams["w-mdd"]} />
+															<Label for="ga-w-mdd">Fitness Weight (Max DD)</Label>
+															<Input id="ga-w-mdd" type="number" step="0.01" bind:value={gaParams["w-mdd"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-selection-train-weight">Selection Weight (Train)</Label>
-															<Input id="rust-selection-train-weight" type="number" step="0.01" min="0" bind:value={rustParams["selection-train-weight"]} />
+															<Label for="ga-selection-train-weight">Selection Weight (Train)</Label>
+															<Input id="ga-selection-train-weight" type="number" step="0.01" min="0" bind:value={gaParams["selection-train-weight"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-selection-eval-weight">Selection Weight (Eval)</Label>
-															<Input id="rust-selection-eval-weight" type="number" step="0.01" min="0" bind:value={rustParams["selection-eval-weight"]} />
+															<Label for="ga-selection-eval-weight">Selection Weight (Eval)</Label>
+															<Input id="ga-selection-eval-weight" type="number" step="0.01" min="0" bind:value={gaParams["selection-eval-weight"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-selection-gap-penalty">Selection Gap Penalty</Label>
-															<Input id="rust-selection-gap-penalty" type="number" step="0.01" min="0" bind:value={rustParams["selection-gap-penalty"]} />
+															<Label for="ga-selection-gap-penalty">Selection Gap Penalty</Label>
+															<Input id="ga-selection-gap-penalty" type="number" step="0.01" min="0" bind:value={gaParams["selection-gap-penalty"]} />
 														</div>
 													</div>
 												</details>
@@ -743,28 +765,28 @@
 													<summary class="cursor-pointer text-sm font-semibold">Position Hold Penalties</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="rust-max-hold-bars-positive">Max Hold Bars (Profit)</Label>
-															<Input id="rust-max-hold-bars-positive" type="number" min="0" bind:value={rustParams["max-hold-bars-positive"]} />
+															<Label for="ga-max-hold-bars-positive">Max Hold Bars (Profit)</Label>
+															<Input id="ga-max-hold-bars-positive" type="number" min="0" bind:value={gaParams["max-hold-bars-positive"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-max-hold-bars-drawdown">Max Hold Bars (Drawdown)</Label>
-															<Input id="rust-max-hold-bars-drawdown" type="number" min="0" bind:value={rustParams["max-hold-bars-drawdown"]} />
+															<Label for="ga-max-hold-bars-drawdown">Max Hold Bars (Drawdown)</Label>
+															<Input id="ga-max-hold-bars-drawdown" type="number" min="0" bind:value={gaParams["max-hold-bars-drawdown"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-hold-duration-penalty">Hold Penalty</Label>
-															<Input id="rust-hold-duration-penalty" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty"]} />
+															<Label for="ga-hold-duration-penalty">Hold Penalty</Label>
+															<Input id="ga-hold-duration-penalty" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-hold-duration-penalty-growth">Hold Penalty Growth</Label>
-															<Input id="rust-hold-duration-penalty-growth" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty-growth"]} />
+															<Label for="ga-hold-duration-penalty-growth">Hold Penalty Growth</Label>
+															<Input id="ga-hold-duration-penalty-growth" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-growth"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-hold-duration-penalty-positive-scale">Hold Penalty Scale (Profit)</Label>
-															<Input id="rust-hold-duration-penalty-positive-scale" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty-positive-scale"]} />
+															<Label for="ga-hold-duration-penalty-positive-scale">Hold Penalty Scale (Profit)</Label>
+															<Input id="ga-hold-duration-penalty-positive-scale" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-positive-scale"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
-															<Input id="rust-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={rustParams["hold-duration-penalty-negative-scale"]} />
+															<Label for="ga-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
+															<Input id="ga-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-negative-scale"]} />
 														</div>
 													</div>
 												</details>
@@ -773,20 +795,20 @@
 													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Checkpoints</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="rust-outdir">Output Folder</Label>
-															<Input id="rust-outdir" type="text" bind:value={rustParams.outdir} placeholder="runs_ga" />
+															<Label for="ga-outdir">Output Folder</Label>
+															<Input id="ga-outdir" type="text" bind:value={gaParams.outdir} placeholder="runs_ga" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-save-top-n">Save Top N</Label>
-															<Input id="rust-save-top-n" type="number" min="0" bind:value={rustParams["save-top-n"]} />
+															<Label for="ga-save-top-n">Save Top N</Label>
+															<Input id="ga-save-top-n" type="number" min="0" bind:value={gaParams["save-top-n"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-save-every">Save Every (gens)</Label>
-															<Input id="rust-save-every" type="number" min="0" bind:value={rustParams["save-every"]} />
+															<Label for="ga-save-every">Save Every (gens)</Label>
+															<Input id="ga-save-every" type="number" min="0" bind:value={gaParams["save-every"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="rust-checkpoint-every">Checkpoint Every (gens)</Label>
-															<Input id="rust-checkpoint-every" type="number" min="0" bind:value={rustParams["checkpoint-every"]} />
+															<Label for="ga-checkpoint-every">Checkpoint Every (gens)</Label>
+															<Input id="ga-checkpoint-every" type="number" min="0" bind:value={gaParams["checkpoint-every"]} />
 														</div>
 													</div>
 												</details>
@@ -794,12 +816,12 @@
 										</form>
 									</Tabs.Content>
 
-									<Tabs.Content value="python">
+									<Tabs.Content value="rl">
 										<form
 											class="space-y-4"
 											onsubmit={(event) => {
 												event.preventDefault();
-												startTraining('python');
+												startTraining('rl');
 											}}
 										>
 											<div class="space-y-4">
@@ -807,36 +829,36 @@
 													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="py-train-parquet">Train Parquet</Label>
-															<Input id="py-train-parquet" type="text" bind:value={pythonParams["train-parquet"]} placeholder="data/train" />
+															<Label for="rl-train-parquet">Train Parquet</Label>
+															<Input id="rl-train-parquet" type="text" bind:value={rlParams["train-parquet"]} placeholder="data/train" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-val-parquet">Val Parquet</Label>
-															<Input id="py-val-parquet" type="text" bind:value={pythonParams["val-parquet"]} placeholder="data/val" />
+															<Label for="rl-val-parquet">Val Parquet</Label>
+															<Input id="rl-val-parquet" type="text" bind:value={rlParams["val-parquet"]} placeholder="data/val" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-test-parquet">Test Parquet</Label>
-															<Input id="py-test-parquet" type="text" bind:value={pythonParams["test-parquet"]} placeholder="data/test" />
+															<Label for="rl-test-parquet">Test Parquet</Label>
+															<Input id="rl-test-parquet" type="text" bind:value={rlParams["test-parquet"]} placeholder="data/test" />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-data-mode">Data Mode</Label>
+															<Label for="rl-data-mode">Data Mode</Label>
 															<select
-																id="py-data-mode"
-																bind:value={pythonDataMode}
+																id="rl-data-mode"
+																bind:value={rlDataMode}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
 																<option value="windowed">Windowed</option>
 																<option value="full">Full file</option>
 															</select>
 														</div>
-														{#if pythonDataMode === 'windowed'}
+														{#if rlDataMode === 'windowed'}
 															<div class="grid gap-2">
-																<Label for="py-window">Window Size</Label>
-																<Input id="py-window" type="number" min="1" bind:value={pythonParams.window} />
+																<Label for="rl-window">Window Size</Label>
+																<Input id="rl-window" type="number" min="1" bind:value={rlParams.window} />
 															</div>
 															<div class="grid gap-2">
-																<Label for="py-step">Step Size</Label>
-																<Input id="py-step" type="number" min="1" bind:value={pythonParams.step} />
+																<Label for="rl-step">Step Size</Label>
+																<Input id="rl-step" type="number" min="1" bind:value={rlParams.step} />
 															</div>
 														{/if}
 													</div>
@@ -846,10 +868,10 @@
 													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="py-device">Device</Label>
+															<Label for="rl-device">Device</Label>
 															<select
-																id="py-device"
-																bind:value={pythonParams.device}
+																id="rl-device"
+																bind:value={rlParams.device}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
 																<option value="cpu">CPU</option>
@@ -861,79 +883,155 @@
 												</details>
 
 												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">GA Settings</summary>
+													<summary class="cursor-pointer text-sm font-semibold">PPO Training</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="py-generations">Generations</Label>
-															<Input id="py-generations" type="number" min="1" bind:value={pythonParams.generations} />
+															<Label for="rl-epochs">Epochs</Label>
+															<Input id="rl-epochs" type="number" min="1" bind:value={rlParams.epochs} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-pop-size">Population Size</Label>
-															<Input id="py-pop-size" type="number" min="1" bind:value={pythonParams["pop-size"]} />
+															<Label for="rl-train-windows">Train Windows</Label>
+															<Input id="rl-train-windows" type="number" min="0" bind:value={rlParams["train-windows"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-workers">Workers</Label>
-															<Input id="py-workers" type="number" min="0" bind:value={pythonParams.workers} />
+															<Label for="rl-ppo-epochs">PPO Epochs</Label>
+															<Input id="rl-ppo-epochs" type="number" min="1" bind:value={rlParams["ppo-epochs"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-mutation-sigma">Mutation Sigma</Label>
-															<Input id="py-mutation-sigma" type="number" step="0.01" min="0" bind:value={pythonParams["mutation-sigma"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="py-eval-windows">Eval Windows</Label>
-															<Input id="py-eval-windows" type="number" min="1" bind:value={pythonParams["eval-windows"]} />
+															<Label for="rl-eval-windows">Eval Windows</Label>
+															<Input id="rl-eval-windows" type="number" min="1" bind:value={rlParams["eval-windows"]} />
 														</div>
 													</div>
 												</details>
 
 												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">PPO Settings</summary>
+													<summary class="cursor-pointer text-sm font-semibold">Optimization</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="py-train-epochs">Train Epochs</Label>
-															<Input id="py-train-epochs" type="number" min="1" bind:value={pythonParams["train-epochs"]} />
+															<Label for="rl-lr">Learning Rate</Label>
+															<Input id="rl-lr" type="number" step="0.0001" bind:value={rlParams.lr} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-train-windows">Train Windows</Label>
-															<Input id="py-train-windows" type="number" min="1" bind:value={pythonParams["train-windows"]} />
+															<Label for="rl-gamma">Gamma</Label>
+															<Input id="rl-gamma" type="number" step="0.01" min="0" max="1" bind:value={rlParams.gamma} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-lr">Learning Rate</Label>
-															<Input id="py-lr" type="number" step="0.0001" bind:value={pythonParams.lr} />
+															<Label for="rl-lam">Lambda</Label>
+															<Input id="rl-lam" type="number" step="0.01" min="0" max="1" bind:value={rlParams.lam} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-gamma">Gamma</Label>
-															<Input id="py-gamma" type="number" step="0.01" min="0" max="1" bind:value={pythonParams.gamma} />
+															<Label for="rl-clip">Clip Range</Label>
+															<Input id="rl-clip" type="number" step="0.01" min="0" bind:value={rlParams.clip} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-lam">Lambda</Label>
-															<Input id="py-lam" type="number" step="0.01" bind:value={pythonParams.lam} />
+															<Label for="rl-vf-coef">Value Coef</Label>
+															<Input id="rl-vf-coef" type="number" step="0.01" min="0" bind:value={rlParams["vf-coef"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-initial-balance">Initial Balance</Label>
-															<Input id="py-initial-balance" type="number" step="0.01" bind:value={pythonParams["initial-balance"]} />
+															<Label for="rl-ent-coef">Entropy Coef</Label>
+															<Input id="rl-ent-coef" type="number" step="0.01" min="0" bind:value={rlParams["ent-coef"]} />
 														</div>
 													</div>
 												</details>
 
 												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Runtime</summary>
+													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
-															<Label for="py-outdir">Output Folder</Label>
-															<Input id="py-outdir" type="text" bind:value={pythonParams.outdir} placeholder="runs_ga" />
+															<Label for="rl-hidden">Hidden Units</Label>
+															<Input id="rl-hidden" type="number" min="1" bind:value={rlParams.hidden} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-save-top-n">Save Top N</Label>
-															<Input id="py-save-top-n" type="number" min="0" bind:value={pythonParams["save-top-n"]} />
+															<Label for="rl-layers">Layers</Label>
+															<Input id="rl-layers" type="number" min="1" bind:value={rlParams.layers} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-save-every">Save Every (gens)</Label>
-															<Input id="py-save-every" type="number" min="0" bind:value={pythonParams["save-every"]} />
+															<Label for="rl-initial-balance">Initial Balance</Label>
+															<Input id="rl-initial-balance" type="number" step="0.01" bind:value={rlParams["initial-balance"]} />
 														</div>
 														<div class="grid gap-2">
-															<Label for="py-checkpoint-every">Checkpoint Every (gens)</Label>
-															<Input id="py-checkpoint-every" type="number" min="0" bind:value={pythonParams["checkpoint-every"]} />
+															<Label for="rl-max-position">Max Position (0 = no cap)</Label>
+															<Input id="rl-max-position" type="number" min="0" bind:value={rlParams["max-position"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-margin-mode">Margin Mode</Label>
+															<select
+																id="rl-margin-mode"
+																bind:value={rlParams["margin-mode"]}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="auto">Auto</option>
+																<option value="per-contract">Per-contract</option>
+																<option value="price">Price-based</option>
+															</select>
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-contract-multiplier">Contract Multiplier</Label>
+															<Input id="rl-contract-multiplier" type="number" step="0.01" min="0" bind:value={rlParams["contract-multiplier"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-margin-per-contract">Margin Per Contract</Label>
+															<Input id="rl-margin-per-contract" type="number" step="0.01" min="0" bind:value={rlParams["margin-per-contract"]} placeholder="auto from config" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-w-pnl">Fitness Weight (PNL)</Label>
+															<Input id="rl-w-pnl" type="number" step="0.01" bind:value={rlParams["w-pnl"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-w-sortino">Fitness Weight (Sortino)</Label>
+															<Input id="rl-w-sortino" type="number" step="0.01" bind:value={rlParams["w-sortino"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-w-mdd">Fitness Weight (Max DD)</Label>
+															<Input id="rl-w-mdd" type="number" step="0.01" bind:value={rlParams["w-mdd"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Position Hold Penalties</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rl-max-hold-bars-positive">Max Hold Bars (Profit)</Label>
+															<Input id="rl-max-hold-bars-positive" type="number" min="0" bind:value={rlParams["max-hold-bars-positive"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-max-hold-bars-drawdown">Max Hold Bars (Drawdown)</Label>
+															<Input id="rl-max-hold-bars-drawdown" type="number" min="0" bind:value={rlParams["max-hold-bars-drawdown"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-hold-duration-penalty">Hold Penalty</Label>
+															<Input id="rl-hold-duration-penalty" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-hold-duration-penalty-growth">Hold Penalty Growth</Label>
+															<Input id="rl-hold-duration-penalty-growth" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty-growth"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-hold-duration-penalty-positive-scale">Hold Penalty Scale (Profit)</Label>
+															<Input id="rl-hold-duration-penalty-positive-scale" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty-positive-scale"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
+															<Input id="rl-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty-negative-scale"]} />
+														</div>
+													</div>
+												</details>
+
+												<details class="rounded-lg border bg-background/60 p-4">
+													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Checkpoints</summary>
+													<div class="mt-4 grid gap-4 md:grid-cols-2">
+														<div class="grid gap-2">
+															<Label for="rl-outdir">Output Folder</Label>
+															<Input id="rl-outdir" type="text" bind:value={rlParams.outdir} placeholder="runs_rl" />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-log-interval">Log Interval (epochs)</Label>
+															<Input id="rl-log-interval" type="number" min="1" bind:value={rlParams["log-interval"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rl-checkpoint-every">Checkpoint Every (epochs)</Label>
+															<Input id="rl-checkpoint-every" type="number" min="0" bind:value={rlParams["checkpoint-every"]} />
 														</div>
 													</div>
 												</details>
@@ -990,13 +1088,15 @@
 	<main class={`p-8 space-y-8 ${paramsCollapsed ? 'lg:ml-[120px]' : 'lg:ml-[360px]'}`}>
 		<div class="flex items-center gap-4">
 			<a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Back to Dashboard</a>
-			<h1 class="text-4xl font-bold tracking-tight">Train GA Model</h1>
+			<h1 class="text-4xl font-bold tracking-tight">
+				Train {trainMode === 'ga' ? 'GA' : 'RL'} Model
+			</h1>
 		</div>
 
 		<div class="space-y-6">
 			<Card.Root>
 				<Card.Header class="flex flex-row items-center justify-between">
-					<Card.Title>Best Fitness by Generation</Card.Title>
+					<Card.Title>Best Fitness by {logLabel}</Card.Title>
 					{#if training}
 						<Badge variant="outline" class="animate-pulse">Active</Badge>
 					{/if}
@@ -1008,7 +1108,7 @@
 						</div>
 					{:else}
 						<div class="h-[220px] flex items-center justify-center text-muted-foreground">
-							Waiting for the first generation results...
+							Waiting for the first {logLabel.toLowerCase()} results...
 						</div>
 					{/if}
 				</Card.Content>

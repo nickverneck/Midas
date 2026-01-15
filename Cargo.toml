@@ -41,3 +41,8 @@ required-features = ["torch"]
 name = "tch_mps_check"
 path = "src/bin/tch_mps_check.rs"
 required-features = ["torch"]
+
+[[bin]]
+name = "train_rl"
+path = "src/bin/train_rl.rs"
+required-features = ["torch"]
