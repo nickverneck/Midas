@@ -136,6 +136,8 @@ pub struct EnvState {
 
 #[derive(Debug, Clone)]
 pub struct StepInfo {
+    pub effective_action: Action,
+    pub action_overridden: bool,
     pub commission_paid: f64,
     pub slippage_paid: f64,
     pub pnl_change: f64,
@@ -198,11 +200,14 @@ impl TradingEnv {
 
     /// Apply an action using the next market price and context, returning reward and info.
     pub fn step(&mut self, action: Action, next_price: f64, ctx: StepContext) -> (f64, StepInfo) {
+        let requested_action = action;
         let session_open = ctx.session_open && self.cfg.default_session_open;
         if !session_open && !matches!(action, Action::Hold) {
             return (
                 -VIOLATION_PENALTY,
                 StepInfo {
+                    effective_action: action,
+                    action_overridden: false,
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
@@ -222,6 +227,8 @@ impl TradingEnv {
             return (
                 -VIOLATION_PENALTY,
                 StepInfo {
+                    effective_action: action,
+                    action_overridden: false,
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
@@ -262,6 +269,7 @@ impl TradingEnv {
             }
         }
 
+        let action_overridden = action != requested_action;
         let target_position = match action {
             Action::Buy => self.state.position + 1,
             Action::Sell => self.state.position - 1,
@@ -281,6 +289,8 @@ impl TradingEnv {
             return (
                 -VIOLATION_PENALTY,
                 StepInfo {
+                    effective_action: action,
+                    action_overridden,
                     commission_paid: 0.0,
                     slippage_paid: 0.0,
                     pnl_change: 0.0,
@@ -313,6 +323,8 @@ impl TradingEnv {
                 return (
                     -VIOLATION_PENALTY,
                     StepInfo {
+                        effective_action: action,
+                        action_overridden,
                         commission_paid: 0.0,
                         slippage_paid: 0.0,
                         pnl_change: 0.0,
@@ -432,6 +444,8 @@ impl TradingEnv {
         (
             reward,
             StepInfo {
+                effective_action: action,
+                action_overridden,
                 commission_paid,
                 slippage_paid,
                 pnl_change,
