@@ -298,22 +298,22 @@ fn evaluate_candidate_internal(
                 sample.int64_value(&[0, 0]) as i32
             });
 
-            let (action, action_label) = match action_idx {
+            let action = match action_idx {
                 0 => {
                     act_buy += 1;
-                    (Action::Buy, "buy")
+                    Action::Buy
                 }
                 1 => {
                     act_sell += 1;
-                    (Action::Sell, "sell")
+                    Action::Sell
                 }
                 2 => {
                     act_hold += 1;
-                    (Action::Hold, "hold")
+                    Action::Hold
                 }
                 _ => {
                     act_revert += 1;
-                    (Action::Revert, "revert")
+                    Action::Revert
                 }
             };
 
@@ -342,6 +342,12 @@ fn evaluate_candidate_internal(
                     minutes_to_close,
                 },
             );
+            let action_label = match info.effective_action {
+                Action::Buy => "buy",
+                Action::Sell => "sell",
+                Action::Hold => "hold",
+                Action::Revert => "revert",
+            };
             if info.session_closed_violation {
                 session_violations += 1;
                 violation_penalty_sum += VIOLATION_PENALTY;

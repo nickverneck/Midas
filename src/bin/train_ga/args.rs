@@ -85,9 +85,9 @@ pub struct Args {
     pub drawdown_penalty_growth: f64,
     #[arg(long, default_value_t = 0.0)]
     pub session_close_penalty: f64,
-    #[arg(long, default_value_t = 195)]
+    #[arg(long, default_value_t = 0)]
     pub max_hold_bars_positive: usize,
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 0)]
     pub max_hold_bars_drawdown: usize,
     #[arg(long, default_value_t = 7.0)]
     pub invalid_revert_penalty: f64,
