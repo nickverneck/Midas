@@ -1,4 +1,5 @@
 use anyhow::Result;
+use midas_env::env::MarginMode;
 use std::path::{Path, PathBuf};
 
 use crate::args::Args;
@@ -128,12 +129,25 @@ pub fn load_symbol_config(path: &Path, symbol: &str) -> Result<(Option<f64>, Opt
 }
 
 pub fn infer_margin(symbol: &str) -> f64 {
-    let sym = symbol.to_ascii_uppercase();
-    if sym.contains("MES") {
-        return 50.0;
-    }
-    if sym == "ES" || sym.contains("ES@") || sym.ends_with("ES") {
+    if is_futures_symbol(symbol) {
+        let sym = symbol.to_ascii_uppercase();
+        if sym.contains("MES") {
+            return 50.0;
+        }
         return 500.0;
     }
     100.0
+}
+
+pub fn infer_margin_mode(symbol: &str, margin_cfg: Option<f64>) -> MarginMode {
+    if margin_cfg.is_some() || is_futures_symbol(symbol) {
+        MarginMode::PerContract
+    } else {
+        MarginMode::Price
+    }
+}
+
+fn is_futures_symbol(symbol: &str) -> bool {
+    let sym = symbol.to_ascii_uppercase();
+    sym.contains("MES") || sym == "ES" || sym.contains("ES@") || sym.ends_with("ES")
 }

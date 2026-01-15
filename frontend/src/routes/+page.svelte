@@ -123,7 +123,7 @@
 	let behaviorListLoading = $state(false);
 	let behaviorError = $state("");
 	let behaviorListDir = $state("");
-	let behaviorFilter = $state<BehaviorFilter>('trades');
+	let behaviorFilter = $state<BehaviorFilter>('all');
 	let behaviorRowLimit = $state(500);
 
 	let selectedTrainBehavior = $state("");
@@ -232,7 +232,7 @@
 	};
 	const matchesBehaviorFilter = (action: string) => {
 		if (behaviorFilter === 'all') return true;
-		if (behaviorFilter === 'trades') return action !== 'hold';
+		if (behaviorFilter === 'trades') return action === 'buy' || action === 'sell' || action === 'revert';
 		return action === behaviorFilter;
 	};
 	const formatTimestamp = (value: unknown) => {
