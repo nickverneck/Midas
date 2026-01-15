@@ -47,6 +47,7 @@ mod py_bindings {
                 default_session_open: true,
                 risk_penalty,
                 idle_penalty,
+                ..EnvConfig::default()
             };
             Self {
                 inner: TradingEnv::new(initial_price, initial_balance, cfg),

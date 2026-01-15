@@ -7,10 +7,14 @@ use tch::{kind::Kind, no_grad, Device, Tensor};
 use crate::data::{build_observation, DataSet};
 use crate::metrics::{compute_sortino, max_drawdown};
 use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
+use midas_env::env::MarginMode;
 
 #[derive(Clone)]
 pub struct CandidateConfig {
     pub initial_balance: f64,
+    pub max_position: i32,
+    pub margin_mode: MarginMode,
+    pub contract_multiplier: f64,
     pub margin_per_contract: f64,
     pub disable_margin: bool,
     pub w_pnl: f64,
@@ -213,6 +217,9 @@ fn evaluate_candidate_internal(
     load_params_from_vec(&vs, genome);
 
     let env_cfg = EnvConfig {
+        max_position: cfg.max_position,
+        margin_mode: cfg.margin_mode,
+        contract_multiplier: cfg.contract_multiplier,
         margin_per_contract: cfg.margin_per_contract,
         enforce_margin: !cfg.disable_margin,
         drawdown_penalty: cfg.drawdown_penalty,
@@ -510,6 +517,9 @@ pub fn evaluate_candidates_batch(
     let policy = build_batched_policy(genomes, data.obs_dim, cfg.hidden, cfg.layers, cfg.device);
 
     let env_cfg = EnvConfig {
+        max_position: cfg.max_position,
+        margin_mode: cfg.margin_mode,
+        contract_multiplier: cfg.contract_multiplier,
         margin_per_contract: cfg.margin_per_contract,
         enforce_margin: !cfg.disable_margin,
         drawdown_penalty: cfg.drawdown_penalty,

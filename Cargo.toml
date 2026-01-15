@@ -23,10 +23,21 @@ csv = "1.3"
 rand = "0.8"
 rand_distr = "0.4"
 rayon = "1.10"
-tch = { version = "0.22.0" }
+tch = { version = "0.22.0", optional = true }
 bincode = "1.3"
 flate2 = { version = "1.1.5" }
 
 [features]
 default = []
 python = ["pyo3/extension-module", "pyo3", "numpy"]
+torch = ["tch"]
+
+[[bin]]
+name = "train_ga"
+path = "src/bin/train_ga.rs"
+required-features = ["torch"]
+
+[[bin]]
+name = "tch_mps_check"
+path = "src/bin/tch_mps_check.rs"
+required-features = ["torch"]

@@ -29,6 +29,12 @@ pub struct Args {
     pub rth: bool,
     #[arg(long, default_value_t = 10000.0)]
     pub initial_balance: f64,
+    #[arg(long, default_value_t = 0)]
+    pub max_position: i32,
+    #[arg(long, default_value = "auto", value_parser = ["auto", "per-contract", "price"])]
+    pub margin_mode: String,
+    #[arg(long, default_value_t = 1.0)]
+    pub contract_multiplier: f64,
     #[arg(long)]
     pub margin_per_contract: Option<f64>,
     #[arg(long, default_value = "config/symbols.yaml")]

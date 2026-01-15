@@ -108,11 +108,14 @@ pub fn run_ema_crossover(prices: &[f64], params: EmaParams, cfg: EnvConfig) -> E
         actions[i - 1] = action;
         // Track expected position for next decision.
         position = match action {
-            Action::Buy => (position + 1).clamp(-cfg.max_position, cfg.max_position),
-            Action::Sell => (position - 1).clamp(-cfg.max_position, cfg.max_position),
+            Action::Buy => position + 1,
+            Action::Sell => position - 1,
             Action::Revert => -position,
             Action::Hold => position,
         };
+        if cfg.max_position > 0 {
+            position = position.clamp(-cfg.max_position, cfg.max_position);
+        }
     }
 
     run_episode(prices, &actions, 10000.0, cfg)

@@ -46,6 +46,10 @@
 		window: 512,
 		step: 256,
 		"initial-balance": 10000,
+		"max-position": 0,
+		"margin-mode": "auto",
+		"contract-multiplier": 1.0,
+		"margin-per-contract": "",
 		"elite-frac": 0.33,
 		"mutation-sigma": 0.05,
 		"init-sigma": 0.5,
@@ -674,6 +678,30 @@
 														<div class="grid gap-2">
 															<Label for="rust-initial-balance">Initial Balance</Label>
 															<Input id="rust-initial-balance" type="number" step="0.01" bind:value={rustParams["initial-balance"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-max-position">Max Position (0 = no cap)</Label>
+															<Input id="rust-max-position" type="number" min="0" bind:value={rustParams["max-position"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-margin-mode">Margin Mode</Label>
+															<select
+																id="rust-margin-mode"
+																bind:value={rustParams["margin-mode"]}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="auto">Auto</option>
+																<option value="per-contract">Per-contract</option>
+																<option value="price">Price-based</option>
+															</select>
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-contract-multiplier">Contract Multiplier</Label>
+															<Input id="rust-contract-multiplier" type="number" step="0.01" min="0" bind:value={rustParams["contract-multiplier"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="rust-margin-per-contract">Margin Per Contract</Label>
+															<Input id="rust-margin-per-contract" type="number" step="0.01" min="0" bind:value={rustParams["margin-per-contract"]} placeholder="auto from config" />
 														</div>
 														<div class="grid gap-2">
 															<Label for="rust-w-pnl">Fitness Weight (PNL)</Label>

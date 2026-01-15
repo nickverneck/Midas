@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     if df.column("row_idx").is_err() {
         let height = df.height();
         let row_idx: Vec<i64> = (0..height as i64).collect();
-        df.with_column(Series::new("row_idx", row_idx))?;
+        df.with_column(Series::new("row_idx".into(), row_idx))?;
     }
 
     if let Some(cols) = args.columns {
@@ -51,6 +51,8 @@ fn main() -> Result<()> {
     }
 
     let mut stdout = std::io::stdout();
-    CsvWriter::new(&mut stdout).has_header(true).finish(&mut df)?;
+    CsvWriter::new(&mut stdout)
+        .include_header(true)
+        .finish(&mut df)?;
     Ok(())
 }

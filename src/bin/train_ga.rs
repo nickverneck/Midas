@@ -13,6 +13,7 @@ mod util;
 
 use clap::Parser;
 use std::path::Path;
+use midas_env::env::MarginMode;
 
 fn write_behavior_csv(
     path: &Path,
@@ -183,6 +184,16 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     }
 
     let (margin_cfg, session_cfg) = util::load_symbol_config(&args.symbol_config, &train.symbol)?;
+    let margin_mode = match args.margin_mode.as_str() {
+        "per-contract" => MarginMode::PerContract,
+        "price" => MarginMode::Price,
+        _ => util::infer_margin_mode(&train.symbol, margin_cfg),
+    };
+    let contract_multiplier = if args.contract_multiplier > 0.0 {
+        args.contract_multiplier
+    } else {
+        1.0
+    };
     let margin_per_contract = args
         .margin_per_contract
         .or(margin_cfg)
@@ -305,6 +316,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
         let base_cfg = ga::CandidateConfig {
             initial_balance: args.initial_balance,
+            max_position: args.max_position,
+            margin_mode,
+            contract_multiplier,
             margin_per_contract,
             disable_margin: args.disable_margin,
             w_pnl: args.w_pnl,
@@ -604,6 +618,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     if let Some(best_genome) = best_overall_genome {
         let base_cfg = ga::CandidateConfig {
             initial_balance: args.initial_balance,
+            max_position: args.max_position,
+            margin_mode,
+            contract_multiplier,
             margin_per_contract,
             disable_margin: args.disable_margin,
             w_pnl: args.w_pnl,

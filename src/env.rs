@@ -11,16 +11,34 @@ pub enum Action {
     Revert,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginMode {
+    /// Fixed margin per contract (futures-style).
+    PerContract,
+    /// Margin based on notional price * contract multiplier.
+    Price,
+}
+
+impl Default for MarginMode {
+    fn default() -> Self {
+        MarginMode::PerContract
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EnvConfig {
     /// Round-turn commission per contract (USD).
     pub commission_round_turn: f64,
     /// Slippage per contract (USD).
     pub slippage_per_contract: f64,
-    /// Maximum absolute position (contracts).
+    /// Maximum absolute position (contracts). Set <= 0 to disable hard cap.
     pub max_position: i32,
     /// Margin required per contract (USD).
     pub margin_per_contract: f64,
+    /// Margin calculation mode (futures-style or price-based).
+    pub margin_mode: MarginMode,
+    /// Contract multiplier for price-based margin (e.g., 1 for equities).
+    pub contract_multiplier: f64,
     /// Enforce margin check internally (else rely on passed StepContext margin_ok).
     pub enforce_margin: bool,
     /// Session open flag default (used if StepContext not provided).
@@ -58,6 +76,8 @@ impl Default for EnvConfig {
             slippage_per_contract: 0.25,
             max_position: 1,
             margin_per_contract: 50.0,
+            margin_mode: MarginMode::PerContract,
+            contract_multiplier: 1.0,
             enforce_margin: true,
             default_session_open: true,
             risk_penalty: 0.0,
@@ -241,8 +261,8 @@ impl TradingEnv {
         }
 
         let target_position = match action {
-            Action::Buy => (self.state.position + 1).clamp(-self.cfg.max_position, self.cfg.max_position),
-            Action::Sell => (self.state.position - 1).clamp(-self.cfg.max_position, self.cfg.max_position),
+            Action::Buy => self.state.position + 1,
+            Action::Sell => self.state.position - 1,
             Action::Hold => self.state.position,
             Action::Revert => {
                 if self.state.position == 0 {
@@ -253,7 +273,8 @@ impl TradingEnv {
             }
         };
 
-        let position_limit_violation = target_position.abs() > self.cfg.max_position;
+        let position_limit_violation =
+            self.cfg.max_position > 0 && target_position.abs() > self.cfg.max_position;
         if position_limit_violation {
             return (
                 -1000.0,
@@ -274,8 +295,17 @@ impl TradingEnv {
         }
 
         // Margin check if enabled.
+        let multiplier = if self.cfg.contract_multiplier > 0.0 {
+            self.cfg.contract_multiplier
+        } else {
+            1.0
+        };
+
         if self.cfg.enforce_margin {
-            let required_margin = (target_position.abs() as f64) * self.cfg.margin_per_contract;
+            let required_margin = match self.cfg.margin_mode {
+                MarginMode::PerContract => (target_position.abs() as f64) * self.cfg.margin_per_contract,
+                MarginMode::Price => (target_position.abs() as f64) * next_price * multiplier,
+            };
             let equity = self.state.cash + self.state.unrealized_pnl;
             if equity < required_margin {
                 return (
@@ -303,7 +333,7 @@ impl TradingEnv {
         let slippage_paid = self.cfg.slippage_per_contract * (delta_pos.abs() as f64);
 
         let price_change = next_price - self.state.last_price;
-        let pnl_change = price_change * (self.state.position as f64);
+        let pnl_change = price_change * multiplier * (self.state.position as f64);
 
         let trade_costs = commission_paid + slippage_paid;
         self.state.cash -= trade_costs;
@@ -373,9 +403,13 @@ impl TradingEnv {
             0.0
         };
 
-        let mut reward = pnl_change
-            - trade_costs
-            - self.cfg.risk_penalty * (self.state.position.abs() as f64 / self.cfg.max_position as f64);
+        let denom = if self.cfg.max_position > 0 {
+            self.cfg.max_position as f64
+        } else {
+            1.0
+        };
+        let mut reward =
+            pnl_change - trade_costs - self.cfg.risk_penalty * (self.state.position.abs() as f64 / denom);
 
         if self.state.position == 0 && self.cfg.idle_penalty > 0.0 {
             reward -= self.cfg.idle_penalty;
@@ -515,6 +549,64 @@ mod tests {
         let (_r, info) = env.step(Action::Hold, 101.0, StepContext::default());
         assert_eq!(info.commission_paid, 0.0);
         assert_eq!(env.state.position, 0);
+    }
+
+    #[test]
+    fn position_accumulates_up_to_max() {
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                max_position: 2,
+                enforce_margin: false,
+                ..Default::default()
+            },
+        );
+        let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
+        assert_eq!(env.state.position, 1);
+        let (_r2, _i2) = env.step(Action::Buy, 100.0, StepContext::default());
+        assert_eq!(env.state.position, 2);
+        let (_r3, _i3) = env.step(Action::Sell, 100.0, StepContext::default());
+        assert_eq!(env.state.position, 1);
+    }
+
+    #[test]
+    fn position_limit_blocks_overflow() {
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                max_position: 1,
+                enforce_margin: false,
+                ..Default::default()
+            },
+        );
+        let (_r1, _i1) = env.step(Action::Sell, 100.0, StepContext::default());
+        assert_eq!(env.state.position, -1);
+        let (_r2, info2) = env.step(Action::Sell, 100.0, StepContext::default());
+        assert!(info2.position_limit_violation);
+        assert_eq!(env.state.position, -1);
+    }
+
+    #[test]
+    fn price_margin_limits_by_equity() {
+        let mut env = TradingEnv::new(
+            100.0,
+            100.0,
+            EnvConfig {
+                max_position: 0,
+                enforce_margin: true,
+                margin_mode: MarginMode::Price,
+                contract_multiplier: 1.0,
+                ..Default::default()
+            },
+        );
+        let (_r1, info1) = env.step(Action::Buy, 100.0, StepContext::default());
+        assert!(!info1.margin_call_violation);
+        assert_eq!(env.state.position, 1);
+        let (_r2, info2) = env.step(Action::Buy, 100.0, StepContext::default());
+        assert!(info2.margin_call_violation);
+        assert_eq!(env.state.position, 1);
     }
 
     #[test]

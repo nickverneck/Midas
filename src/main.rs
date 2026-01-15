@@ -10,7 +10,7 @@ use polars::prelude::DataFrame;
 use serde::Deserialize;
 use std::{path::PathBuf, time::Instant};
 use crate::backtesting::{run_ema_crossover, EmaParams};
-use crate::env::EnvConfig;
+use crate::env::{EnvConfig, MarginMode};
 use crate::features::{compute_features, periods};
 use chrono_tz::Tz;
 
@@ -77,6 +77,19 @@ fn load_symbol_cfg(path: &PathBuf, symbol: &str) -> Option<SymbolCfg> {
         .and_then(|v| serde_yaml::from_value::<SymbolCfg>(v.clone()).ok())
 }
 
+fn infer_margin_mode(symbol: &str, cfg: Option<&SymbolCfg>) -> MarginMode {
+    if cfg.and_then(|c| c.margin_per_contract).is_some() || is_futures_symbol(symbol) {
+        MarginMode::PerContract
+    } else {
+        MarginMode::Price
+    }
+}
+
+fn is_futures_symbol(symbol: &str) -> bool {
+    let sym = symbol.to_ascii_uppercase();
+    sym.contains("MES") || sym == "ES" || sym.contains("ES@") || sym.ends_with("ES")
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
     let timer = Instant::now();
@@ -119,6 +132,7 @@ fn main() -> Result<()> {
             .as_ref()
             .and_then(|c| c.margin_per_contract)
             .unwrap_or(50.0),
+        margin_mode: infer_margin_mode(&symbol, sym_cfg.as_ref()),
         ..Default::default()
     };
     // Session handling
