@@ -23,6 +23,7 @@
 	};
 
 	type GenMember = {
+		idx: number | null;
 		fitness: number | null;
 		pnl: number | null;
 		realized: number | null;
@@ -366,9 +367,11 @@
 			const drawdown = toNumber(row[keys.drawdownKey]);
 			const ret = toNumber(row[keys.retKey]);
 			const genValue = toNumber(row.gen);
+			const idxValue = toNumber(row.idx);
 
 			if (genValue !== null) {
 				const member: GenMember = {
+					idx: idxValue,
 					fitness,
 					pnl,
 					realized,
@@ -974,7 +977,7 @@
 				const drawdown = member.drawdown;
 				if (realized === null || drawdown === null) continue;
 				if (!bestPoint || realized > bestPoint.y) {
-					bestPoint = { x: drawdown, y: realized, gen: g.gen };
+					bestPoint = { x: drawdown, y: realized, gen: g.gen, idx: member.idx };
 				}
 			}
 			if (bestPoint) points.push(bestPoint);
@@ -1008,6 +1011,24 @@
 				title: {
 					display: true,
 					text: 'Realized PNL'
+				}
+			}
+		},
+		plugins: {
+			tooltip: {
+				callbacks: {
+					label: (ctx) => {
+						const raw = ctx.raw as { x?: number; y?: number; gen?: number; idx?: number | null };
+						const genLabel = raw?.gen ?? '—';
+						const idxLabel = raw?.idx ?? '—';
+						const dd = raw?.x ?? ctx.parsed?.x;
+						const pnl = raw?.y ?? ctx.parsed?.y;
+						return [
+							`Gen ${genLabel} | Idx ${idxLabel}`,
+							`Drawdown: ${dd ?? '—'}`,
+							`Realized PNL: ${pnl ?? '—'}`
+						];
+					}
 				}
 			}
 		}
