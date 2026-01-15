@@ -85,10 +85,18 @@ pub struct Args {
     pub drawdown_penalty_growth: f64,
     #[arg(long, default_value_t = 0.0)]
     pub session_close_penalty: f64,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 15)]
     pub max_hold_bars_positive: usize,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 15)]
     pub max_hold_bars_drawdown: usize,
+    #[arg(long, default_value_t = 1.0)]
+    pub hold_duration_penalty: f64,
+    #[arg(long, default_value_t = 0.05)]
+    pub hold_duration_penalty_growth: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub hold_duration_penalty_positive_scale: f64,
+    #[arg(long, default_value_t = 1.5)]
+    pub hold_duration_penalty_negative_scale: f64,
     #[arg(long, default_value_t = 7.0)]
     pub invalid_revert_penalty: f64,
     #[arg(long, default_value_t = 0.5)]
