@@ -659,10 +659,9 @@
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
 															<Label for="ga-train-parquet">Train Parquet</Label>
-															<div class="flex items-center gap-2">
+															<div class="flex flex-col gap-2">
 																<Input
 																	id="ga-train-parquet"
-																	class="flex-1"
 																	type="text"
 																	bind:value={gaParams["train-parquet"]}
 																	placeholder="data/train"
@@ -674,10 +673,9 @@
 														</div>
 														<div class="grid gap-2">
 															<Label for="ga-val-parquet">Val Parquet</Label>
-															<div class="flex items-center gap-2">
+															<div class="flex flex-col gap-2">
 																<Input
 																	id="ga-val-parquet"
-																	class="flex-1"
 																	type="text"
 																	bind:value={gaParams["val-parquet"]}
 																	placeholder="data/val"
@@ -689,10 +687,9 @@
 														</div>
 														<div class="grid gap-2">
 															<Label for="ga-test-parquet">Test Parquet</Label>
-															<div class="flex items-center gap-2">
+															<div class="flex flex-col gap-2">
 																<Input
 																	id="ga-test-parquet"
-																	class="flex-1"
 																	type="text"
 																	bind:value={gaParams["test-parquet"]}
 																	placeholder="data/test"
@@ -923,10 +920,9 @@
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
 															<Label for="rl-train-parquet">Train Parquet</Label>
-															<div class="flex items-center gap-2">
+															<div class="flex flex-col gap-2">
 																<Input
 																	id="rl-train-parquet"
-																	class="flex-1"
 																	type="text"
 																	bind:value={rlParams["train-parquet"]}
 																	placeholder="data/train"
@@ -938,10 +934,9 @@
 														</div>
 														<div class="grid gap-2">
 															<Label for="rl-val-parquet">Val Parquet</Label>
-															<div class="flex items-center gap-2">
+															<div class="flex flex-col gap-2">
 																<Input
 																	id="rl-val-parquet"
-																	class="flex-1"
 																	type="text"
 																	bind:value={rlParams["val-parquet"]}
 																	placeholder="data/val"
@@ -953,10 +948,9 @@
 														</div>
 														<div class="grid gap-2">
 															<Label for="rl-test-parquet">Test Parquet</Label>
-															<div class="flex items-center gap-2">
+															<div class="flex flex-col gap-2">
 																<Input
 																	id="rl-test-parquet"
-																	class="flex-1"
 																	type="text"
 																	bind:value={rlParams["test-parquet"]}
 																	placeholder="data/test"
