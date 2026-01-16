@@ -1291,11 +1291,19 @@
 		</div>
 	</main>
 	{#if fileBrowserOpen}
-		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onclick={closeFileBrowser}>
-			<div
-				class="w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg"
-				onclick={(event) => event.stopPropagation()}
-			>
+		<div
+			class="fixed inset-0 z-50 flex items-center justify-center p-4 relative"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Select parquet file"
+		>
+			<button
+				type="button"
+				class="absolute inset-0 bg-black/40"
+				onclick={closeFileBrowser}
+				aria-label="Close file picker"
+			></button>
+			<div class="relative z-10 w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg">
 				<div class="flex items-start justify-between gap-4">
 					<div>
 						<div class="text-xs uppercase tracking-wide text-muted-foreground">Select Parquet File</div>
