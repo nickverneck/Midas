@@ -285,8 +285,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     }
 
     let log_path = args.outdir.join("ga_log.csv");
-    let mut log_has_eval_fitness = false;
-    let mut log_has_selection_fitness = false;
+    let mut log_has_eval_fitness;
+    let mut log_has_selection_fitness;
     if log_path.exists() {
         let meta = std::fs::metadata(&log_path)?;
         if meta.len() == 0 {
@@ -514,7 +514,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 )
             } else if log_has_eval_fitness {
                 format!(
-                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
+                    "{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.8}\n",
                     generation,
                     idx,
                     args.w_pnl,
