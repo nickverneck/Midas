@@ -29,7 +29,13 @@
         Decimation
     );
 
-    const props = $props();
+    type ChartProps = {
+        data?: ChartConfiguration['data'];
+        options?: ChartConfiguration['options'];
+        type?: ChartType;
+    };
+
+    let { data, options, type }: ChartProps = $props();
     let canvas: HTMLCanvasElement;
     let chart: Chart | null = null;
     let destroyed = false;
@@ -156,9 +162,9 @@
             await ensureZoomPlugin();
             if (cancelled || destroyed || !mounted || !canvas) return;
 
-            const { labels, datasets, seriesCount, usesXY } = snapshotData(props.data);
-            const nextOptions = mergeOptions(props.options);
-            const nextType = (props.type ?? 'line') as ChartType;
+            const { labels, datasets, seriesCount, usesXY } = snapshotData(data);
+            const nextOptions = mergeOptions(options);
+            const nextType = (type ?? 'line') as ChartType;
 
             if (!chart || chart.config.type !== nextType) {
                 if (chart) chart.destroy();
@@ -168,8 +174,7 @@
                     options: nextOptions
                 });
             } else {
-                chart.data.labels = labels;
-                chart.data.datasets = datasets;
+                chart.data = { labels, datasets };
                 chart.options = nextOptions;
             }
 
@@ -194,7 +199,8 @@
                 chart.options.plugins.zoom.pan.mode = zoomMode;
                 chart.options.plugins.zoom.zoom.mode = zoomMode;
             }
-            chart.update('none');
+            chart.update();
+            chart.resize();
         };
 
         void setup();

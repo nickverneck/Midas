@@ -111,6 +111,66 @@
 		"checkpoint-every": 1
 	});
 
+	type ParquetKey = "train-parquet" | "val-parquet" | "test-parquet";
+	let fileInput: HTMLInputElement | null = null;
+	let filePickerTarget: { mode: TrainMode; key: ParquetKey } | null = null;
+
+	const resolvePickedPath = (file: File) => {
+		const fileWithPath = file as File & { path?: string; webkitRelativePath?: string };
+		return fileWithPath.path || fileWithPath.webkitRelativePath || file.name;
+	};
+
+	const setParquetPath = (mode: TrainMode, key: ParquetKey, value: string) => {
+		if (mode === "ga") {
+			gaParams[key] = value;
+		} else {
+			rlParams[key] = value;
+		}
+	};
+
+	const openParquetPicker = async (mode: TrainMode, key: ParquetKey) => {
+		const picker =
+			typeof window !== "undefined"
+				? (window as Window & { showOpenFilePicker?: typeof window.showOpenFilePicker })
+						.showOpenFilePicker
+				: undefined;
+
+		if (picker) {
+			try {
+				const [handle] = await picker({
+					multiple: false,
+					types: [
+						{
+							description: "Parquet",
+							accept: {
+								"application/octet-stream": [".parquet"]
+							}
+						}
+					]
+				});
+				const file = await handle.getFile();
+				setParquetPath(mode, key, resolvePickedPath(file));
+				return;
+			} catch (err) {
+				if (err instanceof DOMException && err.name === "AbortError") {
+					return;
+				}
+			}
+		}
+
+		filePickerTarget = { mode, key };
+		fileInput?.click();
+	};
+
+	const handleFileInput = (event: Event) => {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file || !filePickerTarget) return;
+		setParquetPath(filePickerTarget.mode, filePickerTarget.key, resolvePickedPath(file));
+		filePickerTarget = null;
+		input.value = "";
+	};
+
 	const toNumber = (value: unknown): number | null => {
 		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
 		if (typeof value === 'string' && value.trim() !== '') {
@@ -599,15 +659,48 @@
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
 															<Label for="ga-train-parquet">Train Parquet</Label>
-															<Input id="ga-train-parquet" type="text" bind:value={gaParams["train-parquet"]} placeholder="data/train" />
+															<div class="flex items-center gap-2">
+																<Input
+																	id="ga-train-parquet"
+																	class="flex-1"
+																	type="text"
+																	bind:value={gaParams["train-parquet"]}
+																	placeholder="data/train"
+																/>
+																<Button type="button" variant="outline" onclick={() => openParquetPicker("ga", "train-parquet")}>
+																	Browse
+																</Button>
+															</div>
 														</div>
 														<div class="grid gap-2">
 															<Label for="ga-val-parquet">Val Parquet</Label>
-															<Input id="ga-val-parquet" type="text" bind:value={gaParams["val-parquet"]} placeholder="data/val" />
+															<div class="flex items-center gap-2">
+																<Input
+																	id="ga-val-parquet"
+																	class="flex-1"
+																	type="text"
+																	bind:value={gaParams["val-parquet"]}
+																	placeholder="data/val"
+																/>
+																<Button type="button" variant="outline" onclick={() => openParquetPicker("ga", "val-parquet")}>
+																	Browse
+																</Button>
+															</div>
 														</div>
 														<div class="grid gap-2">
 															<Label for="ga-test-parquet">Test Parquet</Label>
-															<Input id="ga-test-parquet" type="text" bind:value={gaParams["test-parquet"]} placeholder="data/test" />
+															<div class="flex items-center gap-2">
+																<Input
+																	id="ga-test-parquet"
+																	class="flex-1"
+																	type="text"
+																	bind:value={gaParams["test-parquet"]}
+																	placeholder="data/test"
+																/>
+																<Button type="button" variant="outline" onclick={() => openParquetPicker("ga", "test-parquet")}>
+																	Browse
+																</Button>
+															</div>
 														</div>
 														<div class="grid gap-2">
 															<Label for="ga-data-mode">Data Mode</Label>
@@ -830,15 +923,48 @@
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
 															<Label for="rl-train-parquet">Train Parquet</Label>
-															<Input id="rl-train-parquet" type="text" bind:value={rlParams["train-parquet"]} placeholder="data/train" />
+															<div class="flex items-center gap-2">
+																<Input
+																	id="rl-train-parquet"
+																	class="flex-1"
+																	type="text"
+																	bind:value={rlParams["train-parquet"]}
+																	placeholder="data/train"
+																/>
+																<Button type="button" variant="outline" onclick={() => openParquetPicker("rl", "train-parquet")}>
+																	Browse
+																</Button>
+															</div>
 														</div>
 														<div class="grid gap-2">
 															<Label for="rl-val-parquet">Val Parquet</Label>
-															<Input id="rl-val-parquet" type="text" bind:value={rlParams["val-parquet"]} placeholder="data/val" />
+															<div class="flex items-center gap-2">
+																<Input
+																	id="rl-val-parquet"
+																	class="flex-1"
+																	type="text"
+																	bind:value={rlParams["val-parquet"]}
+																	placeholder="data/val"
+																/>
+																<Button type="button" variant="outline" onclick={() => openParquetPicker("rl", "val-parquet")}>
+																	Browse
+																</Button>
+															</div>
 														</div>
 														<div class="grid gap-2">
 															<Label for="rl-test-parquet">Test Parquet</Label>
-															<Input id="rl-test-parquet" type="text" bind:value={rlParams["test-parquet"]} placeholder="data/test" />
+															<div class="flex items-center gap-2">
+																<Input
+																	id="rl-test-parquet"
+																	class="flex-1"
+																	type="text"
+																	bind:value={rlParams["test-parquet"]}
+																	placeholder="data/test"
+																/>
+																<Button type="button" variant="outline" onclick={() => openParquetPicker("rl", "test-parquet")}>
+																	Browse
+																</Button>
+															</div>
 														</div>
 														<div class="grid gap-2">
 															<Label for="rl-data-mode">Data Mode</Label>
@@ -1137,4 +1263,12 @@
 			</Card.Root>
 		</div>
 	</main>
+
+	<input
+		class="hidden"
+		type="file"
+		accept=".parquet"
+		bind:this={fileInput}
+		onchange={handleFileInput}
+	/>
 </div>
