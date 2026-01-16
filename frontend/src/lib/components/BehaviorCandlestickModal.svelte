@@ -304,7 +304,7 @@
 
 {#if open}
 	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+		class="fixed inset-0 z-50 flex bg-black/60"
 		role="dialog"
 		aria-modal="true"
 		aria-label={title}
@@ -315,7 +315,7 @@
 			onclick={() => onClose?.()}
 			aria-label="Close candlestick viewer"
 		></button>
-		<div class="relative z-10 flex h-full w-full max-w-6xl flex-col gap-4 rounded-xl border bg-background p-4 shadow-xl">
+		<div class="relative z-10 flex h-full w-full flex-col gap-4 overflow-hidden rounded-none border bg-background p-4 shadow-xl">
 			<div class="flex flex-wrap items-start justify-between gap-3">
 				<div>
 					<div class="text-xs uppercase tracking-wide text-muted-foreground">Behavior Candlesticks</div>
@@ -373,8 +373,8 @@
 				</div>
 			</div>
 
-			<div class="flex flex-1 flex-col gap-4 xl:flex-row">
-				<div class="flex min-h-[360px] flex-1 flex-col gap-3">
+			<div class="flex min-h-0 flex-1 flex-col gap-4 xl:flex-row">
+				<div class="flex min-h-0 flex-1 flex-col gap-3">
 					<div class="flex items-center gap-3">
 						<input
 							class="w-full"
@@ -390,8 +390,8 @@
 							disabled={candles.length === 0}
 						/>
 					</div>
-					<div class="flex-1 rounded-lg border bg-background">
-						<div class="h-full w-full p-2" bind:this={container}>
+					<div class="flex-1 overflow-hidden rounded-lg border bg-background">
+						<div class="h-full w-full min-h-0 p-2" bind:this={container}>
 							<canvas class="h-full w-full" bind:this={canvas}></canvas>
 						</div>
 					</div>
@@ -415,7 +415,7 @@
 					</div>
 				</div>
 
-				<div class="w-full max-w-sm space-y-4">
+				<div class="w-full max-w-sm min-h-0 space-y-4 overflow-auto">
 					<div class="rounded-lg border p-3">
 						<div class="text-xs uppercase text-muted-foreground">Current Step</div>
 						{#if currentCandle}
