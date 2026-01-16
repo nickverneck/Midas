@@ -1,8 +1,14 @@
+#[path = "train_rl/args.rs"]
 mod args;
+#[path = "train_rl/data.rs"]
 mod data;
+#[path = "train_rl/metrics.rs"]
 mod metrics;
+#[path = "train_rl/model.rs"]
 mod model;
+#[path = "train_rl/ppo.rs"]
 mod ppo;
+#[path = "train_rl/util.rs"]
 mod util;
 
 use std::io::Write;
@@ -13,6 +19,7 @@ use midas_env::env::{EnvConfig, MarginMode};
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand::rngs::StdRng;
 use tch::nn;
+use tch::nn::OptimizerConfig;
 
 use args::Args;
 use ppo::{LossStats, RolloutConfig, RolloutMetrics};
@@ -25,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     let device = util::resolve_device(args.device.as_deref());
     util::print_device(&device);
 
-    let seed = args.seed.unwrap_or_else(|| rand::thread_rng().gen());
+    let seed = args.seed.unwrap_or_else(|| rand::thread_rng().r#gen());
     let mut rng = StdRng::seed_from_u64(seed);
 
     let (train_path, val_path, test_path) = util::resolve_paths(&args)?;
