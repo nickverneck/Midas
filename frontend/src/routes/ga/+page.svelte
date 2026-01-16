@@ -8,6 +8,7 @@
     import * as Tabs from "$lib/components/ui/tabs";
     import * as Alert from "$lib/components/ui/alert";
     import GaChart from "$lib/components/GaChart.svelte";
+    import BehaviorCandlestickModal from "$lib/components/BehaviorCandlestickModal.svelte";
     import Papa from 'papaparse';
     import { AlertCircle, TrendingUp, Info, ListFilter, Bug } from "lucide-svelte";
 
@@ -660,6 +661,24 @@
 	let valBehaviorFiles = $derived(behaviorFiles.filter((file) => file.split === 'val'));
 	let trainBehaviorDisplay = $derived.by(() => buildBehaviorDisplay(trainBehaviorRows, trainDataMap));
 	let valBehaviorDisplay = $derived.by(() => buildBehaviorDisplay(valBehaviorRows, valDataMap));
+	let trainChartRows = $derived.by(() => {
+		const limited = behaviorRowLimit > 0 ? trainBehaviorRows.slice(0, behaviorRowLimit) : trainBehaviorRows;
+		return limited;
+	});
+	let valChartRows = $derived.by(() => {
+		const limited = behaviorRowLimit > 0 ? valBehaviorRows.slice(0, behaviorRowLimit) : valBehaviorRows;
+		return limited;
+	});
+	let trainChartOpen = $state(false);
+	let valChartOpen = $state(false);
+	let trainChartTitle = $derived.by(() => {
+		const file = trainBehaviorFiles.find((entry) => entry.name === selectedTrainBehavior);
+		return file ? `Train · ${formatBehaviorLabel(file)}` : 'Train Behavior';
+	});
+	let valChartTitle = $derived.by(() => {
+		const file = valBehaviorFiles.find((entry) => entry.name === selectedValBehavior);
+		return file ? `Eval · ${formatBehaviorLabel(file)}` : 'Eval Behavior';
+	});
 
     // Data Aggregation by Generation
     let genData = $derived.by(() => {
@@ -1682,12 +1701,21 @@
 
                 <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
                     <Card.Root>
-                        <Card.Header>
-                            <Card.Title>Train Behavior</Card.Title>
-                            <Card.Description>
-                                Showing {trainBehaviorDisplay.rows.length.toLocaleString()} of{' '}
-                                {trainBehaviorDisplay.total.toLocaleString()} rows
-                            </Card.Description>
+                        <Card.Header class="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <Card.Title>Train Behavior</Card.Title>
+                                <Card.Description>
+                                    Showing {trainBehaviorDisplay.rows.length.toLocaleString()} of{' '}
+                                    {trainBehaviorDisplay.total.toLocaleString()} rows
+                                </Card.Description>
+                            </div>
+                            <button
+                                class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                onclick={() => (trainChartOpen = true)}
+                                disabled={trainBehaviorDisplay.rows.length === 0}
+                            >
+                                Open Candlestick
+                            </button>
                         </Card.Header>
                         <Card.Content>
                             {#if trainBehaviorLoading || trainDataLoading}
@@ -1755,12 +1783,21 @@
                     </Card.Root>
 
                     <Card.Root>
-                        <Card.Header>
-                            <Card.Title>Eval Behavior</Card.Title>
-                            <Card.Description>
-                                Showing {valBehaviorDisplay.rows.length.toLocaleString()} of{' '}
-                                {valBehaviorDisplay.total.toLocaleString()} rows
-                            </Card.Description>
+                        <Card.Header class="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <Card.Title>Eval Behavior</Card.Title>
+                                <Card.Description>
+                                    Showing {valBehaviorDisplay.rows.length.toLocaleString()} of{' '}
+                                    {valBehaviorDisplay.total.toLocaleString()} rows
+                                </Card.Description>
+                            </div>
+                            <button
+                                class="px-3 py-1 border rounded-md text-xs disabled:opacity-40"
+                                onclick={() => (valChartOpen = true)}
+                                disabled={valBehaviorDisplay.rows.length === 0}
+                            >
+                                Open Candlestick
+                            </button>
                         </Card.Header>
                         <Card.Content>
                             {#if valBehaviorLoading || valDataLoading}
@@ -1902,3 +1939,16 @@
         </Tabs.Root>
 	{/if}
 </div>
+
+<BehaviorCandlestickModal
+	open={trainChartOpen}
+	title={trainChartTitle}
+	rows={trainChartRows}
+	onClose={() => (trainChartOpen = false)}
+/>
+<BehaviorCandlestickModal
+	open={valChartOpen}
+	title={valChartTitle}
+	rows={valChartRows}
+	onClose={() => (valChartOpen = false)}
+/>
