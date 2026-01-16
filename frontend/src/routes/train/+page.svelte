@@ -1087,7 +1087,7 @@
 
 	<main class={`p-8 space-y-8 ${paramsCollapsed ? 'lg:ml-[120px]' : 'lg:ml-[360px]'}`}>
 		<div class="flex items-center gap-4">
-			<a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Back to Dashboard</a>
+			<a href="/ga" class="text-sm text-muted-foreground hover:text-foreground">← Back to GA Analytics</a>
 			<h1 class="text-4xl font-bold tracking-tight">
 				Train {trainMode === 'ga' ? 'GA' : 'RL'} Model
 			</h1>

@@ -8,15 +8,16 @@ const CHUNK_SIZE = 64 * 1024;
 const DEFAULT_LOG_DIR = 'runs_ga';
 
 const resolveProjectRoot = () => {
-    const cwd = process.cwd();
-    if (fs.existsSync(path.join(cwd, 'Cargo.toml'))) {
-        return cwd;
+    let current = process.cwd();
+    for (let i = 0; i < 8; i += 1) {
+        if (fs.existsSync(path.join(current, 'Cargo.toml'))) {
+            return current;
+        }
+        const parent = path.resolve(current, '..');
+        if (parent === current) break;
+        current = parent;
     }
-    const parent = path.resolve(cwd, '..');
-    if (fs.existsSync(path.join(parent, 'Cargo.toml'))) {
-        return parent;
-    }
-    return cwd;
+    return process.cwd();
 };
 
 const resolveLogPath = (dirParam: string | null, logParam: string | null) => {
@@ -29,6 +30,9 @@ const resolveLogPath = (dirParam: string | null, logParam: string | null) => {
     const relative = path.relative(root, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
         return null;
+    }
+    if (resolved.toLowerCase().endsWith('.csv')) {
+        return resolved;
     }
     return path.join(resolved, fileName);
 };
