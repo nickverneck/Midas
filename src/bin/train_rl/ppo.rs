@@ -85,7 +85,8 @@ pub fn rollout<P: nn::Module, V: nn::Module>(
             cfg.initial_balance,
         );
         obs_buf.extend_from_slice(&obs);
-        let obs_tensor = Tensor::of_slice(&obs)
+        let obs_tensor = Tensor::f_from_slice(&obs)
+            .expect("tensor from obs slice")
             .reshape(&[1, obs_dim as i64])
             .to_device(cfg.device);
 
@@ -149,14 +150,25 @@ pub fn rollout<P: nn::Module, V: nn::Module>(
 
     let (adv_buf, ret_buf) = compute_gae(&rew_buf, &val_buf, cfg.gamma, cfg.lam);
 
-    let obs_tensor = Tensor::of_slice(&obs_buf)
+    let obs_tensor = Tensor::f_from_slice(&obs_buf)
+        .expect("tensor from obs buffer")
         .reshape(&[steps as i64, obs_dim as i64])
         .to_device(cfg.device);
-    let act_tensor = Tensor::of_slice(&act_buf).to_device(cfg.device);
-    let logp_tensor = Tensor::of_slice(&logp_buf).to_device(cfg.device);
-    let adv_tensor = Tensor::of_slice(&adv_buf).to_device(cfg.device);
-    let ret_tensor = Tensor::of_slice(&ret_buf).to_device(cfg.device);
-    let val_tensor = Tensor::of_slice(&val_buf).to_device(cfg.device);
+    let act_tensor = Tensor::f_from_slice(&act_buf)
+        .expect("tensor from action buffer")
+        .to_device(cfg.device);
+    let logp_tensor = Tensor::f_from_slice(&logp_buf)
+        .expect("tensor from logp buffer")
+        .to_device(cfg.device);
+    let adv_tensor = Tensor::f_from_slice(&adv_buf)
+        .expect("tensor from advantage buffer")
+        .to_device(cfg.device);
+    let ret_tensor = Tensor::f_from_slice(&ret_buf)
+        .expect("tensor from return buffer")
+        .to_device(cfg.device);
+    let val_tensor = Tensor::f_from_slice(&val_buf)
+        .expect("tensor from value buffer")
+        .to_device(cfg.device);
 
     RolloutBatch {
         obs: obs_tensor,
@@ -236,10 +248,10 @@ pub fn ppo_update<P: nn::Module, V: nn::Module>(
         loss.backward();
         opt.step();
 
-        policy_loss_sum += f64::from(&policy_loss);
-        value_loss_sum += f64::from(&value_loss);
-        entropy_sum += f64::from(&entropy);
-        total_loss_sum += f64::from(&loss);
+        policy_loss_sum += policy_loss.double_value(&[]);
+        value_loss_sum += value_loss.double_value(&[]);
+        entropy_sum += entropy.double_value(&[]);
+        total_loss_sum += loss.double_value(&[]);
     }
 
     let denom = cfg.ppo_epochs.max(1) as f64;
