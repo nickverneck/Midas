@@ -113,8 +113,11 @@
 
 	type ParquetKey = "train-parquet" | "val-parquet" | "test-parquet";
 	type FileEntry = { name: string; path: string; kind: "dir" | "file" };
+	type FilePickerTarget =
+		| { kind: "parquet"; mode: TrainMode; key: ParquetKey }
+		| { kind: "checkpoint"; mode: TrainMode };
 
-	let filePickerTarget: { mode: TrainMode; key: ParquetKey } | null = null;
+	let filePickerTarget: FilePickerTarget | null = null;
 	let fileBrowserOpen = $state(false);
 	let fileBrowserDir = $state("");
 	let fileBrowserParent = $state<string | null>(null);
@@ -122,6 +125,8 @@
 	let fileBrowserLoading = $state(false);
 	let fileBrowserError = $state("");
 	let fileBrowserToken = 0;
+	let fileBrowserTitle = $state("Select File");
+	let fileBrowserExtensions = $state<string[]>(["parquet"]);
 
 	const setParquetPath = (mode: TrainMode, key: ParquetKey, value: string) => {
 		if (mode === "ga") {
@@ -131,21 +136,28 @@
 		}
 	};
 
-	const buildFileBrowserUrl = (dir: string) => {
+	const normalizeExtensions = (extensions: string[]) =>
+		extensions.map((ext) => ext.replace(/^\./, "").toLowerCase());
+
+	const buildFileBrowserUrl = (dir: string, extensions: string[]) => {
 		const params = new URLSearchParams();
 		if (dir.trim() !== "") {
 			params.set("dir", dir);
+		}
+		const normalized = normalizeExtensions(extensions);
+		if (normalized.length > 0) {
+			params.set("ext", normalized.join(","));
 		}
 		const query = params.toString();
 		return query ? `/api/files?${query}` : "/api/files";
 	};
 
-	const loadFileBrowser = async (dir: string) => {
+	const loadFileBrowser = async (dir: string, extensions: string[]) => {
 		const token = ++fileBrowserToken;
 		fileBrowserLoading = true;
 		fileBrowserError = "";
 		try {
-			const res = await fetch(buildFileBrowserUrl(dir));
+			const res = await fetch(buildFileBrowserUrl(dir, extensions));
 			if (!res.ok) {
 				const errPayload = await res.json().catch(() => null);
 				throw new Error(errPayload?.error || `Failed to load files (${res.status})`);
@@ -170,17 +182,34 @@
 		}
 	};
 
-	const openParquetPicker = async (mode: TrainMode, key: ParquetKey) => {
-		filePickerTarget = { mode, key };
+	const openFileBrowser = async (
+		target: FilePickerTarget,
+		title: string,
+		extensions: string[],
+		preferredDir: string
+	) => {
+		filePickerTarget = target;
+		fileBrowserTitle = title;
+		fileBrowserExtensions = normalizeExtensions(extensions);
 		fileBrowserOpen = true;
 		fileBrowserDir = "";
 		fileBrowserParent = null;
 		fileBrowserEntries = [];
-		const preferredDir = "data";
-		const ok = await loadFileBrowser(preferredDir);
+		const ok = await loadFileBrowser(preferredDir, fileBrowserExtensions);
 		if (!ok && preferredDir !== "") {
-			await loadFileBrowser("");
+			await loadFileBrowser("", fileBrowserExtensions);
 		}
+	};
+
+	const openParquetPicker = async (mode: TrainMode, key: ParquetKey) => {
+		await openFileBrowser({ kind: "parquet", mode, key }, "Select Parquet File", ["parquet"], "data");
+	};
+
+	const openCheckpointPicker = async (mode: TrainMode) => {
+		const ext = mode === "ga" ? "bin" : "pt";
+		const title = mode === "ga" ? "Select GA Checkpoint" : "Select RL Checkpoint";
+		const preferredDir = mode === "ga" ? "runs_ga" : "runs_rl";
+		await openFileBrowser({ kind: "checkpoint", mode }, title, [ext], preferredDir);
 	};
 
 	const closeFileBrowser = () => {
@@ -191,17 +220,21 @@
 
 	const handleFileEntry = (entry: FileEntry) => {
 		if (entry.kind === "dir") {
-			void loadFileBrowser(entry.path);
+			void loadFileBrowser(entry.path, fileBrowserExtensions);
 			return;
 		}
 		if (!filePickerTarget) return;
-		setParquetPath(filePickerTarget.mode, filePickerTarget.key, entry.path);
+		if (filePickerTarget.kind === "parquet") {
+			setParquetPath(filePickerTarget.mode, filePickerTarget.key, entry.path);
+		} else {
+			checkpointPath = entry.path;
+		}
 		closeFileBrowser();
 	};
 
 	const handleFileBrowserUp = () => {
 		if (fileBrowserParent === null) return;
-		void loadFileBrowser(fileBrowserParent);
+		void loadFileBrowser(fileBrowserParent, fileBrowserExtensions);
 	};
 
 	const toNumber = (value: unknown): number | null => {
@@ -648,12 +681,17 @@
 								{#if startChoice === 'resume'}
 									<div class="grid gap-2">
 										<Label for="checkpoint-path">Checkpoint Path</Label>
-										<Input
-											id="checkpoint-path"
-											type="text"
-											bind:value={checkpointPath}
-											placeholder={trainMode === 'ga' ? "runs_ga/checkpoint_gen4.bin" : "runs_rl/checkpoint_epoch4.pt"}
-										/>
+										<div class="flex flex-col gap-2">
+											<Input
+												id="checkpoint-path"
+												type="text"
+												bind:value={checkpointPath}
+												placeholder={trainMode === 'ga' ? "runs_ga/checkpoint_gen4.bin" : "runs_rl/checkpoint_epoch4.pt"}
+											/>
+											<Button type="button" variant="outline" onclick={() => openCheckpointPicker(trainMode)}>
+												Browse
+											</Button>
+										</div>
 										<div class="text-xs text-muted-foreground">
 											GA checkpoints use .bin; RL checkpoints use .pt.
 										</div>
@@ -1306,8 +1344,11 @@
 			<div class="relative z-10 w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg">
 				<div class="flex items-start justify-between gap-4">
 					<div>
-						<div class="text-xs uppercase tracking-wide text-muted-foreground">Select Parquet File</div>
+						<div class="text-xs uppercase tracking-wide text-muted-foreground">{fileBrowserTitle}</div>
 						<div class="text-sm font-semibold">{fileBrowserDir || "Project root"}</div>
+						<div class="text-xs text-muted-foreground">
+							Allowed: {fileBrowserExtensions.map((ext) => `.${ext}`).join(", ")}
+						</div>
 					</div>
 					<Button type="button" variant="ghost" size="sm" onclick={closeFileBrowser}>
 						Close

@@ -40,17 +40,34 @@ const resolveDir = (dirParam: string | null) => {
     return { root, resolved, relative };
 };
 
+const parseExtensions = (extParam: string | null) => {
+    if (!extParam || extParam.trim() === '') {
+        return ['parquet'];
+    }
+    const parts = extParam
+        .split(',')
+        .map((part) => part.trim().replace(/^\./, '').toLowerCase())
+        .filter(Boolean);
+    return parts.length > 0 ? parts : ['parquet'];
+};
+
 export const GET = async ({ url }) => {
     const headers = { 'Cache-Control': 'no-store' };
     const dirParam = url.searchParams.get('dir');
+    const extParam = url.searchParams.get('ext');
     const resolved = resolveDir(dirParam);
     if (!resolved) {
         return json({ error: 'Invalid directory' }, { status: 400, headers });
     }
 
+    const extensions = parseExtensions(extParam);
     const entries: FileEntry[] = fs
         .readdirSync(resolved.resolved, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() || entry.name.toLowerCase().endsWith('.parquet'))
+        .filter((entry) => {
+            if (entry.isDirectory()) return true;
+            const name = entry.name.toLowerCase();
+            return extensions.some((ext) => name.endsWith(`.${ext}`));
+        })
         .map((entry) => {
             const entryPath = resolved.relative
                 ? path.join(resolved.relative, entry.name)
