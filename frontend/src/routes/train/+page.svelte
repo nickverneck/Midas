@@ -112,13 +112,16 @@
 	});
 
 	type ParquetKey = "train-parquet" | "val-parquet" | "test-parquet";
-	let fileInput: HTMLInputElement | null = null;
-	let filePickerTarget: { mode: TrainMode; key: ParquetKey } | null = null;
+	type FileEntry = { name: string; path: string; kind: "dir" | "file" };
 
-	const resolvePickedPath = (file: File) => {
-		const fileWithPath = file as File & { path?: string; webkitRelativePath?: string };
-		return fileWithPath.path || fileWithPath.webkitRelativePath || file.name;
-	};
+	let filePickerTarget: { mode: TrainMode; key: ParquetKey } | null = null;
+	let fileBrowserOpen = $state(false);
+	let fileBrowserDir = $state("");
+	let fileBrowserParent = $state<string | null>(null);
+	let fileBrowserEntries = $state<FileEntry[]>([]);
+	let fileBrowserLoading = $state(false);
+	let fileBrowserError = $state("");
+	let fileBrowserToken = 0;
 
 	const setParquetPath = (mode: TrainMode, key: ParquetKey, value: string) => {
 		if (mode === "ga") {
@@ -128,47 +131,77 @@
 		}
 	};
 
-	const openParquetPicker = async (mode: TrainMode, key: ParquetKey) => {
-		const picker =
-			typeof window !== "undefined"
-				? (window as Window & { showOpenFilePicker?: typeof window.showOpenFilePicker })
-						.showOpenFilePicker
-				: undefined;
-
-		if (picker) {
-			try {
-				const [handle] = await picker({
-					multiple: false,
-					types: [
-						{
-							description: "Parquet",
-							accept: {
-								"application/octet-stream": [".parquet"]
-							}
-						}
-					]
-				});
-				const file = await handle.getFile();
-				setParquetPath(mode, key, resolvePickedPath(file));
-				return;
-			} catch (err) {
-				if (err instanceof DOMException && err.name === "AbortError") {
-					return;
-				}
-			}
+	const buildFileBrowserUrl = (dir: string) => {
+		const params = new URLSearchParams();
+		if (dir.trim() !== "") {
+			params.set("dir", dir);
 		}
-
-		filePickerTarget = { mode, key };
-		fileInput?.click();
+		const query = params.toString();
+		return query ? `/api/files?${query}` : "/api/files";
 	};
 
-	const handleFileInput = (event: Event) => {
-		const input = event.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file || !filePickerTarget) return;
-		setParquetPath(filePickerTarget.mode, filePickerTarget.key, resolvePickedPath(file));
+	const loadFileBrowser = async (dir: string) => {
+		const token = ++fileBrowserToken;
+		fileBrowserLoading = true;
+		fileBrowserError = "";
+		try {
+			const res = await fetch(buildFileBrowserUrl(dir));
+			if (!res.ok) {
+				const errPayload = await res.json().catch(() => null);
+				throw new Error(errPayload?.error || `Failed to load files (${res.status})`);
+			}
+			const payload = await res.json();
+			if (token !== fileBrowserToken) return false;
+			fileBrowserDir = typeof payload.dir === "string" ? payload.dir : dir;
+			fileBrowserParent = typeof payload.parent === "string" ? payload.parent : null;
+			fileBrowserEntries = Array.isArray(payload.entries) ? payload.entries : [];
+			return true;
+		} catch (err) {
+			if (token === fileBrowserToken) {
+				fileBrowserError = err instanceof Error ? err.message : String(err);
+				fileBrowserEntries = [];
+				fileBrowserParent = null;
+			}
+			return false;
+		} finally {
+			if (token === fileBrowserToken) {
+				fileBrowserLoading = false;
+			}
+		}
+	};
+
+	const openParquetPicker = async (mode: TrainMode, key: ParquetKey) => {
+		filePickerTarget = { mode, key };
+		fileBrowserOpen = true;
+		fileBrowserDir = "";
+		fileBrowserParent = null;
+		fileBrowserEntries = [];
+		const preferredDir = "data";
+		const ok = await loadFileBrowser(preferredDir);
+		if (!ok && preferredDir !== "") {
+			await loadFileBrowser("");
+		}
+	};
+
+	const closeFileBrowser = () => {
+		fileBrowserOpen = false;
+		fileBrowserError = "";
 		filePickerTarget = null;
-		input.value = "";
+	};
+
+	const handleFileEntry = (entry: FileEntry) => {
+		if (entry.kind === "dir") {
+			void loadFileBrowser(entry.path);
+			return;
+		}
+		if (!filePickerTarget) return;
+		setParquetPath(filePickerTarget.mode, filePickerTarget.key, entry.path);
+		closeFileBrowser();
+	};
+
+	const handleFileBrowserUp = () => {
+		if (fileBrowserParent === null) return;
+		void loadFileBrowser(fileBrowserParent);
 	};
 
 	const toNumber = (value: unknown): number | null => {
@@ -1257,12 +1290,59 @@
 			</Card.Root>
 		</div>
 	</main>
+	{#if fileBrowserOpen}
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onclick={closeFileBrowser}>
+			<div
+				class="w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg"
+				onclick={(event) => event.stopPropagation()}
+			>
+				<div class="flex items-start justify-between gap-4">
+					<div>
+						<div class="text-xs uppercase tracking-wide text-muted-foreground">Select Parquet File</div>
+						<div class="text-sm font-semibold">{fileBrowserDir || "Project root"}</div>
+					</div>
+					<Button type="button" variant="ghost" size="sm" onclick={closeFileBrowser}>
+						Close
+					</Button>
+				</div>
+				<div class="mt-3 flex items-center gap-2">
+					<Button type="button" variant="outline" size="sm" onclick={handleFileBrowserUp} disabled={fileBrowserParent === null}>
+						Up
+					</Button>
+					<div class="text-xs text-muted-foreground truncate">
+						{fileBrowserDir ? `/${fileBrowserDir}` : "/"}
+					</div>
+				</div>
 
-	<input
-		class="hidden"
-		type="file"
-		accept=".parquet"
-		bind:this={fileInput}
-		onchange={handleFileInput}
-	/>
+				{#if fileBrowserError}
+					<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+						{fileBrowserError}
+					</div>
+				{/if}
+
+				<div class="mt-3 max-h-[360px] overflow-auto rounded-lg border">
+					{#if fileBrowserLoading}
+						<div class="px-4 py-6 text-sm text-muted-foreground">Loading files...</div>
+					{:else if fileBrowserEntries.length === 0}
+						<div class="px-4 py-6 text-sm text-muted-foreground">No parquet files found here.</div>
+					{:else}
+						<div class="divide-y">
+							{#each fileBrowserEntries as entry}
+								<button
+									type="button"
+									class="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-muted/50"
+									onclick={() => handleFileEntry(entry)}
+								>
+									<span class="text-[11px] font-semibold uppercase text-muted-foreground">
+										{entry.kind === "dir" ? "Dir" : "File"}
+									</span>
+									<span class="text-sm">{entry.name}</span>
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</div>
+		</div>
+	{/if}
 </div>
