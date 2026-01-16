@@ -12,6 +12,7 @@ mod ppo;
 mod util;
 
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::Context;
 use clap::Parser;
@@ -125,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     let value = model::build_value(&vs.root().sub("value"), obs_dim, args.hidden as i64, args.layers);
 
     if let Some(path) = &args.load_checkpoint {
-        vs.load(path).with_context(|| format!("load checkpoint {}", path.display()))?;
+        load_checkpoint(&mut vs, device, path)?;
         println!("info: loaded checkpoint {}", path.display());
     }
 
@@ -308,4 +309,66 @@ fn average_losses(values: &[LossStats]) -> LossStats {
         entropy: entropy / denom,
         total_loss: total_loss / denom,
     }
+}
+
+fn load_checkpoint(vs: &mut nn::VarStore, device: tch::Device, path: &Path) -> anyhow::Result<()> {
+    match vs.load(path) {
+        Ok(()) => return Ok(()),
+        Err(err) => {
+            let err_msg = err.to_string();
+            eprintln!(
+                "warn: VarStore load failed for {} ({}), trying TorchScript fallback",
+                path.display(),
+                err_msg
+            );
+            if let Err(ts_err) = load_torchscript_checkpoint(vs, device, path) {
+                anyhow::bail!(
+                    "load checkpoint {} failed: {}; TorchScript fallback failed: {}",
+                    path.display(),
+                    err_msg,
+                    ts_err
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_torchscript_checkpoint(
+    vs: &mut nn::VarStore,
+    device: tch::Device,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let module = tch::CModule::load_on_device(path, device)
+        .with_context(|| format!("load torchscript checkpoint {}", path.display()))?;
+    let params = module
+        .named_parameters()
+        .context("read torchscript parameters")?;
+    apply_named_parameters(vs, params, path)
+}
+
+fn apply_named_parameters(
+    vs: &mut nn::VarStore,
+    params: Vec<(String, tch::Tensor)>,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let mut by_name = std::collections::HashMap::with_capacity(params.len());
+    for (name, tensor) in params {
+        let name = name.replace('|', ".");
+        by_name.insert(name, tensor);
+    }
+
+    let mut variables = vs.variables_.lock().unwrap();
+    for (name, var) in variables.named_variables.iter_mut() {
+        let Some(src) = by_name.get(name) else {
+            anyhow::bail!("checkpoint missing tensor {name} in {}", path.display());
+        };
+        tch::no_grad(|| {
+            var.set_data(&var.to_kind(src.kind()));
+            var.f_copy_(src)
+        })
+        .with_context(|| format!("copy tensor {name} from {}", path.display()))?;
+    }
+
+    Ok(())
 }
