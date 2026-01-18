@@ -42,7 +42,9 @@ const resolveBehaviorFile = (dirParam: string | null, fileParam: string | null) 
     return candidate;
 };
 
-export const GET = async ({ url }) => {
+import type { RequestEvent } from "@sveltejs/kit";
+
+export const GET = async ({ url }: RequestEvent) => {
     const headers = { 'Cache-Control': 'no-store' };
     const mode = url.searchParams.get('mode');
     const dirParam = url.searchParams.get('dir');

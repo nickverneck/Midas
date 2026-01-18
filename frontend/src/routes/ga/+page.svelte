@@ -553,7 +553,7 @@
 			const files = Array.isArray(payload.files) ? payload.files : [];
 			behaviorFiles = files
 				.map((name: string) => parseBehaviorFile(name))
-				.sort((a, b) => {
+				.sort((a: BehaviorFile, b: BehaviorFile) => {
 					const genA = a.gen ?? -1;
 					const genB = b.gen ?? -1;
 					if (genA !== genB) return genB - genA;
@@ -877,7 +877,7 @@
 		let lastImprovementIndex: number | null = null;
 		let plateauIndex: number | null = null;
 
-		const pickValue = (g) => {
+			const pickValue = (g: any) => {
 			if (hasEvalRealized) return g.bestEvalRealized;
 			if (hasTrainRealized) return g.bestTrainRealized;
 			return g.bestFitness;
@@ -1061,7 +1061,7 @@
 	const frontierOptions = $derived.by(() => ({
 		scales: {
 			x: {
-				type: 'linear',
+				type: 'linear' as const,
 				title: {
 					display: true,
 					text: `Max ${sourceLabel} Drawdown (%)`
@@ -1077,7 +1077,7 @@
 		plugins: {
 			tooltip: {
 				callbacks: {
-					label: (ctx) => {
+					label: (ctx: any) => {
 						const raw = ctx.raw as { x?: number; y?: number; gen?: number; idx?: number | null };
 						const genLabel = raw?.gen ?? '—';
 						const idxLabel = raw?.idx ?? '—';
@@ -1121,10 +1121,11 @@
 		return { labels, datasets };
 	});
 
-    // Issues Detection
-    let issues = $derived.by(() => {
-        const list = [];
-        if (logs.length === 0) return list;
+	// Issues Detection
+	type IssueItem = { type: string; title: string; message: string; items?: string[] };
+	let issues = $derived.by(() => {
+		const list: IssueItem[] = [];
+		if (logs.length === 0) return list;
 
         // 1. Fitness Outliers
         if (issueState.highFitnessCount > 0) {

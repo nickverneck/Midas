@@ -51,7 +51,9 @@ const parseExtensions = (extParam: string | null) => {
     return parts.length > 0 ? parts : ['parquet'];
 };
 
-export const GET = async ({ url }) => {
+import type { RequestEvent } from "@sveltejs/kit";
+
+export const GET = async ({ url }: RequestEvent) => {
     const headers = { 'Cache-Control': 'no-store' };
     const dirParam = url.searchParams.get('dir');
     const extParam = url.searchParams.get('ext');
@@ -75,7 +77,7 @@ export const GET = async ({ url }) => {
             return {
                 name: entry.name,
                 path: entryPath,
-                kind: entry.isDirectory() ? 'dir' : 'file'
+                kind: (entry.isDirectory() ? 'dir' : 'file') as 'dir' | 'file'
             };
         })
         .sort((a, b) => {

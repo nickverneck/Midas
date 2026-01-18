@@ -20,8 +20,8 @@
 
 	let { open = false, title = 'Behavior Candlesticks', rows = [], onClose }: Props = $props();
 
-	let container: HTMLDivElement;
-	let canvas: HTMLCanvasElement;
+	let container = $state<HTMLDivElement>();
+	let canvas = $state<HTMLCanvasElement>();
 	let ctx: CanvasRenderingContext2D | null = null;
 	let resizeObserver: ResizeObserver | null = null;
 	let raf = 0;
