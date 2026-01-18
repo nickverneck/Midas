@@ -63,7 +63,7 @@
         maintainAspectRatio: false,
         normalized: true,
         interaction: {
-            mode: 'index',
+            mode: 'index' as const,
             intersect: false,
         },
         elements: {
@@ -74,38 +74,38 @@
         plugins: {
             decimation: {
                 enabled: false,
-                algorithm: 'min-max',
+                algorithm: 'min-max' as const,
                 samples: 400
             },
             zoom: {
                 pan: {
                     enabled: true,
-                    mode: 'x',
-                    modifierKey: 'shift'
+                    mode: 'x' as const,
+                    modifierKey: 'shift' as const
                 },
                 zoom: {
                     wheel: {
                         enabled: true,
-                        modifierKey: 'ctrl'
+                        modifierKey: 'ctrl' as const
                     },
                     pinch: {
                         enabled: true
                     },
-                    mode: 'x'
+                    mode: 'x' as const
                 }
             }
         },
         scales: {
             y: {
                 beginAtZero: false,
-                type: 'linear',
+                type: 'linear' as const,
                 display: true,
-                position: 'left',
+                position: 'left' as const,
             },
             y1: {
-                type: 'linear',
+                type: 'linear' as const,
                 display: false,
-                position: 'right',
+                position: 'right' as const,
                 grid: {
                     drawOnChartArea: false,
                 },
@@ -166,7 +166,7 @@
             const nextOptions = mergeOptions(options);
             const nextType = (type ?? 'line') as ChartType;
 
-            if (!chart || chart.config.type !== nextType) {
+            if (!chart || (chart.config as ChartConfiguration).type !== nextType) {
                 if (chart) chart.destroy();
                 chart = new Chart(canvas, {
                     type: nextType,
@@ -196,8 +196,9 @@
             }
             if (chart.options.plugins?.zoom) {
                 const zoomMode = nextType === 'scatter' ? 'xy' : 'x';
-                chart.options.plugins.zoom.pan.mode = zoomMode;
-                chart.options.plugins.zoom.zoom.mode = zoomMode;
+				const zoomPlugin = chart.options.plugins.zoom as any;
+				if (zoomPlugin.pan) zoomPlugin.pan.mode = zoomMode;
+				if (zoomPlugin.zoom) zoomPlugin.zoom.mode = zoomMode;
             }
             chart.update();
             chart.resize();

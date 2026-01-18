@@ -46,7 +46,9 @@ const resolveParquetDump = (root: string) => {
     return { command: 'cargo', argsPrefix: ['run', '--quiet', '--bin', 'parquet_dump', '--'] };
 };
 
-export const GET = async ({ url }) => {
+import type { RequestEvent } from "@sveltejs/kit";
+
+export const GET = async ({ url }: RequestEvent) => {
     const headers = { 'Cache-Control': 'no-store' };
     const dataset = url.searchParams.get('dataset');
     const pathParam = url.searchParams.get('path');

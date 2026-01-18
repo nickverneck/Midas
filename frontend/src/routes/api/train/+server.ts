@@ -82,8 +82,8 @@ const resolveTorchEnv = (root: string) => {
                     process.platform === 'darwin'
                         ? 'DYLD_LIBRARY_PATH'
                         : process.platform === 'linux'
-                          ? 'LD_LIBRARY_PATH'
-                          : 'PATH';
+                            ? 'LD_LIBRARY_PATH'
+                            : 'PATH';
                 env[libKey] = env[libKey]
                     ? `${torchLib}${path.delimiter}${env[libKey]}`
                     : torchLib;
@@ -98,7 +98,9 @@ const resolveTorchEnv = (root: string) => {
     return env;
 };
 
-export const POST = async ({ request }) => {
+import type { RequestEvent } from "@sveltejs/kit";
+
+export const POST = async ({ request }: RequestEvent) => {
     const payload = await request.json();
     const engine = (payload?.engine ?? 'ga') as TrainEngine;
     const params = (payload?.params ?? payload ?? {}) as Record<string, unknown>;

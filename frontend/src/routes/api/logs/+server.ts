@@ -100,7 +100,9 @@ async function readLines(filePath: string, offset: number, limit: number): Promi
     return lines;
 }
 
-export const GET = async ({ url }) => {
+import type { RequestEvent } from "@sveltejs/kit";
+
+export const GET = async ({ url }: RequestEvent) => {
     const headers = { 'Cache-Control': 'no-store' };
     const logPath = resolveLogPath(url.searchParams.get('dir'), url.searchParams.get('log'));
     const mode = url.searchParams.get('mode');
