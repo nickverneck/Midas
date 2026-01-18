@@ -156,19 +156,31 @@
 	);
 	let latest = $derived.by(() => (epochData.length > 0 ? epochData[epochData.length - 1] : null));
 
+	const toSeries = (picker: (row: RlPoint) => number | null) =>
+		epochData.map((row) => ({ x: row.epoch, y: picker(row) }));
+
+	const chartOptions = {
+		scales: {
+			x: {
+				type: 'linear' as const,
+				title: { display: true, text: 'Epoch' },
+				ticks: { precision: 0 }
+			}
+		}
+	};
+
 	let fitnessChartData = $derived.by(() => ({
-		labels: epochData.map((row) => `Epoch ${row.epoch}`),
 		datasets: [
 			{
 				label: 'Fitness (Eval)',
-				data: epochData.map((row) => row.fitness),
+				data: toSeries((row) => row.fitness),
 				borderColor: 'rgb(59, 130, 246)',
 				backgroundColor: 'rgba(59, 130, 246, 0.35)',
 				tension: 0.1
 			},
 			{
 				label: 'Eval PnL',
-				data: epochData.map((row) => row.evalPnl),
+				data: toSeries((row) => row.evalPnl),
 				borderColor: 'rgb(34, 197, 94)',
 				backgroundColor: 'rgba(34, 197, 94, 0.3)',
 				borderDash: [4, 4],
@@ -178,25 +190,24 @@
 	}));
 
 	let performanceChartData = $derived.by(() => ({
-		labels: epochData.map((row) => `Epoch ${row.epoch}`),
 		datasets: [
 			{
 				label: 'Train PnL',
-				data: epochData.map((row) => row.trainPnl),
+				data: toSeries((row) => row.trainPnl),
 				borderColor: 'rgb(148, 163, 184)',
 				backgroundColor: 'rgba(148, 163, 184, 0.25)',
 				tension: 0.1
 			},
 			{
 				label: 'Eval PnL',
-				data: epochData.map((row) => row.evalPnl),
+				data: toSeries((row) => row.evalPnl),
 				borderColor: 'rgb(34, 197, 94)',
 				backgroundColor: 'rgba(34, 197, 94, 0.3)',
 				tension: 0.1
 			},
 			{
 				label: 'Eval Sortino',
-				data: epochData.map((row) => row.evalSortino),
+				data: toSeries((row) => row.evalSortino),
 				borderColor: 'rgb(168, 85, 247)',
 				backgroundColor: 'rgba(168, 85, 247, 0.2)',
 				borderDash: [4, 4],
@@ -207,18 +218,17 @@
 	}));
 
 	let drawdownChartData = $derived.by(() => ({
-		labels: epochData.map((row) => `Epoch ${row.epoch}`),
 		datasets: [
 			{
 				label: 'Train Drawdown',
-				data: epochData.map((row) => row.trainDrawdown),
+				data: toSeries((row) => row.trainDrawdown),
 				borderColor: 'rgb(239, 68, 68)',
 				backgroundColor: 'rgba(239, 68, 68, 0.3)',
 				tension: 0.1
 			},
 			{
 				label: 'Eval Drawdown',
-				data: epochData.map((row) => row.evalDrawdown),
+				data: toSeries((row) => row.evalDrawdown),
 				borderColor: 'rgb(248, 113, 113)',
 				backgroundColor: 'rgba(248, 113, 113, 0.2)',
 				borderDash: [4, 4],
@@ -228,25 +238,24 @@
 	}));
 
 	let lossChartData = $derived.by(() => ({
-		labels: epochData.map((row) => `Epoch ${row.epoch}`),
 		datasets: [
 			{
 				label: 'Policy Loss',
-				data: epochData.map((row) => row.policyLoss),
+				data: toSeries((row) => row.policyLoss),
 				borderColor: 'rgb(59, 130, 246)',
 				backgroundColor: 'rgba(59, 130, 246, 0.3)',
 				tension: 0.1
 			},
 			{
 				label: 'Value Loss',
-				data: epochData.map((row) => row.valueLoss),
+				data: toSeries((row) => row.valueLoss),
 				borderColor: 'rgb(16, 185, 129)',
 				backgroundColor: 'rgba(16, 185, 129, 0.25)',
 				tension: 0.1
 			},
 			{
 				label: 'Entropy',
-				data: epochData.map((row) => row.entropy),
+				data: toSeries((row) => row.entropy),
 				borderColor: 'rgb(251, 191, 36)',
 				backgroundColor: 'rgba(251, 191, 36, 0.2)',
 				borderDash: [4, 4],
@@ -299,22 +308,22 @@
 					</Tabs.List>
 					<Tabs.Content value="fitness">
 						<div class="h-[320px]">
-							<GaChart data={fitnessChartData} />
+							<GaChart data={fitnessChartData} options={chartOptions} />
 						</div>
 					</Tabs.Content>
 					<Tabs.Content value="performance">
 						<div class="h-[320px]">
-							<GaChart data={performanceChartData} />
+							<GaChart data={performanceChartData} options={chartOptions} />
 						</div>
 					</Tabs.Content>
 					<Tabs.Content value="drawdown">
 						<div class="h-[320px]">
-							<GaChart data={drawdownChartData} />
+							<GaChart data={drawdownChartData} options={chartOptions} />
 						</div>
 					</Tabs.Content>
 					<Tabs.Content value="loss">
 						<div class="h-[320px]">
-							<GaChart data={lossChartData} />
+							<GaChart data={lossChartData} options={chartOptions} />
 						</div>
 					</Tabs.Content>
 				</Tabs.Root>
