@@ -6,11 +6,10 @@ fn main() {
     println!("cudnn available: {}", tch::Cuda::cudnn_is_available());
     if tch::Cuda::is_available() {
         println!("tch cuda device count: {}", tch::Cuda::device_count());
-        if tch::Cuda::device_count() > 0 {
-            println!("tch cuda device 0 name: {}", tch::Cuda::device_name(0).unwrap_or_else(|_| "unknown".to_string()));
-        }
     }
-    println!("tch cuda version: {}", tch::Cuda::version());
+    if let Ok(cuda_ver) = std::env::var("TORCH_CUDA_VERSION") {
+        println!("env TORCH_CUDA_VERSION: {}", cuda_ver);
+    }
 
     // MPS support is exposed via Device::Mps in tch when libtorch has MPS.
     let mps_device = Device::Mps;
