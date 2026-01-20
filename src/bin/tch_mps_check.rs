@@ -1,6 +1,9 @@
+use std::env;
+use std::path::Path;
 use tch::Device;
 
 fn main() {
+    preload_cuda_dlls();
     println!("tch crate version: {}", env!("CARGO_PKG_VERSION"));
     println!("cuda available: {}", tch::Cuda::is_available());
     println!("cudnn available: {}", tch::Cuda::cudnn_is_available());
@@ -28,4 +31,34 @@ fn main() {
 
     let device = if mps_available { Device::Mps } else { Device::Cpu };
     println!("selected device: {:?}", device);
+}
+
+fn preload_cuda_dlls() {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+    if env::var("MIDAS_PRELOAD_TORCH").as_deref() != Ok("1") {
+        return;
+    }
+    let Ok(libtorch) = env::var("LIBTORCH") else {
+        return;
+    };
+    let lib_dir = Path::new(&libtorch).join("lib");
+    for dll in ["c10_cuda.dll", "torch_cuda.dll"] {
+        let path = lib_dir.join(dll);
+        if !path.exists() {
+            continue;
+        }
+        unsafe {
+            match libloading::Library::new(&path) {
+                Ok(lib) => {
+                    std::mem::forget(lib);
+                    println!("info: preloaded {}", dll);
+                }
+                Err(err) => {
+                    println!("warn: failed to preload {}: {}", dll, err);
+                }
+            }
+        }
+    }
 }

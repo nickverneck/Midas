@@ -1,10 +1,12 @@
 use anyhow::Result;
+use std::env;
 use midas_env::env::MarginMode;
 use std::path::{Path, PathBuf};
 
 use crate::args::Args;
 
 pub fn resolve_device(requested: Option<&str>) -> tch::Device {
+    preload_cuda_dlls();
     use tch::Device;
     match requested.unwrap_or("") {
         "cuda" | "cuda:0" => {
@@ -32,6 +34,36 @@ pub fn resolve_device(requested: Option<&str>) -> tch::Device {
                 Device::Cuda(0)
             } else {
                 Device::Cpu
+            }
+        }
+    }
+}
+
+fn preload_cuda_dlls() {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+    if env::var("MIDAS_PRELOAD_TORCH").as_deref() != Ok("1") {
+        return;
+    }
+    let Ok(libtorch) = env::var("LIBTORCH") else {
+        return;
+    };
+    let lib_dir = Path::new(&libtorch).join("lib");
+    for dll in ["c10_cuda.dll", "torch_cuda.dll"] {
+        let path = lib_dir.join(dll);
+        if !path.exists() {
+            continue;
+        }
+        unsafe {
+            match libloading::Library::new(&path) {
+                Ok(lib) => {
+                    std::mem::forget(lib);
+                    println!("info: preloaded {}", dll);
+                }
+                Err(err) => {
+                    println!("warn: failed to preload {}: {}", dll, err);
+                }
             }
         }
     }
