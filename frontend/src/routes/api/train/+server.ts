@@ -45,8 +45,23 @@ const findVenvTorchRoot = (venvDir: string) => {
     return null;
 };
 
-const resolveTorchEnv = (root: string) => {
-    const env = { ...process.env };
+const loadDotEnv = (root: string) => {
+    const envPath = path.join(root, '.env');
+    if (!fs.existsSync(envPath)) return {};
+    const out: Record<string, string> = {};
+    const raw = fs.readFileSync(envPath, 'utf8');
+    for (const line of raw.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) continue;
+        const [key, ...rest] = trimmed.split('=');
+        const value = rest.join('=').trim().replace(/^['"]|['"]$/g, '');
+        if (key) out[key.trim()] = value;
+    }
+    return out;
+};
+
+const resolveTorchEnv = (root: string, baseEnv: NodeJS.ProcessEnv) => {
+    const env = { ...baseEnv };
     const isWindows = process.platform === 'win32';
     const venvDir = path.join(root, '.venv');
     const venvBin = path.join(venvDir, isWindows ? 'Scripts' : 'bin');
@@ -104,6 +119,20 @@ const resolveTorchEnv = (root: string) => {
     return env;
 };
 
+const resolveCargoBin = (env: NodeJS.ProcessEnv) => {
+    if (env.CARGO_BIN) return env.CARGO_BIN;
+    if (process.platform === 'win32') {
+        const cargoHome =
+            env.CARGO_HOME ??
+            (env.USERPROFILE ? path.join(env.USERPROFILE, '.cargo') : null);
+        if (cargoHome) {
+            const cargoPath = path.join(cargoHome, 'bin', 'cargo.exe');
+            if (fs.existsSync(cargoPath)) return cargoPath;
+        }
+    }
+    return 'cargo';
+};
+
 import type { RequestEvent } from "@sveltejs/kit";
 
 export const POST = async ({ request }: RequestEvent) => {
@@ -114,9 +143,10 @@ export const POST = async ({ request }: RequestEvent) => {
 
     const root = resolveProjectRoot();
     const cliArgs = buildCliArgs(params);
-    const env = resolveTorchEnv(root);
+    const dotenv = loadDotEnv(root);
+    const env = resolveTorchEnv(root, { ...process.env, ...dotenv });
 
-    const command = 'cargo';
+    const command = resolveCargoBin(env);
     const args: string[] =
         engine === 'rl'
             ? ['run', '--features', 'torch', '--bin', 'train_rl', '--', ...cliArgs]
