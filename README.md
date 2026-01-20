@@ -8,7 +8,8 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - Build and install Python bindings:  
   `uv run maturin develop --features python`
 - Build Rust with torch from the local uv venv:  
-  `scripts/cargo-build.sh`
+  `python scripts/cargo-build.py`
+  - Set `MIDAS_PLATFORM=windows` or `MIDAS_PLATFORM=unix` in `.env` to pick the helper script.
 
 ## CLI examples (Rust)
 - Load parquet + compute features (default feature-only mode):  
