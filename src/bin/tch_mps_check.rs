@@ -10,11 +10,13 @@ fn main() {
     if let Ok(cuda_ver) = std::env::var("TORCH_CUDA_VERSION") {
         println!("env TORCH_CUDA_VERSION: {}", cuda_ver);
     }
-    let cuda_tensor_ok = std::panic::catch_unwind(|| {
-        let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, Device::Cuda(0)));
-    })
-    .is_ok();
-    println!("cuda tensor usable: {}", cuda_tensor_ok);
+    if tch::Cuda::is_available() {
+        let cuda_tensor_ok = std::panic::catch_unwind(|| {
+            let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, Device::Cuda(0)));
+        })
+        .is_ok();
+        println!("cuda tensor usable: {}", cuda_tensor_ok);
+    }
 
     // MPS support is exposed via Device::Mps in tch when libtorch has MPS.
     let mps_device = Device::Mps;

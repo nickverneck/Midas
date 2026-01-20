@@ -13,13 +13,20 @@ export const GET = async () => {
     const command = resolveCargoBin(env);
     const args = ['run', '--bin', 'tch_mps_check', '--features', 'torch'];
 
+    const torchLibDir = env.LIBTORCH ? `${env.LIBTORCH}\\lib` : null;
+    const pathValue = env.PATH ?? '';
+    const pathHasTorchLib = torchLibDir
+        ? pathValue.toLowerCase().includes(torchLibDir.toLowerCase())
+        : false;
     const envSnapshot = {
         LIBTORCH: env.LIBTORCH ?? null,
         LIBTORCH_USE_PYTORCH: env.LIBTORCH_USE_PYTORCH ?? null,
         LIBTORCH_BYPASS_VERSION_CHECK: env.LIBTORCH_BYPASS_VERSION_CHECK ?? null,
         TORCH_CUDA_VERSION: env.TORCH_CUDA_VERSION ?? null,
         PYTHON: env.PYTHON ?? null,
-        VIRTUAL_ENV: env.VIRTUAL_ENV ?? null
+        VIRTUAL_ENV: env.VIRTUAL_ENV ?? null,
+        TORCH_LIB_DIR: torchLibDir,
+        PATH_HAS_TORCH_LIB: pathHasTorchLib ? '1' : '0'
     };
 
     try {
