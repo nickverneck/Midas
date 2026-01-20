@@ -35,6 +35,7 @@
 	let diagnosticsOutput = $state<string | null>(null);
 	let diagnosticsError = $state<string | null>(null);
 	let diagnosticsLoading = $state(false);
+	let diagnosticsEnv = $state<Record<string, string | null> | null>(null);
 	
 	let gaParams = $state({
 		outdir: "runs_ga",
@@ -146,15 +147,18 @@
 		if (diagnosticsLoading) return;
 		diagnosticsLoading = true;
 		diagnosticsError = null;
+		diagnosticsEnv = null;
 		try {
 			const response = await fetch('/api/diagnostics');
 			const data = await response.json();
 			if (!response.ok || !data.ok) {
 				diagnosticsOutput = (data.stdout || data.output || '').trim();
 				diagnosticsError = (data.stderr || data.error || 'Diagnostics failed').trim();
+				diagnosticsEnv = data.env ?? null;
 				return;
 			}
 			diagnosticsOutput = (data.output || '').trim();
+			diagnosticsEnv = data.env ?? null;
 		} catch (err) {
 			diagnosticsError = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -693,6 +697,9 @@
 									<Button variant="outline" onclick={() => selectStartChoice('resume')} disabled={training}>
 										Continue from Checkpoint
 									</Button>
+									<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
+										{diagnosticsLoading ? 'Running diagnostics...' : 'Run CUDA diagnostics'}
+									</Button>
 								</div>
 							{:else}
 								<div class="flex items-center gap-2 text-sm">
@@ -701,6 +708,9 @@
 										{startChoice === 'resume' ? 'Resume from Checkpoint' : 'New Training'}
 									</Badge>
 								</div>
+								<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
+									{diagnosticsLoading ? 'Running diagnostics...' : 'Run CUDA diagnostics'}
+								</Button>
 								{#if startChoice === 'resume'}
 									<div class="grid gap-2">
 										<Label for="checkpoint-path">Checkpoint Path</Label>
@@ -1286,14 +1296,6 @@
 								>
 									{runLabel}
 								</Button>
-								<Button
-									variant="outline"
-									class="w-full"
-									onclick={runDiagnostics}
-									disabled={diagnosticsLoading}
-								>
-									{diagnosticsLoading ? 'Running diagnostics...' : 'Run CUDA diagnostics'}
-								</Button>
 								{#if startChoice === 'resume' && !trimmedCheckpoint}
 									<div class="text-xs text-muted-foreground">
 										Add a checkpoint path to resume training.
@@ -1367,6 +1369,13 @@
 				</Card.Header>
 				<Card.Content>
 					<ScrollArea class="h-[220px] w-full bg-zinc-950 p-4 rounded-md border border-zinc-800 font-mono text-sm">
+						{#if diagnosticsEnv}
+							<div class="text-zinc-400 whitespace-pre-wrap mb-3">
+{Object.entries(diagnosticsEnv)
+	.map(([key, value]) => `${key}=${value ?? ''}`)
+	.join('\n')}
+							</div>
+						{/if}
 						{#if diagnosticsError}
 							<div class="text-red-400 whitespace-pre-wrap">{diagnosticsError}</div>
 						{/if}
