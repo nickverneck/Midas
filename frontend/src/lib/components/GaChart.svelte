@@ -158,13 +158,18 @@
         if (!mounted || !canvas) return;
         let cancelled = false;
 
+        // Access reactive props synchronously to ensure $effect tracks them as dependencies
+        const snapshotResult = snapshotData(data);
+        const mergedOptions = mergeOptions(options);
+        const chartType = (type ?? 'line') as ChartType;
+
         const setup = async () => {
             await ensureZoomPlugin();
             if (cancelled || destroyed || !mounted || !canvas) return;
 
-            const { labels, datasets, seriesCount, usesXY } = snapshotData(data);
-            const nextOptions = mergeOptions(options);
-            const nextType = (type ?? 'line') as ChartType;
+            const { labels, datasets, seriesCount, usesXY } = snapshotResult;
+            const nextOptions = mergedOptions;
+            const nextType = chartType;
 
             if (!chart || (chart.config as ChartConfiguration).type !== nextType) {
                 if (chart) chart.destroy();
