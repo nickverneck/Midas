@@ -13,6 +13,7 @@ mod util;
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::Context;
 use clap::Parser;
@@ -158,7 +159,9 @@ fn main() -> anyhow::Result<()> {
 
     let mut train_windows = windows_train;
 
+    let training_start = Instant::now();
     for epoch in 0..args.epochs {
+        let epoch_start = Instant::now();
         train_windows.shuffle(&mut rng);
         let train_count = if args.train_windows == 0 {
             train_windows.len()
@@ -193,14 +196,15 @@ fn main() -> anyhow::Result<()> {
             - (args.w_mdd * eval_summary.drawdown);
 
         println!(
-            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | fitness {:.4}",
+            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | fitness {:.4} | time {}",
             epoch,
             train_summary.ret_mean,
             train_summary.pnl,
             eval_summary.pnl,
             eval_summary.sortino,
             eval_summary.drawdown,
-            fitness
+            fitness,
+            format_duration(epoch_start.elapsed())
         );
 
         if args.log_interval > 0 && epoch % args.log_interval == 0 {
@@ -247,12 +251,25 @@ fn main() -> anyhow::Result<()> {
         test_summary.sortino,
         test_summary.drawdown
     );
+    println!("total training time: {}", format_duration(training_start.elapsed()));
 
     let final_path = args.outdir.join("ppo_final.pt");
     vs.save(&final_path)?;
     println!("Saved final PPO checkpoint to {}", final_path.display());
 
     Ok(())
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    let millis = duration.subsec_millis();
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if minutes > 0 {
+        format!("{minutes}m{seconds:02}.{millis:03}s")
+    } else {
+        format!("{seconds}.{millis:03}s")
+    }
 }
 
 fn average_metrics(values: &[RolloutMetrics]) -> RolloutMetrics {
