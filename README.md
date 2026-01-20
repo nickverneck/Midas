@@ -11,6 +11,12 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
   `python scripts/cargo-build.py`
   - Set `MIDAS_PLATFORM=windows` or `MIDAS_PLATFORM=unix` in `.env` to pick the helper script.
 
+## Windows CUDA notes (tch-rs)
+- Ensure the venv CUDA build is used: set `LIBTORCH_USE_PYTORCH=1` and avoid pointing `LIBTORCH` at a CPU-only libtorch.
+- Match the CUDA wheel version at build time, e.g. `TORCH_CUDA_VERSION=cu126`.
+- `LIBTORCH_BYPASS_VERSION_CHECK=1` is set by the helper scripts and frontend runner.
+- If CUDA is still unavailable, confirm the NVIDIA driver is installed (`nvcuda.dll` in `C:\Windows\System32`) and the venv `torch\lib` directory is on `PATH`.
+
 ## CLI examples (Rust)
 - Load parquet + compute features (default feature-only mode):  
   `cargo run -- --file data/train/SPY0.parquet`
