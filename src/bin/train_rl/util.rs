@@ -45,9 +45,13 @@ pub fn print_device(device: &tch::Device) {
             "info: torch_cuda.dll exists: {}",
             if cuda_dll.exists() { "yes" } else { "no" }
         );
-        if let Ok(entries) = std::fs::read_dir(std::path::Path::new(&libtorch).join("lib")) {
+        let lib_dir = std::path::Path::new(&libtorch).join("lib");
+        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
             let mut has_cudart = false;
             let mut has_cublas = false;
+            let mut has_cublas_lt = false;
+            let mut has_cudnn = false;
+            let mut has_nvrtc = false;
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
                     if name.starts_with("cudart64_") && name.ends_with(".dll") {
@@ -56,6 +60,15 @@ pub fn print_device(device: &tch::Device) {
                     if name.starts_with("cublas64_") && name.ends_with(".dll") {
                         has_cublas = true;
                     }
+                    if name.starts_with("cublasLt64_") && name.ends_with(".dll") {
+                        has_cublas_lt = true;
+                    }
+                    if name.starts_with("cudnn64_") && name.ends_with(".dll") {
+                        has_cudnn = true;
+                    }
+                    if name.starts_with("nvrtc64_") && name.ends_with(".dll") {
+                        has_nvrtc = true;
+                    }
                 }
             }
             println!(
@@ -63,6 +76,22 @@ pub fn print_device(device: &tch::Device) {
                 if has_cudart { "yes" } else { "no" },
                 if has_cublas { "yes" } else { "no" }
             );
+            println!(
+                "info: libtorch cuda extras: cublasLt={}, cudnn={}, nvrtc={}",
+                if has_cublas_lt { "yes" } else { "no" },
+                if has_cudnn { "yes" } else { "no" },
+                if has_nvrtc { "yes" } else { "no" }
+            );
+            if cfg!(target_os = "windows") {
+                let system_root = std::env::var("SystemRoot")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("C:\\Windows"));
+                let nvcuda = system_root.join("System32").join("nvcuda.dll");
+                println!(
+                    "info: nvcuda.dll in System32: {}",
+                    if nvcuda.exists() { "yes" } else { "no" }
+                );
+            }
         }
     }
     if let tch::Device::Cuda(idx) = device {
