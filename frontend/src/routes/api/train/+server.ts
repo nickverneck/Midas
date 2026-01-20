@@ -29,6 +29,11 @@ const buildCliArgs = (params: Record<string, unknown>) => {
 };
 
 const findVenvTorchRoot = (venvDir: string) => {
+    const isWindows = process.platform === 'win32';
+    if (isWindows) {
+        const torchRoot = path.join(venvDir, 'Lib', 'site-packages', 'torch');
+        return fs.existsSync(torchRoot) ? torchRoot : null;
+    }
     const libDir = path.join(venvDir, 'lib');
     if (!fs.existsSync(libDir)) return null;
     const entries = fs.readdirSync(libDir, { withFileTypes: true });
@@ -42,9 +47,10 @@ const findVenvTorchRoot = (venvDir: string) => {
 
 const resolveTorchEnv = (root: string) => {
     const env = { ...process.env };
+    const isWindows = process.platform === 'win32';
     const venvDir = path.join(root, '.venv');
-    const venvBin = path.join(venvDir, 'bin');
-    const venvPython = path.join(venvBin, 'python');
+    const venvBin = path.join(venvDir, isWindows ? 'Scripts' : 'bin');
+    const venvPython = path.join(venvBin, isWindows ? 'python.exe' : 'python');
     if (fs.existsSync(venvPython)) {
         env.VIRTUAL_ENV = env.VIRTUAL_ENV ?? venvDir;
         env.PATH = `${venvBin}${path.delimiter}${env.PATH ?? ''}`;
