@@ -32,6 +32,9 @@
 	const logPollMaxInterval = 6000;
 	let logPollDelay = logPollInterval;
 	let liveLogUpdates = $state(true);
+	let diagnosticsOutput = $state<string | null>(null);
+	let diagnosticsError = $state<string | null>(null);
+	let diagnosticsLoading = $state(false);
 	
 	let gaParams = $state({
 		outdir: "runs_ga",
@@ -138,6 +141,26 @@
 
 	const normalizeExtensions = (extensions: string[]) =>
 		extensions.map((ext) => ext.replace(/^\./, "").toLowerCase());
+
+	const runDiagnostics = async () => {
+		if (diagnosticsLoading) return;
+		diagnosticsLoading = true;
+		diagnosticsError = null;
+		try {
+			const response = await fetch('/api/diagnostics');
+			const data = await response.json();
+			if (!response.ok || !data.ok) {
+				diagnosticsOutput = (data.stdout || data.output || '').trim();
+				diagnosticsError = (data.stderr || data.error || 'Diagnostics failed').trim();
+				return;
+			}
+			diagnosticsOutput = (data.output || '').trim();
+		} catch (err) {
+			diagnosticsError = err instanceof Error ? err.message : String(err);
+		} finally {
+			diagnosticsLoading = false;
+		}
+	};
 
 	const buildFileBrowserUrl = (dir: string, extensions: string[]) => {
 		const params = new URLSearchParams();
@@ -1263,6 +1286,14 @@
 								>
 									{runLabel}
 								</Button>
+								<Button
+									variant="outline"
+									class="w-full"
+									onclick={runDiagnostics}
+									disabled={diagnosticsLoading}
+								>
+									{diagnosticsLoading ? 'Running diagnostics...' : 'Run CUDA diagnostics'}
+								</Button>
 								{#if startChoice === 'resume' && !trimmedCheckpoint}
 									<div class="text-xs text-muted-foreground">
 										Add a checkpoint path to resume training.
@@ -1322,6 +1353,27 @@
 						{/each}
 						{#if consoleOutput.length === 0}
 							<div class="text-zinc-600 italic">No output yet. Start training to see logs.</div>
+						{/if}
+					</ScrollArea>
+				</Card.Content>
+			</Card.Root>
+
+			<Card.Root>
+				<Card.Header class="flex flex-row items-center justify-between">
+					<Card.Title>Diagnostics Output</Card.Title>
+					{#if diagnosticsLoading}
+						<Badge variant="outline" class="animate-pulse">Running</Badge>
+					{/if}
+				</Card.Header>
+				<Card.Content>
+					<ScrollArea class="h-[220px] w-full bg-zinc-950 p-4 rounded-md border border-zinc-800 font-mono text-sm">
+						{#if diagnosticsError}
+							<div class="text-red-400 whitespace-pre-wrap">{diagnosticsError}</div>
+						{/if}
+						{#if diagnosticsOutput}
+							<div class="text-zinc-300 whitespace-pre-wrap">{diagnosticsOutput}</div>
+						{:else}
+							<div class="text-zinc-600 italic">Run diagnostics to see CUDA/tch info.</div>
 						{/if}
 					</ScrollArea>
 				</Card.Content>
