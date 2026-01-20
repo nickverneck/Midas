@@ -83,13 +83,17 @@ const resolveTorchEnv = (root: string, baseEnv: NodeJS.ProcessEnv) => {
                 .toString()
                 .trim();
             if (torchRoot) {
-                env.LIBTORCH = env.LIBTORCH ?? torchRoot;
+                if (env.LIBTORCH_USE_PYTORCH === '1') {
+                    env.LIBTORCH = torchRoot;
+                } else {
+                    env.LIBTORCH = env.LIBTORCH ?? torchRoot;
+                }
             }
         } catch {
             // Fall back to default env when torch isn't available in the venv.
         }
 
-        if (!env.LIBTORCH) {
+        if (!env.LIBTORCH || env.LIBTORCH_USE_PYTORCH === '1') {
             const torchRoot = findVenvTorchRoot(venvDir);
             if (torchRoot) {
                 env.LIBTORCH = torchRoot;
