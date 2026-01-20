@@ -57,6 +57,9 @@ export const resolveTorchEnv = (root: string, baseEnv: NodeJS.ProcessEnv) => {
         env.PYTHON = env.PYTHON ?? venvPython;
         env.LIBTORCH_USE_PYTORCH = env.LIBTORCH_USE_PYTORCH ?? '1';
         env.LIBTORCH_BYPASS_VERSION_CHECK = env.LIBTORCH_BYPASS_VERSION_CHECK ?? '1';
+        if (process.platform === 'win32') {
+            env.MIDAS_PRELOAD_TORCH = env.MIDAS_PRELOAD_TORCH ?? '1';
+        }
 
         const python = env.PYTHON ?? venvPython;
         try {
