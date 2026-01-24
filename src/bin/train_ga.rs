@@ -11,8 +11,9 @@ mod model;
 #[path = "train_ga/util.rs"]
 mod util;
 
+use chrono::Local;
 use clap::Parser;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use midas_env::env::MarginMode;
 
 fn write_behavior_csv(
@@ -143,7 +144,8 @@ fn write_behavior_csv(
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = args::Args::parse();
+    let mut args = args::Args::parse();
+    args.outdir = resolve_outdir(args.outdir, "runs_ga", args.load_checkpoint.is_some());
     run(args)
 }
 
@@ -162,6 +164,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     }
 
     std::fs::create_dir_all(&args.outdir)?;
+    println!("info: run directory {}", args.outdir.display());
     let behavior_dir = args.outdir.join("behavior");
     std::fs::create_dir_all(&behavior_dir)?;
 
@@ -763,4 +766,16 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         overall_start.elapsed()
     );
     Ok(())
+}
+
+fn resolve_outdir(outdir: PathBuf, default_base: &str, is_resume: bool) -> PathBuf {
+    if is_resume || !is_default_outdir(&outdir, default_base) {
+        return outdir;
+    }
+    let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    outdir.join(stamp)
+}
+
+fn is_default_outdir(outdir: &Path, default_base: &str) -> bool {
+    outdir == Path::new(default_base) || outdir == Path::new(&format!("./{default_base}"))
 }

@@ -4,6 +4,7 @@ GA + PPO hybrid training example.
 - PPO trains policy for each GA candidate.
 """
 import argparse
+from datetime import datetime
 from pathlib import Path
 import math
 import random
@@ -29,6 +30,15 @@ best_overall_policy_state = None
 best_overall_value_state = None
 
 ACTIONS = ["buy", "sell", "hold", "revert"]
+
+
+def resolve_outdir(outdir: Path, default_base: str, resume: bool = False) -> Path:
+    if resume:
+        return outdir
+    if outdir == Path(default_base) or outdir == Path(f"./{default_base}"):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return outdir / stamp
+    return outdir
 
 
 def infer_margin(symbol: str) -> float:
@@ -360,6 +370,7 @@ def main():
     ap.add_argument("--disable-margin", action="store_true", help="Disable margin enforcement for debugging")
     args = ap.parse_args()
 
+    args.outdir = resolve_outdir(args.outdir, "runs_ga", resume=args.load_checkpoint is not None)
     default_device = (
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
@@ -372,6 +383,7 @@ def main():
     else:
         print(f"🟡 Using device: {device} (CUDA available={torch.cuda.is_available()})")
     args.outdir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Run directory: {args.outdir}")
     # Start overall timer
     overall_start_time = time.time()
     # ---------------------------------------------------------------------
