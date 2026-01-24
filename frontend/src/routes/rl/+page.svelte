@@ -32,6 +32,7 @@
 	let logDir = $state('runs_rl');
 	let activeLogDir = $state('runs_rl');
 	let logMap = $state(new Map<number, RlPoint>());
+	let fitnessWeights = $state({ pnl: 1.0, sortino: 1.0, mdd: 0.5 });
 	let loading = $state(false);
 	let loadingMore = $state(false);
 	let doneLoading = $state(false);
@@ -159,6 +160,21 @@
 	const toSeries = (picker: (row: RlPoint) => number | null) =>
 		epochData.map((row) => ({ x: row.epoch, y: picker(row) }));
 
+	let resolvedWeights = $derived.by(() => ({
+		pnl: toNumber(fitnessWeights.pnl) ?? 1,
+		sortino: toNumber(fitnessWeights.sortino) ?? 1,
+		mdd: toNumber(fitnessWeights.mdd) ?? 0.5
+	}));
+
+	const calcFitness = (pnl: number | null, sortino: number | null, drawdown: number | null) => {
+		if (pnl === null || sortino === null || drawdown === null) return null;
+		return (
+			resolvedWeights.pnl * pnl +
+			resolvedWeights.sortino * sortino -
+			resolvedWeights.mdd * drawdown
+		);
+	};
+
 	const chartOptions = {
 		scales: {
 			x: {
@@ -172,15 +188,15 @@
 	let fitnessChartData = $derived.by(() => ({
 		datasets: [
 			{
-				label: 'Fitness (Eval)',
-				data: toSeries((row) => row.fitness),
-				borderColor: 'rgb(59, 130, 246)',
-				backgroundColor: 'rgba(59, 130, 246, 0.35)',
+				label: 'Train Fitness',
+				data: toSeries((row) => calcFitness(row.trainPnl, row.trainSortino, row.trainDrawdown)),
+				borderColor: 'rgb(148, 163, 184)',
+				backgroundColor: 'rgba(148, 163, 184, 0.25)',
 				tension: 0.1
 			},
 			{
-				label: 'Eval PnL',
-				data: toSeries((row) => row.evalPnl),
+				label: 'Eval Fitness',
+				data: toSeries((row) => calcFitness(row.evalPnl, row.evalSortino, row.evalDrawdown)),
 				borderColor: 'rgb(34, 197, 94)',
 				backgroundColor: 'rgba(34, 197, 94, 0.3)',
 				borderDash: [4, 4],
@@ -272,15 +288,50 @@
 			<h1 class="text-4xl font-bold tracking-tight">RL Analytics</h1>
 			<p class="text-sm text-muted-foreground">PPO training metrics from Rust runs.</p>
 		</div>
-		<div class="flex items-center gap-2">
-			<Input
-				class="w-56"
-				placeholder="runs_rl"
-				bind:value={logDir}
-			/>
-			<Button onclick={fetchLogs} disabled={loading}>
-				{loading ? 'Loading...' : 'Reload'}
-			</Button>
+		<div class="flex flex-wrap items-center gap-3">
+			<div class="flex items-center gap-2">
+				<Input
+					class="w-56"
+					placeholder="runs_rl"
+					bind:value={logDir}
+				/>
+				<Button onclick={fetchLogs} disabled={loading}>
+					{loading ? 'Loading...' : 'Reload'}
+				</Button>
+			</div>
+			<div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+				<span class="font-medium uppercase tracking-wide">Fitness weights</span>
+				<div class="flex items-center gap-1">
+					<span>w_pnl</span>
+					<Input
+						class="h-8 w-20 text-xs"
+						type="number"
+						step="0.01"
+						aria-label="Fitness weight PnL"
+						bind:value={fitnessWeights.pnl}
+					/>
+				</div>
+				<div class="flex items-center gap-1">
+					<span>w_sortino</span>
+					<Input
+						class="h-8 w-20 text-xs"
+						type="number"
+						step="0.01"
+						aria-label="Fitness weight Sortino"
+						bind:value={fitnessWeights.sortino}
+					/>
+				</div>
+				<div class="flex items-center gap-1">
+					<span>w_mdd</span>
+					<Input
+						class="h-8 w-20 text-xs"
+						type="number"
+						step="0.01"
+						aria-label="Fitness weight MDD"
+						bind:value={fitnessWeights.mdd}
+					/>
+				</div>
+			</div>
 		</div>
 	</div>
 
@@ -343,7 +394,15 @@
 							<span class="font-semibold">{latest.epoch}</span>
 						</div>
 						<div class="flex items-center justify-between">
-							<span class="text-muted-foreground">Fitness</span>
+							<span class="text-muted-foreground">Train Fitness</span>
+							<span class="font-semibold">{calcFitness(latest.trainPnl, latest.trainSortino, latest.trainDrawdown) ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Eval Fitness</span>
+							<span class="font-semibold">{calcFitness(latest.evalPnl, latest.evalSortino, latest.evalDrawdown) ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Logged Fitness</span>
 							<span class="font-semibold">{latest.fitness ?? '—'}</span>
 						</div>
 						<div class="flex items-center justify-between">

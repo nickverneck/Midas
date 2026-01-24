@@ -78,6 +78,8 @@ pub struct Args {
     pub w_sortino: f64,
     #[arg(long, default_value_t = 0.5)]
     pub w_mdd: f64,
+    #[arg(long)]
+    pub fitness_use_eval: bool,
     #[arg(long, default_value_t = 1.0)]
     pub sortino_annualization: f64,
     #[arg(long, default_value_t = 0.0)]

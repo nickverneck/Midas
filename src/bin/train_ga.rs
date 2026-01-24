@@ -441,15 +441,19 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         let mut log_buffer = String::new();
         for (idx, train_metrics, eval_metrics) in results.into_iter() {
             let genome = pop[idx].clone();
-            let selection_score = eval_metrics
-                .as_ref()
-                .map(|m| {
-                    let gap = (train_metrics.fitness - m.fitness).max(0.0);
-                    args.selection_train_weight * train_metrics.fitness
-                        + args.selection_eval_weight * m.fitness
-                        - args.selection_gap_penalty * gap
-                })
-                .unwrap_or(train_metrics.fitness);
+            let selection_score = if args.selection_use_eval {
+                eval_metrics
+                    .as_ref()
+                    .map(|m| {
+                        let gap = (train_metrics.fitness - m.fitness).max(0.0);
+                        args.selection_train_weight * train_metrics.fitness
+                            + args.selection_eval_weight * m.fitness
+                            - args.selection_gap_penalty * gap
+                    })
+                    .unwrap_or(train_metrics.fitness)
+            } else {
+                train_metrics.fitness
+            };
             scored.push((
                 selection_score,
                 idx,
