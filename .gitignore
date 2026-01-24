@@ -28,3 +28,5 @@ target
 *.parquet
 *.pt
 .env
+*.bin
+*.csv
