@@ -145,7 +145,7 @@ fn write_behavior_csv(
 
 fn main() -> anyhow::Result<()> {
     let mut args = args::Args::parse();
-    args.outdir = resolve_outdir(args.outdir, "runs_ga", args.load_checkpoint.is_some());
+    args.outdir = resolve_outdir(args.outdir, "runs_ga");
     run(args)
 }
 
@@ -768,8 +768,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_outdir(outdir: PathBuf, default_base: &str, is_resume: bool) -> PathBuf {
-    if is_resume || !is_default_outdir(&outdir, default_base) {
+fn resolve_outdir(outdir: PathBuf, default_base: &str) -> PathBuf {
+    if !is_default_outdir(&outdir, default_base) {
         return outdir;
     }
     let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();

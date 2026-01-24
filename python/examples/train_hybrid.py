@@ -32,9 +32,7 @@ best_overall_value_state = None
 ACTIONS = ["buy", "sell", "hold", "revert"]
 
 
-def resolve_outdir(outdir: Path, default_base: str, resume: bool = False) -> Path:
-    if resume:
-        return outdir
+def resolve_outdir(outdir: Path, default_base: str) -> Path:
     if outdir == Path(default_base) or outdir == Path(f"./{default_base}"):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return outdir / stamp
@@ -370,7 +368,7 @@ def main():
     ap.add_argument("--disable-margin", action="store_true", help="Disable margin enforcement for debugging")
     args = ap.parse_args()
 
-    args.outdir = resolve_outdir(args.outdir, "runs_ga", resume=args.load_checkpoint is not None)
+    args.outdir = resolve_outdir(args.outdir, "runs_ga")
     default_device = (
         "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     )
