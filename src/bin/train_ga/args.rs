@@ -83,6 +83,8 @@ pub struct Args {
     pub selection_eval_weight: f64,
     #[arg(long, default_value_t = 0.2)]
     pub selection_gap_penalty: f64,
+    #[arg(long)]
+    pub selection_use_eval: bool,
     #[arg(long, default_value_t = 1.0)]
     pub sortino_annualization: f64,
     #[arg(long, default_value_t = 0.0)]

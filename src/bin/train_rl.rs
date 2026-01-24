@@ -191,9 +191,14 @@ fn main() -> anyhow::Result<()> {
         }
         let eval_summary = average_metrics(&eval_metrics);
 
-        let fitness = (args.w_pnl * eval_summary.pnl)
-            + (args.w_sortino * eval_summary.sortino)
-            - (args.w_mdd * eval_summary.drawdown);
+        let fitness_source = if args.fitness_use_eval {
+            eval_summary
+        } else {
+            train_summary
+        };
+        let fitness = (args.w_pnl * fitness_source.pnl)
+            + (args.w_sortino * fitness_source.sortino)
+            - (args.w_mdd * fitness_source.drawdown);
 
         println!(
             "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | fitness {:.4} | time {}",
