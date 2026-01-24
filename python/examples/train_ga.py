@@ -4,6 +4,7 @@ GA-only neuroevolution example.
 - No PPO updates; evaluation is forward-pass rollouts only.
 """
 import argparse
+from datetime import datetime
 from pathlib import Path
 import math
 import random
@@ -20,6 +21,15 @@ import yaml
 import midas_env as me
 
 ACTIONS = ["buy", "sell", "hold", "revert"]
+
+
+def resolve_outdir(outdir: Path, default_base: str, resume: bool = False) -> Path:
+    if resume:
+        return outdir
+    if outdir == Path(default_base) or outdir == Path(f"./{default_base}"):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return outdir / stamp
+    return outdir
 
 
 def infer_margin(symbol: str) -> float:
@@ -593,6 +603,7 @@ def main():
     ap.add_argument("--skip-val-eval", action="store_true", help="Skip validation eval during GA (faster)")
     args = ap.parse_args()
 
+    args.outdir = resolve_outdir(args.outdir, "runs_ga")
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
@@ -604,6 +615,7 @@ def main():
     device = torch.device(args.device or default_device)
     args.device = device
     args.outdir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Run directory: {args.outdir}")
 
     if device.type == "cuda":
         cuda_index = device.index if device.index is not None else 0

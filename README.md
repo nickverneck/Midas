@@ -77,6 +77,7 @@ To recompile the Rust environment for Python:
 `uv run maturin develop --features python`
 
 ## Artifacts
-- **Logs**: `runs_ga/ga_log.csv` contains performance metrics for every individual.
-- **Traces**: `runs_ga/trace_gen{G}_rank{R}.csv` contains step-by-step action history for top performers.
+- **Run folders**: default outdirs create timestamped subfolders like `runs_ga/20260124_153045` (and `runs_rl/...`) to avoid overwriting.
+- **Logs**: `runs_ga/<timestamp>/ga_log.csv` contains performance metrics for every individual.
+- **Traces**: `runs_ga/<timestamp>/trace_gen{G}_rank{R}.csv` contains step-by-step action history for top performers.
 - **Weights**: `.pt` files for the neural networks are saved for top performers each generation.

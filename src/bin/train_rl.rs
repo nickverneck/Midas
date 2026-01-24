@@ -12,10 +12,11 @@ mod ppo;
 mod util;
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Context;
+use chrono::Local;
 use clap::Parser;
 use midas_env::env::{EnvConfig, MarginMode};
 use rand::{seq::SliceRandom, Rng, SeedableRng};
@@ -27,9 +28,11 @@ use args::Args;
 use ppo::{LossStats, RolloutConfig, RolloutMetrics};
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.outdir = resolve_outdir(args.outdir, "runs_rl", args.load_checkpoint.is_some());
 
     std::fs::create_dir_all(&args.outdir)?;
+    println!("info: run directory {}", args.outdir.display());
 
     let device = util::resolve_device(args.device.as_deref());
     util::print_device(&device);
@@ -263,6 +266,18 @@ fn main() -> anyhow::Result<()> {
     println!("Saved final PPO checkpoint to {}", final_path.display());
 
     Ok(())
+}
+
+fn resolve_outdir(outdir: PathBuf, default_base: &str, is_resume: bool) -> PathBuf {
+    if is_resume || !is_default_outdir(&outdir, default_base) {
+        return outdir;
+    }
+    let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    outdir.join(stamp)
+}
+
+fn is_default_outdir(outdir: &Path, default_base: &str) -> bool {
+    outdir == Path::new(default_base) || outdir == Path::new(&format!("./{default_base}"))
 }
 
 fn format_duration(duration: std::time::Duration) -> String {

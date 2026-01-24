@@ -7,6 +7,24 @@ const DEFAULT_LIMIT = 1000;
 const CHUNK_SIZE = 64 * 1024;
 const DEFAULT_LOG_DIR = 'runs_ga';
 
+const findLatestRunLog = (baseDir: string, fileName: string) => {
+    if (!fs.existsSync(baseDir)) return null;
+    const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+    let latestPath: string | null = null;
+    let latestMtime = -1;
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = path.join(baseDir, entry.name, fileName);
+        if (!fs.existsSync(candidate)) continue;
+        const stat = fs.statSync(candidate);
+        if (stat.mtimeMs > latestMtime) {
+            latestMtime = stat.mtimeMs;
+            latestPath = candidate;
+        }
+    }
+    return latestPath;
+};
+
 const resolveProjectRoot = () => {
     let current = process.cwd();
     for (let i = 0; i < 8; i += 1) {
@@ -22,7 +40,9 @@ const resolveProjectRoot = () => {
 
 const resolveLogPath = (dirParam: string | null, logParam: string | null) => {
     const root = resolveProjectRoot();
-    const dir = dirParam && dirParam.trim() !== '' ? dirParam.trim() : DEFAULT_LOG_DIR;
+    const trimmedDir = dirParam?.trim() ?? '';
+    const useFallback = trimmedDir === '' || trimmedDir === DEFAULT_LOG_DIR;
+    const dir = trimmedDir !== '' ? trimmedDir : DEFAULT_LOG_DIR;
     const logType = logParam && logParam.trim() !== '' ? logParam.trim() : 'ga';
     const fileName = logType === 'rl' ? 'rl_log.csv' : 'ga_log.csv';
     const candidate = path.isAbsolute(dir) ? dir : path.join(root, dir);
@@ -34,7 +54,15 @@ const resolveLogPath = (dirParam: string | null, logParam: string | null) => {
     if (resolved.toLowerCase().endsWith('.csv')) {
         return resolved;
     }
-    return path.join(resolved, fileName);
+    const logPath = path.join(resolved, fileName);
+    if (fs.existsSync(logPath)) {
+        return logPath;
+    }
+    if (useFallback) {
+        const latest = findLatestRunLog(resolved, fileName);
+        if (latest) return latest;
+    }
+    return logPath;
 };
 
 function readHeader(filePath: string): string {
