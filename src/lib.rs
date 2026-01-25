@@ -4,6 +4,7 @@ pub mod env;
 pub mod backtesting;
 pub mod features;
 pub mod sampler;
+pub mod script;
 
 #[cfg(feature = "python")]
 mod py_bindings {

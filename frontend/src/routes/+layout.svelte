@@ -13,6 +13,7 @@
 	<nav class="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
 		<div class="mx-auto flex max-w-6xl items-center gap-6 px-6 py-3 text-sm">
 			<a href="/" class="font-semibold text-foreground">Train</a>
+			<a href="/backtest" class="text-muted-foreground hover:text-foreground">Backtest</a>
 			<a href="/ga" class="text-muted-foreground hover:text-foreground">GA Analytics</a>
 			<a href="/rl" class="text-muted-foreground hover:text-foreground">RL Analytics</a>
 		</div>

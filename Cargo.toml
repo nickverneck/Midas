@@ -19,6 +19,7 @@ chrono = "0.4.38"
 chrono-tz = "0.9.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+serde_json = "1.0"
 csv = "1.3"
 rand = "0.8"
 rand_distr = "0.4"
@@ -27,6 +28,7 @@ tch = { version = "0.22.0", optional = true }
 libloading = "0.8"
 bincode = "1.3"
 flate2 = { version = "1.1.5" }
+mlua = { version = "0.9", features = ["lua54", "vendored"] }
 
 [features]
 default = []
@@ -47,3 +49,7 @@ required-features = ["torch"]
 name = "train_rl"
 path = "src/bin/train_rl.rs"
 required-features = ["torch"]
+
+[[bin]]
+name = "backtest_script"
+path = "src/bin/backtest_script.rs"
