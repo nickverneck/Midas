@@ -63,6 +63,12 @@ end
 	let running = $state(false);
 	let runError = $state("");
 
+	const toNumber = (value: unknown) => {
+		if (value === null || value === undefined || value === "") return null;
+		const num = Number(value);
+		return Number.isFinite(num) ? num : null;
+	};
+
 	let env = $state({
 		initialBalance: 10_000,
 		maxPosition: 1,
@@ -79,6 +85,77 @@ end
 		instructionLimit: 5_000_000,
 		instructionInterval: 10_000
 	});
+
+	let numericEnv = $derived.by(() => ({
+		initialBalance: toNumber(env.initialBalance),
+		maxPosition: toNumber(env.maxPosition),
+		commission: toNumber(env.commission),
+		slippage: toNumber(env.slippage),
+		marginPerContract: toNumber(env.marginPerContract),
+		contractMultiplier: toNumber(env.contractMultiplier)
+	}));
+
+	let numericLimits = $derived.by(() => ({
+		memoryMb: toNumber(limits.memoryMb),
+		instructionLimit: toNumber(limits.instructionLimit),
+		instructionInterval: toNumber(limits.instructionInterval)
+	}));
+
+	let scriptInvalid = $derived.by(() => scriptText.trim().length === 0);
+	let datasetPathInvalid = $derived.by(() => {
+		if (datasetMode !== "custom") return false;
+		const trimmed = datasetPath.trim().toLowerCase();
+		if (!trimmed) return true;
+		return !trimmed.endsWith(".parquet");
+	});
+
+	let invalidInitialBalance = $derived.by(
+		() => numericEnv.initialBalance === null || numericEnv.initialBalance <= 0
+	);
+	let invalidMaxPosition = $derived.by(
+		() => numericEnv.maxPosition === null || numericEnv.maxPosition < 0
+	);
+	let invalidCommission = $derived.by(
+		() => numericEnv.commission === null || numericEnv.commission < 0
+	);
+	let invalidSlippage = $derived.by(
+		() => numericEnv.slippage === null || numericEnv.slippage < 0
+	);
+	let invalidMargin = $derived.by(
+		() => numericEnv.marginPerContract === null || numericEnv.marginPerContract < 0
+	);
+	let invalidContractMultiplier = $derived.by(
+		() => numericEnv.contractMultiplier === null || numericEnv.contractMultiplier <= 0
+	);
+	let invalidMemory = $derived.by(
+		() => numericLimits.memoryMb === null || numericLimits.memoryMb < 0
+	);
+	let invalidInstructionLimit = $derived.by(
+		() => numericLimits.instructionLimit === null || numericLimits.instructionLimit < 0
+	);
+	let invalidInstructionInterval = $derived.by(
+		() => numericLimits.instructionInterval === null || numericLimits.instructionInterval <= 0
+	);
+
+	let validationErrors = $derived.by(() => {
+		const errors: string[] = [];
+		if (scriptInvalid) errors.push("Script is required.");
+		if (datasetPathInvalid) {
+			errors.push("Custom dataset path must be a .parquet file.");
+		}
+		if (invalidInitialBalance) errors.push("Initial balance must be greater than 0.");
+		if (invalidMaxPosition) errors.push("Max position must be 0 or higher.");
+		if (invalidCommission) errors.push("Commission must be 0 or higher.");
+		if (invalidSlippage) errors.push("Slippage must be 0 or higher.");
+		if (invalidMargin) errors.push("Margin per contract must be 0 or higher.");
+		if (invalidContractMultiplier) errors.push("Contract multiplier must be greater than 0.");
+		if (invalidMemory) errors.push("Memory limit must be 0 or higher.");
+		if (invalidInstructionLimit) errors.push("Instruction limit must be 0 or higher.");
+		if (invalidInstructionInterval) errors.push("Instruction interval must be greater than 0.");
+		return errors;
+	});
+
+	let canRun = $derived.by(() => !running && validationErrors.length === 0);
 
 	$effect(() => {
 		if (datasetMode === "train") {
@@ -162,6 +239,10 @@ end
 	};
 
 	const runBacktest = async () => {
+		if (validationErrors.length > 0) {
+			runError = "Fix validation errors before running.";
+			return;
+		}
 		running = true;
 		runError = "";
 		try {
@@ -170,19 +251,19 @@ end
 				path: datasetMode === "custom" ? datasetPath : null,
 				script: scriptText,
 				env: {
-					initialBalance: env.initialBalance,
-					maxPosition: env.maxPosition,
-					commission: env.commission,
-					slippage: env.slippage,
-					marginPerContract: env.marginPerContract,
+					initialBalance: numericEnv.initialBalance,
+					maxPosition: numericEnv.maxPosition,
+					commission: numericEnv.commission,
+					slippage: numericEnv.slippage,
+					marginPerContract: numericEnv.marginPerContract,
 					marginMode: env.marginMode,
-					contractMultiplier: env.contractMultiplier,
+					contractMultiplier: numericEnv.contractMultiplier,
 					enforceMargin: env.enforceMargin
 				},
 				limits: {
-					memoryMb: limits.memoryMb,
-					instructionLimit: limits.instructionLimit,
-					instructionInterval: limits.instructionInterval
+					memoryMb: numericLimits.memoryMb,
+					instructionLimit: numericLimits.instructionLimit,
+					instructionInterval: numericLimits.instructionInterval
 				}
 			};
 
@@ -244,7 +325,10 @@ end
 				</Card.Header>
 				<Card.Content>
 					<textarea
-						class="min-h-[320px] w-full resize-none rounded-lg border bg-muted/30 px-4 py-3 font-mono text-xs leading-relaxed shadow-inner focus:outline-none focus:ring-2 focus:ring-ring"
+						class={`min-h-[320px] w-full resize-none rounded-lg border bg-muted/30 px-4 py-3 font-mono text-xs leading-relaxed shadow-inner focus:outline-none focus:ring-2 ${
+							scriptInvalid ? "border-destructive focus:ring-destructive/40" : "focus:ring-ring"
+						}`}
+						aria-invalid={scriptInvalid}
 						bind:value={scriptText}
 					></textarea>
 					<div class="mt-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
@@ -317,7 +401,11 @@ end
 							bind:value={datasetPath}
 							placeholder="data/train/SPY0.parquet"
 							disabled={datasetMode !== "custom"}
+							aria-invalid={datasetPathInvalid}
 						/>
+						{#if datasetMode === "custom"}
+							<p class="text-xs text-muted-foreground">Provide a .parquet file path.</p>
+						{/if}
 					</div>
 				</Card.Content>
 			</Card.Root>
@@ -334,23 +422,31 @@ end
 					<div class="grid gap-4 sm:grid-cols-2">
 						<div class="space-y-2">
 							<Label>Initial Balance</Label>
-							<Input type="number" bind:value={env.initialBalance} />
+							<Input type="number" bind:value={env.initialBalance} aria-invalid={invalidInitialBalance} />
 						</div>
 						<div class="space-y-2">
 							<Label>Max Position</Label>
-							<Input type="number" bind:value={env.maxPosition} />
+							<Input type="number" bind:value={env.maxPosition} aria-invalid={invalidMaxPosition} />
 						</div>
 						<div class="space-y-2">
 							<Label>Commission (round trip)</Label>
-							<Input type="number" bind:value={env.commission} />
+							<Input type="number" bind:value={env.commission} aria-invalid={invalidCommission} />
 						</div>
 						<div class="space-y-2">
 							<Label>Slippage / Contract</Label>
-							<Input type="number" bind:value={env.slippage} />
+							<Input type="number" bind:value={env.slippage} aria-invalid={invalidSlippage} />
 						</div>
 						<div class="space-y-2">
 							<Label>Margin / Contract</Label>
-							<Input type="number" bind:value={env.marginPerContract} />
+							<Input type="number" bind:value={env.marginPerContract} aria-invalid={invalidMargin} />
+						</div>
+						<div class="space-y-2">
+							<Label>Contract Multiplier</Label>
+							<Input
+								type="number"
+								bind:value={env.contractMultiplier}
+								aria-invalid={invalidContractMultiplier}
+							/>
 						</div>
 						<div class="space-y-2">
 							<Label>Margin Mode</Label>
@@ -367,9 +463,24 @@ end
 					<div class="space-y-2">
 						<Label>Safety Limits</Label>
 						<div class="grid gap-3 sm:grid-cols-3">
-							<Input type="number" bind:value={limits.memoryMb} placeholder="MB" />
-							<Input type="number" bind:value={limits.instructionLimit} placeholder="Instructions" />
-							<Input type="number" bind:value={limits.instructionInterval} placeholder="Check interval" />
+							<Input
+								type="number"
+								bind:value={limits.memoryMb}
+								placeholder="MB"
+								aria-invalid={invalidMemory}
+							/>
+							<Input
+								type="number"
+								bind:value={limits.instructionLimit}
+								placeholder="Instructions"
+								aria-invalid={invalidInstructionLimit}
+							/>
+							<Input
+								type="number"
+								bind:value={limits.instructionInterval}
+								placeholder="Check interval"
+								aria-invalid={invalidInstructionInterval}
+							/>
 						</div>
 						<p class="text-xs text-muted-foreground">Lua runtime caps for runaway scripts.</p>
 					</div>
@@ -385,9 +496,19 @@ end
 					<Card.Description>Execute the Lua script against the selected dataset.</Card.Description>
 				</Card.Header>
 				<Card.Content class="space-y-3">
-					<Button class="w-full" on:click={runBacktest} disabled={running || !scriptText.trim()}>
+					<Button class="w-full" on:click={runBacktest} disabled={!canRun}>
 						{running ? "Running..." : "Run Script"}
 					</Button>
+					{#if validationErrors.length > 0}
+						<div class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+							<p class="font-medium">Fix before running:</p>
+							<ul class="mt-1 space-y-1">
+								{#each validationErrors as err}
+									<li>• {err}</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
 					{#if runError}
 						<p class="text-xs text-destructive">{runError}</p>
 					{/if}
