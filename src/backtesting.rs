@@ -121,7 +121,7 @@ pub fn run_ema_crossover(prices: &[f64], params: EmaParams, cfg: EnvConfig) -> E
     run_episode(prices, &actions, 10000.0, cfg)
 }
 
-fn compute_metrics(rewards: &[f64], equity_curve: &[f64]) -> EpisodeMetrics {
+pub fn compute_metrics(rewards: &[f64], equity_curve: &[f64]) -> EpisodeMetrics {
     let total_reward: f64 = rewards.iter().sum();
     let total_pnl = *equity_curve.last().unwrap_or(&0.0);
 
