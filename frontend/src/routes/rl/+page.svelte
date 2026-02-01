@@ -5,9 +5,11 @@
 	import { Input } from "$lib/components/ui/input";
 	import { Button } from "$lib/components/ui/button";
 	import { Badge } from "$lib/components/ui/badge";
+	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import GaChart from "$lib/components/GaChart.svelte";
 
 	type ChartTab = 'fitness' | 'performance' | 'drawdown' | 'loss';
+	type FolderEntry = { name: string; path: string; kind: "dir" | "file"; mtime?: number };
 	
 	type RlPoint = {
 		epoch: number;
@@ -22,8 +24,10 @@
 		evalDrawdown: number | null;
 		policyLoss: number | null;
 		valueLoss: number | null;
+		klDiv: number | null;
 		entropy: number | null;
 		totalLoss: number | null;
+		algorithm: 'ppo' | 'grpo' | null;
 	};
 
 	const logChunk = 1000;
@@ -40,6 +44,13 @@
 	let error = $state('');
 	let loadToken = 0;
 
+	// Folder picker state
+	let folderPickerOpen = $state(false);
+	let folderPickerLoading = $state(false);
+	let folderPickerError = $state('');
+	let folderEntries = $state<FolderEntry[]>([]);
+	let folderPickerToken = 0;
+
 	const toNumber = (value: unknown): number | null => {
 		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
 		if (typeof value === 'string' && value.trim() !== '') {
@@ -50,6 +61,55 @@
 	};
 
 	const normalizeLogDir = (value: string) => value.trim() || 'runs_rl';
+
+	// Folder picker functions
+	const loadFolders = async () => {
+		const token = ++folderPickerToken;
+		folderPickerLoading = true;
+		folderPickerError = '';
+		try {
+			const res = await fetch('/api/files?dir=runs_rl');
+			if (!res.ok) {
+				const errPayload = await res.json().catch(() => null);
+				throw new Error(errPayload?.error || `Failed to load folders (${res.status})`);
+			}
+			const payload = await res.json();
+			if (token !== folderPickerToken) return;
+			
+			// Filter only directories and sort by mtime (newest first)
+			const entries = Array.isArray(payload.entries) ? payload.entries : [];
+			const folders = entries
+				.filter((e: FolderEntry) => e.kind === 'dir')
+				.sort((a: FolderEntry, b: FolderEntry) => (b.mtime || 0) - (a.mtime || 0));
+			folderEntries = folders;
+		} catch (err) {
+			if (token === folderPickerToken) {
+				folderPickerError = err instanceof Error ? err.message : String(err);
+				folderEntries = [];
+			}
+		} finally {
+			if (token === folderPickerToken) {
+				folderPickerLoading = false;
+			}
+		}
+	};
+
+	const openFolderPicker = async () => {
+		folderPickerOpen = true;
+		await loadFolders();
+	};
+
+	const closeFolderPicker = () => {
+		folderPickerOpen = false;
+		folderPickerError = '';
+	};
+
+	const selectFolder = (folder: FolderEntry) => {
+		logDir = folder.path;
+		closeFolderPicker();
+		fetchLogs();
+	};
+
 	const buildLogsUrl = (offset: number, dir: string) => {
 		const params = new URLSearchParams({
 			limit: String(logChunk),
@@ -67,6 +127,14 @@
 			if (!row || typeof row !== 'object') continue;
 			const epoch = toNumber(row.epoch);
 			if (epoch === null) continue;
+			const valueLoss = toNumber(row.value_loss);
+			const klDiv = toNumber(row.kl_div);
+			let algorithm: 'ppo' | 'grpo' | null = null;
+			if (valueLoss !== null) {
+				algorithm = 'ppo';
+			} else if (klDiv !== null) {
+				algorithm = 'grpo';
+			}
 			next.set(epoch, {
 				epoch,
 				fitness: toNumber(row.fitness),
@@ -79,9 +147,11 @@
 				evalSortino: toNumber(row.eval_sortino),
 				evalDrawdown: toNumber(row.eval_drawdown),
 				policyLoss: toNumber(row.policy_loss),
-				valueLoss: toNumber(row.value_loss),
+				valueLoss,
+				klDiv,
 				entropy: toNumber(row.entropy),
-				totalLoss: toNumber(row.total_loss)
+				totalLoss: toNumber(row.total_loss),
+				algorithm
 			});
 		}
 		logMap = next;
@@ -298,6 +368,9 @@
 				<Button onclick={fetchLogs} disabled={loading}>
 					{loading ? 'Loading...' : 'Reload'}
 				</Button>
+				<Button variant="outline" onclick={openFolderPicker}>
+					Browse
+				</Button>
 			</div>
 			<div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
 				<span class="font-medium uppercase tracking-wide">Fitness weights</span>
@@ -441,4 +514,67 @@
 			{/if}
 		</Card.Root>
 	</div>
+
+	<!-- Folder Picker Modal -->
+	{#if folderPickerOpen}
+		<div
+			class="fixed inset-0 z-50 flex items-center justify-center p-4"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Select RL run folder"
+		>
+			<button
+				type="button"
+				class="absolute inset-0 bg-black/40"
+				onclick={closeFolderPicker}
+				aria-label="Close folder picker"
+			></button>
+			<div class="relative z-10 w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg">
+				<div class="flex items-start justify-between gap-4">
+					<div>
+						<div class="text-xs uppercase tracking-wide text-muted-foreground">Select RL Run Folder</div>
+						<div class="text-sm font-semibold">runs_rl</div>
+						<div class="text-xs text-muted-foreground">
+							Sorted by modification time (newest first)
+						</div>
+					</div>
+					<Button type="button" variant="ghost" size="sm" onclick={closeFolderPicker}>
+						Close
+					</Button>
+				</div>
+
+				{#if folderPickerError}
+					<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+						{folderPickerError}
+					</div>
+				{/if}
+
+				<ScrollArea class="mt-3 max-h-[360px] rounded-lg border">
+					{#if folderPickerLoading}
+						<div class="px-4 py-6 text-sm text-muted-foreground">Loading folders...</div>
+					{:else if folderEntries.length === 0}
+						<div class="px-4 py-6 text-sm text-muted-foreground">No run folders found in runs_rl.</div>
+					{:else}
+						<div class="divide-y">
+							{#each folderEntries as folder}
+								<button
+									type="button"
+									class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/50"
+									onclick={() => selectFolder(folder)}
+								>
+									<span class="text-[11px] font-semibold uppercase text-muted-foreground">Folder</span>
+									<span class="text-sm font-medium">{folder.name}</span>
+									{#if folder.mtime}
+										<span class="ml-auto text-xs text-muted-foreground">
+											{new Date(folder.mtime * 1000).toLocaleString()}
+										</span>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</ScrollArea>
+			</div>
+		</div>
+	{/if}
 </main>

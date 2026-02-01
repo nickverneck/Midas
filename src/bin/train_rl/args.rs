@@ -48,6 +48,12 @@ pub struct Args {
     pub train_windows: usize,
     #[arg(long, default_value_t = 4)]
     pub ppo_epochs: usize,
+    #[arg(long, default_value = "ppo", value_parser = ["ppo", "grpo"])]
+    pub algorithm: String,
+    #[arg(long, default_value_t = 8)]
+    pub group_size: usize,
+    #[arg(long, default_value_t = 4)]
+    pub grpo_epochs: usize,
     #[arg(long, default_value_t = 0.0003)]
     pub lr: f64,
     #[arg(long, default_value_t = 0.99)]

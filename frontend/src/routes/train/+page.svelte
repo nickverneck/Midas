@@ -9,11 +9,13 @@
 	import GaChart from "$lib/components/GaChart.svelte";
 
 	type TrainMode = 'ga' | 'rl';
+	type RlAlgorithm = 'ppo' | 'grpo';
 	type ConsoleLine = { type: string; text: string };
 	type DataMode = 'full' | 'windowed';
 	type StartChoice = 'new' | 'resume';
 
 	let trainMode = $state<TrainMode>('ga');
+	let rlAlgorithm = $state<RlAlgorithm>('ppo');
 	let consoleOutput = $state<ConsoleLine[]>([]);
 	let training = $state(false);
 	let paramsCollapsed = $state(false);
@@ -78,6 +80,7 @@
 	});
 
 	let rlParams = $state({
+		algorithm: "ppo",
 		outdir: "runs_rl",
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
@@ -88,6 +91,8 @@
 		epochs: 10,
 		"train-windows": 3,
 		"ppo-epochs": 4,
+		"group-size": 8,
+		"grpo-epochs": 4,
 		lr: 0.0003,
 		gamma: 0.99,
 		lam: 0.95,
@@ -514,6 +519,7 @@
 
 	const buildRlParams = () => {
 		const params = { ...rlParams } as Record<string, unknown>;
+		params.algorithm = rlAlgorithm;
 		if (rlDataMode === 'full') {
 			params["full-file"] = true;
 		} else {
@@ -558,7 +564,8 @@
 		training = true;
 		const verb = startChoice === 'resume' ? 'Resuming' : 'Starting';
 		const suffix = startChoice === 'resume' ? ' from checkpoint' : '';
-		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()} training${suffix}...` }];
+		const algoInfo = mode === 'rl' ? ` (${rlAlgorithm.toUpperCase()})` : '';
+		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()}${algoInfo} training${suffix}...` }];
 		fitnessByGen = new Map();
 		if (liveLogUpdates) {
 			startLogPolling(outdir);
@@ -594,6 +601,16 @@
 						const data = JSON.parse(line.substring(6));
 						if (data.type === 'stdout' || data.type === 'stderr') {
 							consoleOutput = [...consoleOutput, { type: data.type, text: data.content }];
+							// Parse the run directory from Rust output
+							const runDirMatch = data.content.match(/info: run directory (.+)/);
+							if (runDirMatch) {
+								const actualDir = runDirMatch[1].trim();
+								activeLogDir = actualDir;
+								if (liveLogUpdates) {
+									stopLogPolling();
+									startLogPolling(actualDir);
+								}
+							}
 						} else if (data.type === 'error') {
 							consoleOutput = [...consoleOutput, { type: 'error', text: data.content }];
 						} else if (data.type === 'exit') {
@@ -746,7 +763,7 @@
 								<Tabs.Root bind:value={trainMode} class="w-full">
 									<Tabs.List class="grid w-full grid-cols-2 mb-4">
 										<Tabs.Trigger value="ga">GA (Primary)</Tabs.Trigger>
-										<Tabs.Trigger value="rl">RL (PPO)</Tabs.Trigger>
+										<Tabs.Trigger value="rl">RL (PPO/GRPO)</Tabs.Trigger>
 									</Tabs.List>
 
 									<Tabs.Content value="ga">
@@ -1103,60 +1120,108 @@
 																<option value="cuda">CUDA</option>
 															</select>
 														</div>
-													</div>
-												</details>
+											</div>
+										</details>
 
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">PPO Training</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-epochs">Epochs</Label>
-															<Input id="rl-epochs" type="number" min="1" bind:value={rlParams.epochs} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-train-windows">Train Windows</Label>
-															<Input id="rl-train-windows" type="number" min="0" bind:value={rlParams["train-windows"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-ppo-epochs">PPO Epochs</Label>
-															<Input id="rl-ppo-epochs" type="number" min="1" bind:value={rlParams["ppo-epochs"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-eval-windows">Eval Windows</Label>
-															<Input id="rl-eval-windows" type="number" min="1" bind:value={rlParams["eval-windows"]} />
-														</div>
-													</div>
-												</details>
+										<details class="rounded-lg border bg-background/60 p-4" open>
+											<summary class="cursor-pointer text-sm font-semibold">Algorithm</summary>
+											<div class="mt-4 grid gap-4 md:grid-cols-2">
+												<div class="grid gap-2">
+													<Label for="rl-algorithm">RL Algorithm</Label>
+													<select
+														id="rl-algorithm"
+														bind:value={rlAlgorithm}
+														class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+													>
+														<option value="ppo">PPO (Proximal Policy Optimization)</option>
+														<option value="grpo">GRPO (Group Relative Policy Optimization)</option>
+													</select>
+													<p class="text-xs text-muted-foreground">
+														{rlAlgorithm === 'ppo' ? 'Uses actor-critic with value network' : 'Group-based, no value network required'}
+													</p>
+												</div>
+											</div>
+										</details>
 
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Optimization</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-lr">Learning Rate</Label>
-															<Input id="rl-lr" type="number" step="0.0001" bind:value={rlParams.lr} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-gamma">Gamma</Label>
-															<Input id="rl-gamma" type="number" step="0.01" min="0" max="1" bind:value={rlParams.gamma} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-lam">Lambda</Label>
-															<Input id="rl-lam" type="number" step="0.01" min="0" max="1" bind:value={rlParams.lam} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-clip">Clip Range</Label>
-															<Input id="rl-clip" type="number" step="0.01" min="0" bind:value={rlParams.clip} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-vf-coef">Value Coef</Label>
-															<Input id="rl-vf-coef" type="number" step="0.01" min="0" bind:value={rlParams["vf-coef"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-ent-coef">Entropy Coef</Label>
-															<Input id="rl-ent-coef" type="number" step="0.01" min="0" bind:value={rlParams["ent-coef"]} />
-														</div>
-													</div>
-												</details>
+										{#if rlAlgorithm === 'ppo'}
+										<details class="rounded-lg border bg-background/60 p-4">
+											<summary class="cursor-pointer text-sm font-semibold">PPO Training</summary>
+											<div class="mt-4 grid gap-4 md:grid-cols-2">
+												<div class="grid gap-2">
+													<Label for="rl-epochs">Epochs</Label>
+													<Input id="rl-epochs" type="number" min="1" bind:value={rlParams.epochs} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-train-windows">Train Windows</Label>
+													<Input id="rl-train-windows" type="number" min="0" bind:value={rlParams["train-windows"]} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-ppo-epochs">PPO Epochs</Label>
+													<Input id="rl-ppo-epochs" type="number" min="1" bind:value={rlParams["ppo-epochs"]} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-eval-windows">Eval Windows</Label>
+													<Input id="rl-eval-windows" type="number" min="1" bind:value={rlParams["eval-windows"]} />
+												</div>
+											</div>
+										</details>
+										{/if}
+
+										{#if rlAlgorithm === 'grpo'}
+										<details class="rounded-lg border bg-background/60 p-4">
+											<summary class="cursor-pointer text-sm font-semibold">GRPO Training</summary>
+											<div class="mt-4 grid gap-4 md:grid-cols-2">
+												<div class="grid gap-2">
+													<Label for="rl-epochs">Epochs</Label>
+													<Input id="rl-epochs" type="number" min="1" bind:value={rlParams.epochs} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-train-windows">Train Windows</Label>
+													<Input id="rl-train-windows" type="number" min="0" bind:value={rlParams["train-windows"]} />
+												</div>
+												<div class="grid gap-2">
+															<Label for="rl-group-size">Group Size</Label>
+															<Input id="rl-group-size" type="number" min="2" bind:value={rlParams["group-size"]} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-eval-windows">Eval Windows</Label>
+													<Input id="rl-eval-windows" type="number" min="1" bind:value={rlParams["eval-windows"]} />
+												</div>
+											</div>
+										</details>
+										{/if}
+
+										<details class="rounded-lg border bg-background/60 p-4">
+											<summary class="cursor-pointer text-sm font-semibold">Optimization</summary>
+											<div class="mt-4 grid gap-4 md:grid-cols-2">
+												<div class="grid gap-2">
+													<Label for="rl-lr">Learning Rate</Label>
+													<Input id="rl-lr" type="number" step="0.0001" bind:value={rlParams.lr} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-gamma">Gamma</Label>
+													<Input id="rl-gamma" type="number" step="0.01" min="0" max="1" bind:value={rlParams.gamma} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-lam">Lambda</Label>
+													<Input id="rl-lam" type="number" step="0.01" min="0" max="1" bind:value={rlParams.lam} />
+												</div>
+												<div class="grid gap-2">
+													<Label for="rl-clip">Clip Range</Label>
+													<Input id="rl-clip" type="number" step="0.01" min="0" bind:value={rlParams.clip} />
+												</div>
+												{#if rlAlgorithm === 'ppo'}
+												<div class="grid gap-2">
+													<Label for="rl-vf-coef">Value Coef</Label>
+													<Input id="rl-vf-coef" type="number" step="0.01" min="0" bind:value={rlParams["vf-coef"]} />
+												</div>
+												{/if}
+												<div class="grid gap-2">
+													<Label for="rl-ent-coef">Entropy Coef</Label>
+													<Input id="rl-ent-coef" type="number" step="0.01" min="0" bind:value={rlParams["ent-coef"]} />
+												</div>
+											</div>
+										</details>
 
 												<details class="rounded-lg border bg-background/60 p-4">
 													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
