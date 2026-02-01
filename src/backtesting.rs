@@ -52,7 +52,7 @@ pub fn run_episode(prices: &[f64], actions: &[Action], initial_balance: f64, cfg
         equity_curve.push(equity);
     }
 
-    let metrics = compute_metrics(&rewards, &equity_curve);
+    let metrics = compute_metrics(&rewards, &equity_curve, initial_balance);
     EpisodeResult {
         metrics,
         equity_curve,
@@ -121,20 +121,22 @@ pub fn run_ema_crossover(prices: &[f64], params: EmaParams, cfg: EnvConfig) -> E
     run_episode(prices, &actions, 10000.0, cfg)
 }
 
-pub fn compute_metrics(rewards: &[f64], equity_curve: &[f64]) -> EpisodeMetrics {
+pub fn compute_metrics(rewards: &[f64], equity_curve: &[f64], initial_balance: f64) -> EpisodeMetrics {
     let total_reward: f64 = rewards.iter().sum();
     let total_pnl = *equity_curve.last().unwrap_or(&0.0);
 
+    let returns = equity_returns(equity_curve, initial_balance);
+
     let sharpe_ratio = {
-        if rewards.is_empty() {
+        if returns.is_empty() {
             0.0
         } else {
-            let mean = rewards.iter().sum::<f64>() / rewards.len() as f64;
-            let var = rewards
+            let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+            let var = returns
                 .iter()
                 .map(|r| (r - mean).powi(2))
                 .sum::<f64>()
-                / rewards.len().max(1) as f64;
+                / returns.len().max(1) as f64;
             let std = var.sqrt();
             if std == 0.0 { 0.0 } else { (mean / std) * (252f64).sqrt() }
         }
@@ -152,6 +154,24 @@ pub fn compute_metrics(rewards: &[f64], equity_curve: &[f64]) -> EpisodeMetrics 
         win_rate,
         max_consecutive_losses,
     }
+}
+
+pub fn equity_returns(equity_curve: &[f64], initial_balance: f64) -> Vec<f64> {
+    if equity_curve.is_empty() {
+        return Vec::new();
+    }
+    let mut returns = Vec::with_capacity(equity_curve.len());
+    let mut prev = initial_balance;
+    for &eq in equity_curve {
+        let r = if prev.abs() < 1e-9 {
+            0.0
+        } else {
+            (eq - prev) / prev
+        };
+        returns.push(r);
+        prev = eq;
+    }
+    returns
 }
 
 fn calc_max_drawdown(equity_curve: &[f64]) -> f64 {

@@ -196,7 +196,7 @@ fn run(args: Args) -> Result<()> {
         }
     }
 
-    let metrics = compute_metrics(&rewards, &equity_curve);
+    let metrics = compute_metrics(&rewards, &equity_curve, args.initial_balance);
     let ending_equity = equity_curve.last().copied().unwrap_or(args.initial_balance);
     let net_pnl = ending_equity - args.initial_balance;
 

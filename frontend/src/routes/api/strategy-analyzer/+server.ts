@@ -38,47 +38,13 @@ const resolveParquetPath = (dataset: string | null, pathParam: string | null) =>
 	return resolved;
 };
 
-const resolveBacktestBin = (root: string) => {
-	const binName = process.platform === 'win32' ? 'backtest_script.exe' : 'backtest_script';
+const resolveAnalyzerBin = (root: string) => {
+	const binName = process.platform === 'win32' ? 'strategy_analyzer.exe' : 'strategy_analyzer';
 	const binPath = path.join(root, 'target', 'debug', binName);
 	if (fs.existsSync(binPath)) {
 		return { command: binPath, argsPrefix: [] as string[] };
 	}
-	return { command: 'cargo', argsPrefix: ['run', '--quiet', '--bin', 'backtest_script', '--'] };
-};
-
-const buildArgs = (payload: Record<string, any>, filePath: string, scriptPath: string) => {
-	const args: string[] = ['--file', filePath, '--script', scriptPath];
-
-	const add = (key: string, value: unknown) => {
-		if (value === undefined || value === null || value === '') return;
-		args.push(`--${key}`, String(value));
-	};
-
-	const addFlag = (key: string, enabled: unknown) => {
-		if (enabled === true) {
-			args.push(`--${key}`);
-		}
-	};
-
-	add('offset', payload.offset);
-	add('limit', payload.limit);
-	add('initial-balance', payload.env?.initialBalance);
-	add('max-position', payload.env?.maxPosition);
-	add('commission-round-turn', payload.env?.commission);
-	add('slippage-per-contract', payload.env?.slippage);
-	add('margin-per-contract', payload.env?.marginPerContract);
-	add('contract-multiplier', payload.env?.contractMultiplier);
-	add('margin-mode', payload.env?.marginMode);
-	addFlag('enforce-margin', payload.env?.enforceMargin);
-	add('memory-limit-mb', payload.limits?.memoryMb);
-	add('instruction-limit', payload.limits?.instructionLimit);
-	add('instruction-interval', payload.limits?.instructionInterval);
-
-	if (payload.globex) args.push('--globex');
-	if (payload.traceActions) args.push('--trace-actions');
-
-	return args;
+	return { command: 'cargo', argsPrefix: ['run', '--quiet', '--bin', 'strategy_analyzer', '--'] };
 };
 
 import type { RequestEvent } from '@sveltejs/kit';
@@ -94,10 +60,9 @@ export const POST = async ({ request }: RequestEvent) => {
 
 	const dataset = typeof payload.dataset === 'string' ? payload.dataset : null;
 	const pathParam = typeof payload.path === 'string' ? payload.path : null;
-	const script = typeof payload.script === 'string' ? payload.script : '';
-
-	if (!script.trim()) {
-		return json({ error: 'Script is required' }, { status: 400, headers });
+	const signal = payload.signal;
+	if (!signal?.indicatorA || !signal?.indicatorB) {
+		return json({ error: 'Signal configuration is required' }, { status: 400, headers });
 	}
 
 	const filePath = resolveParquetPath(dataset, pathParam);
@@ -109,15 +74,39 @@ export const POST = async ({ request }: RequestEvent) => {
 	}
 
 	const root = resolveProjectRoot();
-	const { command, argsPrefix } = resolveBacktestBin(root);
+	const { command, argsPrefix } = resolveAnalyzerBin(root);
 
-	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'midas-backtest-'));
-	const scriptPath = path.join(tempDir, 'strategy.lua');
-	fs.writeFileSync(scriptPath, script, 'utf-8');
+	const config = {
+		file: filePath,
+		offset: payload.offset ?? null,
+		limit: payload.limit ?? null,
+		initialBalance: payload.env?.initialBalance ?? 10_000,
+		maxPosition: payload.env?.maxPosition ?? 1,
+		commissionRoundTurn: payload.env?.commission ?? 1.6,
+		slippagePerContract: payload.env?.slippage ?? 0.25,
+		marginPerContract: payload.env?.marginPerContract ?? 50,
+		contractMultiplier: payload.env?.contractMultiplier ?? 1.0,
+		marginMode: payload.env?.marginMode ?? 'per-contract',
+		enforceMargin: payload.env?.enforceMargin ?? true,
+		globex: payload.globex ?? false,
+		signal: {
+			indicatorA: signal.indicatorA,
+			indicatorB: signal.indicatorB,
+			buyAction: signal.buyAction,
+			sellAction: signal.sellAction
+		},
+		takeProfit: payload.takeProfit ?? null,
+		stopLoss: payload.stopLoss ?? null,
+		fitness: payload.fitness ?? null,
+		maxCombinations: payload.maxCombinations ?? null
+	};
+
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'midas-analyzer-'));
+	const configPath = path.join(tempDir, 'analyzer.json');
+	fs.writeFileSync(configPath, JSON.stringify(config), 'utf-8');
 
 	try {
-		const cliArgs = buildArgs(payload, filePath, scriptPath);
-		const output = execFileSync(command, [...argsPrefix, ...cliArgs], {
+		const output = execFileSync(command, [...argsPrefix, '--config', configPath], {
 			cwd: root,
 			maxBuffer: 1024 * 1024 * 200
 		});
@@ -125,7 +114,7 @@ export const POST = async ({ request }: RequestEvent) => {
 		const result = JSON.parse(text);
 		return json(result, { headers });
 	} catch (err) {
-		const message = err instanceof Error ? err.message : 'Backtest failed';
+		const message = err instanceof Error ? err.message : 'Strategy analyzer failed';
 		return json({ error: message }, { status: 500, headers });
 	} finally {
 		try {

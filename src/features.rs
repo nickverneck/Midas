@@ -57,7 +57,7 @@ pub fn compute_features_ohlcv(
     out
 }
 
-fn sma(prices: &[f64], period: usize) -> Vec<f64> {
+pub fn sma(prices: &[f64], period: usize) -> Vec<f64> {
     let mut res = vec![f64::NAN; prices.len()];
     if period == 0 || prices.len() < period {
         return res;
@@ -71,7 +71,7 @@ fn sma(prices: &[f64], period: usize) -> Vec<f64> {
     res
 }
 
-fn ema(prices: &[f64], period: usize) -> Vec<f64> {
+pub fn ema(prices: &[f64], period: usize) -> Vec<f64> {
     let mut res = vec![f64::NAN; prices.len()];
     if period == 0 || prices.len() < period {
         return res;
@@ -105,7 +105,7 @@ fn wma(prices: &[f64], period: usize) -> Vec<f64> {
     res
 }
 
-fn hma(prices: &[f64], period: usize) -> Vec<f64> {
+pub fn hma(prices: &[f64], period: usize) -> Vec<f64> {
     let mut res = vec![f64::NAN; prices.len()];
     if period < 2 || prices.len() < period {
         return res;
