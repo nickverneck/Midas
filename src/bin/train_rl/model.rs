@@ -1,6 +1,12 @@
 use tch::nn;
 
-pub fn build_mlp(p: &nn::Path, input_dim: i64, hidden: i64, layers: usize, output_dim: i64) -> nn::Sequential {
+pub fn build_mlp(
+    p: &nn::Path,
+    input_dim: i64,
+    hidden: i64,
+    layers: usize,
+    output_dim: i64,
+) -> nn::Sequential {
     let mut seq = nn::seq();
     let mut in_dim = input_dim;
     for i in 0..layers {
@@ -12,7 +18,13 @@ pub fn build_mlp(p: &nn::Path, input_dim: i64, hidden: i64, layers: usize, outpu
     seq.add(out)
 }
 
-pub fn build_policy(p: &nn::Path, input_dim: i64, hidden: i64, layers: usize, action_dim: i64) -> nn::Sequential {
+pub fn build_policy(
+    p: &nn::Path,
+    input_dim: i64,
+    hidden: i64,
+    layers: usize,
+    action_dim: i64,
+) -> nn::Sequential {
     build_mlp(p, input_dim, hidden, layers, action_dim)
 }
 

@@ -2,6 +2,8 @@
 mod args;
 #[path = "train_rl/data.rs"]
 mod data;
+#[path = "train_rl/grpo.rs"]
+mod grpo;
 #[path = "train_rl/metrics.rs"]
 mod metrics;
 #[path = "train_rl/model.rs"]
@@ -19,8 +21,8 @@ use anyhow::Context;
 use chrono::Local;
 use clap::Parser;
 use midas_env::env::{EnvConfig, MarginMode};
-use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{seq::SliceRandom, Rng, SeedableRng};
 use tch::nn;
 use tch::nn::OptimizerConfig;
 
@@ -125,9 +127,26 @@ fn main() -> anyhow::Result<()> {
     let obs_dim = train.obs_dim as i64;
     let action_dim = 4i64;
 
+    let use_grpo = args.algorithm == "grpo";
+
     let mut vs = nn::VarStore::new(device);
-    let policy = model::build_policy(&vs.root().sub("policy"), obs_dim, args.hidden as i64, args.layers, action_dim);
-    let value = model::build_value(&vs.root().sub("value"), obs_dim, args.hidden as i64, args.layers);
+    let policy = model::build_policy(
+        &vs.root().sub("policy"),
+        obs_dim,
+        args.hidden as i64,
+        args.layers,
+        action_dim,
+    );
+    let value = if use_grpo {
+        None
+    } else {
+        Some(model::build_value(
+            &vs.root().sub("value"),
+            obs_dim,
+            args.hidden as i64,
+            args.layers,
+        ))
+    };
 
     if let Some(path) = &args.load_checkpoint {
         load_checkpoint(&mut vs, device, path)?;
@@ -140,10 +159,12 @@ fn main() -> anyhow::Result<()> {
 
     let log_path = args.outdir.join("rl_log.csv");
     if !log_path.exists() || std::fs::metadata(&log_path)?.len() == 0 {
-        std::fs::write(
-            &log_path,
-            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,value_loss,entropy,total_loss\n",
-        )?;
+        let header = if use_grpo {
+            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,entropy,total_loss,kl_div\n"
+        } else {
+            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,value_loss,entropy,total_loss\n"
+        };
+        std::fs::write(&log_path, header)?;
     }
 
     let rollout_cfg = RolloutConfig {
@@ -159,6 +180,12 @@ fn main() -> anyhow::Result<()> {
         ent_coef: args.ent_coef,
         ppo_epochs: args.ppo_epochs,
     };
+    let grpo_cfg = grpo::GrpoConfig {
+        group_size: args.group_size,
+        clip: args.clip,
+        ent_coef: args.ent_coef,
+        grpo_epochs: args.grpo_epochs,
+    };
 
     let mut train_windows = windows_train;
 
@@ -173,24 +200,64 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mut train_metrics = Vec::with_capacity(train_count);
-        let mut loss_stats = Vec::with_capacity(train_count);
+        let mut loss_stats_ppo = Vec::with_capacity(train_count);
+        let mut loss_stats_grpo = Vec::with_capacity(train_count);
 
-        for window in train_windows.iter().take(train_count) {
-            let batch = ppo::rollout(&train, *window, &policy, &value, &env_cfg, &rollout_cfg);
-            let metrics = ppo::summarize_batch(&batch, args.sortino_annualization);
-            let losses = ppo::ppo_update(&policy, &value, &mut opt, &batch, &ppo_cfg);
-            train_metrics.push(metrics);
-            loss_stats.push(losses);
+        if use_grpo {
+            // GRPO training: group-based rollouts
+            for _ in 0..train_count {
+                let group = grpo::rollout_group(
+                    &train,
+                    &train_windows,
+                    &policy,
+                    &env_cfg,
+                    grpo_cfg.group_size,
+                    device,
+                );
+                let advantages = grpo::compute_grpo_advantages(&group);
+                let losses = grpo::grpo_update(&policy, &mut opt, &group, &advantages, &grpo_cfg);
+                let metrics = grpo::summarize_group(&group, args.sortino_annualization);
+                train_metrics.push(metrics);
+                loss_stats_grpo.push(losses);
+            }
+        } else {
+            // PPO training: single rollout with value function
+            for window in train_windows.iter().take(train_count) {
+                let batch = ppo::rollout(
+                    &train,
+                    *window,
+                    &policy,
+                    value.as_ref().unwrap(),
+                    &env_cfg,
+                    &rollout_cfg,
+                );
+                let metrics = ppo::summarize_batch(&batch, args.sortino_annualization);
+                let losses =
+                    ppo::ppo_update(&policy, value.as_ref().unwrap(), &mut opt, &batch, &ppo_cfg);
+                train_metrics.push(metrics);
+                loss_stats_ppo.push(losses);
+            }
         }
 
         let train_summary = average_metrics(&train_metrics);
-        let loss_summary = average_losses(&loss_stats);
 
         let eval_count = args.eval_windows.min(windows_val.len()).max(1);
         let mut eval_metrics = Vec::with_capacity(eval_count);
         for window in windows_val.iter().take(eval_count) {
-            let batch = ppo::rollout(&val, *window, &policy, &value, &env_cfg, &rollout_cfg);
-            eval_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
+            if use_grpo {
+                let group = grpo::rollout_group(&val, &[*window], &policy, &env_cfg, 1, device);
+                eval_metrics.push(grpo::summarize_group(&group, args.sortino_annualization));
+            } else {
+                let batch = ppo::rollout(
+                    &val,
+                    *window,
+                    &policy,
+                    value.as_ref().unwrap(),
+                    &env_cfg,
+                    &rollout_cfg,
+                );
+                eval_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
+            }
         }
         let eval_summary = average_metrics(&eval_metrics);
 
@@ -199,8 +266,7 @@ fn main() -> anyhow::Result<()> {
         } else {
             train_summary
         };
-        let fitness = (args.w_pnl * fitness_source.pnl)
-            + (args.w_sortino * fitness_source.sortino)
+        let fitness = (args.w_pnl * fitness_source.pnl) + (args.w_sortino * fitness_source.sortino)
             - (args.w_mdd * fitness_source.drawdown);
 
         println!(
@@ -216,27 +282,48 @@ fn main() -> anyhow::Result<()> {
         );
 
         if args.log_interval > 0 && epoch % args.log_interval == 0 {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&log_path)?;
-            writeln!(
-                file,
-                "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
-                epoch,
-                train_summary.ret_mean,
-                train_summary.pnl,
-                train_summary.sortino,
-                train_summary.drawdown,
-                eval_summary.ret_mean,
-                eval_summary.pnl,
-                eval_summary.sortino,
-                eval_summary.drawdown,
-                fitness,
-                loss_summary.policy_loss,
-                loss_summary.value_loss,
-                loss_summary.entropy,
-                loss_summary.total_loss
-            )?;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&log_path)?;
+            if use_grpo {
+                let loss_summary = average_grpo_losses(&loss_stats_grpo);
+                writeln!(
+                    file,
+                    "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
+                    epoch,
+                    train_summary.ret_mean,
+                    train_summary.pnl,
+                    train_summary.sortino,
+                    train_summary.drawdown,
+                    eval_summary.ret_mean,
+                    eval_summary.pnl,
+                    eval_summary.sortino,
+                    eval_summary.drawdown,
+                    fitness,
+                    loss_summary.policy_loss,
+                    loss_summary.entropy,
+                    loss_summary.total_loss,
+                    loss_summary.kl_div
+                )?;
+            } else {
+                let loss_summary = average_losses(&loss_stats_ppo);
+                writeln!(
+                    file,
+                    "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
+                    epoch,
+                    train_summary.ret_mean,
+                    train_summary.pnl,
+                    train_summary.sortino,
+                    train_summary.drawdown,
+                    eval_summary.ret_mean,
+                    eval_summary.pnl,
+                    eval_summary.sortino,
+                    eval_summary.drawdown,
+                    fitness,
+                    loss_summary.policy_loss,
+                    loss_summary.value_loss,
+                    loss_summary.entropy,
+                    loss_summary.total_loss
+                )?;
+            }
         }
 
         if args.checkpoint_every > 0 && epoch % args.checkpoint_every == 0 {
@@ -248,22 +335,43 @@ fn main() -> anyhow::Result<()> {
     let eval_count = args.eval_windows.min(windows_test.len()).max(1);
     let mut test_metrics = Vec::with_capacity(eval_count);
     for window in windows_test.iter().take(eval_count) {
-        let batch = ppo::rollout(&test, *window, &policy, &value, &env_cfg, &rollout_cfg);
-        test_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
+        if use_grpo {
+            let group = grpo::rollout_group(&test, &[*window], &policy, &env_cfg, 1, device);
+            test_metrics.push(grpo::summarize_group(&group, args.sortino_annualization));
+        } else {
+            let batch = ppo::rollout(
+                &test,
+                *window,
+                &policy,
+                value.as_ref().unwrap(),
+                &env_cfg,
+                &rollout_cfg,
+            );
+            test_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
+        }
     }
     let test_summary = average_metrics(&test_metrics);
     println!(
         "test | ret {:.4} | pnl {:.4} | sortino {:.4} | mdd {:.4}",
-        test_summary.ret_mean,
-        test_summary.pnl,
-        test_summary.sortino,
-        test_summary.drawdown
+        test_summary.ret_mean, test_summary.pnl, test_summary.sortino, test_summary.drawdown
     );
-    println!("total training time: {}", format_duration(training_start.elapsed()));
+    println!(
+        "total training time: {}",
+        format_duration(training_start.elapsed())
+    );
 
-    let final_path = args.outdir.join("ppo_final.pt");
+    let final_path = if use_grpo {
+        args.outdir.join("grpo_final.pt")
+    } else {
+        args.outdir.join("ppo_final.pt")
+    };
     vs.save(&final_path)?;
-    println!("Saved final PPO checkpoint to {}", final_path.display());
+    let algo_name = if use_grpo { "GRPO" } else { "PPO" };
+    println!(
+        "Saved final {} checkpoint to {}",
+        algo_name,
+        final_path.display()
+    );
 
     Ok(())
 }
@@ -345,6 +453,34 @@ fn average_losses(values: &[LossStats]) -> LossStats {
         value_loss: value_loss / denom,
         entropy: entropy / denom,
         total_loss: total_loss / denom,
+    }
+}
+
+fn average_grpo_losses(values: &[grpo::GrpoLossStats]) -> grpo::GrpoLossStats {
+    if values.is_empty() {
+        return grpo::GrpoLossStats {
+            policy_loss: 0.0,
+            entropy: 0.0,
+            total_loss: 0.0,
+            kl_div: 0.0,
+        };
+    }
+    let mut policy_loss = 0.0;
+    let mut entropy = 0.0;
+    let mut total_loss = 0.0;
+    let mut kl_div = 0.0;
+    for v in values {
+        policy_loss += v.policy_loss;
+        entropy += v.entropy;
+        total_loss += v.total_loss;
+        kl_div += v.kl_div;
+    }
+    let denom = values.len() as f64;
+    grpo::GrpoLossStats {
+        policy_loss: policy_loss / denom,
+        entropy: entropy / denom,
+        total_loss: total_loss / denom,
+        kl_div: kl_div / denom,
     }
 }
 

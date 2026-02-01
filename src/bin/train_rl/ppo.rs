@@ -142,7 +142,11 @@ pub fn rollout<P: nn::Module, V: nn::Module>(
         val_buf.push(value_val);
         rew_buf.push(reward);
         pnl_buf.push(info.pnl_change);
-        let denom = if prev_equity.abs() < 1e-8 { 1e-8 } else { prev_equity };
+        let denom = if prev_equity.abs() < 1e-8 {
+            1e-8
+        } else {
+            prev_equity
+        };
         ret_series.push(info.pnl_change / denom);
         equity_curve.push(equity);
         prev_equity = equity;
@@ -238,9 +242,8 @@ pub fn ppo_update<P: nn::Module, V: nn::Module>(
         let value_loss = (&value_diff * &value_diff).mean(Kind::Float);
 
         let probs = log_probs.exp();
-        let entropy = (-(probs * log_probs)
-            .sum_dim_intlist([-1_i64].as_ref(), false, Kind::Float))
-        .mean(Kind::Float);
+        let entropy = (-(probs * log_probs).sum_dim_intlist([-1_i64].as_ref(), false, Kind::Float))
+            .mean(Kind::Float);
 
         let loss = &policy_loss + cfg.vf_coef * &value_loss - cfg.ent_coef * &entropy;
 
