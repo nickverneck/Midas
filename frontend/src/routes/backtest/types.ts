@@ -19,7 +19,7 @@ export type BacktestResult = {
 	actions?: { idx: number; action: string }[];
 };
 
-export type IndicatorKind = "sma" | "ema" | "hma";
+export type IndicatorKind = "sma" | "ema" | "hma" | "wma" | "price";
 export type CrossAction = "crossover" | "crossunder";
 
 export type AnalyzerMetrics = {

@@ -10,10 +10,13 @@ use std::sync::Arc;
 
 use midas_env::backtesting::{compute_metrics, equity_returns};
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
-use midas_env::features::{ema, hma, sma};
+use midas_env::features::{ema, hma, sma, wma};
 
 #[derive(Parser, Debug)]
-#[command(name = "strategy_analyzer", about = "Sweep indicator ranges and return heatmap metrics")]
+#[command(
+    name = "strategy_analyzer",
+    about = "Sweep indicator ranges and return heatmap metrics"
+)]
 struct Args {
     #[arg(long)]
     config: PathBuf,
@@ -63,6 +66,8 @@ enum IndicatorKind {
     Sma,
     Ema,
     Hma,
+    Wma,
+    Price,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -165,8 +170,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let config_text = fs::read_to_string(&args.config)
         .with_context(|| format!("read config {}", args.config.display()))?;
-    let cfg: AnalyzerConfig = serde_json::from_str(&config_text)
-        .with_context(|| "parse analyzer config")?;
+    let cfg: AnalyzerConfig =
+        serde_json::from_str(&config_text).with_context(|| "parse analyzer config")?;
     run(cfg)
 }
 
@@ -206,10 +211,7 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         sl_values.iter().copied().map(Some).collect()
     };
 
-    let total_combos = periods_a.len()
-        * periods_b.len()
-        * tp_options.len()
-        * sl_options.len();
+    let total_combos = periods_a.len() * periods_b.len() * tp_options.len() * sl_options.len();
     let max_combos = cfg.max_combinations.unwrap_or(20_000);
     if total_combos > max_combos {
         bail!(
@@ -359,6 +361,14 @@ fn precompute_series(
             IndicatorKind::Sma => sma(prices, p),
             IndicatorKind::Ema => ema(prices, p),
             IndicatorKind::Hma => hma(prices, p),
+            IndicatorKind::Wma => wma(prices, p),
+            IndicatorKind::Price => {
+                // Price is just the previous close (t-1)
+                // First value is f64::NAN since there's no previous price
+                let mut price_series = vec![f64::NAN];
+                price_series.extend_from_slice(&prices[..prices.len().saturating_sub(1)]);
+                price_series
+            }
         };
         out.insert(p, Arc::new(series));
     }
@@ -371,9 +381,8 @@ fn build_combos(
     tp_options: &[Option<f64>],
     sl_options: &[Option<f64>],
 ) -> Vec<Combo> {
-    let mut combos = Vec::with_capacity(
-        periods_a.len() * periods_b.len() * tp_options.len() * sl_options.len(),
-    );
+    let mut combos =
+        Vec::with_capacity(periods_a.len() * periods_b.len() * tp_options.len() * sl_options.len());
     for &a in periods_a {
         for &b in periods_b {
             for &tp in tp_options {
@@ -632,12 +641,14 @@ fn compute_sortino(returns: &[f64], annualization: f64, target: f64, cap: f64) -
 }
 
 fn load_parquet_slice(path: &PathBuf, offset: usize, limit: Option<usize>) -> Result<DataFrame> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("open parquet {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open parquet {}", path.display()))?;
     let mut df = ParquetReader::new(file).finish()?;
     let total = df.height();
     let start = offset.min(total);
-    let len = limit.unwrap_or(total.saturating_sub(start)).min(total.saturating_sub(start));
+    let len = limit
+        .unwrap_or(total.saturating_sub(start))
+        .min(total.saturating_sub(start));
     if start > 0 || len < total {
         df = df.slice(start as i64, len);
     }
@@ -694,7 +705,13 @@ fn series_to_f64(series: &Series) -> Result<Vec<f64>> {
             AnyValue::Int32(v) => v as f64,
             AnyValue::UInt32(v) => v as f64,
             AnyValue::UInt64(v) => v as f64,
-            AnyValue::Boolean(v) => if v { 1.0 } else { 0.0 },
+            AnyValue::Boolean(v) => {
+                if v {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             _ => f64::NAN,
         })
         .collect();
@@ -735,8 +752,8 @@ fn series_to_i64(series: &Series) -> Result<Vec<i64>> {
 }
 
 fn build_session_mask(datetimes_ns: &[i64], globex: bool) -> Vec<bool> {
-    use chrono_tz::America::New_York;
     use chrono::Timelike;
+    use chrono_tz::America::New_York;
 
     if datetimes_ns.is_empty() || datetimes_ns[0] == 0 {
         return vec![true; datetimes_ns.len()];
@@ -758,8 +775,8 @@ fn build_session_mask(datetimes_ns: &[i64], globex: bool) -> Vec<bool> {
 }
 
 fn build_minutes_to_close(datetimes_ns: &[i64], globex: bool) -> Vec<f64> {
-    use chrono_tz::America::New_York;
     use chrono::Timelike;
+    use chrono_tz::America::New_York;
 
     if datetimes_ns.is_empty() || datetimes_ns[0] == 0 {
         return vec![0.0; datetimes_ns.len()];
@@ -773,7 +790,11 @@ fn build_minutes_to_close(datetimes_ns: &[i64], globex: bool) -> Vec<f64> {
             let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
             let close_hour = if globex { 17.0 } else { 16.0 };
             let minutes = (close_hour - hour) * 60.0;
-            if minutes.is_finite() { minutes.max(0.0) } else { 0.0 }
+            if minutes.is_finite() {
+                minutes.max(0.0)
+            } else {
+                0.0
+            }
         })
         .collect()
 }
