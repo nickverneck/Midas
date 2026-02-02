@@ -22,7 +22,10 @@ pub fn compute_features(prices: &[f64]) -> HashMap<String, Vec<f64>> {
 }
 
 /// Compute features and optionally add t-1 volume (shifted volume).
-pub fn compute_features_with_volume(prices: &[f64], volume: Option<&[f64]>) -> HashMap<String, Vec<f64>> {
+pub fn compute_features_with_volume(
+    prices: &[f64],
+    volume: Option<&[f64]>,
+) -> HashMap<String, Vec<f64>> {
     let mut out = compute_features(prices);
     if let Some(vol) = volume {
         let mut vol_t1 = vec![f64::NAN; vol.len()];
@@ -88,7 +91,7 @@ pub fn ema(prices: &[f64], period: usize) -> Vec<f64> {
     res
 }
 
-fn wma(prices: &[f64], period: usize) -> Vec<f64> {
+pub fn wma(prices: &[f64], period: usize) -> Vec<f64> {
     let mut res = vec![f64::NAN; prices.len()];
     if period == 0 || prices.len() < period {
         return res;
@@ -142,10 +145,7 @@ fn true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
             let h = high[i];
             let l = low[i];
             let pc = close[i - 1];
-            let tr_i = hl
-                .abs()
-                .max((h - pc).abs())
-                .max((l - pc).abs());
+            let tr_i = hl.abs().max((h - pc).abs()).max((l - pc).abs());
             tr[i] = tr_i;
         }
     }

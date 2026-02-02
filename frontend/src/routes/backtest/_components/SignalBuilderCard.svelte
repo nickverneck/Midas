@@ -30,17 +30,19 @@
 					<Label>Type</Label>
 					<Select.Root bind:value={analyzer.indicatorA.kind}>
 						<Select.Trigger class="w-full">{analyzer.indicatorA.kind}</Select.Trigger>
-						<Select.Content>
-							<Select.Item value="sma">sma</Select.Item>
-							<Select.Item value="ema">ema</Select.Item>
-							<Select.Item value="hma">hma</Select.Item>
-						</Select.Content>
-					</Select.Root>
-				</div>
-				<div class="grid gap-2 sm:grid-cols-3">
-					<div class="space-y-1">
-						<Label class="text-xs">Start</Label>
-						<Input type="number" bind:value={analyzer.indicatorA.start} min="1" />
+					<Select.Content>
+					<Select.Item value="sma">sma</Select.Item>
+					<Select.Item value="ema">ema</Select.Item>
+					<Select.Item value="hma">hma</Select.Item>
+					<Select.Item value="wma">wma</Select.Item>
+					<Select.Item value="price">price</Select.Item>
+				</Select.Content>
+			</Select.Root>
+		</div>
+		<div class="grid gap-2 sm:grid-cols-3">
+				<div class="space-y-1">
+					<Label class="text-xs">Start</Label>
+					<Input type="number" bind:value={analyzer.indicatorA.start} min="1" />
 					</div>
 					<div class="space-y-1">
 						<Label class="text-xs">End</Label>
@@ -59,12 +61,14 @@
 					<Select.Root bind:value={analyzer.indicatorB.kind}>
 						<Select.Trigger class="w-full">{analyzer.indicatorB.kind}</Select.Trigger>
 						<Select.Content>
-							<Select.Item value="sma">sma</Select.Item>
-							<Select.Item value="ema">ema</Select.Item>
-							<Select.Item value="hma">hma</Select.Item>
-						</Select.Content>
-					</Select.Root>
-				</div>
+						<Select.Item value="sma">sma</Select.Item>
+						<Select.Item value="ema">ema</Select.Item>
+						<Select.Item value="hma">hma</Select.Item>
+						<Select.Item value="wma">wma</Select.Item>
+						<Select.Item value="price">price</Select.Item>
+					</Select.Content>
+				</Select.Root>
+			</div>
 				<div class="grid gap-2 sm:grid-cols-3">
 					<div class="space-y-1">
 						<Label class="text-xs">Start</Label>
