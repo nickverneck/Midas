@@ -1,7 +1,7 @@
 use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
-use tch::{nn, no_grad, Kind, Tensor};
+use tch::{Kind, Tensor, nn, no_grad};
 
-use crate::data::{build_observation, DataSet};
+use crate::data::{DataSet, build_observation};
 use crate::metrics::{compute_sortino, max_drawdown};
 
 pub struct RolloutBatch {

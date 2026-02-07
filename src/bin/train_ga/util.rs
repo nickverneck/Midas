@@ -1,6 +1,6 @@
 use anyhow::Result;
-use std::env;
 use midas_env::env::MarginMode;
+use std::env;
 use std::path::{Path, PathBuf};
 
 use crate::args::Args;
@@ -22,11 +22,7 @@ pub fn resolve_device(requested: Option<&str>) -> tch::Device {
                 let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, mps_device));
             })
             .is_ok();
-            if mps_ok {
-                mps_device
-            } else {
-                Device::Cpu
-            }
+            if mps_ok { mps_device } else { Device::Cpu }
         }
         "cpu" => Device::Cpu,
         _ => {
@@ -71,7 +67,9 @@ fn preload_cuda_dlls() {
 
 pub fn print_device(device: &tch::Device) {
     if let Ok(libtorch) = std::env::var("LIBTORCH") {
-        let cuda_dll = std::path::Path::new(&libtorch).join("lib").join("torch_cuda.dll");
+        let cuda_dll = std::path::Path::new(&libtorch)
+            .join("lib")
+            .join("torch_cuda.dll");
         println!("info: LIBTORCH={}", libtorch);
         println!(
             "info: torch_cuda.dll exists: {}",
@@ -152,7 +150,10 @@ pub fn resolve_paths(args: &Args) -> Result<(PathBuf, PathBuf, PathBuf)> {
                 .filter(|p| p.extension().map(|e| e == "parquet").unwrap_or(false))
                 .collect();
             entries.sort();
-            return entries.first().cloned().unwrap_or_else(|| fallback.to_path_buf());
+            return entries
+                .first()
+                .cloned()
+                .unwrap_or_else(|| fallback.to_path_buf());
         }
         if path.exists() {
             path.to_path_buf()

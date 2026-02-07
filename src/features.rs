@@ -1,11 +1,33 @@
 //! Feature computation: SMA, EMA, HMA for a fixed set of periods.
 use std::collections::HashMap;
 
-const PERIODS: [usize; 14] = [3, 5, 7, 11, 13, 19, 23, 29, 31, 37, 41, 43, 47, 53];
+const PERIODS: [usize; 19] = [
+    3, 5, 7, 11, 13, 19, 23, 29, 31, 37, 41, 43, 47, 53, 100, 150, 200, 250, 300,
+];
 pub const ATR_PERIODS: [usize; 3] = [7, 14, 21];
 
 pub fn periods() -> &'static [usize] {
     &PERIODS
+}
+
+/// Minimum observation index `idx` such that all configured features at `idx - 1` are warmed.
+pub fn feature_warmup_bars() -> usize {
+    let ma_warmup = PERIODS
+        .iter()
+        .copied()
+        .map(hma_warmup_bars)
+        .max()
+        .unwrap_or(1);
+    let atr_warmup = ATR_PERIODS.iter().copied().max().unwrap_or(1);
+    ma_warmup.max(atr_warmup).max(1)
+}
+
+fn hma_warmup_bars(period: usize) -> usize {
+    if period < 2 {
+        return period.max(1);
+    }
+    let sqrt_p = (period as f64).sqrt().round() as usize;
+    period.saturating_add(sqrt_p.saturating_sub(1))
 }
 
 /// Returns a map of column name -> vector of feature values (NaN during warmup).
@@ -199,5 +221,10 @@ mod tests {
         assert!(!tr[0].is_nan());
         let atr = atr_wilder(&tr, 2);
         assert_eq!(atr[1].is_nan(), false);
+    }
+
+    #[test]
+    fn warmup_covers_long_hma_periods() {
+        assert_eq!(feature_warmup_bars(), 316);
     }
 }

@@ -15,6 +15,22 @@ pub fn windows(len: usize, window: usize, step: usize) -> Vec<(usize, usize)> {
     out
 }
 
+/// Shift windows so starts are at least `min_start`.
+/// Windows with fewer than two bars after shifting are dropped.
+pub fn enforce_min_start(windows: &[(usize, usize)], min_start: usize) -> Vec<(usize, usize)> {
+    windows
+        .iter()
+        .filter_map(|&(start, end)| {
+            let adj_start = start.max(min_start);
+            if end > adj_start + 1 {
+                Some((adj_start, end))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,5 +45,15 @@ mod tests {
     fn empty_when_window_too_big() {
         let w = windows(3, 5, 1);
         assert!(w.is_empty());
+    }
+
+    #[test]
+    fn enforce_min_start_shifts_and_drops_short_windows() {
+        let input = vec![(0, 10), (8, 12), (12, 14)];
+        let out = enforce_min_start(&input, 9);
+        assert_eq!(out, vec![(9, 12), (12, 14)]);
+
+        let out_drop = enforce_min_start(&[(0, 9)], 9);
+        assert!(out_drop.is_empty());
     }
 }

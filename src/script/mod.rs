@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use mlua::{Error as LuaError, Function, HookTriggers, Lua, Table, Value};
 
 use crate::env::Action;
@@ -36,9 +36,7 @@ impl ScriptRunner {
         sanitize_globals(&lua)?;
         apply_limits(&lua, limits)?;
 
-        lua.load(script)
-            .set_name("strategy.lua")
-            .exec()?;
+        lua.load(script).set_name("strategy.lua").exec()?;
 
         let (has_on_init, has_on_bar) = {
             let globals = lua.globals();
@@ -76,7 +74,9 @@ impl ScriptRunner {
 
 fn sanitize_globals(lua: &Lua) -> Result<()> {
     let globals = lua.globals();
-    for key in ["os", "io", "package", "debug", "dofile", "loadfile", "require", "load"] {
+    for key in [
+        "os", "io", "package", "debug", "dofile", "loadfile", "require", "load",
+    ] {
         globals.set(key, Value::Nil)?;
     }
     Ok(())

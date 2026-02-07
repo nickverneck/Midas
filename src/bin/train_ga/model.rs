@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tch::nn;
 use tch::Tensor;
+use tch::nn;
 
 pub fn param_count(input_dim: usize, hidden: usize, layers: usize) -> usize {
     let mut count = 0;

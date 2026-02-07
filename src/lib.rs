@@ -1,7 +1,7 @@
 //! Library entry for optional Python bindings.
 
-pub mod env;
 pub mod backtesting;
+pub mod env;
 pub mod features;
 pub mod sampler;
 pub mod script;
@@ -10,13 +10,13 @@ pub mod script;
 mod py_bindings {
     #![allow(unsafe_op_in_unsafe_fn)]
 
+    use numpy::{PyArray1, PyReadonlyArray1};
     use pyo3::prelude::*;
     use pyo3::types::PyDict;
-    use numpy::{PyArray1, PyReadonlyArray1};
 
+    use crate::env::build_observation;
     use crate::env::{Action, EnvConfig, StepContext, TradingEnv};
     use crate::features::{compute_features_ohlcv, periods};
-    use crate::env::build_observation;
     use crate::sampler::windows;
 
     #[pyclass]
@@ -75,7 +75,11 @@ mod py_bindings {
                 "sell" => Action::Sell,
                 "hold" => Action::Hold,
                 "revert" | "flip" => Action::Revert,
-                other => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unknown action: {other}"))),
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Unknown action: {other}"
+                    )));
+                }
             };
 
             let (reward, info) = self.inner.step(
@@ -139,7 +143,7 @@ mod py_bindings {
                     other => {
                         return Err(pyo3::exceptions::PyValueError::new_err(format!(
                             "Unknown action: {other}"
-                        )))
+                        )));
                     }
                 };
 

@@ -22,7 +22,7 @@ use chrono::Local;
 use clap::Parser;
 use midas_env::env::{EnvConfig, MarginMode};
 use rand::rngs::StdRng;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use tch::nn;
 use tch::nn::OptimizerConfig;
 
@@ -81,24 +81,46 @@ fn main() -> anyhow::Result<()> {
     } else {
         args.full_file || !args.windowed
     };
-    let windows_train = if full_file {
+    let raw_windows_train = if full_file {
         vec![(0, train.close.len())]
     } else {
         midas_env::sampler::windows(train.close.len(), args.window, args.step)
     };
-    let windows_val = if full_file {
+    let raw_windows_val = if full_file {
         vec![(0, val.close.len())]
     } else {
         midas_env::sampler::windows(val.close.len(), args.window, args.step)
     };
-    let windows_test = if full_file {
+    let raw_windows_test = if full_file {
         vec![(0, test.close.len())]
     } else {
         midas_env::sampler::windows(test.close.len(), args.window, args.step)
     };
 
+    let feature_warmup = midas_env::features::feature_warmup_bars();
+    let min_window_start = feature_warmup.saturating_sub(1);
+    let adjust_windows = |label: &str, windows: Vec<(usize, usize)>| {
+        let before = windows.len();
+        let adjusted = midas_env::sampler::enforce_min_start(&windows, min_window_start);
+        let dropped = before.saturating_sub(adjusted.len());
+        if dropped > 0 {
+            println!(
+                "info: dropped {} {} window(s) before feature warmup ({} bars)",
+                dropped, label, feature_warmup
+            );
+        }
+        adjusted
+    };
+
+    let windows_train = adjust_windows("train", raw_windows_train);
+    let windows_val = adjust_windows("val", raw_windows_val);
+    let windows_test = adjust_windows("test", raw_windows_test);
+
     if windows_train.is_empty() {
-        anyhow::bail!("no training windows available");
+        anyhow::bail!(
+            "no training windows available after applying feature warmup ({} bars)",
+            feature_warmup
+        );
     }
 
     let env_cfg = EnvConfig {

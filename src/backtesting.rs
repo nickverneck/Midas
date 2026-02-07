@@ -29,7 +29,12 @@ pub struct EmaParams {
 
 /// Run one episode over price series with given actions.
 /// Assumes `actions.len() == prices.len() - 1` (one action per transition).
-pub fn run_episode(prices: &[f64], actions: &[Action], initial_balance: f64, cfg: EnvConfig) -> EpisodeResult {
+pub fn run_episode(
+    prices: &[f64],
+    actions: &[Action],
+    initial_balance: f64,
+    cfg: EnvConfig,
+) -> EpisodeResult {
     assert!(
         prices.len() >= 2,
         "need at least two prices to compute a step"
@@ -63,7 +68,10 @@ pub fn run_episode(prices: &[f64], actions: &[Action], initial_balance: f64, cfg
 /// Simple EMA crossover strategy producing actions and running the episode.
 pub fn run_ema_crossover(prices: &[f64], params: EmaParams, cfg: EnvConfig) -> EpisodeResult {
     assert!(params.fast < params.slow, "fast period must be < slow");
-    assert!(prices.len() > params.slow + 1, "price series too short for EMA periods");
+    assert!(
+        prices.len() > params.slow + 1,
+        "price series too short for EMA periods"
+    );
 
     let mut actions = vec![Action::Hold; prices.len() - 1];
 
@@ -121,7 +129,11 @@ pub fn run_ema_crossover(prices: &[f64], params: EmaParams, cfg: EnvConfig) -> E
     run_episode(prices, &actions, 10000.0, cfg)
 }
 
-pub fn compute_metrics(rewards: &[f64], equity_curve: &[f64], initial_balance: f64) -> EpisodeMetrics {
+pub fn compute_metrics(
+    rewards: &[f64],
+    equity_curve: &[f64],
+    initial_balance: f64,
+) -> EpisodeMetrics {
     let total_reward: f64 = rewards.iter().sum();
     let total_pnl = *equity_curve.last().unwrap_or(&0.0);
 
@@ -132,13 +144,14 @@ pub fn compute_metrics(rewards: &[f64], equity_curve: &[f64], initial_balance: f
             0.0
         } else {
             let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-            let var = returns
-                .iter()
-                .map(|r| (r - mean).powi(2))
-                .sum::<f64>()
+            let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
                 / returns.len().max(1) as f64;
             let std = var.sqrt();
-            if std == 0.0 { 0.0 } else { (mean / std) * (252f64).sqrt() }
+            if std == 0.0 {
+                0.0
+            } else {
+                (mean / std) * (252f64).sqrt()
+            }
         }
     };
 

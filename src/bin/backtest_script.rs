@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use polars::prelude::{AnyValue, DataFrame, ParquetReader, SerReader, Series};
 use serde::Serialize;
@@ -7,11 +7,14 @@ use std::path::PathBuf;
 
 use midas_env::backtesting::compute_metrics;
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
-use midas_env::features::{compute_features_ohlcv, periods, ATR_PERIODS};
+use midas_env::features::{ATR_PERIODS, compute_features_ohlcv, periods};
 use midas_env::script::{ScriptLimits, ScriptRunner};
 
 #[derive(Parser, Debug)]
-#[command(name = "backtest_script", about = "Run a Lua strategy script against a parquet dataset")]
+#[command(
+    name = "backtest_script",
+    about = "Run a Lua strategy script against a parquet dataset"
+)]
 struct Args {
     #[arg(long)]
     file: PathBuf,
@@ -101,8 +104,9 @@ fn main() -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     let script_text = match (args.script, args.script_inline) {
-        (Some(path), None) => fs::read_to_string(&path)
-            .with_context(|| format!("read script {}", path.display()))?,
+        (Some(path), None) => {
+            fs::read_to_string(&path).with_context(|| format!("read script {}", path.display()))?
+        }
         (None, Some(text)) => text,
         (Some(_), Some(_)) => bail!("Provide either --script or --script-inline, not both"),
         (None, None) => bail!("Provide --script or --script-inline"),
@@ -240,12 +244,14 @@ struct ScriptData {
 }
 
 fn load_parquet_slice(path: &PathBuf, offset: usize, limit: Option<usize>) -> Result<DataFrame> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("open parquet {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open parquet {}", path.display()))?;
     let mut df = ParquetReader::new(file).finish()?;
     let total = df.height();
     let start = offset.min(total);
-    let len = limit.unwrap_or(total.saturating_sub(start)).min(total.saturating_sub(start));
+    let len = limit
+        .unwrap_or(total.saturating_sub(start))
+        .min(total.saturating_sub(start));
     if start > 0 || len < total {
         df = df.slice(start as i64, len);
     }
@@ -344,15 +350,21 @@ fn ordered_feature_cols(
         let hma_key = format!("hma_{p}");
         cols.push((
             sma_key.clone(),
-            feats.remove(&sma_key).unwrap_or_else(|| vec![f64::NAN; len]),
+            feats
+                .remove(&sma_key)
+                .unwrap_or_else(|| vec![f64::NAN; len]),
         ));
         cols.push((
             ema_key.clone(),
-            feats.remove(&ema_key).unwrap_or_else(|| vec![f64::NAN; len]),
+            feats
+                .remove(&ema_key)
+                .unwrap_or_else(|| vec![f64::NAN; len]),
         ));
         cols.push((
             hma_key.clone(),
-            feats.remove(&hma_key).unwrap_or_else(|| vec![f64::NAN; len]),
+            feats
+                .remove(&hma_key)
+                .unwrap_or_else(|| vec![f64::NAN; len]),
         ));
     }
     for &p in ATR_PERIODS.iter() {
@@ -427,7 +439,13 @@ fn series_to_f64(series: &Series) -> Result<Vec<f64>> {
             AnyValue::Int32(v) => v as f64,
             AnyValue::UInt32(v) => v as f64,
             AnyValue::UInt64(v) => v as f64,
-            AnyValue::Boolean(v) => if v { 1.0 } else { 0.0 },
+            AnyValue::Boolean(v) => {
+                if v {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             _ => f64::NAN,
         })
         .collect();
@@ -506,7 +524,11 @@ fn build_minutes_to_close(datetimes_ns: &[i64], globex: bool) -> Vec<f64> {
             let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
             let close_hour = if globex { 17.0 } else { 16.0 };
             let minutes = (close_hour - hour) * 60.0;
-            if minutes.is_finite() { minutes.max(0.0) } else { 0.0 }
+            if minutes.is_finite() {
+                minutes.max(0.0)
+            } else {
+                0.0
+            }
         })
         .collect()
 }

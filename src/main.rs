@@ -1,18 +1,18 @@
-mod parquet_loader;
 mod backtesting;
 mod env;
 mod features;
+mod parquet_loader;
 mod sampler;
 
+use crate::backtesting::{EmaParams, run_ema_crossover};
+use crate::env::{EnvConfig, MarginMode};
+use crate::features::{compute_features, periods};
 use anyhow::Result;
+use chrono_tz::Tz;
 use clap::Parser;
 use polars::prelude::DataFrame;
 use serde::Deserialize;
 use std::{path::PathBuf, time::Instant};
-use crate::backtesting::{run_ema_crossover, EmaParams};
-use crate::env::{EnvConfig, MarginMode};
-use crate::features::{compute_features, periods};
-use chrono_tz::Tz;
 
 /// Simple CLI for loading parquet files with Polars.
 #[derive(Parser)]
@@ -65,7 +65,9 @@ struct SymbolCfg {
     tz: String,
 }
 
-fn default_tz() -> String { "America/New_York".to_string() }
+fn default_tz() -> String {
+    "America/New_York".to_string()
+}
 
 fn load_symbol_cfg(path: &PathBuf, symbol: &str) -> Option<SymbolCfg> {
     if !path.exists() {
@@ -143,7 +145,7 @@ fn main() -> Result<()> {
     };
     if let Some(s) = session_choice {
         cfg.default_session_open = match s.to_lowercase().as_str() {
-            "rth" => true,   // open flag used with external mask; here we just keep true
+            "rth" => true, // open flag used with external mask; here we just keep true
             "globex" => true,
             _ => true,
         };
@@ -152,7 +154,11 @@ fn main() -> Result<()> {
     match args.mode.as_str() {
         "feature" => {
             let feats = compute_features(&prices);
-            println!("Feature-only mode: computed {} feature columns over {} rows", feats.len(), prices.len());
+            println!(
+                "Feature-only mode: computed {} feature columns over {} rows",
+                feats.len(),
+                prices.len()
+            );
             println!("Periods: {:?}", periods());
             // Show a small preview of the last row to confirm values.
             let sample_col = format!("ema_{}", periods()[0]);

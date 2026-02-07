@@ -63,7 +63,7 @@ Notes:
   - `open[t]` (Current bar entry price)
   - `close[t-1]`, `volume[t-1]`
   - Real-time `equity` (Cash + Unrealized PnL)
-  - Indicators (SMA/EMA/HMA periods: 3,5,7,11,13,19,23,29,31,37,41,43,47,53)
+  - Indicators (SMA/EMA/HMA periods: 3,5,7,11,13,19,23,29,31,37,41,43,47,53,100,150,200,250,300)
   - ATR (periods: 7,14,21)
   - Time encoding (sin/cos of hour), Session/Margin masks, Current Position.
 

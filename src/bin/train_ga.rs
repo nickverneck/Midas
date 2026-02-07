@@ -13,8 +13,8 @@ mod util;
 
 use chrono::Local;
 use clap::Parser;
-use std::path::{Path, PathBuf};
 use midas_env::env::MarginMode;
+use std::path::{Path, PathBuf};
 
 fn write_behavior_csv(
     path: &Path,
@@ -85,11 +85,7 @@ fn write_behavior_csv(
         let high = data._high.get(data_idx).copied();
         let low = data._low.get(data_idx).copied();
         let close = data.close.get(data_idx).copied();
-        let volume = data
-            .volume
-            .as_ref()
-            .and_then(|v| v.get(data_idx))
-            .copied();
+        let volume = data.volume.as_ref().and_then(|v| v.get(data_idx)).copied();
 
         wtr.write_record([
             generation.to_string(),
@@ -126,7 +122,9 @@ fn write_behavior_csv(
             row.flat_hold_penalty.to_string(),
             row.session_open.to_string(),
             row.margin_ok.to_string(),
-            row.minutes_to_close.map(|v| v.to_string()).unwrap_or_default(),
+            row.minutes_to_close
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             row.session_closed_violation.to_string(),
             row.margin_call_violation.to_string(),
             row.position_limit_violation.to_string(),
@@ -222,24 +220,46 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     } else {
         args.full_file || !args.windowed
     };
-    let windows_train = if full_file {
+    let raw_windows_train = if full_file {
         vec![(0, train.close.len())]
     } else {
         midas_env::sampler::windows(train.close.len(), args.window, args.step)
     };
-    let windows_val = if full_file {
+    let raw_windows_val = if full_file {
         vec![(0, val.close.len())]
     } else {
         midas_env::sampler::windows(val.close.len(), args.window, args.step)
     };
-    let windows_test = if full_file {
+    let raw_windows_test = if full_file {
         vec![(0, test.close.len())]
     } else {
         midas_env::sampler::windows(test.close.len(), args.window, args.step)
     };
 
+    let feature_warmup = midas_env::features::feature_warmup_bars();
+    let min_window_start = feature_warmup.saturating_sub(1);
+    let adjust_windows = |label: &str, windows: Vec<(usize, usize)>| {
+        let before = windows.len();
+        let adjusted = midas_env::sampler::enforce_min_start(&windows, min_window_start);
+        let dropped = before.saturating_sub(adjusted.len());
+        if dropped > 0 {
+            println!(
+                "info: dropped {} {} window(s) before feature warmup ({} bars)",
+                dropped, label, feature_warmup
+            );
+        }
+        adjusted
+    };
+
+    let windows_train = adjust_windows("train", raw_windows_train);
+    let windows_val = adjust_windows("val", raw_windows_val);
+    let windows_test = adjust_windows("test", raw_windows_test);
+
     if windows_train.is_empty() {
-        anyhow::bail!("no training windows available");
+        anyhow::bail!(
+            "no training windows available after applying feature warmup ({} bars)",
+            feature_warmup
+        );
     }
 
     let obs_dim = train.obs_dim;
@@ -305,7 +325,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             let mut header = String::new();
             let _ = reader.read_line(&mut header)?;
             log_has_eval_fitness = header.split(',').any(|col| col.trim() == "eval_fitness");
-            log_has_selection_fitness = header.split(',').any(|col| col.trim() == "selection_fitness");
+            log_has_selection_fitness = header
+                .split(',')
+                .any(|col| col.trim() == "selection_fitness");
             if !log_has_eval_fitness || !log_has_selection_fitness {
                 println!(
                     "warn: ga_log.csv missing selection columns; delete the log to enable eval/selection fitness tracking"
@@ -329,10 +351,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             "info: checkpoint generation {} is >= requested generations {}; nothing to run",
             start_gen, args.generations
         );
-        println!(
-            "info: total training time {:.2?}",
-            overall_start.elapsed()
-        );
+        println!("info: total training time {:.2?}", overall_start.elapsed());
         return Ok(());
     }
 
@@ -402,14 +421,25 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 let mut results = Vec::with_capacity(pop.len());
                 let mut offset = 0usize;
                 for chunk in pop.chunks(batch_candidates) {
-                    let train_results =
-                        ga::evaluate_candidates_batch(chunk, &train, &windows_train, &base_cfg, false);
+                    let train_results = ga::evaluate_candidates_batch(
+                        chunk,
+                        &train,
+                        &windows_train,
+                        &base_cfg,
+                        false,
+                    );
                     let mut eval_iter = if args.skip_val_eval {
                         None
                     } else {
                         Some(
-                            ga::evaluate_candidates_batch(chunk, &val, &windows_val, &base_cfg, true)
-                                .into_iter(),
+                            ga::evaluate_candidates_batch(
+                                chunk,
+                                &val,
+                                &windows_val,
+                                &base_cfg,
+                                true,
+                            )
+                            .into_iter(),
                         )
                     };
                     for (i, train_metrics) in train_results.into_iter().enumerate() {
@@ -423,20 +453,36 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 pop.par_iter()
                     .enumerate()
                     .map(|(idx, genome)| {
-                        let train_metrics =
-                            ga::evaluate_candidate(genome, &train, &windows_train, &base_cfg, false);
+                        let train_metrics = ga::evaluate_candidate(
+                            genome,
+                            &train,
+                            &windows_train,
+                            &base_cfg,
+                            false,
+                        );
                         let eval_metrics = if args.skip_val_eval {
                             None
                         } else {
-                            Some(ga::evaluate_candidate(genome, &val, &windows_val, &base_cfg, true))
+                            Some(ga::evaluate_candidate(
+                                genome,
+                                &val,
+                                &windows_val,
+                                &base_cfg,
+                                true,
+                            ))
                         };
                         (idx, train_metrics, eval_metrics)
                     })
                     .collect()
             };
 
-        let mut scored: Vec<(f64, usize, Vec<f32>, Option<ga::CandidateResult>, ga::CandidateResult)> =
-            Vec::with_capacity(pop.len());
+        let mut scored: Vec<(
+            f64,
+            usize,
+            Vec<f32>,
+            Option<ga::CandidateResult>,
+            ga::CandidateResult,
+        )> = Vec::with_capacity(pop.len());
 
         let mut results = eval_results;
         results.sort_by_key(|(idx, _, _)| *idx);
@@ -629,7 +675,11 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 .context("write ga_log")?;
         }
 
-        println!("Generation {} completed in {:.2?}", generation, gen_start.elapsed());
+        println!(
+            "Generation {} completed in {:.2?}",
+            generation,
+            gen_start.elapsed()
+        );
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -680,7 +730,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             }
         }
 
-        let should_save = args.save_top_n > 0 && args.save_every > 0 && generation % args.save_every == 0;
+        let should_save =
+            args.save_top_n > 0 && args.save_every > 0 && generation % args.save_every == 0;
         if should_save {
             for (rank, (_fit, _idx, genome, _eval_metrics, _train_metrics)) in
                 scored.iter().take(args.save_top_n).enumerate()
@@ -688,7 +739,14 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                 let policy_path = args
                     .outdir
                     .join(format!("policy_gen{}_rank{}.pt", generation, rank));
-                model::save_policy(obs_dim, args.hidden, args.layers, device, genome, &policy_path)?;
+                model::save_policy(
+                    obs_dim,
+                    args.hidden,
+                    args.layers,
+                    device,
+                    genome,
+                    &policy_path,
+                )?;
             }
         }
 
@@ -713,7 +771,9 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         pop = new_pop;
 
         if args.checkpoint_every > 0 && generation % args.checkpoint_every == 0 {
-            let ckpt_path = args.outdir.join(format!("checkpoint_gen{}.bin", generation));
+            let ckpt_path = args
+                .outdir
+                .join(format!("checkpoint_gen{}.bin", generation));
             ga::save_checkpoint(&ckpt_path, generation, &pop)?;
         }
     }
@@ -757,14 +817,18 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         );
 
         let best_path = args.outdir.join("best_overall_policy.pt");
-        model::save_policy(obs_dim, args.hidden, args.layers, device, &best_genome, &best_path)?;
+        model::save_policy(
+            obs_dim,
+            args.hidden,
+            args.layers,
+            device,
+            &best_genome,
+            &best_path,
+        )?;
         println!("Saved best overall policy to {}", best_path.display());
     }
 
-    println!(
-        "info: total training time {:.2?}",
-        overall_start.elapsed()
-    );
+    println!("info: total training time {:.2?}", overall_start.elapsed());
     Ok(())
 }
 

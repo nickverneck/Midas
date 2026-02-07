@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use polars::prelude::{AnyValue, DataFrame, ParquetReader, SerReader, Series};
 use rayon::prelude::*;
