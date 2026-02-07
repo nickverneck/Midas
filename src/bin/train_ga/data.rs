@@ -1,5 +1,5 @@
 use anyhow::Result;
-use polars::prelude::{AnyValue, Series, SerReader};
+use polars::prelude::{AnyValue, SerReader, Series};
 
 #[derive(Clone)]
 pub struct DataSet {
@@ -61,7 +61,9 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
     );
     let feature_cols = ordered_feature_cols(feats)?;
 
-    let session_open = datetime_ns.as_ref().map(|dt| build_session_mask(dt, globex));
+    let session_open = datetime_ns
+        .as_ref()
+        .map(|dt| build_session_mask(dt, globex));
     let minutes_to_close = datetime_ns
         .as_ref()
         .map(|dt| build_minutes_to_close(dt, globex));
@@ -111,7 +113,7 @@ pub fn dump_dataset_stats(label: &str, data: &DataSet) {
         }
     }
     println!(
-        "info: {label}: close[min={:.6}, max={:.6}], zero_delta={}/{},", 
+        "info: {label}: close[min={:.6}, max={:.6}], zero_delta={}/{},",
         min_v, max_v, zero_delta, total
     );
 }
@@ -147,7 +149,11 @@ pub fn build_observation(
     }
 
     obs.push(equity);
-    let denom = if initial_balance.abs() < 1e-8 { 1.0 } else { initial_balance };
+    let denom = if initial_balance.abs() < 1e-8 {
+        1.0
+    } else {
+        initial_balance
+    };
     obs.push(unrealized_pnl / denom);
     obs.push(realized_pnl / denom);
 
@@ -155,7 +161,11 @@ pub fn build_observation(
         obs.push(*col.get(idx.saturating_sub(1)).unwrap_or(&f64::NAN));
     }
 
-    if let Some(dt) = data.datetime_ns.as_ref().and_then(|d| d.get(idx.saturating_sub(1))) {
+    if let Some(dt) = data
+        .datetime_ns
+        .as_ref()
+        .and_then(|d| d.get(idx.saturating_sub(1)))
+    {
         let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(*dt);
         let hour = dt.hour() as f64 + dt.minute() as f64 / 60.0;
         let angle = 2.0 * std::f64::consts::PI * (hour / 24.0);
@@ -289,7 +299,11 @@ fn build_minutes_to_close(datetimes_ns: &[i64], globex: bool) -> Vec<f64> {
             let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
             let close_hour = if globex { 17.0 } else { 16.0 };
             let minutes = (close_hour - hour) * 60.0;
-            if minutes.is_finite() { minutes.max(0.0) } else { 0.0 }
+            if minutes.is_finite() {
+                minutes.max(0.0)
+            } else {
+                0.0
+            }
         })
         .collect()
 }

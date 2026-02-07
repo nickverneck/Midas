@@ -29,7 +29,11 @@ fn main() {
     .is_ok();
     println!("mps device usable: {}", mps_available);
 
-    let device = if mps_available { Device::Mps } else { Device::Cpu };
+    let device = if mps_available {
+        Device::Mps
+    } else {
+        Device::Cpu
+    };
     println!("selected device: {:?}", device);
 }
 

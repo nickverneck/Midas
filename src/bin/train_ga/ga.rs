@@ -2,9 +2,9 @@ use anyhow::Result;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tch::{kind::Kind, no_grad, Device, Tensor};
+use tch::{Device, Tensor, kind::Kind, no_grad};
 
-use crate::data::{build_observation, DataSet};
+use crate::data::{DataSet, build_observation};
 use crate::metrics::{compute_sortino, max_drawdown};
 use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
 use midas_env::env::{MarginMode, VIOLATION_PENALTY};
@@ -154,7 +154,8 @@ impl CandidateStats {
     }
 
     fn finish(self, cfg: &CandidateConfig) -> CandidateResult {
-        let eval_sortino = compute_sortino(&self.eval_returns, cfg.sortino_annualization, 0.0, 50.0);
+        let eval_sortino =
+            compute_sortino(&self.eval_returns, cfg.sortino_annualization, 0.0, 50.0);
         let eval_draw = self
             .eval_equity
             .iter()
@@ -224,7 +225,12 @@ fn evaluate_candidate_internal(
     use tch::nn::Module;
 
     let vs = tch::nn::VarStore::new(cfg.device);
-    let policy = build_mlp(&vs.root(), data.obs_dim as i64, cfg.hidden as i64, cfg.layers);
+    let policy = build_mlp(
+        &vs.root(),
+        data.obs_dim as i64,
+        cfg.hidden as i64,
+        cfg.layers,
+    );
     load_params_from_vec(&vs, genome);
 
     let env_cfg = EnvConfig {
@@ -450,7 +456,6 @@ fn evaluate_candidate_internal(
         }
 
         eval_equity.push(eq_curve);
-
     }
 
     let eval_sortino = compute_sortino(&eval_returns, cfg.sortino_annualization, 0.0, 50.0);
@@ -700,7 +705,8 @@ pub fn evaluate_candidates_batch(
 
         for i in 0..batch {
             let realized_pnl = envs[i].state().realized_pnl;
-            let total_pnl = envs[i].state().cash + envs[i].state().unrealized_pnl - cfg.initial_balance;
+            let total_pnl =
+                envs[i].state().cash + envs[i].state().unrealized_pnl - cfg.initial_balance;
             let pnl_sum = realized_pnl
                 - window_drawdown_penalty[i]
                 - stats[i].invalid_revert_penalty_sum
@@ -754,7 +760,10 @@ fn parse_generation_from_path(path: &Path) -> Option<usize> {
     let stem = path.file_stem()?.to_string_lossy();
     let marker = "checkpoint_gen";
     let start = stem.find(marker)? + marker.len();
-    let digits: String = stem[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = stem[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if digits.is_empty() {
         None
     } else {
@@ -768,7 +777,9 @@ pub fn load_checkpoint(path: &Path) -> Result<(usize, Vec<Vec<f32>>)> {
         return Ok((ckpt.generation.saturating_add(1), ckpt.pop));
     }
     let pop: Vec<Vec<f32>> = bincode::deserialize(&data)?;
-    let start_gen = parse_generation_from_path(path).unwrap_or(0).saturating_add(1);
+    let start_gen = parse_generation_from_path(path)
+        .unwrap_or(0)
+        .saturating_add(1);
     Ok((start_gen, pop))
 }
 

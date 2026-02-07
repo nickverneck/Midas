@@ -1,6 +1,6 @@
 //! Trading environment with discrete actions and observation builder.
 
-use crate::features::{compute_features_ohlcv, periods, ATR_PERIODS};
+use crate::features::{ATR_PERIODS, compute_features_ohlcv, periods};
 use chrono::{DateTime, Timelike, Utc};
 
 pub const VIOLATION_PENALTY: f64 = 1000.0;
@@ -264,14 +264,16 @@ impl TradingEnv {
         if self.state.position == 0 && matches!(action, Action::Revert) {
             self.state.invalid_revert_streak = self.state.invalid_revert_streak.saturating_add(1);
             let streak = self.state.invalid_revert_streak as f64;
-            invalid_revert_penalty =
-                self.cfg.invalid_revert_penalty * (1.0 + self.cfg.invalid_revert_penalty_growth * (streak - 1.0).max(0.0));
+            invalid_revert_penalty = self.cfg.invalid_revert_penalty
+                * (1.0 + self.cfg.invalid_revert_penalty_growth * (streak - 1.0).max(0.0));
             action = Action::Hold;
         } else {
             self.state.invalid_revert_streak = 0;
         }
         let hold_bars = if self.state.position != 0 {
-            self.state.step.saturating_sub(self.state.position_entry_step)
+            self.state
+                .step
+                .saturating_sub(self.state.position_entry_step)
         } else {
             0
         };
@@ -323,7 +325,9 @@ impl TradingEnv {
 
         if self.cfg.enforce_margin {
             let required_margin = match self.cfg.margin_mode {
-                MarginMode::PerContract => (target_position.abs() as f64) * self.cfg.margin_per_contract,
+                MarginMode::PerContract => {
+                    (target_position.abs() as f64) * self.cfg.margin_per_contract
+                }
                 MarginMode::Price => (target_position.abs() as f64) * next_price * multiplier,
             };
             let equity = self.state.cash + self.state.unrealized_pnl;
@@ -362,8 +366,7 @@ impl TradingEnv {
         self.state.cash -= trade_costs;
         self.state.unrealized_pnl += pnl_change;
         let closing = self.state.position != 0
-            && (target_position == 0
-                || self.state.position.signum() != target_position.signum());
+            && (target_position == 0 || self.state.position.signum() != target_position.signum());
         let mut realized_pnl_change = 0.0;
         if closing {
             realized_pnl_change = self.state.unrealized_pnl;
@@ -396,7 +399,9 @@ impl TradingEnv {
 
         let drawdown_penalty = if self.state.position != 0 && self.state.drawdown_steps > 0 {
             let steps = self.state.drawdown_steps as f64;
-            self.cfg.drawdown_penalty * steps * (1.0 + self.cfg.drawdown_penalty_growth * (steps - 1.0).max(0.0))
+            self.cfg.drawdown_penalty
+                * steps
+                * (1.0 + self.cfg.drawdown_penalty_growth * (steps - 1.0).max(0.0))
         } else {
             0.0
         };
@@ -421,7 +426,8 @@ impl TradingEnv {
             && self.state.flat_steps > self.cfg.max_flat_hold_bars
         {
             let extra = (self.state.flat_steps - self.cfg.max_flat_hold_bars) as f64;
-            self.cfg.flat_hold_penalty * (1.0 + self.cfg.flat_hold_penalty_growth * (extra - 1.0).max(0.0))
+            self.cfg.flat_hold_penalty
+                * (1.0 + self.cfg.flat_hold_penalty_growth * (extra - 1.0).max(0.0))
         } else {
             0.0
         };
@@ -453,8 +459,9 @@ impl TradingEnv {
         } else {
             1.0
         };
-        let mut reward =
-            pnl_change - trade_costs - self.cfg.risk_penalty * (self.state.position.abs() as f64 / denom);
+        let mut reward = pnl_change
+            - trade_costs
+            - self.cfg.risk_penalty * (self.state.position.abs() as f64 / denom);
 
         if self.state.position == 0 && self.cfg.idle_penalty > 0.0 {
             reward -= self.cfg.idle_penalty;
@@ -514,7 +521,7 @@ pub fn build_observation(
 ) -> Vec<f64> {
     let feats = compute_features_ohlcv(close, Some(high), Some(low), volume);
     let mut obs = Vec::with_capacity(4 + feats.len() + 4);
-    
+
     // Current bar's open (the "right now" price)
     if let Some(o) = open {
         obs.push(o[idx]);
@@ -534,15 +541,27 @@ pub fn build_observation(
         obs.push(f64::NAN);
         obs.push(f64::NAN);
     }
-    
+
     // Equity/Balance feature
     obs.push(equity);
 
     // indicators at t-1 (or NaN during warmup)
     for period in periods() {
-        obs.push(*feats[&format!("sma_{period}")].get(idx - 1).unwrap_or(&f64::NAN));
-        obs.push(*feats[&format!("ema_{period}")].get(idx - 1).unwrap_or(&f64::NAN));
-        obs.push(*feats[&format!("hma_{period}")].get(idx - 1).unwrap_or(&f64::NAN));
+        obs.push(
+            *feats[&format!("sma_{period}")]
+                .get(idx - 1)
+                .unwrap_or(&f64::NAN),
+        );
+        obs.push(
+            *feats[&format!("ema_{period}")]
+                .get(idx - 1)
+                .unwrap_or(&f64::NAN),
+        );
+        obs.push(
+            *feats[&format!("hma_{period}")]
+                .get(idx - 1)
+                .unwrap_or(&f64::NAN),
+        );
     }
     for p in ATR_PERIODS {
         obs.push(*feats[&format!("atr_{p}")].get(idx - 1).unwrap_or(&f64::NAN));
@@ -584,7 +603,15 @@ mod tests {
 
     #[test]
     fn revert_flips_and_charges_double_side_costs() {
-        let mut env = TradingEnv::new(100.0, 1000.0, EnvConfig { max_position: 1, enforce_margin: false, ..Default::default() });
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                max_position: 1,
+                enforce_margin: false,
+                ..Default::default()
+            },
+        );
         let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
         assert_eq!(env.state.position, 1);
 
@@ -708,7 +735,19 @@ mod tests {
         let dt = vec![now, now, now, now];
         let sess = vec![true, true, true, true];
         let margin = vec![true, true, true, true];
-        let obs = build_observation(3, None, &close, &high, &low, None, Some(&dt), Some(&sess), Some(&margin), 1, 1000.0);
+        let obs = build_observation(
+            3,
+            None,
+            &close,
+            &high,
+            &low,
+            None,
+            Some(&dt),
+            Some(&sess),
+            Some(&margin),
+            1,
+            1000.0,
+        );
         assert!(obs.len() > 0);
         assert_eq!(obs.last().cloned().unwrap(), 1.0); // margin mask
     }

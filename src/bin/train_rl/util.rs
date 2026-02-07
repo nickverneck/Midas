@@ -22,11 +22,7 @@ pub fn resolve_device(requested: Option<&str>) -> tch::Device {
                 let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, mps_device));
             })
             .is_ok();
-            if mps_ok {
-                mps_device
-            } else {
-                Device::Cpu
-            }
+            if mps_ok { mps_device } else { Device::Cpu }
         }
         "cpu" => Device::Cpu,
         _ => {
