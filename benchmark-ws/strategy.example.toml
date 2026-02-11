@@ -1,0 +1,65 @@
+# Example strategy config for benchmark-ws execution engine
+# Converted from NinjaScript UptrickZeroHMAAngleFiltertrailing.
+
+mode = "backtest" # "backtest", "sim", or "live"
+confirm_live = false # must be true for mode="live"
+
+data_file = "data/train/SPY0.parquet"
+ticker = "SPY"
+
+# Tradovate sim-mode settings
+sim_contract = "SPY" # e.g., "MESH6" for futures
+sim_ws_url = "wss://md.tradovateapi.com/v1/websocket"
+sim_rest_url = "https://demo.tradovateapi.com/v1"
+live_ws_url = "wss://md.tradovateapi.com/v1/websocket"
+live_rest_url = "https://live.tradovateapi.com/v1"
+sim_token_path = ".auth/bearer-token.json"
+# sim_account_spec = "SIM12345"
+# sim_account_id = 123456
+sim_history_bars = 500
+sim_max_runtime_seconds = 3600
+# sim_max_realtime_bars = 200
+sim_heartbeat_ms = 2500
+sim_order_time_in_force = "Day"
+sim_dry_run = true
+
+initial_balance = 10000.0
+quantity = 1
+commission_round_turn = 1.60
+slippage_per_contract = 0.25
+
+# Price conversion:
+# dollar PnL = (price move) * point_value * quantity
+point_value = 1.0
+tick_size = 0.01
+
+hma_length = 255
+min_angle = 7.0
+angle_lookback = 7
+longs_only = false
+
+use_risk_management = true
+use_risk_management_short_only = false
+take_profit_dollars = 30.0
+stop_loss_dollars = 15.0
+
+use_trailing_stop = false
+trail_trigger_ticks = 10.0
+trail_offset_ticks = 0.0
+
+use_bar_trailing = false
+bar_trail_trigger_ticks = 10.0
+bar_trail_ticks_per_bar = 2.0
+
+use_ny_hours = true
+ny_start_hour = 9
+ny_start_minute = 30
+ny_end_hour = 16
+ny_end_minute = 0
+
+bars_required_to_trade = 50
+offset = 0
+limit = 5000
+
+export_trades_csv = "runs/strategy_trades.csv"
+export_equity_csv = "runs/strategy_equity.csv"
