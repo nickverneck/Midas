@@ -156,6 +156,88 @@ pub fn hma(prices: &[f64], period: usize) -> Vec<f64> {
     res
 }
 
+/// Kaufman's Adaptive Moving Average (KAMA).
+/// - `period` controls the efficiency-ratio lookback.
+/// - `fast_period` and `slow_period` control smoothing limits.
+pub fn kama(prices: &[f64], period: usize, fast_period: usize, slow_period: usize) -> Vec<f64> {
+    let mut res = vec![f64::NAN; prices.len()];
+    if period == 0 || fast_period == 0 || slow_period == 0 || slow_period <= fast_period {
+        return res;
+    }
+    if prices.len() < period {
+        return res;
+    }
+
+    let fast_sc = 2.0 / (fast_period as f64 + 1.0);
+    let slow_sc = 2.0 / (slow_period as f64 + 1.0);
+
+    let seed = prices[..period].iter().sum::<f64>() / period as f64;
+    res[period - 1] = seed;
+    let mut prev_kama = seed;
+
+    for i in period..prices.len() {
+        let change = (prices[i] - prices[i - period]).abs();
+        let mut volatility = 0.0;
+        for j in (i - period + 1)..=i {
+            volatility += (prices[j] - prices[j - 1]).abs();
+        }
+        let efficiency_ratio = if volatility > 0.0 {
+            change / volatility
+        } else {
+            0.0
+        };
+        let smoothing = (efficiency_ratio * (fast_sc - slow_sc) + slow_sc).powi(2);
+        let current = prev_kama + smoothing * (prices[i] - prev_kama);
+        res[i] = current;
+        prev_kama = current;
+    }
+
+    res
+}
+
+/// Arnaud Legoux Moving Average (ALMA).
+/// - `period` is the moving window length.
+/// - `offset` should be in [0, 1], typically 0.85.
+/// - `sigma` controls Gaussian width, typically 6.0.
+pub fn alma(prices: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
+    let mut res = vec![f64::NAN; prices.len()];
+    if period == 0 || prices.len() < period {
+        return res;
+    }
+    if sigma <= 0.0 || !(0.0..=1.0).contains(&offset) {
+        return res;
+    }
+
+    let m = offset * (period as f64 - 1.0);
+    let s = period as f64 / sigma;
+    if s <= 0.0 {
+        return res;
+    }
+
+    let mut weights = vec![0.0; period];
+    let mut weight_sum = 0.0;
+    for (i, w) in weights.iter_mut().enumerate() {
+        let dist = i as f64 - m;
+        let weight = (-(dist * dist) / (2.0 * s * s)).exp();
+        *w = weight;
+        weight_sum += weight;
+    }
+    if weight_sum <= 0.0 {
+        return res;
+    }
+
+    for end in period..=prices.len() {
+        let start = end - period;
+        let mut acc = 0.0;
+        for i in 0..period {
+            acc += weights[i] * prices[start + i];
+        }
+        res[end - 1] = acc / weight_sum;
+    }
+
+    res
+}
+
 fn true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     let len = close.len();
     let mut tr = vec![f64::NAN; len];
@@ -226,5 +308,28 @@ mod tests {
     #[test]
     fn warmup_covers_long_hma_periods() {
         assert_eq!(feature_warmup_bars(), 316);
+    }
+
+    #[test]
+    fn kama_warms_and_tracks_prices() {
+        let prices = [1.0, 1.2, 1.1, 1.3, 1.4, 1.6, 1.7, 1.9];
+        let out = kama(&prices, 3, 2, 30);
+        assert!(out[0].is_nan());
+        assert!(out[1].is_nan());
+        assert!(!out[2].is_nan());
+        assert!(!out[7].is_nan());
+        assert!(out[7].is_finite());
+    }
+
+    #[test]
+    fn alma_warms_and_tracks_prices() {
+        let prices = [1.0, 1.2, 1.1, 1.3, 1.4, 1.6, 1.7, 1.9];
+        let out = alma(&prices, 4, 0.85, 6.0);
+        assert!(out[0].is_nan());
+        assert!(out[1].is_nan());
+        assert!(out[2].is_nan());
+        assert!(!out[3].is_nan());
+        assert!(!out[7].is_nan());
+        assert!(out[7].is_finite());
     }
 }

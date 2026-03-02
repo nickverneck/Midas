@@ -16,6 +16,7 @@
 	import ScriptEditorCard from "./_components/ScriptEditorCard.svelte";
 	import SelectionDetailsCard from "./_components/SelectionDetailsCard.svelte";
 	import SignalBuilderCard from "./_components/SignalBuilderCard.svelte";
+	import type { ChartConfiguration, ChartDataset } from "chart.js";
 
 	import type {
 		AnalyzerCell,
@@ -30,6 +31,7 @@
 		CrossAction,
 		DatasetMode,
 		IndicatorKind,
+		IndicatorSweepParam,
 		NumericInput
 	} from "./types";
 
@@ -104,8 +106,30 @@ end
 	let analyzerDatasetPath = $state("data/train/SPY0.parquet");
 
 	let analyzer = $state<AnalyzerConfig>({
-		indicatorA: { kind: "ema" as IndicatorKind, start: 5, end: 20, step: 1 },
-		indicatorB: { kind: "ema" as IndicatorKind, start: 5, end: 20, step: 1 },
+		indicatorA: {
+			kind: "ema" as IndicatorKind,
+			sweepParam: "period" as IndicatorSweepParam,
+			period: 10,
+			start: 5,
+			end: 20,
+			step: 1,
+			kamaFast: 2,
+			kamaSlow: 30,
+			almaOffset: 0.85,
+			almaSigma: 6
+		},
+		indicatorB: {
+			kind: "ema" as IndicatorKind,
+			sweepParam: "period" as IndicatorSweepParam,
+			period: 10,
+			start: 5,
+			end: 20,
+			step: 1,
+			kamaFast: 2,
+			kamaSlow: 30,
+			almaOffset: 0.85,
+			almaSigma: 6
+		},
 		buyAction: "crossover" as CrossAction,
 		sellAction: "crossunder" as CrossAction,
 		takeProfit: { enabled: false, start: 0.5, end: 2.0, step: 0.5 },
@@ -126,8 +150,8 @@ end
 	let heatmapMetric = $state<keyof AnalyzerMetrics>("fitness");
 	let heatmapRangeMin = $state<NumericInput>("");
 	let heatmapRangeMax = $state<NumericInput>("");
-	let selectedTakeProfit = $state<string | null>(null);
-	let selectedStopLoss = $state<string | null>(null);
+	let selectedTakeProfit = $state<string | undefined>(undefined);
+	let selectedStopLoss = $state<string | undefined>(undefined);
 	let selectedCell = $state<AnalyzerCell | null>(null);
 
 	const toNumber = (value: unknown) => {
@@ -148,6 +172,29 @@ end
 		if (metric === "winRate") return num / 100;
 		return num;
 	};
+
+	const indicatorSweepParams = (kind: IndicatorKind): IndicatorSweepParam[] => {
+		switch (kind) {
+			case "kama":
+				return ["period", "fast", "slow"];
+			case "alma":
+				return ["period", "offset", "sigma"];
+			default:
+				return ["period"];
+		}
+	};
+
+	const normalizeSweepParam = (
+		kind: IndicatorKind,
+		param: IndicatorSweepParam | undefined
+	): IndicatorSweepParam => {
+		const allowed = indicatorSweepParams(kind);
+		if (param && allowed.includes(param)) return param;
+		return allowed[0];
+	};
+
+	const isIntegerSweepParam = (param: IndicatorSweepParam) =>
+		param === "period" || param === "fast" || param === "slow";
 
 	const countRange = (start: number | null, end: number | null, step: number | null) => {
 		if (start === null || end === null || step === null) return 0;
@@ -350,15 +397,25 @@ end
 	}));
 
 	let analyzerIndicatorA = $derived.by(() => ({
-		start: toInteger(analyzer.indicatorA.start),
-		end: toInteger(analyzer.indicatorA.end),
-		step: toInteger(analyzer.indicatorA.step)
+		start: toNumber(analyzer.indicatorA.start),
+		end: toNumber(analyzer.indicatorA.end),
+		step: toNumber(analyzer.indicatorA.step),
+		period: toInteger(analyzer.indicatorA.period),
+		kamaFast: toInteger(analyzer.indicatorA.kamaFast),
+		kamaSlow: toInteger(analyzer.indicatorA.kamaSlow),
+		almaOffset: toNumber(analyzer.indicatorA.almaOffset),
+		almaSigma: toNumber(analyzer.indicatorA.almaSigma)
 	}));
 
 	let analyzerIndicatorB = $derived.by(() => ({
-		start: toInteger(analyzer.indicatorB.start),
-		end: toInteger(analyzer.indicatorB.end),
-		step: toInteger(analyzer.indicatorB.step)
+		start: toNumber(analyzer.indicatorB.start),
+		end: toNumber(analyzer.indicatorB.end),
+		step: toNumber(analyzer.indicatorB.step),
+		period: toInteger(analyzer.indicatorB.period),
+		kamaFast: toInteger(analyzer.indicatorB.kamaFast),
+		kamaSlow: toInteger(analyzer.indicatorB.kamaSlow),
+		almaOffset: toNumber(analyzer.indicatorB.almaOffset),
+		almaSigma: toNumber(analyzer.indicatorB.almaSigma)
 	}));
 
 	let analyzerTakeProfit = $derived.by(() => ({
@@ -380,19 +437,122 @@ end
 		return !trimmed.endsWith(".parquet");
 	});
 
-	let invalidAnalyzerIndicatorA = $derived.by(() => {
-		const { start, end, step } = analyzerIndicatorA;
-		if (start === null || end === null || step === null) return true;
-		if (start <= 0 || step <= 0) return true;
-		return end < start;
-	});
+	type ParsedIndicator = {
+		start: number | null;
+		end: number | null;
+		step: number | null;
+		period: number | null;
+		kamaFast: number | null;
+		kamaSlow: number | null;
+		almaOffset: number | null;
+		almaSigma: number | null;
+	};
 
-	let invalidAnalyzerIndicatorB = $derived.by(() => {
-		const { start, end, step } = analyzerIndicatorB;
-		if (start === null || end === null || step === null) return true;
-		if (start <= 0 || step <= 0) return true;
-		return end < start;
-	});
+	const validateAnalyzerIndicator = (
+		label: "A" | "B",
+		kind: IndicatorKind,
+		sweepParam: IndicatorSweepParam,
+		parsed: ParsedIndicator
+	) => {
+		const errors: string[] = [];
+		const allowedSweepParams = indicatorSweepParams(kind);
+		if (!allowedSweepParams.includes(sweepParam)) {
+			errors.push(`Indicator ${label} sweep parameter is not valid for ${kind.toUpperCase()}.`);
+			return errors;
+		}
+
+		const { start, end, step } = parsed;
+		if (start === null || end === null || step === null) {
+			errors.push(`Indicator ${label} sweep range is incomplete.`);
+			return errors;
+		}
+		if (step <= 0 || end < start) {
+			errors.push(`Indicator ${label} sweep range must satisfy end >= start and step > 0.`);
+			return errors;
+		}
+		if (isIntegerSweepParam(sweepParam)) {
+			if (!Number.isInteger(start) || !Number.isInteger(end) || !Number.isInteger(step)) {
+				errors.push(`Indicator ${label} ${sweepParam} sweep values must be integers.`);
+			}
+			if (start <= 0) {
+				errors.push(`Indicator ${label} ${sweepParam} sweep values must be greater than 0.`);
+			}
+		} else if (sweepParam === "offset") {
+			if (start < 0 || end > 1) {
+				errors.push(`Indicator ${label} offset sweep must stay within [0, 1].`);
+			}
+		} else if (sweepParam === "sigma") {
+			if (start <= 0) {
+				errors.push(`Indicator ${label} sigma sweep values must be greater than 0.`);
+			}
+		}
+
+		if (kind !== "price" && sweepParam !== "period") {
+			if (parsed.period === null || !Number.isInteger(parsed.period) || parsed.period <= 0) {
+				errors.push(`Indicator ${label} fixed period must be an integer greater than 0.`);
+			}
+		}
+
+		if (kind === "kama") {
+			if (sweepParam !== "fast") {
+				if (
+					parsed.kamaFast === null ||
+					!Number.isInteger(parsed.kamaFast) ||
+					parsed.kamaFast <= 0
+				) {
+					errors.push(`Indicator ${label} fixed KAMA fast must be an integer greater than 0.`);
+				}
+			}
+			if (sweepParam !== "slow") {
+				if (
+					parsed.kamaSlow === null ||
+					!Number.isInteger(parsed.kamaSlow) ||
+					parsed.kamaSlow <= 0
+				) {
+					errors.push(`Indicator ${label} fixed KAMA slow must be an integer greater than 0.`);
+				}
+			}
+
+			const fastMax = sweepParam === "fast" ? end : parsed.kamaFast;
+			const slowMin = sweepParam === "slow" ? start : parsed.kamaSlow;
+			if (fastMax !== null && slowMin !== null && slowMin <= fastMax) {
+				errors.push(`Indicator ${label} KAMA requires slow > fast across the sweep.`);
+			}
+		}
+
+		if (kind === "alma") {
+			if (sweepParam !== "offset") {
+				if (parsed.almaOffset === null || parsed.almaOffset < 0 || parsed.almaOffset > 1) {
+					errors.push(`Indicator ${label} fixed ALMA offset must be within [0, 1].`);
+				}
+			}
+			if (sweepParam !== "sigma") {
+				if (parsed.almaSigma === null || parsed.almaSigma <= 0) {
+					errors.push(`Indicator ${label} fixed ALMA sigma must be greater than 0.`);
+				}
+			}
+		}
+
+		return errors;
+	};
+
+	let analyzerIndicatorAErrors = $derived.by(() =>
+		validateAnalyzerIndicator(
+			"A",
+			analyzer.indicatorA.kind,
+			analyzer.indicatorA.sweepParam,
+			analyzerIndicatorA
+		)
+	);
+
+	let analyzerIndicatorBErrors = $derived.by(() =>
+		validateAnalyzerIndicator(
+			"B",
+			analyzer.indicatorB.kind,
+			analyzer.indicatorB.sweepParam,
+			analyzerIndicatorB
+		)
+	);
 
 	let invalidAnalyzerTakeProfit = $derived.by(() => {
 		if (!analyzer.takeProfit.enabled) return false;
@@ -444,8 +604,7 @@ end
 	let analyzerValidationErrors = $derived.by(() => {
 		const errors: string[] = [];
 		if (analyzerDatasetPathInvalid) errors.push("Custom dataset path must be a .parquet file.");
-		if (invalidAnalyzerIndicatorA) errors.push("Indicator A range must be valid (start/end/step).");
-		if (invalidAnalyzerIndicatorB) errors.push("Indicator B range must be valid (start/end/step).");
+		errors.push(...analyzerIndicatorAErrors, ...analyzerIndicatorBErrors);
 		if (invalidAnalyzerTakeProfit) errors.push("Take profit range must be valid.");
 		if (invalidAnalyzerStopLoss) errors.push("Stop loss range must be valid.");
 		if (invalidAnalyzerInitialBalance) errors.push("Initial balance must be greater than 0.");
@@ -480,6 +639,20 @@ end
 		}
 	});
 
+	$effect(() => {
+		const normalized = normalizeSweepParam(analyzer.indicatorA.kind, analyzer.indicatorA.sweepParam);
+		if (analyzer.indicatorA.sweepParam !== normalized) {
+			analyzer.indicatorA.sweepParam = normalized;
+		}
+	});
+
+	$effect(() => {
+		const normalized = normalizeSweepParam(analyzer.indicatorB.kind, analyzer.indicatorB.sweepParam);
+		if (analyzer.indicatorB.sweepParam !== normalized) {
+			analyzer.indicatorB.sweepParam = normalized;
+		}
+	});
+
 	const demoEquitySeries = Array.from({ length: 140 }, (_, i) => {
 		const drift = i * 3.2;
 		const wave = Math.sin(i / 9) * 40;
@@ -504,7 +677,7 @@ end
 	let activeMetrics = $derived.by(() => runResult?.metrics ?? demoMetrics);
 
 	let equityChartData = $derived.by(() => {
-		const datasets = [
+		const datasets: ChartDataset<"line", number[]>[] = [
 			{
 				label: "Script",
 				data: equitySeries,
@@ -547,11 +720,16 @@ end
 			},
 			y: {
 				ticks: {
-					callback: (value: number) => `$${value.toLocaleString()}`
+					callback: (value: string | number) => {
+						const numericValue = Number(value);
+						return Number.isFinite(numericValue)
+							? `$${numericValue.toLocaleString()}`
+							: String(value);
+					}
 				}
 			}
 		}
-	};
+	} satisfies ChartConfiguration<"line", number[], number>["options"];
 
 	const metricValue = (metrics: AnalyzerMetrics, metric: keyof AnalyzerMetrics) => {
 		switch (metric) {
@@ -616,8 +794,8 @@ end
 
 	let filteredAnalyzerCells = $derived.by(() => {
 		if (!analyzerResult) return [];
-		const tpValue = selectedTakeProfit === null ? null : Number(selectedTakeProfit);
-		const slValue = selectedStopLoss === null ? null : Number(selectedStopLoss);
+		const tpValue = selectedTakeProfit === undefined ? null : Number(selectedTakeProfit);
+		const slValue = selectedStopLoss === undefined ? null : Number(selectedStopLoss);
 		return analyzerResult.results.filter((cell) => {
 			const tpMatch = tpValue === null ? cell.takeProfit === null : cell.takeProfit === tpValue;
 			const slMatch = slValue === null ? cell.stopLoss === null : cell.stopLoss === slValue;
@@ -635,10 +813,12 @@ end
 		return true;
 	};
 
+	const axisValueKey = (value: number) => (Number.isFinite(value) ? value.toFixed(6) : "nan");
+
 	let analyzerCellMap = $derived.by(() => {
 		const map = new Map<string, AnalyzerCell>();
 		for (const cell of filteredAnalyzerCells) {
-			map.set(`${cell.aPeriod}-${cell.bPeriod}`, cell);
+			map.set(`${axisValueKey(cell.aPeriod)}-${axisValueKey(cell.bPeriod)}`, cell);
 		}
 		return map;
 	});
@@ -689,12 +869,19 @@ end
 	};
 
 	const findCell = (aPeriod: number, bPeriod: number) => {
-		return analyzerCellMap.get(`${aPeriod}-${bPeriod}`);
+		return analyzerCellMap.get(`${axisValueKey(aPeriod)}-${axisValueKey(bPeriod)}`);
 	};
 
 	$effect(() => {
 		if (!selectedCell) return;
-		const key = `${selectedCell.aPeriod}-${selectedCell.bPeriod}`;
+		const tpValue = selectedTakeProfit === undefined ? null : Number(selectedTakeProfit);
+		const slValue = selectedStopLoss === undefined ? null : Number(selectedStopLoss);
+		const matchesCurrentTp = tpValue === null ? true : selectedCell.takeProfit === tpValue;
+		const matchesCurrentSl = slValue === null ? true : selectedCell.stopLoss === slValue;
+		if (!matchesCurrentTp || !matchesCurrentSl) {
+			return;
+		}
+		const key = `${axisValueKey(selectedCell.aPeriod)}-${axisValueKey(selectedCell.bPeriod)}`;
 		if (!analyzerCellMap.has(key)) {
 			selectedCell = null;
 		}
@@ -760,18 +947,34 @@ end
 				signal: {
 					indicatorA: {
 						kind: analyzer.indicatorA.kind,
+						sweepParam: analyzer.indicatorA.sweepParam,
 						range: {
 							start: analyzerIndicatorA.start,
 							end: analyzerIndicatorA.end,
 							step: analyzerIndicatorA.step
+						},
+						params: {
+							period: analyzerIndicatorA.period,
+							fast: analyzerIndicatorA.kamaFast,
+							slow: analyzerIndicatorA.kamaSlow,
+							offset: analyzerIndicatorA.almaOffset,
+							sigma: analyzerIndicatorA.almaSigma
 						}
 					},
 					indicatorB: {
 						kind: analyzer.indicatorB.kind,
+						sweepParam: analyzer.indicatorB.sweepParam,
 						range: {
 							start: analyzerIndicatorB.start,
 							end: analyzerIndicatorB.end,
 							step: analyzerIndicatorB.step
+						},
+						params: {
+							period: analyzerIndicatorB.period,
+							fast: analyzerIndicatorB.kamaFast,
+							slow: analyzerIndicatorB.kamaSlow,
+							offset: analyzerIndicatorB.almaOffset,
+							sigma: analyzerIndicatorB.almaSigma
 						}
 					},
 					buyAction: analyzer.buyAction,
@@ -823,19 +1026,19 @@ end
 
 	$effect(() => {
 		if (!analyzerResult) {
-			selectedTakeProfit = null;
-			selectedStopLoss = null;
+			selectedTakeProfit = undefined;
+			selectedStopLoss = undefined;
 			selectedCell = null;
 			return;
 		}
 		selectedTakeProfit =
 			analyzerResult.axes.takeProfitValues?.[0] !== undefined
 				? String(analyzerResult.axes.takeProfitValues[0])
-				: null;
+				: undefined;
 		selectedStopLoss =
 			analyzerResult.axes.stopLossValues?.[0] !== undefined
 				? String(analyzerResult.axes.stopLossValues[0])
-				: null;
+				: undefined;
 		selectedCell = null;
 	});
 </script>
