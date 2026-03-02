@@ -19,8 +19,9 @@ export type BacktestResult = {
 	actions?: { idx: number; action: string }[];
 };
 
-export type IndicatorKind = "sma" | "ema" | "hma" | "wma" | "price";
+export type IndicatorKind = "sma" | "ema" | "hma" | "wma" | "kama" | "alma" | "price";
 export type CrossAction = "crossover" | "crossunder";
+export type IndicatorSweepParam = "period" | "fast" | "slow" | "offset" | "sigma";
 
 export type AnalyzerMetrics = {
 	totalReward: number;
@@ -46,8 +47,8 @@ export type AnalyzerCell = {
 
 export type AnalyzerResult = {
 	axes: {
-		indicatorA: { kind: IndicatorKind; periods: number[] };
-		indicatorB: { kind: IndicatorKind; periods: number[] };
+		indicatorA: { kind: IndicatorKind; sweepParam: IndicatorSweepParam; periods: number[] };
+		indicatorB: { kind: IndicatorKind; sweepParam: IndicatorSweepParam; periods: number[] };
 		takeProfitValues: number[];
 		stopLossValues: number[];
 		total_combinations: number;
@@ -83,9 +84,22 @@ export type AnalyzerRange = {
 	step: NumericInput;
 };
 
+export type AnalyzerIndicatorConfig = {
+	kind: IndicatorKind;
+	sweepParam: IndicatorSweepParam;
+	period: NumericInput;
+	start: NumericInput;
+	end: NumericInput;
+	step: NumericInput;
+	kamaFast: NumericInput;
+	kamaSlow: NumericInput;
+	almaOffset: NumericInput;
+	almaSigma: NumericInput;
+};
+
 export type AnalyzerConfig = {
-	indicatorA: { kind: IndicatorKind; start: NumericInput; end: NumericInput; step: NumericInput };
-	indicatorB: { kind: IndicatorKind; start: NumericInput; end: NumericInput; step: NumericInput };
+	indicatorA: AnalyzerIndicatorConfig;
+	indicatorB: AnalyzerIndicatorConfig;
 	buyAction: CrossAction;
 	sellAction: CrossAction;
 	takeProfit: { enabled: boolean; start: NumericInput; end: NumericInput; step: NumericInput };

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use midas_env::backtesting::{compute_metrics, equity_returns};
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
-use midas_env::features::{ema, hma, sma, wma};
+use midas_env::features::{alma, ema, hma, kama, sma, wma};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,7 +57,20 @@ struct SignalConfig {
 #[serde(rename_all = "camelCase")]
 struct IndicatorSpec {
     kind: IndicatorKind,
-    range: RangeInt,
+    #[serde(default)]
+    sweep_param: SweepParam,
+    range: RangeSweep,
+    params: Option<IndicatorParams>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndicatorParams {
+    period: Option<usize>,
+    fast: Option<usize>,
+    slow: Option<usize>,
+    offset: Option<f64>,
+    sigma: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -67,7 +80,20 @@ enum IndicatorKind {
     Ema,
     Hma,
     Wma,
+    Kama,
+    Alma,
     Price,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum SweepParam {
+    #[default]
+    Period,
+    Fast,
+    Slow,
+    Offset,
+    Sigma,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -78,10 +104,10 @@ enum CrossAction {
 }
 
 #[derive(Debug, Deserialize)]
-struct RangeInt {
-    start: usize,
-    end: usize,
-    step: usize,
+struct RangeSweep {
+    start: f64,
+    end: f64,
+    step: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,14 +146,15 @@ struct AxesInfo {
 #[serde(rename_all = "camelCase")]
 struct IndicatorAxis {
     kind: IndicatorKind,
-    periods: Vec<usize>,
+    sweep_param: SweepParam,
+    periods: Vec<f64>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AnalyzerCell {
-    a_period: usize,
-    b_period: usize,
+    a_period: f64,
+    b_period: f64,
     take_profit: Option<f64>,
     stop_loss: Option<f64>,
     metrics: MetricsPayload,
@@ -160,8 +187,8 @@ struct MarketData {
 
 #[derive(Clone, Copy)]
 struct Combo {
-    a_period: usize,
-    b_period: usize,
+    a_value: f64,
+    b_value: f64,
     take_profit: Option<f64>,
     stop_loss: Option<f64>,
 }
@@ -188,8 +215,8 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         bail!("not enough bars to run analyzer");
     }
 
-    let periods_a = build_range_usize(&cfg.signal.indicator_a.range, "indicatorA")?;
-    let periods_b = build_range_usize(&cfg.signal.indicator_b.range, "indicatorB")?;
+    let sweep_values_a = build_indicator_sweep_values(&cfg.signal.indicator_a, "indicatorA")?;
+    let sweep_values_b = build_indicator_sweep_values(&cfg.signal.indicator_b, "indicatorB")?;
 
     let tp_values = match cfg.take_profit {
         Some(range) => build_range_f64(&range, "takeProfit")?,
@@ -211,7 +238,8 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         sl_values.iter().copied().map(Some).collect()
     };
 
-    let total_combos = periods_a.len() * periods_b.len() * tp_options.len() * sl_options.len();
+    let total_combos =
+        sweep_values_a.len() * sweep_values_b.len() * tp_options.len() * sl_options.len();
     let max_combos = cfg.max_combinations.unwrap_or(20_000);
     if total_combos > max_combos {
         bail!(
@@ -236,24 +264,24 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         ..EnvConfig::default()
     };
 
-    let series_a = precompute_series(cfg.signal.indicator_a.kind, &periods_a, &data.close);
-    let series_b = precompute_series(cfg.signal.indicator_b.kind, &periods_b, &data.close);
+    let series_a = precompute_series(&cfg.signal.indicator_a, &sweep_values_a, &data.close)?;
+    let series_b = precompute_series(&cfg.signal.indicator_b, &sweep_values_b, &data.close)?;
 
     let prices = Arc::new(data.close);
     let session_open = Arc::new(data.session_open);
     let margin_ok = Arc::new(data.margin_ok);
     let minutes_to_close = Arc::new(data.minutes_to_close);
 
-    let combos = build_combos(&periods_a, &periods_b, &tp_options, &sl_options);
+    let combos = build_combos(&sweep_values_a, &sweep_values_b, &tp_options, &sl_options);
 
     let results: Vec<AnalyzerCell> = combos
         .par_iter()
         .map(|combo| {
             let series_a = series_a
-                .get(&combo.a_period)
+                .get(&sweep_value_key(combo.a_value))
                 .expect("missing indicator A series");
             let series_b = series_b
-                .get(&combo.b_period)
+                .get(&sweep_value_key(combo.b_value))
                 .expect("missing indicator B series");
             let metrics = run_strategy(
                 &prices,
@@ -271,8 +299,8 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
                 cfg.fitness.as_ref(),
             );
             AnalyzerCell {
-                a_period: combo.a_period,
-                b_period: combo.b_period,
+                a_period: combo.a_value,
+                b_period: combo.b_value,
                 take_profit: combo.take_profit,
                 stop_loss: combo.stop_loss,
                 metrics,
@@ -284,11 +312,13 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         axes: AxesInfo {
             indicator_a: IndicatorAxis {
                 kind: cfg.signal.indicator_a.kind,
-                periods: periods_a.clone(),
+                sweep_param: cfg.signal.indicator_a.sweep_param,
+                periods: sweep_values_a.clone(),
             },
             indicator_b: IndicatorAxis {
                 kind: cfg.signal.indicator_b.kind,
-                periods: periods_b.clone(),
+                sweep_param: cfg.signal.indicator_b.sweep_param,
+                periods: sweep_values_b.clone(),
             },
             take_profit_values: tp_values,
             stop_loss_values: sl_values,
@@ -302,21 +332,78 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
     Ok(())
 }
 
-fn build_range_usize(range: &RangeInt, label: &str) -> Result<Vec<usize>> {
-    if range.step == 0 {
-        bail!("{label} step must be greater than 0");
+fn build_indicator_sweep_values(spec: &IndicatorSpec, label: &str) -> Result<Vec<f64>> {
+    if !sweep_param_allowed_for_kind(spec.kind, spec.sweep_param) {
+        bail!(
+            "{label} sweep parameter {:?} is not valid for {:?}",
+            spec.sweep_param,
+            spec.kind
+        );
     }
-    if range.start == 0 {
-        bail!("{label} start must be greater than 0");
+    let values = build_range_any_f64(&spec.range, label)?;
+    match spec.sweep_param {
+        SweepParam::Period | SweepParam::Fast | SweepParam::Slow => {
+            if values.is_empty() {
+                bail!("{label} sweep range is empty");
+            }
+            for value in values.iter().copied() {
+                if value <= 0.0 {
+                    bail!("{label} sweep values must be > 0");
+                }
+                if (value - value.round()).abs() > 1e-9 {
+                    bail!("{label} sweep values must be integers");
+                }
+            }
+        }
+        SweepParam::Offset => {
+            for value in values.iter().copied() {
+                if !(0.0..=1.0).contains(&value) {
+                    bail!("{label} offset sweep values must be in [0, 1]");
+                }
+            }
+        }
+        SweepParam::Sigma => {
+            for value in values.iter().copied() {
+                if value <= 0.0 {
+                    bail!("{label} sigma sweep values must be > 0");
+                }
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn sweep_param_allowed_for_kind(kind: IndicatorKind, sweep_param: SweepParam) -> bool {
+    match kind {
+        IndicatorKind::Kama => matches!(
+            sweep_param,
+            SweepParam::Period | SweepParam::Fast | SweepParam::Slow
+        ),
+        IndicatorKind::Alma => matches!(
+            sweep_param,
+            SweepParam::Period | SweepParam::Offset | SweepParam::Sigma
+        ),
+        _ => matches!(sweep_param, SweepParam::Period),
+    }
+}
+
+fn build_range_any_f64(range: &RangeSweep, label: &str) -> Result<Vec<f64>> {
+    if range.step <= 0.0 {
+        bail!("{label} step must be greater than 0");
     }
     if range.end < range.start {
         bail!("{label} end must be >= start");
     }
     let mut out = Vec::new();
     let mut value = range.start;
-    while value <= range.end {
-        out.push(value);
-        value = value.saturating_add(range.step);
+    let mut guard = 0;
+    while value <= range.end + 1e-9 {
+        out.push(round_sweep_value(value));
+        value += range.step;
+        guard += 1;
+        if guard > 10_000 {
+            bail!("{label} range too large");
+        }
     }
     Ok(out)
 }
@@ -351,17 +438,55 @@ fn round_sweep_value(value: f64) -> f64 {
 }
 
 fn precompute_series(
-    kind: IndicatorKind,
-    periods: &[usize],
+    spec: &IndicatorSpec,
+    sweep_values: &[f64],
     prices: &[f64],
-) -> HashMap<usize, Arc<Vec<f64>>> {
+) -> Result<HashMap<i64, Arc<Vec<f64>>>> {
+    let defaults = resolve_indicator_defaults(spec);
     let mut out = HashMap::new();
-    for &p in periods {
-        let series = match kind {
-            IndicatorKind::Sma => sma(prices, p),
-            IndicatorKind::Ema => ema(prices, p),
-            IndicatorKind::Hma => hma(prices, p),
-            IndicatorKind::Wma => wma(prices, p),
+
+    for &sweep_value in sweep_values {
+        let mut period = defaults.period;
+        let mut fast = defaults.fast;
+        let mut slow = defaults.slow;
+        let mut offset = defaults.offset;
+        let mut sigma = defaults.sigma;
+
+        match spec.sweep_param {
+            SweepParam::Period => period = to_usize_param(sweep_value, "period")?,
+            SweepParam::Fast => fast = to_usize_param(sweep_value, "fast")?,
+            SweepParam::Slow => slow = to_usize_param(sweep_value, "slow")?,
+            SweepParam::Offset => offset = sweep_value,
+            SweepParam::Sigma => sigma = sweep_value,
+        }
+
+        if period == 0 {
+            bail!("indicator period must be > 0");
+        }
+
+        let series = match spec.kind {
+            IndicatorKind::Sma => sma(prices, period),
+            IndicatorKind::Ema => ema(prices, period),
+            IndicatorKind::Hma => hma(prices, period),
+            IndicatorKind::Wma => wma(prices, period),
+            IndicatorKind::Kama => {
+                if fast == 0 || slow == 0 {
+                    bail!("kama params fast/slow must be > 0");
+                }
+                if slow <= fast {
+                    bail!("kama param slow must be greater than fast");
+                }
+                kama(prices, period, fast, slow)
+            }
+            IndicatorKind::Alma => {
+                if !(0.0..=1.0).contains(&offset) {
+                    bail!("alma param offset must be in [0, 1]");
+                }
+                if sigma <= 0.0 {
+                    bail!("alma param sigma must be greater than 0");
+                }
+                alma(prices, period, offset, sigma)
+            }
             IndicatorKind::Price => {
                 // Price is just the previous close (t-1)
                 // First value is f64::NAN since there's no previous price
@@ -370,26 +495,69 @@ fn precompute_series(
                 price_series
             }
         };
-        out.insert(p, Arc::new(series));
+        out.insert(sweep_value_key(sweep_value), Arc::new(series));
     }
-    out
+    Ok(out)
+}
+
+#[derive(Clone, Copy)]
+struct IndicatorDefaults {
+    period: usize,
+    fast: usize,
+    slow: usize,
+    offset: f64,
+    sigma: f64,
+}
+
+fn resolve_indicator_defaults(spec: &IndicatorSpec) -> IndicatorDefaults {
+    let params = spec.params.unwrap_or(IndicatorParams {
+        period: None,
+        fast: None,
+        slow: None,
+        offset: None,
+        sigma: None,
+    });
+    IndicatorDefaults {
+        period: params.period.unwrap_or(10),
+        fast: params.fast.unwrap_or(2),
+        slow: params.slow.unwrap_or(30),
+        offset: params.offset.unwrap_or(0.85),
+        sigma: params.sigma.unwrap_or(6.0),
+    }
+}
+
+fn to_usize_param(value: f64, label: &str) -> Result<usize> {
+    if !value.is_finite() {
+        bail!("{label} must be finite");
+    }
+    if value <= 0.0 {
+        bail!("{label} must be > 0");
+    }
+    if (value - value.round()).abs() > 1e-9 {
+        bail!("{label} must be an integer");
+    }
+    Ok(value.round() as usize)
+}
+
+fn sweep_value_key(value: f64) -> i64 {
+    (round_sweep_value(value) * 1_000_000.0).round() as i64
 }
 
 fn build_combos(
-    periods_a: &[usize],
-    periods_b: &[usize],
+    values_a: &[f64],
+    values_b: &[f64],
     tp_options: &[Option<f64>],
     sl_options: &[Option<f64>],
 ) -> Vec<Combo> {
     let mut combos =
-        Vec::with_capacity(periods_a.len() * periods_b.len() * tp_options.len() * sl_options.len());
-    for &a in periods_a {
-        for &b in periods_b {
+        Vec::with_capacity(values_a.len() * values_b.len() * tp_options.len() * sl_options.len());
+    for &a in values_a {
+        for &b in values_b {
             for &tp in tp_options {
                 for &sl in sl_options {
                     combos.push(Combo {
-                        a_period: a,
-                        b_period: b,
+                        a_value: a,
+                        b_value: b,
                         take_profit: tp,
                         stop_loss: sl,
                     });

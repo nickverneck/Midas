@@ -10,6 +10,32 @@
 	};
 
 	let { selectedCell, analyzerResult, formatMetricValue }: Props = $props();
+
+	const sweepParamLabel = (value: string) => {
+		switch (value) {
+			case "period":
+				return "Period";
+			case "fast":
+				return "Fast";
+			case "slow":
+				return "Slow";
+			case "offset":
+				return "Offset";
+			case "sigma":
+				return "Sigma";
+			default:
+				return value;
+		}
+	};
+
+	const formatAxisValue = (value: number) => {
+		if (!Number.isFinite(value)) return "n/a";
+		if (Number.isInteger(value)) return String(value);
+		return value.toFixed(4);
+	};
+
+	const formatAxisDescriptor = (kind: string, sweepParam: string, value: number) =>
+		`${kind.toUpperCase()} ${sweepParamLabel(sweepParam)} ${formatAxisValue(value)}`;
 </script>
 
 <Card.Root>
@@ -22,8 +48,22 @@
 			<div class="rounded-lg border bg-muted/20 p-3 text-xs">
 				<p class="font-semibold text-muted-foreground">Configuration</p>
 				<p class="mt-1">
-					A {analyzerResult?.axes.indicatorA.kind.toUpperCase()} {selectedCell.aPeriod}
-					vs B {analyzerResult?.axes.indicatorB.kind.toUpperCase()} {selectedCell.bPeriod}
+					A
+					{analyzerResult
+						? formatAxisDescriptor(
+								analyzerResult.axes.indicatorA.kind,
+								analyzerResult.axes.indicatorA.sweepParam,
+								selectedCell.aPeriod
+							)
+						: formatAxisValue(selectedCell.aPeriod)}
+					vs B
+					{analyzerResult
+						? formatAxisDescriptor(
+								analyzerResult.axes.indicatorB.kind,
+								analyzerResult.axes.indicatorB.sweepParam,
+								selectedCell.bPeriod
+							)
+						: formatAxisValue(selectedCell.bPeriod)}
 				</p>
 				{#if selectedCell.takeProfit !== null || selectedCell.stopLoss !== null}
 					<p class="mt-1">
