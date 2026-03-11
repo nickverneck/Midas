@@ -28,5 +28,6 @@ target
 *.parquet
 *.pt
 .env
+.auth/
 *.bin
 *.csv
