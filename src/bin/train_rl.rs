@@ -512,10 +512,11 @@ fn load_checkpoint(vs: &mut nn::VarStore, device: tch::Device, path: &Path) -> a
         Ok(()) => return Ok(()),
         Err(err) => {
             let err_msg = err.to_string();
+            let short_err = err_msg.lines().next().unwrap_or(&err_msg);
             eprintln!(
-                "warn: VarStore load failed for {} ({}), trying TorchScript fallback",
+                "info: native RL checkpoint load failed for {} ({}), trying compatible import",
                 path.display(),
-                err_msg
+                short_err
             );
             if let Err(ts_err) = load_torchscript_checkpoint(vs, device, path) {
                 anyhow::bail!(
@@ -540,23 +541,56 @@ fn load_torchscript_checkpoint(
     let params = module
         .named_parameters()
         .context("read torchscript parameters")?;
-    apply_named_parameters(vs, params, path)
+    let summary = apply_named_parameters(vs, params, path)?;
+    if summary.policy_aliases > 0 || summary.skipped_value_tensors > 0 {
+        println!(
+            "info: imported {} tensor(s) from {} (policy aliases: {}, value tensors left initialized: {})",
+            summary.imported_tensors,
+            path.display(),
+            summary.policy_aliases,
+            summary.skipped_value_tensors,
+        );
+    }
+    Ok(())
+}
+
+struct CheckpointImportSummary {
+    imported_tensors: usize,
+    policy_aliases: usize,
+    skipped_value_tensors: usize,
 }
 
 fn apply_named_parameters(
     vs: &mut nn::VarStore,
     params: Vec<(String, tch::Tensor)>,
     path: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CheckpointImportSummary> {
     let mut by_name = std::collections::HashMap::with_capacity(params.len());
     for (name, tensor) in params {
         let name = name.replace('|', ".");
         by_name.insert(name, tensor);
     }
 
+    let has_value_tensors = by_name.keys().any(|name| name.starts_with("value."));
+    let mut imported_tensors = 0usize;
+    let mut policy_aliases = 0usize;
+    let mut skipped_value_tensors = 0usize;
+
     let mut variables = vs.variables_.lock().unwrap();
     for (name, var) in variables.named_variables.iter_mut() {
-        let Some(src) = by_name.get(name) else {
+        let mut aliased_policy = false;
+        let src = if let Some(src) = by_name.get(name) {
+            src
+        } else if let Some(policy_name) = name.strip_prefix("policy.") {
+            let Some(src) = by_name.get(policy_name) else {
+                anyhow::bail!("checkpoint missing tensor {name} in {}", path.display());
+            };
+            aliased_policy = true;
+            src
+        } else if name.starts_with("value.") && !has_value_tensors {
+            skipped_value_tensors += 1;
+            continue;
+        } else {
             anyhow::bail!("checkpoint missing tensor {name} in {}", path.display());
         };
         tch::no_grad(|| {
@@ -564,7 +598,15 @@ fn apply_named_parameters(
             var.f_copy_(src)
         })
         .with_context(|| format!("copy tensor {name} from {}", path.display()))?;
+        imported_tensors += 1;
+        if aliased_policy {
+            policy_aliases += 1;
+        }
     }
 
-    Ok(())
+    Ok(CheckpointImportSummary {
+        imported_tensors,
+        policy_aliases,
+        skipped_value_tensors,
+    })
 }
