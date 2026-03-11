@@ -856,7 +856,7 @@ async fn market_data_worker_inner(
                         message_id += 1;
                         chart_req_id = Some(message_id);
                         let body = json!({
-                            "symbol": contract.name,
+                            "symbol": contract.id,
                             "chartDescription": {
                                 "underlyingType": "MinuteBar",
                                 "elementSize": 1,
@@ -1284,10 +1284,7 @@ fn create_message(endpoint: &str, id: u64, body: Option<&Value>) -> String {
 
 fn parse_bar(value: &Value) -> Option<Bar> {
     let ts = value.get("timestamp")?.as_str()?;
-    let ts_ns = chrono::DateTime::parse_from_rfc3339(ts)
-        .ok()?
-        .with_timezone(&Utc)
-        .timestamp_nanos_opt()?;
+    let ts_ns = parse_bar_timestamp_ns(ts)?;
     Some(Bar {
         ts_ns,
         open: json_number(value, "open")?,
@@ -1295,6 +1292,15 @@ fn parse_bar(value: &Value) -> Option<Bar> {
         low: json_number(value, "low")?,
         close: json_number(value, "close")?,
     })
+}
+
+fn parse_bar_timestamp_ns(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M%:z").map(|dt| dt.with_timezone(&Utc)))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%MZ").map(|dt| dt.and_utc()))
+        .ok()?
+        .timestamp_nanos_opt()
 }
 
 fn json_number(value: &Value, key: &str) -> Option<f64> {
@@ -1347,5 +1353,32 @@ fn empty_as_none(value: &str) -> Option<&str> {
         None
     } else {
         Some(trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_bar_accepts_minute_precision_utc_timestamp() {
+        let bar = parse_bar(&json!({
+            "timestamp": "2026-03-11T22:38Z",
+            "open": 6738.5,
+            "high": 6739.5,
+            "low": 6736.75,
+            "close": 6738.0
+        }))
+        .expect("bar should parse");
+
+        let expected_ts = chrono::DateTime::parse_from_rfc3339("2026-03-11T22:38:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp_nanos_opt()
+            .unwrap();
+
+        assert_eq!(bar.ts_ns, expected_ts);
+        assert_eq!(bar.close, 6738.0);
     }
 }
