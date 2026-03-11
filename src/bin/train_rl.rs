@@ -132,6 +132,7 @@ fn main() -> anyhow::Result<()> {
         drawdown_penalty: args.drawdown_penalty,
         drawdown_penalty_growth: args.drawdown_penalty_growth,
         session_close_penalty: args.session_close_penalty,
+        auto_close_minutes_before_close: args.auto_close_minutes_before_close,
         max_hold_bars_positive: args.max_hold_bars_positive,
         max_hold_bars_drawdown: args.max_hold_bars_drawdown,
         hold_duration_penalty: args.hold_duration_penalty,

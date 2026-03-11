@@ -29,6 +29,7 @@ pub struct CandidateConfig {
     pub drawdown_penalty: f64,
     pub drawdown_penalty_growth: f64,
     pub session_close_penalty: f64,
+    pub auto_close_minutes_before_close: f64,
     pub max_hold_bars_positive: usize,
     pub max_hold_bars_drawdown: usize,
     pub hold_duration_penalty: f64,
@@ -92,6 +93,7 @@ pub struct BehaviorRow {
     pub invalid_revert_penalty: f64,
     pub hold_duration_penalty: f64,
     pub flat_hold_penalty: f64,
+    pub auto_close_executed: bool,
     pub session_open: bool,
     pub margin_ok: bool,
     pub minutes_to_close: Option<f64>,
@@ -242,6 +244,7 @@ fn evaluate_candidate_internal(
         drawdown_penalty: cfg.drawdown_penalty,
         drawdown_penalty_growth: cfg.drawdown_penalty_growth,
         session_close_penalty: cfg.session_close_penalty,
+        auto_close_minutes_before_close: cfg.auto_close_minutes_before_close,
         max_hold_bars_positive: cfg.max_hold_bars_positive,
         max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
         hold_duration_penalty: cfg.hold_duration_penalty,
@@ -292,6 +295,11 @@ fn evaluate_candidate_internal(
         let mut pnl_buf = Vec::with_capacity(end - start - 1);
         let mut eq_curve = Vec::with_capacity(end - start - 1);
         let mut window_drawdown_penalty = 0.0f64;
+        let mut window_invalid_revert_penalty = 0.0f64;
+        let mut window_hold_duration_penalty = 0.0f64;
+        let mut window_flat_hold_penalty = 0.0f64;
+        let mut window_session_close_penalty = 0.0f64;
+        let mut window_violation_penalty = 0.0f64;
         let mut step_idx = 0usize;
 
         for t in (start + 1)..end {
@@ -370,15 +378,15 @@ fn evaluate_candidate_internal(
             };
             if info.session_closed_violation {
                 session_violations += 1;
-                violation_penalty_sum += VIOLATION_PENALTY;
+                window_violation_penalty += VIOLATION_PENALTY;
             }
             if info.margin_call_violation {
                 margin_violations += 1;
-                violation_penalty_sum += VIOLATION_PENALTY;
+                window_violation_penalty += VIOLATION_PENALTY;
             }
             if info.position_limit_violation {
                 position_violations += 1;
-                violation_penalty_sum += VIOLATION_PENALTY;
+                window_violation_penalty += VIOLATION_PENALTY;
             }
             position = env.state().position;
             equity = env.state().cash + env.state().unrealized_pnl;
@@ -407,6 +415,7 @@ fn evaluate_candidate_internal(
                     invalid_revert_penalty: info.invalid_revert_penalty,
                     hold_duration_penalty: info.hold_duration_penalty,
                     flat_hold_penalty: info.flat_hold_penalty,
+                    auto_close_executed: info.auto_close_executed,
                     session_open,
                     margin_ok,
                     minutes_to_close,
@@ -418,10 +427,10 @@ fn evaluate_candidate_internal(
             pnl_buf.push(info.pnl_change);
             eq_curve.push(equity);
             window_drawdown_penalty += info.drawdown_penalty;
-            invalid_revert_penalty_sum += info.invalid_revert_penalty;
-            hold_duration_penalty_sum += info.hold_duration_penalty;
-            flat_hold_penalty_sum += info.flat_hold_penalty;
-            session_close_penalty_sum += info.session_close_penalty;
+            window_invalid_revert_penalty += info.invalid_revert_penalty;
+            window_hold_duration_penalty += info.hold_duration_penalty;
+            window_flat_hold_penalty += info.flat_hold_penalty;
+            window_session_close_penalty += info.session_close_penalty;
             if !matches!(action, Action::Hold) {
                 non_hold += 1;
             }
@@ -437,15 +446,20 @@ fn evaluate_candidate_internal(
         let total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
         let pnl_sum = realized_pnl
             - window_drawdown_penalty
-            - invalid_revert_penalty_sum
-            - hold_duration_penalty_sum
-            - flat_hold_penalty_sum
-            - session_close_penalty_sum
-            - violation_penalty_sum;
+            - window_invalid_revert_penalty
+            - window_hold_duration_penalty
+            - window_flat_hold_penalty
+            - window_session_close_penalty
+            - window_violation_penalty;
         eval_pnls.push(pnl_sum);
         eval_pnls_realized.push(realized_pnl);
         eval_pnls_total.push(total_pnl);
         drawdown_penalty_sum += window_drawdown_penalty;
+        invalid_revert_penalty_sum += window_invalid_revert_penalty;
+        hold_duration_penalty_sum += window_hold_duration_penalty;
+        flat_hold_penalty_sum += window_flat_hold_penalty;
+        session_close_penalty_sum += window_session_close_penalty;
+        violation_penalty_sum += window_violation_penalty;
 
         let mut prev_eq = cfg.initial_balance;
         for (i, &pnl) in pnl_buf.iter().enumerate() {
@@ -561,6 +575,7 @@ pub fn evaluate_candidates_batch(
         drawdown_penalty: cfg.drawdown_penalty,
         drawdown_penalty_growth: cfg.drawdown_penalty_growth,
         session_close_penalty: cfg.session_close_penalty,
+        auto_close_minutes_before_close: cfg.auto_close_minutes_before_close,
         max_hold_bars_positive: cfg.max_hold_bars_positive,
         max_hold_bars_drawdown: cfg.max_hold_bars_drawdown,
         hold_duration_penalty: cfg.hold_duration_penalty,
@@ -597,6 +612,11 @@ pub fn evaluate_candidates_batch(
             .map(|_| Vec::with_capacity(end - start - 1))
             .collect();
         let mut window_drawdown_penalty = vec![0.0f64; batch];
+        let mut window_invalid_revert_penalty = vec![0.0f64; batch];
+        let mut window_hold_duration_penalty = vec![0.0f64; batch];
+        let mut window_flat_hold_penalty = vec![0.0f64; batch];
+        let mut window_session_close_penalty = vec![0.0f64; batch];
+        let mut window_violation_penalty = vec![0.0f64; batch];
 
         for t in (start + 1)..end {
             let mut obs_batch: Vec<f32> = Vec::with_capacity(batch * data.obs_dim);
@@ -672,15 +692,15 @@ pub fn evaluate_candidates_batch(
                 );
                 if info.session_closed_violation {
                     stats[i].session_violations += 1;
-                    stats[i].violation_penalty_sum += VIOLATION_PENALTY;
+                    window_violation_penalty[i] += VIOLATION_PENALTY;
                 }
                 if info.margin_call_violation {
                     stats[i].margin_violations += 1;
-                    stats[i].violation_penalty_sum += VIOLATION_PENALTY;
+                    window_violation_penalty[i] += VIOLATION_PENALTY;
                 }
                 if info.position_limit_violation {
                     stats[i].position_violations += 1;
-                    stats[i].violation_penalty_sum += VIOLATION_PENALTY;
+                    window_violation_penalty[i] += VIOLATION_PENALTY;
                 }
 
                 positions[i] = envs[i].state().position;
@@ -688,10 +708,10 @@ pub fn evaluate_candidates_batch(
                 pnl_bufs[i].push(info.pnl_change);
                 eq_curves[i].push(equities[i]);
                 window_drawdown_penalty[i] += info.drawdown_penalty;
-                stats[i].invalid_revert_penalty_sum += info.invalid_revert_penalty;
-                stats[i].hold_duration_penalty_sum += info.hold_duration_penalty;
-                stats[i].flat_hold_penalty_sum += info.flat_hold_penalty;
-                stats[i].session_close_penalty_sum += info.session_close_penalty;
+                window_invalid_revert_penalty[i] += info.invalid_revert_penalty;
+                window_hold_duration_penalty[i] += info.hold_duration_penalty;
+                window_flat_hold_penalty[i] += info.flat_hold_penalty;
+                window_session_close_penalty[i] += info.session_close_penalty;
                 if !matches!(action, Action::Hold) {
                     stats[i].non_hold += 1;
                 }
@@ -709,15 +729,20 @@ pub fn evaluate_candidates_batch(
                 envs[i].state().cash + envs[i].state().unrealized_pnl - cfg.initial_balance;
             let pnl_sum = realized_pnl
                 - window_drawdown_penalty[i]
-                - stats[i].invalid_revert_penalty_sum
-                - stats[i].hold_duration_penalty_sum
-                - stats[i].flat_hold_penalty_sum
-                - stats[i].session_close_penalty_sum
-                - stats[i].violation_penalty_sum;
+                - window_invalid_revert_penalty[i]
+                - window_hold_duration_penalty[i]
+                - window_flat_hold_penalty[i]
+                - window_session_close_penalty[i]
+                - window_violation_penalty[i];
             stats[i].eval_pnls.push(pnl_sum);
             stats[i].eval_pnls_realized.push(realized_pnl);
             stats[i].eval_pnls_total.push(total_pnl);
             stats[i].drawdown_penalty_sum += window_drawdown_penalty[i];
+            stats[i].invalid_revert_penalty_sum += window_invalid_revert_penalty[i];
+            stats[i].hold_duration_penalty_sum += window_hold_duration_penalty[i];
+            stats[i].flat_hold_penalty_sum += window_flat_hold_penalty[i];
+            stats[i].session_close_penalty_sum += window_session_close_penalty[i];
+            stats[i].violation_penalty_sum += window_violation_penalty[i];
 
             let mut prev_eq = cfg.initial_balance;
             for (idx, pnl) in pnl_bufs[i].iter().enumerate() {

@@ -38,6 +38,8 @@
 	let diagnosticsError = $state<string | null>(null);
 	let diagnosticsLoading = $state(false);
 	let diagnosticsEnv = $state<Record<string, string | null> | null>(null);
+	const defaultWindowBars = 7 * 24 * 60;
+	const defaultStepBars = 128;
 	
 	let gaParams = $state({
 		outdir: "runs_ga",
@@ -49,13 +51,14 @@
 		generations: 5,
 		"pop-size": 6,
 		workers: 2,
-		window: 512,
-		step: 256,
+		window: defaultWindowBars,
+		step: defaultStepBars,
 		"initial-balance": 10000,
 		"max-position": 0,
 		"margin-mode": "auto",
 		"contract-multiplier": 1.0,
 		"margin-per-contract": "",
+		"auto-close-minutes-before-close": 5,
 		"max-hold-bars-positive": 15,
 		"max-hold-bars-drawdown": 15,
 		"hold-duration-penalty": 1.0,
@@ -86,8 +89,8 @@
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
 		device: "cpu",
-		window: 512,
-		step: 256,
+		window: defaultWindowBars,
+		step: defaultStepBars,
 		epochs: 10,
 		"train-windows": 3,
 		"ppo-epochs": 4,
@@ -107,6 +110,7 @@
 		"margin-mode": "auto",
 		"contract-multiplier": 1.0,
 		"margin-per-contract": "",
+		"auto-close-minutes-before-close": 5,
 		"max-hold-bars-positive": 15,
 		"max-hold-bars-drawdown": 15,
 		"hold-duration-penalty": 1.0,
@@ -121,6 +125,7 @@
 	});
 
 	type ParquetKey = "train-parquet" | "val-parquet" | "test-parquet";
+	type FuturesPresetKey = "mes-micro" | "es-mini";
 	type FileEntry = { name: string; path: string; kind: "dir" | "file" };
 	type FilePickerTarget =
 		| { kind: "parquet"; mode: TrainMode; key: ParquetKey }
@@ -143,6 +148,40 @@
 		} else {
 			rlParams[key] = value;
 		}
+	};
+
+	const futuresPresets: Record<
+		FuturesPresetKey,
+		{ label: string; marginPerContract: number; contractMultiplier: number; note: string }
+	> = {
+		"mes-micro": {
+			label: "MES Micro",
+			marginPerContract: 50,
+			contractMultiplier: 5,
+			note: "NinjaTrader MES intraday"
+		},
+		"es-mini": {
+			label: "ES Mini",
+			marginPerContract: 500,
+			contractMultiplier: 50,
+			note: "NinjaTrader ES intraday"
+		}
+	};
+
+	const applyFuturesPreset = (mode: TrainMode, presetKey: FuturesPresetKey) => {
+		const preset = futuresPresets[presetKey];
+		const target = mode === "ga" ? gaParams : rlParams;
+		target["margin-mode"] = "per-contract";
+		target["margin-per-contract"] = String(preset.marginPerContract);
+		target["contract-multiplier"] = preset.contractMultiplier;
+		target["auto-close-minutes-before-close"] = 5;
+		consoleOutput = [
+			...consoleOutput,
+			{
+				type: "system",
+				text: `Applied ${preset.label} preset (${preset.note}): margin ${preset.marginPerContract}, multiplier ${preset.contractMultiplier}, auto-close 5m.`
+			}
+		];
 	};
 
 	const normalizeExtensions = (extensions: string[]) =>
@@ -925,6 +964,20 @@
 															<Label for="ga-max-position">Max Position (0 = no cap)</Label>
 															<Input id="ga-max-position" type="number" min="0" bind:value={gaParams["max-position"]} />
 														</div>
+														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3">
+															<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Futures Presets (NinjaTrader)</div>
+															<div class="flex flex-wrap gap-2">
+																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("ga", "mes-micro")}>
+																	MES Micro
+																</Button>
+																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("ga", "es-mini")}>
+																	ES Mini
+																</Button>
+															</div>
+															<p class="text-xs text-muted-foreground">
+																MES uses $50 margin and 5x multiplier; ES uses $500 margin and 50x multiplier. Auto-close stays at 5 minutes before close.
+															</p>
+														</div>
 														<div class="grid gap-2">
 															<Label for="ga-margin-mode">Margin Mode</Label>
 															<select
@@ -1241,6 +1294,20 @@
 														<div class="grid gap-2">
 															<Label for="rl-max-position">Max Position (0 = no cap)</Label>
 															<Input id="rl-max-position" type="number" min="0" bind:value={rlParams["max-position"]} />
+														</div>
+														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3">
+															<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Futures Presets (NinjaTrader)</div>
+															<div class="flex flex-wrap gap-2">
+																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("rl", "mes-micro")}>
+																	MES Micro
+																</Button>
+																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("rl", "es-mini")}>
+																	ES Mini
+																</Button>
+															</div>
+															<p class="text-xs text-muted-foreground">
+																MES uses $50 margin and 5x multiplier; ES uses $500 margin and 50x multiplier. Auto-close stays at 5 minutes before close.
+															</p>
 														</div>
 														<div class="grid gap-2">
 															<Label for="rl-margin-mode">Margin Mode</Label>

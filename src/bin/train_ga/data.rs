@@ -15,10 +15,14 @@ pub struct DataSet {
     pub feature_cols: Vec<Vec<f64>>,
     pub obs_dim: usize,
     pub symbol: String,
+    session_from_parquet: bool,
 }
 
 impl DataSet {
     pub fn with_session(mut self, globex: bool) -> Self {
+        if self.session_from_parquet {
+            return self;
+        }
         if let Some(dt) = &self.datetime_ns {
             self.session_open = Some(build_session_mask(dt, globex));
             self.minutes_to_close = Some(build_minutes_to_close(dt, globex));
@@ -48,6 +52,17 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         .ok()
         .map(|c| series_to_i64(c.as_materialized_series()))
         .transpose()?;
+    let session_open_from_df: Option<Vec<bool>> = df
+        .column("session_open")
+        .ok()
+        .map(|c| series_to_bool(c.as_materialized_series()))
+        .transpose()?;
+    let minutes_to_close_from_df: Option<Vec<f64>> = df
+        .column("minutes_to_close")
+        .ok()
+        .map(|c| series_to_f64(c.as_materialized_series()))
+        .transpose()?;
+    let session_from_parquet = session_open_from_df.is_some() && minutes_to_close_from_df.is_some();
     let symbol = match df.column("symbol")?.get(0)? {
         AnyValue::String(s) => s.to_string(),
         _ => "UNKNOWN".to_string(),
@@ -59,14 +74,18 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         Some(&low),
         volume.as_deref(),
     );
-    let feature_cols = ordered_feature_cols(feats)?;
+    let feature_cols = ordered_feature_cols(feats, &open, &close, &high, &low)?;
 
-    let session_open = datetime_ns
-        .as_ref()
-        .map(|dt| build_session_mask(dt, globex));
-    let minutes_to_close = datetime_ns
-        .as_ref()
-        .map(|dt| build_minutes_to_close(dt, globex));
+    let session_open = session_open_from_df.or_else(|| {
+        datetime_ns
+            .as_ref()
+            .map(|dt| build_session_mask(dt, globex))
+    });
+    let minutes_to_close = minutes_to_close_from_df.or_else(|| {
+        datetime_ns
+            .as_ref()
+            .map(|dt| build_minutes_to_close(dt, globex))
+    });
     let margin_ok = vec![true; close.len()];
 
     let obs_dim = observation_len(&open, &close, volume.as_deref(), &feature_cols);
@@ -84,6 +103,7 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         feature_cols,
         obs_dim,
         symbol,
+        session_from_parquet,
     })
 }
 
@@ -199,16 +219,87 @@ pub fn build_observation(
 
 fn ordered_feature_cols(
     mut feats: std::collections::HashMap<String, Vec<f64>>,
+    open: &[f64],
+    close: &[f64],
+    high: &[f64],
+    low: &[f64],
 ) -> Result<Vec<Vec<f64>>> {
+    let atr_14 = feats
+        .get("atr_14")
+        .expect("missing atr_14 for delta features");
+    let ema_11 = feats
+        .get("ema_11")
+        .expect("missing ema_11 for delta features");
+    let ema_53 = feats
+        .get("ema_53")
+        .expect("missing ema_53 for delta features");
+    let hma_11 = feats
+        .get("hma_11")
+        .expect("missing hma_11 for delta features");
+    let kama_19 = feats
+        .get("kama_19")
+        .expect("missing kama_19 for delta features");
+    let vwap_dist_20 = feats
+        .get(&format!("vwap_dist_{}", midas_env::features::VWAP_PERIOD))
+        .expect("missing vwap distance for delta features");
+    let rvol_20 = feats
+        .get(&format!("rvol_{}", midas_env::features::RVOL_PERIOD))
+        .expect("missing rvol for delta features");
+
+    let ret_1 = log_return(close, 1);
+    let ret_3 = log_return(close, 3);
+    let gap_open = gap_open_series(open, close, atr_14);
+    let body_1 = candle_body_series(open, close, atr_14);
+    let upper_wick_1 = upper_wick_series(open, close, high, atr_14);
+    let lower_wick_1 = lower_wick_series(open, close, low, atr_14);
+    let ema_11_slope = normalized_delta(ema_11, atr_14);
+    let hma_11_slope = normalized_delta(hma_11, atr_14);
+    let kama_19_slope = normalized_delta(kama_19, atr_14);
+    let fast_slow_spread = normalized_spread(ema_11, ema_53, atr_14);
+    let fast_slow_spread_delta = first_difference(&fast_slow_spread);
+    let vwap_dist_delta = first_difference(vwap_dist_20);
+    let rvol_delta = first_difference(rvol_20);
+
     let mut cols = Vec::new();
     for &p in midas_env::features::periods() {
         cols.push(feats.remove(&format!("sma_{p}")).unwrap());
         cols.push(feats.remove(&format!("ema_{p}")).unwrap());
         cols.push(feats.remove(&format!("hma_{p}")).unwrap());
+        cols.push(feats.remove(&format!("kama_{p}")).unwrap());
+        cols.push(feats.remove(&format!("alma_{p}")).unwrap());
     }
     for &p in midas_env::features::ATR_PERIODS.iter() {
         cols.push(feats.remove(&format!("atr_{p}")).unwrap());
     }
+    cols.push(
+        feats
+            .remove(&format!("rvol_{}", midas_env::features::RVOL_PERIOD))
+            .unwrap(),
+    );
+    cols.push(
+        feats
+            .remove(&format!("cmf_{}", midas_env::features::CMF_PERIOD))
+            .unwrap(),
+    );
+    cols.push(
+        feats
+            .remove(&format!("vwap_dist_{}", midas_env::features::VWAP_PERIOD))
+            .unwrap(),
+    );
+    cols.push(feats.remove("obv").unwrap());
+    cols.push(ret_1);
+    cols.push(ret_3);
+    cols.push(gap_open);
+    cols.push(body_1);
+    cols.push(upper_wick_1);
+    cols.push(lower_wick_1);
+    cols.push(ema_11_slope);
+    cols.push(hma_11_slope);
+    cols.push(kama_19_slope);
+    cols.push(fast_slow_spread);
+    cols.push(fast_slow_spread_delta);
+    cols.push(vwap_dist_delta);
+    cols.push(rvol_delta);
     Ok(cols)
 }
 
@@ -234,6 +325,94 @@ fn observation_len(
     } else {
         len
     }
+}
+
+fn safe_div(num: f64, denom: f64) -> f64 {
+    if !num.is_finite() || !denom.is_finite() || denom.abs() < 1e-8 {
+        f64::NAN
+    } else {
+        num / denom
+    }
+}
+
+fn log_return(values: &[f64], lag: usize) -> Vec<f64> {
+    let mut out = vec![f64::NAN; values.len()];
+    for i in lag..values.len() {
+        let current = values[i];
+        let prior = values[i - lag];
+        if current.is_sign_positive() && prior.is_sign_positive() {
+            out[i] = (current / prior).ln();
+        }
+    }
+    out
+}
+
+fn gap_open_series(open: &[f64], close: &[f64], atr: &[f64]) -> Vec<f64> {
+    let len = open.len().min(close.len()).min(atr.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len.saturating_sub(1) {
+        out[i] = safe_div(open[i + 1] - close[i], atr[i]);
+    }
+    out
+}
+
+fn candle_body_series(open: &[f64], close: &[f64], atr: &[f64]) -> Vec<f64> {
+    let len = open.len().min(close.len()).min(atr.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        out[i] = safe_div(close[i] - open[i], atr[i]);
+    }
+    out
+}
+
+fn upper_wick_series(open: &[f64], close: &[f64], high: &[f64], atr: &[f64]) -> Vec<f64> {
+    let len = open.len().min(close.len()).min(high.len()).min(atr.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        let candle_top = open[i].max(close[i]);
+        out[i] = safe_div(high[i] - candle_top, atr[i]);
+    }
+    out
+}
+
+fn lower_wick_series(open: &[f64], close: &[f64], low: &[f64], atr: &[f64]) -> Vec<f64> {
+    let len = open.len().min(close.len()).min(low.len()).min(atr.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        let candle_bottom = open[i].min(close[i]);
+        out[i] = safe_div(candle_bottom - low[i], atr[i]);
+    }
+    out
+}
+
+fn normalized_delta(values: &[f64], norm: &[f64]) -> Vec<f64> {
+    let len = values.len().min(norm.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 1..len {
+        out[i] = safe_div(values[i] - values[i - 1], norm[i]);
+    }
+    out
+}
+
+fn normalized_spread(fast: &[f64], slow: &[f64], norm: &[f64]) -> Vec<f64> {
+    let len = fast.len().min(slow.len()).min(norm.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        out[i] = safe_div(fast[i] - slow[i], norm[i]);
+    }
+    out
+}
+
+fn first_difference(values: &[f64]) -> Vec<f64> {
+    let mut out = vec![f64::NAN; values.len()];
+    for i in 1..values.len() {
+        let current = values[i];
+        let prior = values[i - 1];
+        if current.is_finite() && prior.is_finite() {
+            out[i] = current - prior;
+        }
+    }
+    out
 }
 
 fn series_to_f64(series: &Series) -> Result<Vec<f64>> {
@@ -268,6 +447,27 @@ fn series_to_i64(series: &Series) -> Result<Vec<i64>> {
     Ok(out)
 }
 
+fn series_to_bool(series: &Series) -> Result<Vec<bool>> {
+    let out = series
+        .iter()
+        .map(|v| match v {
+            AnyValue::Boolean(v) => v,
+            AnyValue::UInt8(v) => v != 0,
+            AnyValue::UInt16(v) => v != 0,
+            AnyValue::UInt32(v) => v != 0,
+            AnyValue::UInt64(v) => v != 0,
+            AnyValue::Int8(v) => v != 0,
+            AnyValue::Int16(v) => v != 0,
+            AnyValue::Int32(v) => v != 0,
+            AnyValue::Int64(v) => v != 0,
+            AnyValue::Float32(v) => v != 0.0,
+            AnyValue::Float64(v) => v != 0.0,
+            _ => false,
+        })
+        .collect();
+    Ok(out)
+}
+
 fn build_session_mask(datetimes_ns: &[i64], globex: bool) -> Vec<bool> {
     use chrono::Timelike;
     use chrono_tz::America::New_York;
@@ -279,7 +479,7 @@ fn build_session_mask(datetimes_ns: &[i64], globex: bool) -> Vec<bool> {
             let dt_et = dt_utc.with_timezone(&New_York);
             let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
             if globex {
-                !(hour >= 17.0)
+                hour < 17.0 || hour >= 18.0
             } else {
                 (hour >= 9.5) && (hour <= 16.0)
             }
@@ -297,8 +497,19 @@ fn build_minutes_to_close(datetimes_ns: &[i64], globex: bool) -> Vec<f64> {
             let dt_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(*ns);
             let dt_et = dt_utc.with_timezone(&New_York);
             let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
-            let close_hour = if globex { 17.0 } else { 16.0 };
-            let minutes = (close_hour - hour) * 60.0;
+            let minutes = if globex {
+                if hour < 17.0 {
+                    (17.0 - hour) * 60.0
+                } else if hour >= 18.0 {
+                    ((24.0 - hour) + 17.0) * 60.0
+                } else {
+                    0.0
+                }
+            } else if hour <= 16.0 {
+                (16.0 - hour) * 60.0
+            } else {
+                0.0
+            };
             if minutes.is_finite() {
                 minutes.max(0.0)
             } else {

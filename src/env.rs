@@ -55,6 +55,9 @@ pub struct EnvConfig {
     pub drawdown_penalty_growth: f64,
     /// Penalty applied as session close approaches (scaled within last hour).
     pub session_close_penalty: f64,
+    /// Automatically flatten any open position this many minutes before close.
+    /// Set < 0 to disable auto-close.
+    pub auto_close_minutes_before_close: f64,
     /// Hold-bar threshold when unrealized PnL is positive (0 disables hold penalty).
     pub max_hold_bars_positive: usize,
     /// Hold-bar threshold while in drawdown (0 disables hold penalty).
@@ -95,6 +98,7 @@ impl Default for EnvConfig {
             drawdown_penalty: 0.0,
             drawdown_penalty_growth: 0.0,
             session_close_penalty: 0.0,
+            auto_close_minutes_before_close: 5.0,
             max_hold_bars_positive: 0,
             max_hold_bars_drawdown: 0,
             hold_duration_penalty: 0.0,
@@ -159,6 +163,7 @@ pub struct StepInfo {
     pub invalid_revert_penalty: f64,
     pub hold_duration_penalty: f64,
     pub flat_hold_penalty: f64,
+    pub auto_close_executed: bool,
     pub margin_call_violation: bool,
     pub position_limit_violation: bool,
     pub session_closed_violation: bool,
@@ -214,27 +219,53 @@ impl TradingEnv {
     /// Apply an action using the next market price and context, returning reward and info.
     pub fn step(&mut self, action: Action, next_price: f64, ctx: StepContext) -> (f64, StepInfo) {
         let requested_action = action;
+        let auto_close_enabled = self.cfg.auto_close_minutes_before_close >= 0.0
+            && self.cfg.auto_close_minutes_before_close.is_finite();
+        let mut auto_close_executed = false;
+        let mut action = action;
+
+        if auto_close_enabled && self.state.position != 0 {
+            if let Some(mins) = ctx.minutes_to_close {
+                if mins >= 0.0 && mins <= self.cfg.auto_close_minutes_before_close {
+                    auto_close_executed = true;
+                    action = if self.state.position > 0 {
+                        Action::Sell
+                    } else {
+                        Action::Buy
+                    };
+                }
+            }
+        }
+
         let session_open = ctx.session_open && self.cfg.default_session_open;
         if !session_open && !matches!(action, Action::Hold) {
-            return (
-                -VIOLATION_PENALTY,
-                StepInfo {
-                    effective_action: action,
-                    action_overridden: false,
-                    commission_paid: 0.0,
-                    slippage_paid: 0.0,
-                    pnl_change: 0.0,
-                    realized_pnl_change: 0.0,
-                    drawdown_penalty: 0.0,
-                    session_close_penalty: 0.0,
-                    invalid_revert_penalty: 0.0,
-                    hold_duration_penalty: 0.0,
-                    flat_hold_penalty: 0.0,
-                    margin_call_violation: false,
-                    position_limit_violation: false,
-                    session_closed_violation: true,
-                },
-            );
+            // If auto-close timing landed outside the tradable mask, keep the position unchanged
+            // and avoid a hard violation for the forced flatten attempt.
+            if auto_close_executed {
+                action = Action::Hold;
+                auto_close_executed = false;
+            } else {
+                return (
+                    -VIOLATION_PENALTY,
+                    StepInfo {
+                        effective_action: action,
+                        action_overridden: false,
+                        commission_paid: 0.0,
+                        slippage_paid: 0.0,
+                        pnl_change: 0.0,
+                        realized_pnl_change: 0.0,
+                        drawdown_penalty: 0.0,
+                        session_close_penalty: 0.0,
+                        invalid_revert_penalty: 0.0,
+                        hold_duration_penalty: 0.0,
+                        flat_hold_penalty: 0.0,
+                        auto_close_executed: false,
+                        margin_call_violation: false,
+                        position_limit_violation: false,
+                        session_closed_violation: true,
+                    },
+                );
+            }
         }
 
         if !ctx.margin_ok {
@@ -252,6 +283,7 @@ impl TradingEnv {
                     invalid_revert_penalty: 0.0,
                     hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
+                    auto_close_executed: false,
                     margin_call_violation: true,
                     position_limit_violation: false,
                     session_closed_violation: false,
@@ -259,7 +291,6 @@ impl TradingEnv {
             );
         }
 
-        let mut action = action;
         let mut invalid_revert_penalty = 0.0;
         if self.state.position == 0 && matches!(action, Action::Revert) {
             self.state.invalid_revert_streak = self.state.invalid_revert_streak.saturating_add(1);
@@ -278,16 +309,20 @@ impl TradingEnv {
             0
         };
 
-        let action_overridden = action != requested_action;
-        let target_position = match action {
-            Action::Buy => self.state.position + 1,
-            Action::Sell => self.state.position - 1,
-            Action::Hold => self.state.position,
-            Action::Revert => {
-                if self.state.position == 0 {
-                    0
-                } else {
-                    -self.state.position
+        let action_overridden = action != requested_action || auto_close_executed;
+        let target_position = if auto_close_executed {
+            0
+        } else {
+            match action {
+                Action::Buy => self.state.position + 1,
+                Action::Sell => self.state.position - 1,
+                Action::Hold => self.state.position,
+                Action::Revert => {
+                    if self.state.position == 0 {
+                        0
+                    } else {
+                        -self.state.position
+                    }
                 }
             }
         };
@@ -309,6 +344,7 @@ impl TradingEnv {
                     invalid_revert_penalty: 0.0,
                     hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
+                    auto_close_executed: false,
                     margin_call_violation: false,
                     position_limit_violation,
                     session_closed_violation: false,
@@ -346,6 +382,7 @@ impl TradingEnv {
                         invalid_revert_penalty: 0.0,
                         hold_duration_penalty: 0.0,
                         flat_hold_penalty: 0.0,
+                        auto_close_executed: false,
                         margin_call_violation: true,
                         position_limit_violation: false,
                         session_closed_violation: false,
@@ -406,20 +443,7 @@ impl TradingEnv {
             0.0
         };
 
-        let session_close_penalty = if self.state.position != 0 {
-            if let Some(mins) = ctx.minutes_to_close {
-                if mins >= 0.0 && mins <= 60.0 {
-                    let scale = (60.0 - mins) / 60.0;
-                    self.cfg.session_close_penalty * scale
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
+        let session_close_penalty = 0.0;
 
         let flat_hold_penalty = if self.state.position == 0
             && self.cfg.max_flat_hold_bars > 0
@@ -496,6 +520,7 @@ impl TradingEnv {
                 invalid_revert_penalty,
                 hold_duration_penalty,
                 flat_hold_penalty,
+                auto_close_executed,
                 margin_call_violation: false,
                 position_limit_violation: false,
                 session_closed_violation: false,
@@ -562,10 +587,36 @@ pub fn build_observation(
                 .get(idx - 1)
                 .unwrap_or(&f64::NAN),
         );
+        obs.push(
+            *feats[&format!("kama_{period}")]
+                .get(idx - 1)
+                .unwrap_or(&f64::NAN),
+        );
+        obs.push(
+            *feats[&format!("alma_{period}")]
+                .get(idx - 1)
+                .unwrap_or(&f64::NAN),
+        );
     }
     for p in ATR_PERIODS {
         obs.push(*feats[&format!("atr_{p}")].get(idx - 1).unwrap_or(&f64::NAN));
     }
+    obs.push(
+        *feats[&format!("rvol_{}", crate::features::RVOL_PERIOD)]
+            .get(idx - 1)
+            .unwrap_or(&f64::NAN),
+    );
+    obs.push(
+        *feats[&format!("cmf_{}", crate::features::CMF_PERIOD)]
+            .get(idx - 1)
+            .unwrap_or(&f64::NAN),
+    );
+    obs.push(
+        *feats[&format!("vwap_dist_{}", crate::features::VWAP_PERIOD)]
+            .get(idx - 1)
+            .unwrap_or(&f64::NAN),
+    );
+    obs.push(*feats["obv"].get(idx - 1).unwrap_or(&f64::NAN));
 
     // time encoding
     if let Some(ns) = datetime_ns.and_then(|d| d.get(idx - 1)) {
@@ -724,6 +775,37 @@ mod tests {
         assert!(info.session_closed_violation);
         assert!(r < -999.0);
         assert_eq!(env.state.position, 0);
+    }
+
+    #[test]
+    fn auto_close_flattens_before_close() {
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                max_position: 3,
+                enforce_margin: false,
+                auto_close_minutes_before_close: 5.0,
+                ..Default::default()
+            },
+        );
+        let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
+        let (_r2, _i2) = env.step(Action::Buy, 100.0, StepContext::default());
+        assert_eq!(env.state.position, 2);
+
+        let (_r3, info3) = env.step(
+            Action::Hold,
+            101.0,
+            StepContext {
+                session_open: true,
+                margin_ok: true,
+                minutes_to_close: Some(4.0),
+            },
+        );
+        assert!(info3.auto_close_executed);
+        assert!(matches!(info3.effective_action, Action::Sell));
+        assert_eq!(env.state.position, 0);
+        assert_eq!(info3.session_close_penalty, 0.0);
     }
 
     #[test]

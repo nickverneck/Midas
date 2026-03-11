@@ -1,0 +1,20 @@
+env = "sim"
+auth_mode = "token_file"
+
+token_override = ""
+username = ""
+password = ""
+app_id = "Midas TUI"
+app_version = "0.1.0"
+cid = ""
+secret = ""
+
+token_path = ".auth/bearer-token.json"
+session_cache_path = ".auth/ninjatrader-tui-session.json"
+
+history_bars = 500
+heartbeat_ms = 2500
+contract_suggest_limit = 12
+time_in_force = "Day"
+order_qty = 1
+autoconnect = false

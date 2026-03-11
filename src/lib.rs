@@ -101,6 +101,7 @@ mod py_bindings {
                 dict.set_item("realized_pnl_change", info.realized_pnl_change)?;
                 dict.set_item("drawdown_penalty", info.drawdown_penalty)?;
                 dict.set_item("session_close_penalty", info.session_close_penalty)?;
+                dict.set_item("auto_close_executed", info.auto_close_executed)?;
                 dict.set_item("invalid_revert_penalty", info.invalid_revert_penalty)?;
                 dict.set_item("flat_hold_penalty", info.flat_hold_penalty)?;
                 dict.set_item("margin_call_violation", info.margin_call_violation)?;
@@ -166,6 +167,7 @@ mod py_bindings {
                     d.set_item("realized_pnl_change", info.realized_pnl_change)?;
                     d.set_item("drawdown_penalty", info.drawdown_penalty)?;
                     d.set_item("session_close_penalty", info.session_close_penalty)?;
+                    d.set_item("auto_close_executed", info.auto_close_executed)?;
                     d.set_item("invalid_revert_penalty", info.invalid_revert_penalty)?;
                     d.set_item("flat_hold_penalty", info.flat_hold_penalty)?;
                     d.set_item("margin_call_violation", info.margin_call_violation)?;
@@ -186,7 +188,7 @@ mod py_bindings {
         }
     }
 
-    /// Compute feature columns (SMA/EMA/HMA over configured periods) from a 1-D float array of prices.
+    /// Compute feature columns (MA set, ATR, and volume indicators) from OHLCV arrays.
     #[pyfunction]
     #[pyo3(signature = (close, high=None, low=None, volume=None))]
     fn compute_features_py<'py>(

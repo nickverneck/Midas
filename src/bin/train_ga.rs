@@ -56,6 +56,7 @@ fn write_behavior_csv(
         "slippage_paid",
         "drawdown_penalty",
         "session_close_penalty",
+        "auto_close_executed",
         "invalid_revert_penalty",
         "hold_duration_penalty",
         "flat_hold_penalty",
@@ -117,6 +118,7 @@ fn write_behavior_csv(
             row.slippage_paid.to_string(),
             row.drawdown_penalty.to_string(),
             row.session_close_penalty.to_string(),
+            row.auto_close_executed.to_string(),
             row.invalid_revert_penalty.to_string(),
             row.hold_duration_penalty.to_string(),
             row.flat_hold_penalty.to_string(),
@@ -155,11 +157,6 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     use std::io::{BufRead, BufReader, Write};
 
     let overall_start = std::time::Instant::now();
-
-    if let Some(seed) = args.seed {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let _ = rng.r#gen::<u64>();
-    }
 
     std::fs::create_dir_all(&args.outdir)?;
     println!("info: run directory {}", args.outdir.display());
@@ -265,7 +262,10 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     let obs_dim = train.obs_dim;
     let genome_len = model::param_count(obs_dim, args.hidden, args.layers);
 
-    let mut rng = StdRng::from_entropy();
+    let mut rng = args
+        .seed
+        .map(StdRng::seed_from_u64)
+        .unwrap_or_else(StdRng::from_entropy);
     let normal = Normal::<f32>::new(0.0, args.init_sigma as f32)?;
     let mut start_gen = 0usize;
     let mut target_pop_size = args.pop_size;
@@ -383,6 +383,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             drawdown_penalty: args.drawdown_penalty,
             drawdown_penalty_growth: args.drawdown_penalty_growth,
             session_close_penalty: args.session_close_penalty,
+            auto_close_minutes_before_close: args.auto_close_minutes_before_close,
             max_hold_bars_positive: args.max_hold_bars_positive,
             max_hold_bars_drawdown: args.max_hold_bars_drawdown,
             hold_duration_penalty: args.hold_duration_penalty,
@@ -798,6 +799,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             drawdown_penalty: args.drawdown_penalty,
             drawdown_penalty_growth: args.drawdown_penalty_growth,
             session_close_penalty: args.session_close_penalty,
+            auto_close_minutes_before_close: args.auto_close_minutes_before_close,
             max_hold_bars_positive: args.max_hold_bars_positive,
             max_hold_bars_drawdown: args.max_hold_bars_drawdown,
             hold_duration_penalty: args.hold_duration_penalty,
