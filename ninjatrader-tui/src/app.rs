@@ -5,8 +5,9 @@ use crate::strategies::hma_angle::HmaAngleExecutionState;
 use crate::strategies::{PositionSide, StrategySignal, side_from_signed_qty};
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
-    AccountInfo, AccountSnapshot, ContractSuggestion, LatencySnapshot, ManualOrderAction,
-    MarketSnapshot, ServiceCommand, ServiceEvent, TradeMarkerSide,
+    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, ContractSuggestion,
+    InstrumentSessionWindow, LatencySnapshot, ManualOrderAction, MarketSnapshot, ServiceCommand,
+    ServiceEvent, TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -1144,7 +1145,7 @@ impl App {
         let left = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(10),
+                Constraint::Length(11),
                 Constraint::Length(12),
                 Constraint::Min(8),
             ])
@@ -1499,6 +1500,7 @@ impl App {
                     .clone()
                     .unwrap_or_else(|| "none".to_string())
             )),
+            Line::from(format!("Session Gate: {}", self.session_gate_summary())),
         ]
     }
 
@@ -1739,6 +1741,10 @@ impl App {
             Line::from("Native strategies execute on newly closed 1m bars after you arm them."),
             Line::from("The native engine targets the selected contract position directly."),
             Line::from("TP, SL, and trailing stop are configured in ticks and synced natively."),
+            Line::from(format!(
+                "Native runtime auto-closes {}m before session close and holds until reopen.",
+                AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+            )),
             Line::from("Lua can be loaded from file or typed directly in the TUI."),
             Line::from("ML remains selection-only for now."),
             Line::from(""),
@@ -1839,6 +1845,10 @@ impl App {
                         "Sell: price crosses below zero-lag HMA with sufficient negative angle.",
                     ),
                     Line::from("Inverted swaps buy/sell decisions before order routing."),
+                    Line::from(format!(
+                        "Auto-close holds flat {}m before the inferred session close.",
+                        AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                    )),
                 ],
                 NativeStrategyKind::EmaCross => vec![
                     Line::from("EMA Crossover Strategy"),
@@ -1864,6 +1874,10 @@ impl App {
                     Line::from("Buy: fast EMA crosses above slow EMA."),
                     Line::from("Sell: fast EMA crosses below slow EMA."),
                     Line::from("Inverted swaps buy/sell decisions before order routing."),
+                    Line::from(format!(
+                        "Auto-close holds flat {}m before the inferred session close.",
+                        AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                    )),
                 ],
             };
             lines.extend([
@@ -2261,6 +2275,44 @@ impl App {
         self.closed_bars().last().map(|bar| bar.ts_ns)
     }
 
+    fn session_window_at(&self, ts_ns: i64) -> Option<InstrumentSessionWindow> {
+        self.market
+            .session_profile
+            .map(|profile| profile.evaluate(ts_ns))
+    }
+
+    fn latest_session_window(&self) -> Option<InstrumentSessionWindow> {
+        self.latest_closed_bar_ts()
+            .and_then(|ts_ns| self.session_window_at(ts_ns))
+    }
+
+    fn session_gate_summary(&self) -> String {
+        let Some(profile) = self.market.session_profile else {
+            return "n/a".to_string();
+        };
+        let Some(window) = self.latest_session_window() else {
+            return format!("{} awaiting bars", profile.label());
+        };
+
+        if !window.session_open {
+            return format!("{} closed; holding until reopen", profile.label());
+        }
+
+        let minutes_to_close = window
+            .minutes_to_close
+            .map(|minutes| format!("{minutes:.0}m"))
+            .unwrap_or_else(|| "n/a".to_string());
+        if window.hold_entries {
+            format!(
+                "{} hold active; flattening before close ({} left)",
+                profile.label(),
+                minutes_to_close
+            )
+        } else {
+            format!("{} open; {} to close", profile.label(), minutes_to_close)
+        }
+    }
+
     fn actual_market_position_qty(&self) -> i32 {
         self.selected_snapshot()
             .and_then(|snapshot| snapshot.market_position_qty)
@@ -2485,6 +2537,87 @@ impl App {
             return;
         }
         self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+
+        let session_window = self.session_window_at(last_closed.ts_ns);
+        let actual_qty = self.actual_market_position_qty();
+        if let Some(window) = session_window {
+            if window.hold_entries {
+                if self.strategy_runtime.pending_target_qty.is_some() {
+                    self.strategy_runtime.last_summary = if window.session_open {
+                        format!(
+                            "Session hold active; waiting for prior automated order before close."
+                        )
+                    } else {
+                        "Session closed; waiting for prior automated order and reopen.".to_string()
+                    };
+                    return;
+                }
+
+                if actual_qty != 0 {
+                    self.clear_native_protection(
+                        cmd_tx,
+                        format!("{} session auto-close", self.active_native_slug(),),
+                    );
+                    let reason = if window.session_open {
+                        format!(
+                            "{} session auto-close {:.0}m before {} close",
+                            self.active_native_slug(),
+                            window.minutes_to_close.unwrap_or_default(),
+                            self.market
+                                .session_profile
+                                .map(|profile| profile.label())
+                                .unwrap_or("session")
+                        )
+                    } else {
+                        format!(
+                            "{} session hold until {} reopen",
+                            self.active_native_slug(),
+                            self.market
+                                .session_profile
+                                .map(|profile| profile.label())
+                                .unwrap_or("session")
+                        )
+                    };
+                    let summary = if window.session_open {
+                        format!(
+                            "Session hold active; flattening {} {:.0}m before close.",
+                            actual_qty,
+                            window.minutes_to_close.unwrap_or_default()
+                        )
+                    } else {
+                        format!(
+                            "Session closed; flattening {} and holding until reopen.",
+                            actual_qty
+                        )
+                    };
+                    let _ = cmd_tx.send(ServiceCommand::SetTargetPosition {
+                        target_qty: 0,
+                        automated: true,
+                        reason: reason.clone(),
+                    });
+                    self.strategy_runtime.pending_target_qty = Some(0);
+                    self.strategy_runtime.last_summary = summary.clone();
+                    self.push_log(format!(
+                        "Native {} session hold flattened {} ({})",
+                        self.strategy.native_strategy.label(),
+                        actual_qty,
+                        reason
+                    ));
+                    return;
+                }
+
+                self.maybe_sync_native_protection(cmd_tx, Some(last_closed));
+                self.strategy_runtime.last_summary = if window.session_open {
+                    format!(
+                        "Session hold active; no new entries with {:.0}m to close.",
+                        window.minutes_to_close.unwrap_or_default()
+                    )
+                } else {
+                    "Session closed; holding flat until reopen.".to_string()
+                };
+                return;
+            }
+        }
 
         let current_qty = self.effective_market_position_qty();
         let (signal, summary) = self.evaluate_active_native_strategy(&closed_bars, current_qty);
