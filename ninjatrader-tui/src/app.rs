@@ -1,8 +1,10 @@
 use crate::automation::{StrategyDescriptor, default_strategy_catalog};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
-use crate::strategy::{LuaSourceMode, StrategyKind, StrategyState};
+use crate::strategies::{StrategySignal, side_from_signed_qty};
+use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
-    AccountInfo, AccountSnapshot, ContractSuggestion, MarketSnapshot, ServiceCommand, ServiceEvent,
+    AccountInfo, AccountSnapshot, ContractSuggestion, ManualOrderAction, MarketSnapshot,
+    ServiceCommand, ServiceEvent, TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -33,6 +35,7 @@ pub struct App {
     market: MarketSnapshot,
     logs: VecDeque<String>,
     strategy_catalog: Vec<StrategyDescriptor>,
+    strategy_runtime: StrategyRuntimeState,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +66,12 @@ enum Focus {
     TokenPath,
     Connect,
     StrategyKind,
+    HmaLength,
+    HmaMinAngle,
+    HmaAngleLookback,
+    HmaBarsRequired,
+    HmaLongsOnly,
+    HmaInverted,
     LuaSourceMode,
     LuaFilePath,
     LuaEditor,
@@ -78,6 +87,14 @@ enum Screen {
     Strategy,
     Selection,
     Dashboard,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StrategyRuntimeState {
+    armed: bool,
+    last_closed_bar_ts: Option<i64>,
+    pending_target_qty: Option<i32>,
+    last_summary: String,
 }
 
 impl App {
@@ -100,12 +117,17 @@ impl App {
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
             strategy_catalog: default_strategy_catalog(),
+            strategy_runtime: StrategyRuntimeState::default(),
         };
         app.push_log(
             "Phase 1 enabled: auth, account selection, contract search, 1m history/live."
                 .to_string(),
         );
-        app.push_log("Phase 2 hotkeys (buy/sell/close) remain intentionally disabled.".to_string());
+        app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close.".to_string());
+        app.push_log(
+            "Native HMA Angle strategy can auto-trade closed 1m bars once armed from Strategy."
+                .to_string(),
+        );
         app
     }
 
@@ -124,7 +146,11 @@ impl App {
         cfg
     }
 
-    pub fn handle_service_event(&mut self, event: ServiceEvent) {
+    pub fn handle_service_event(
+        &mut self,
+        event: ServiceEvent,
+        cmd_tx: &UnboundedSender<ServiceCommand>,
+    ) {
         match event {
             ServiceEvent::Status(message) => {
                 self.status = message.clone();
@@ -132,6 +158,11 @@ impl App {
             }
             ServiceEvent::Error(message) => {
                 self.status = format!("Error: {message}");
+                if self.strategy_runtime.pending_target_qty.take().is_some() {
+                    self.push_log(
+                        "Cleared pending automated target after service error.".to_string(),
+                    );
+                }
                 self.push_log(format!("ERROR: {message}"));
             }
             ServiceEvent::Connected {
@@ -156,6 +187,7 @@ impl App {
                 self.account_snapshots.clear();
                 self.contract_results.clear();
                 self.market = MarketSnapshot::default();
+                self.strategy_runtime = StrategyRuntimeState::default();
                 self.status = "Disconnected".to_string();
                 self.push_log("Disconnected".to_string());
             }
@@ -168,6 +200,14 @@ impl App {
             }
             ServiceEvent::AccountSnapshotsLoaded(snapshots) => {
                 self.account_snapshots = snapshots;
+                if let Some(pending) = self.strategy_runtime.pending_target_qty {
+                    let actual = self.actual_market_position_qty();
+                    if actual == pending {
+                        self.strategy_runtime.pending_target_qty = None;
+                        self.strategy_runtime.last_summary =
+                            format!("Position confirmed at target {actual}");
+                    }
+                }
             }
             ServiceEvent::ContractSearchResults { query, results } => {
                 self.contract_results = results;
@@ -178,7 +218,15 @@ impl App {
                 ));
             }
             ServiceEvent::MarketSnapshot(snapshot) => {
+                let contract_changed = self.market.contract_id != snapshot.contract_id;
                 self.market = snapshot;
+                if contract_changed {
+                    self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
+                    self.strategy_runtime.pending_target_qty = None;
+                    self.strategy_runtime.last_summary =
+                        "Contract changed; strategy re-anchored to current bar.".to_string();
+                }
+                self.maybe_run_native_strategy(cmd_tx);
             }
         }
     }
@@ -297,6 +345,12 @@ impl App {
             Focus::Secret => edit_string(&mut self.form.secret, key),
             Focus::TokenPath => edit_string(&mut self.form.token_path, key),
             Focus::StrategyKind
+            | Focus::HmaLength
+            | Focus::HmaMinAngle
+            | Focus::HmaAngleLookback
+            | Focus::HmaBarsRequired
+            | Focus::HmaLongsOnly
+            | Focus::HmaInverted
             | Focus::LuaSourceMode
             | Focus::LuaFilePath
             | Focus::LuaEditor
@@ -322,15 +376,55 @@ impl App {
 
         match self.focus {
             Focus::StrategyKind => match key.code {
-                KeyCode::Left => self.strategy.kind = self.strategy.kind.prev(),
+                KeyCode::Left => {
+                    self.strategy.kind = self.strategy.kind.prev();
+                    self.disarm_native_strategy();
+                }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.strategy.kind = self.strategy.kind.next()
+                    self.strategy.kind = self.strategy.kind.next();
+                    self.disarm_native_strategy();
                 }
                 _ => {}
             },
+            Focus::HmaLength => {
+                if adjust_usize(&mut self.strategy.native_hma.hma_length, key, 2, 1) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::HmaMinAngle => {
+                if adjust_float(&mut self.strategy.native_hma.min_angle, key, 0.0, 0.5) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::HmaAngleLookback => {
+                if adjust_usize(&mut self.strategy.native_hma.angle_lookback, key, 1, 1) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::HmaBarsRequired => {
+                if adjust_usize(
+                    &mut self.strategy.native_hma.bars_required_to_trade,
+                    key,
+                    1,
+                    1,
+                ) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::HmaLongsOnly => {
+                if toggle_bool(&mut self.strategy.native_hma.longs_only, key) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::HmaInverted => {
+                if toggle_bool(&mut self.strategy.native_hma.inverted, key) {
+                    self.disarm_native_strategy();
+                }
+            }
             Focus::LuaSourceMode => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.lua_source_mode = self.strategy.lua_source_mode.toggle();
+                    self.disarm_native_strategy();
                 }
                 _ => {}
             },
@@ -348,15 +442,18 @@ impl App {
                     }
                 } else {
                     edit_string(&mut self.strategy.lua_file_path, key);
+                    self.disarm_native_strategy();
                 }
             }
             Focus::LuaEditor => {
                 let _ = self.strategy.lua_editor.handle_key(key);
+                self.disarm_native_strategy();
             }
             Focus::StrategyContinue => {
                 if key.code == KeyCode::Enter {
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
+                    self.arm_native_strategy();
                     self.push_log(format!(
                         "Strategy selected: {}",
                         self.strategy.summary_label()
@@ -504,6 +601,12 @@ impl App {
             | Focus::Secret
             | Focus::TokenPath
             | Focus::StrategyKind
+            | Focus::HmaLength
+            | Focus::HmaMinAngle
+            | Focus::HmaAngleLookback
+            | Focus::HmaBarsRequired
+            | Focus::HmaLongsOnly
+            | Focus::HmaInverted
             | Focus::LuaSourceMode
             | Focus::LuaFilePath
             | Focus::LuaEditor
@@ -512,7 +615,23 @@ impl App {
         }
     }
 
-    fn handle_dashboard_key(&mut self, _key: KeyEvent, _cmd_tx: &UnboundedSender<ServiceCommand>) {}
+    fn handle_dashboard_key(&mut self, key: KeyEvent, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        let action = match key.code {
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                match ch.to_ascii_lowercase() {
+                    'b' => Some(ManualOrderAction::Buy),
+                    's' => Some(ManualOrderAction::Sell),
+                    'c' => Some(ManualOrderAction::Close),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(action) = action {
+            let _ = cmd_tx.send(ServiceCommand::ManualOrder { action });
+        }
+    }
 
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let rows = Layout::default()
@@ -534,9 +653,11 @@ impl App {
                 "F1 login | F3 strategy | F4 dashboard | Tab focus | Up/Down lists | Enter select/search"
             }
             Screen::Strategy => {
-                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right change | Vim editor for Lua"
+                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | Lua editor supported"
             }
-            Screen::Dashboard => "F1 login | F2 selection | F3 strategy | monitoring view | q quit",
+            Screen::Dashboard => {
+                "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | q quit"
+            }
         };
         let titles = ["Login", "Selection", "Strategy", "Dashboard"]
             .into_iter()
@@ -624,7 +745,7 @@ impl App {
 
         let left = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(14), Constraint::Min(10)])
+            .constraints([Constraint::Length(18), Constraint::Min(10)])
             .split(columns[0]);
 
         let setup = Paragraph::new(self.strategy_setup_lines())
@@ -650,11 +771,11 @@ impl App {
             .constraints([Constraint::Min(16), Constraint::Length(10)])
             .split(columns[1]);
 
-        let editor = Paragraph::new(self.lua_editor_lines())
+        let editor = Paragraph::new(self.strategy_detail_lines())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(self.lua_editor_title()),
+                    .title(self.strategy_detail_title()),
             )
             .wrap(Wrap { trim: false });
         frame.render_widget(editor, right[0]);
@@ -898,14 +1019,94 @@ impl App {
             ),
             None => "1m Market Data".to_string(),
         };
-        let datasets = vec![
-            Dataset::default()
-                .name("Close")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Green))
-                .data(&points),
-        ];
+        let marker_offset = ((y_bounds[1] - y_bounds[0]).abs() * 0.02).max(0.25);
+        let first_ts = bars.first().map(|bar| bar.ts_ns).unwrap_or_default();
+        let last_ts = bars.last().map(|bar| bar.ts_ns).unwrap_or_default();
+        let mut buy_marker_points = Vec::new();
+        let mut sell_marker_points = Vec::new();
+        for marker in &self.market.trade_markers {
+            if marker.ts_ns < first_ts || marker.ts_ns > last_ts {
+                continue;
+            }
+            let Some((idx, _)) = bars
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, bar)| bar.ts_ns.abs_diff(marker.ts_ns))
+            else {
+                continue;
+            };
+            let point = match marker.side {
+                TradeMarkerSide::Buy => {
+                    (idx as f64, (marker.price - marker_offset).max(y_bounds[0]))
+                }
+                TradeMarkerSide::Sell => {
+                    (idx as f64, (marker.price + marker_offset).min(y_bounds[1]))
+                }
+            };
+            match marker.side {
+                TradeMarkerSide::Buy => buy_marker_points.push(point),
+                TradeMarkerSide::Sell => sell_marker_points.push(point),
+            }
+        }
+        let mut segment_points = Vec::with_capacity(points.len().saturating_sub(1));
+        let mut segment_colors = Vec::with_capacity(points.len().saturating_sub(1));
+        for window in points.windows(2) {
+            let start = window[0];
+            let end = window[1];
+            segment_points.push(vec![start, end]);
+            segment_colors.push(if end.1 >= start.1 {
+                Color::Green
+            } else {
+                Color::Red
+            });
+        }
+
+        let mut datasets = segment_points
+            .iter()
+            .zip(segment_colors.iter())
+            .map(|(segment, color)| {
+                Dataset::default()
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(*color))
+                    .data(segment.as_slice())
+            })
+            .collect::<Vec<_>>();
+
+        let last_point_data = points.last().copied().map(|point| vec![point]);
+        if let Some(last_point) = points.last().copied() {
+            let last_point_color = if points.len() >= 2 && last_point.1 < points[points.len() - 2].1
+            {
+                Color::Red
+            } else {
+                Color::Green
+            };
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Dot)
+                    .graph_type(GraphType::Scatter)
+                    .style(Style::default().fg(last_point_color))
+                    .data(last_point_data.as_deref().unwrap_or(&[])),
+            );
+        }
+        if !buy_marker_points.is_empty() {
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Block)
+                    .graph_type(GraphType::Scatter)
+                    .style(Style::default().fg(Color::Cyan))
+                    .data(&buy_marker_points),
+            );
+        }
+        if !sell_marker_points.is_empty() {
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Block)
+                    .graph_type(GraphType::Scatter)
+                    .style(Style::default().fg(Color::Magenta))
+                    .data(&sell_marker_points),
+            );
+        }
         let chart = Chart::new(datasets)
             .block(Block::default().borders(Borders::ALL).title(title))
             .x_axis(Axis::default().bounds([0.0, points.len().max(1) as f64]))
@@ -1023,6 +1224,10 @@ impl App {
         vec![
             Line::from(format!("Env: {}", self.form.env.label())),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
+            Line::from(format!(
+                "Strategy Status: {}",
+                self.strategy_runtime_summary()
+            )),
             Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
             Line::from(format!(
                 "Token Override: {}",
@@ -1049,7 +1254,51 @@ impl App {
             self.focus == Focus::StrategyKind,
         )];
 
-        if self.strategy.kind == StrategyKind::Lua {
+        if self.strategy.kind == StrategyKind::Native {
+            lines.push(Line::from(format!(
+                "Native Strategy: {}",
+                NativeStrategyKind::HmaAngle.label()
+            )));
+            lines.push(styled_line(
+                format!("HMA Length: {}", self.strategy.native_hma.hma_length),
+                self.focus == Focus::HmaLength,
+            ));
+            lines.push(styled_line(
+                format!("Min Angle: {:.1}", self.strategy.native_hma.min_angle),
+                self.focus == Focus::HmaMinAngle,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Angle Lookback: {}",
+                    self.strategy.native_hma.angle_lookback
+                ),
+                self.focus == Focus::HmaAngleLookback,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Bars Required: {}",
+                    self.strategy.native_hma.bars_required_to_trade
+                ),
+                self.focus == Focus::HmaBarsRequired,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Longs Only: {}",
+                    bool_label(self.strategy.native_hma.longs_only)
+                ),
+                self.focus == Focus::HmaLongsOnly,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Inverted: {}",
+                    bool_label(self.strategy.native_hma.inverted)
+                ),
+                self.focus == Focus::HmaInverted,
+            ));
+            lines.push(Line::from(
+                "Use Left/Right to change values and toggle booleans.",
+            ));
+        } else if self.strategy.kind == StrategyKind::Lua {
             lines.push(styled_line(
                 format!("Lua Input: {}", self.strategy.lua_source_mode.label()),
                 self.focus == Focus::LuaSourceMode,
@@ -1079,7 +1328,7 @@ impl App {
 
         lines.push(Line::from(""));
         lines.push(styled_line(
-            "[Enter] Continue To Dashboard".to_string(),
+            "[Enter] Continue To Dashboard / Arm Strategy".to_string(),
             self.focus == Focus::StrategyContinue,
         ));
         lines
@@ -1088,11 +1337,16 @@ impl App {
     fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
         vec![
             Line::from("Backend order: Native Rust > Lua > Machine Learning."),
-            Line::from("Native and ML are selection-only for now."),
+            Line::from("Native HMA executes on newly closed 1m bars after you arm it."),
+            Line::from("The native engine targets the selected contract position directly."),
             Line::from("Lua can be loaded from file or typed directly in the TUI."),
-            Line::from("Strategy execution will be added later; this screen is selection only."),
+            Line::from("ML remains selection-only for now."),
             Line::from(""),
-            Line::from("Vim-style editor controls:"),
+            Line::from("Strategy screen controls:"),
+            Line::from("Up/Down moves focus. Left/Right edits HMA params or toggles fields."),
+            Line::from("Enter on Continue arms the native strategy from the current closed bar."),
+            Line::from(""),
+            Line::from("Lua editor controls:"),
             Line::from("Normal: h/j/k/l move, i insert, a append, o open line, x delete."),
             Line::from("Insert: type text, Enter newline, Backspace delete, Esc back to normal."),
         ]
@@ -1103,7 +1357,8 @@ impl App {
             Line::from(format!("Selected: {}", self.strategy.summary_label())),
             Line::from(match self.strategy.kind {
                 StrategyKind::Native => {
-                    "Native Rust will be the preferred runtime when execution is added.".to_string()
+                    "Native Rust HMA Angle is active and can submit automated market orders."
+                        .to_string()
                 }
                 StrategyKind::Lua => {
                     "Lua strategy source is ready for later execution wiring.".to_string()
@@ -1112,8 +1367,11 @@ impl App {
                     "Machine Learning remains lowest execution priority.".to_string()
                 }
             }),
+            Line::from(format!("Runtime: {}", self.strategy_runtime_summary())),
         ];
-        if self.strategy.kind == StrategyKind::Lua {
+        if self.strategy.kind == StrategyKind::Native {
+            lines.push(Line::from(self.strategy.native_summary()));
+        } else if self.strategy.kind == StrategyKind::Lua {
             lines.push(Line::from(format!(
                 "Lua editor mode: {}",
                 self.strategy.lua_editor.mode().label()
@@ -1126,9 +1384,12 @@ impl App {
         lines
     }
 
-    fn lua_editor_title(&self) -> String {
+    fn strategy_detail_title(&self) -> String {
+        if self.strategy.kind == StrategyKind::Native {
+            return "Native Strategy Detail".to_string();
+        }
         if self.strategy.kind != StrategyKind::Lua {
-            return "Lua Editor Preview".to_string();
+            return "Strategy Detail".to_string();
         }
         match self.strategy.lua_source_mode {
             LuaSourceMode::File => "Lua File Preview".to_string(),
@@ -1141,11 +1402,42 @@ impl App {
         }
     }
 
-    fn lua_editor_lines(&self) -> Vec<Line<'static>> {
+    fn strategy_detail_lines(&self) -> Vec<Line<'static>> {
+        if self.strategy.kind == StrategyKind::Native {
+            return vec![
+                Line::from("HMA Angle Strategy"),
+                Line::from(format!("Type: {}", NativeStrategyKind::HmaAngle.label())),
+                Line::from(format!(
+                    "Params: len={} min_angle={:.1} lookback={} bars_required={}",
+                    self.strategy.native_hma.hma_length,
+                    self.strategy.native_hma.min_angle,
+                    self.strategy.native_hma.angle_lookback,
+                    self.strategy.native_hma.bars_required_to_trade
+                )),
+                Line::from(format!(
+                    "Flags: longs_only={} inverted={}",
+                    bool_label(self.strategy.native_hma.longs_only),
+                    bool_label(self.strategy.native_hma.inverted)
+                )),
+                Line::from(""),
+                Line::from("Signal logic"),
+                Line::from("Buy: price crosses above zero-lag HMA with sufficient positive angle."),
+                Line::from(
+                    "Sell: price crosses below zero-lag HMA with sufficient negative angle.",
+                ),
+                Line::from("Inverted swaps buy/sell decisions before order routing."),
+                Line::from(""),
+                Line::from(format!("Live status: {}", self.strategy_runtime_summary())),
+                Line::from(format!(
+                    "Selected contract qty: {}",
+                    self.effective_market_position_qty()
+                )),
+            ];
+        }
         if self.strategy.kind != StrategyKind::Lua {
             return vec![
-                Line::from("Lua editor is only active when Strategy Type is Lua."),
-                Line::from("Pick Lua on the left to edit or load a script."),
+                Line::from("Native and Lua strategy details appear here."),
+                Line::from("Pick a strategy type on the left to configure it."),
             ];
         }
 
@@ -1171,6 +1463,10 @@ impl App {
     fn selection_summary_lines(&self) -> Vec<Line<'static>> {
         vec![
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
+            Line::from(format!(
+                "Strategy Runtime: {}",
+                self.strategy_runtime_summary()
+            )),
             Line::from(format!("Accounts loaded: {}", self.accounts.len())),
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),
@@ -1207,6 +1503,10 @@ impl App {
                 "Account net liq: {}",
                 format_money(snapshot.net_liq.or(snapshot.balance))
             )));
+            lines.push(Line::from(format!(
+                "Selected contract qty: {}",
+                format_quantity(snapshot.market_position_qty)
+            )));
         }
         lines
     }
@@ -1235,10 +1535,19 @@ impl App {
                 "Open Position Qty: {}",
                 format_quantity(snapshot.open_position_qty)
             )),
+            Line::from(format!(
+                "Selected Contract Qty: {}",
+                format_quantity(snapshot.market_position_qty)
+            )),
             Line::from(match &self.market.contract_name {
                 Some(name) => format!("Active Contract: {name}"),
                 None => "Active Contract: none".to_string(),
             }),
+            Line::from(format!(
+                "Order Qty: {}  TIF: {}",
+                self.base_config.order_qty, self.base_config.time_in_force
+            )),
+            Line::from("Hotkeys: b buy | s sell | c close"),
         ]
     }
 
@@ -1282,7 +1591,16 @@ impl App {
 
     fn strategy_focus_order(&self) -> Vec<Focus> {
         let mut order = vec![Focus::StrategyKind];
-        if self.strategy.kind == StrategyKind::Lua {
+        if self.strategy.kind == StrategyKind::Native {
+            order.extend([
+                Focus::HmaLength,
+                Focus::HmaMinAngle,
+                Focus::HmaAngleLookback,
+                Focus::HmaBarsRequired,
+                Focus::HmaLongsOnly,
+                Focus::HmaInverted,
+            ]);
+        } else if self.strategy.kind == StrategyKind::Lua {
             order.push(Focus::LuaSourceMode);
             match self.strategy.lua_source_mode {
                 LuaSourceMode::File => order.push(Focus::LuaFilePath),
@@ -1378,6 +1696,124 @@ impl App {
         }
         self.logs.push_back(message);
     }
+
+    fn disarm_native_strategy(&mut self) {
+        if self.strategy_runtime.armed {
+            self.strategy_runtime.armed = false;
+            self.strategy_runtime.last_summary =
+                "Native strategy config changed; press Continue to re-arm.".to_string();
+        }
+    }
+
+    fn arm_native_strategy(&mut self) {
+        self.strategy_runtime.pending_target_qty = None;
+        if self.strategy.kind != StrategyKind::Native {
+            self.strategy_runtime.armed = false;
+            self.strategy_runtime.last_closed_bar_ts = None;
+            self.strategy_runtime.last_summary =
+                "Selected strategy is not an armed native runtime.".to_string();
+            return;
+        }
+
+        self.strategy_runtime.armed = true;
+        self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
+        self.strategy_runtime.last_summary = if self.strategy_runtime.last_closed_bar_ts.is_some() {
+            "Native HMA armed from current closed bar.".to_string()
+        } else {
+            "Native HMA armed; waiting for first closed bar.".to_string()
+        };
+    }
+
+    fn closed_bars(&self) -> &[crate::tradovate::Bar] {
+        let closed_len = self.market.history_loaded.min(self.market.bars.len());
+        &self.market.bars[..closed_len]
+    }
+
+    fn latest_closed_bar_ts(&self) -> Option<i64> {
+        self.closed_bars().last().map(|bar| bar.ts_ns)
+    }
+
+    fn actual_market_position_qty(&self) -> i32 {
+        self.selected_snapshot()
+            .and_then(|snapshot| snapshot.market_position_qty)
+            .unwrap_or(0.0)
+            .round() as i32
+    }
+
+    fn effective_market_position_qty(&self) -> i32 {
+        self.strategy_runtime
+            .pending_target_qty
+            .unwrap_or_else(|| self.actual_market_position_qty())
+    }
+
+    fn strategy_runtime_summary(&self) -> String {
+        if !self.strategy_runtime.last_summary.is_empty() {
+            return self.strategy_runtime.last_summary.clone();
+        }
+        if self.strategy_runtime.armed {
+            "Armed".to_string()
+        } else {
+            "Disarmed".to_string()
+        }
+    }
+
+    fn maybe_run_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        if !self.strategy_runtime.armed || self.strategy.kind != StrategyKind::Native {
+            return;
+        }
+
+        let closed_bars = self.closed_bars().to_vec();
+        let Some(last_closed) = closed_bars.last() else {
+            self.strategy_runtime.last_summary =
+                "Native HMA armed; waiting for market data.".to_string();
+            return;
+        };
+
+        if self.strategy_runtime.last_closed_bar_ts.is_none() {
+            self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+            self.strategy_runtime.last_summary =
+                "Native HMA anchored to current bar; waiting for next close.".to_string();
+            return;
+        }
+
+        if self.strategy_runtime.last_closed_bar_ts == Some(last_closed.ts_ns) {
+            return;
+        }
+        self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+
+        let current_qty = self.effective_market_position_qty();
+        let evaluation = self
+            .strategy
+            .native_hma
+            .evaluate(&closed_bars, side_from_signed_qty(current_qty));
+        self.strategy_runtime.last_summary = evaluation.summary();
+
+        let Some(target_qty) =
+            target_qty_for_signal(evaluation.signal, current_qty, self.base_config.order_qty)
+        else {
+            return;
+        };
+
+        if target_qty == current_qty {
+            return;
+        }
+
+        let reason = format!(
+            "hma_angle {} | {}",
+            evaluation.signal.label(),
+            evaluation.summary()
+        );
+        let _ = cmd_tx.send(ServiceCommand::SetTargetPosition {
+            target_qty,
+            automated: true,
+            reason: reason.clone(),
+        });
+        self.strategy_runtime.pending_target_qty = Some(target_qty);
+        self.push_log(format!(
+            "Native HMA target {} -> {} ({})",
+            current_qty, target_qty, reason
+        ));
+    }
 }
 
 impl FormState {
@@ -1440,6 +1876,10 @@ fn format_quantity(value: Option<f64>) -> String {
     }
 }
 
+fn bool_label(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
 fn mask(value: &str) -> String {
     if value.is_empty() {
         String::new()
@@ -1456,6 +1896,60 @@ fn display_token_override(focused: bool, value: &str) -> String {
         return value.to_string();
     }
     format!("{}...{}", &value[..8], &value[value.len() - 6..])
+}
+
+fn toggle_bool(target: &mut bool, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+            *target = !*target;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn adjust_usize(target: &mut usize, key: KeyEvent, min: usize, step: usize) -> bool {
+    match key.code {
+        KeyCode::Left => {
+            *target = target.saturating_sub(step).max(min);
+            true
+        }
+        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+            *target = target.saturating_add(step).max(min);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn adjust_float(target: &mut f64, key: KeyEvent, min: f64, step: f64) -> bool {
+    match key.code {
+        KeyCode::Left => {
+            *target = (*target - step).max(min);
+            true
+        }
+        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+            *target = (*target + step).max(min);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn target_qty_for_signal(signal: StrategySignal, current_qty: i32, base_qty: i32) -> Option<i32> {
+    let base_qty = base_qty.max(1);
+    match signal {
+        StrategySignal::Hold => None,
+        StrategySignal::EnterLong => Some(base_qty),
+        StrategySignal::EnterShort => Some(-base_qty),
+        StrategySignal::ExitLongOnShortSignal => {
+            if current_qty > 0 {
+                Some(0)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn json_preview(snapshot: &AccountSnapshot) -> String {

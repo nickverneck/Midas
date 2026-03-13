@@ -17,9 +17,31 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Debug, Clone)]
 pub enum ServiceCommand {
     Connect(AppConfig),
-    SelectAccount { account_id: i64 },
-    SearchContracts { query: String, limit: usize },
-    SubscribeBars { contract: ContractSuggestion },
+    SelectAccount {
+        account_id: i64,
+    },
+    SearchContracts {
+        query: String,
+        limit: usize,
+    },
+    SubscribeBars {
+        contract: ContractSuggestion,
+    },
+    ManualOrder {
+        action: ManualOrderAction,
+    },
+    SetTargetPosition {
+        target_qty: i32,
+        automated: bool,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ManualOrderAction {
+    Buy,
+    Sell,
+    Close,
 }
 
 #[derive(Debug, Clone)]
@@ -107,9 +129,25 @@ pub struct MarketSnapshot {
     pub contract_id: Option<i64>,
     pub contract_name: Option<String>,
     pub bars: Vec<Bar>,
+    pub trade_markers: Vec<TradeMarker>,
+    pub value_per_point: Option<f64>,
     pub history_loaded: usize,
     pub live_bars: usize,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TradeMarkerSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeMarker {
+    pub ts_ns: i64,
+    pub price: f64,
+    pub qty: i32,
+    pub side: TradeMarkerSide,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +160,7 @@ pub struct AccountSnapshot {
     pub unrealized_pnl: Option<f64>,
     pub intraday_margin: Option<f64>,
     pub open_position_qty: Option<f64>,
+    pub market_position_qty: Option<f64>,
     pub raw_account: Option<Value>,
     pub raw_risk: Option<Value>,
     pub raw_cash: Option<Value>,
@@ -142,6 +181,7 @@ struct SessionState {
     user_store: UserSyncStore,
     selected_account_id: Option<i64>,
     selected_contract: Option<ContractSuggestion>,
+    market: MarketSnapshot,
 }
 
 #[derive(Default)]
@@ -275,7 +315,7 @@ async fn handle_command(
             .await;
 
             let selected_account_id = accounts.first().map(|account| account.id);
-            let snapshots = user_store.build_snapshots(&accounts);
+            let snapshots = user_store.build_snapshots(&accounts, None);
 
             let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts.clone()));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
@@ -300,6 +340,7 @@ async fn handle_command(
                 user_store,
                 selected_account_id,
                 selected_contract: None,
+                market: MarketSnapshot::default(),
             });
         }
         ServiceCommand::SelectAccount { account_id } => {
@@ -307,7 +348,9 @@ async fn handle_command(
                 bail!("not connected");
             };
             session.selected_account_id = Some(account_id);
-            let snapshots = session.user_store.build_snapshots(&session.accounts);
+            let snapshots = session
+                .user_store
+                .build_snapshots(&session.accounts, Some(&session.market));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
         }
         ServiceCommand::SearchContracts { query, limit } => {
@@ -331,6 +374,15 @@ async fn handle_command(
             if let Some(task) = state.market_task.take() {
                 task.abort();
             }
+            session.market = MarketSnapshot::default();
+            let value_per_point = fetch_contract_value_per_point(
+                &state.client,
+                &session.cfg.env,
+                &session.tokens.access_token,
+                &contract,
+            )
+            .await
+            .ok();
             session.selected_contract = Some(contract.clone());
             let cfg = session.cfg.clone();
             let token = session.tokens.md_access_token.clone();
@@ -338,8 +390,50 @@ async fn handle_command(
                 cfg,
                 token,
                 contract,
+                value_per_point,
                 internal_tx,
             )));
+        }
+        ServiceCommand::ManualOrder { action } => {
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            let outcome = submit_manual_order(&state.client, session, action).await?;
+            if let Some(marker) = outcome.marker {
+                session.market.trade_markers.push(marker);
+                if session.market.trade_markers.len() > 200 {
+                    let overflow = session.market.trade_markers.len() - 200;
+                    session.market.trade_markers.drain(0..overflow);
+                }
+                let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
+            }
+            let _ = event_tx.send(ServiceEvent::Status(outcome.message));
+        }
+        ServiceCommand::SetTargetPosition {
+            target_qty,
+            automated,
+            reason,
+        } => {
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            let outcome = submit_target_position_order(
+                &state.client,
+                session,
+                target_qty,
+                automated,
+                &reason,
+            )
+            .await?;
+            if let Some(marker) = outcome.marker {
+                session.market.trade_markers.push(marker);
+                if session.market.trade_markers.len() > 200 {
+                    let overflow = session.market.trade_markers.len() - 200;
+                    session.market.trade_markers.drain(0..overflow);
+                }
+                let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
+            }
+            let _ = event_tx.send(ServiceEvent::Status(outcome.message));
         }
     }
     Ok(())
@@ -358,13 +452,26 @@ async fn handle_internal(
             for envelope in entities {
                 session.user_store.apply(envelope);
             }
-            let snapshots = session.user_store.build_snapshots(&session.accounts);
+            let snapshots = session
+                .user_store
+                .build_snapshots(&session.accounts, Some(&session.market));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
         }
         InternalEvent::UserSocketStatus(message) => {
             let _ = event_tx.send(ServiceEvent::Status(message));
         }
         InternalEvent::Market(snapshot) => {
+            if let Some(session) = state.session.as_mut() {
+                let mut snapshot = snapshot;
+                snapshot.trade_markers = session.market.trade_markers.clone();
+                session.market = snapshot.clone();
+                let snapshots = session
+                    .user_store
+                    .build_snapshots(&session.accounts, Some(&session.market));
+                let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+                let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
+                return Ok(());
+            }
             let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
         }
         InternalEvent::Error(message) => {
@@ -626,6 +733,244 @@ async fn search_contracts(
     Ok(out)
 }
 
+struct ManualOrderOutcome {
+    message: String,
+    marker: Option<TradeMarker>,
+}
+
+async fn submit_manual_order(
+    client: &Client,
+    session: &SessionState,
+    action: ManualOrderAction,
+) -> Result<ManualOrderOutcome> {
+    let order_ctx = resolve_order_context(session)?;
+    let account = order_ctx.account;
+    let contract = order_ctx.contract;
+
+    let (order_action, order_qty, action_label, automated, reason_suffix) = match action {
+        ManualOrderAction::Buy => ("Buy", session.cfg.order_qty, "Buy", false, None),
+        ManualOrderAction::Sell => ("Sell", session.cfg.order_qty, "Sell", false, None),
+        ManualOrderAction::Close => {
+            let Some(net_qty) = session
+                .user_store
+                .contract_position_qty(account.id, contract)
+            else {
+                return Ok(ManualOrderOutcome {
+                    message: format!(
+                        "Close ignored: no open {} position on {}",
+                        contract.name, account.name
+                    ),
+                    marker: None,
+                });
+            };
+            let close_qty = net_qty.abs().round() as i32;
+            if close_qty <= 0 {
+                return Ok(ManualOrderOutcome {
+                    message: format!(
+                        "Close ignored: no open {} position on {}",
+                        contract.name, account.name
+                    ),
+                    marker: None,
+                });
+            }
+            let close_action = if net_qty > 0.0 { "Sell" } else { "Buy" };
+            (close_action, close_qty, "Close", false, None)
+        }
+    };
+
+    place_market_order(
+        client,
+        session,
+        account,
+        contract,
+        order_action,
+        order_qty,
+        action_label,
+        automated,
+        reason_suffix,
+    )
+    .await
+}
+
+async fn submit_target_position_order(
+    client: &Client,
+    session: &SessionState,
+    target_qty: i32,
+    automated: bool,
+    reason: &str,
+) -> Result<ManualOrderOutcome> {
+    let order_ctx = resolve_order_context(session)?;
+    let account = order_ctx.account;
+    let contract = order_ctx.contract;
+    let current_qty = session
+        .user_store
+        .contract_position_qty(account.id, contract)
+        .unwrap_or(0.0)
+        .round() as i32;
+    let delta = target_qty.saturating_sub(current_qty);
+    if delta == 0 {
+        return Ok(ManualOrderOutcome {
+            message: format!(
+                "Strategy target already satisfied: {} at {} on {} ({reason})",
+                target_qty, contract.name, account.name
+            ),
+            marker: None,
+        });
+    }
+
+    let order_action = if delta > 0 { "Buy" } else { "Sell" };
+    let order_qty = delta.unsigned_abs() as i32;
+    let action_label = "Strategy";
+    let reason_suffix = Some(format!(
+        "target {} -> {} ({reason})",
+        current_qty, target_qty
+    ));
+
+    place_market_order(
+        client,
+        session,
+        account,
+        contract,
+        order_action,
+        order_qty,
+        action_label,
+        automated,
+        reason_suffix.as_deref(),
+    )
+    .await
+}
+
+struct OrderContext<'a> {
+    account: &'a AccountInfo,
+    contract: &'a ContractSuggestion,
+}
+
+fn resolve_order_context<'a>(session: &'a SessionState) -> Result<OrderContext<'a>> {
+    let account_id = session
+        .selected_account_id
+        .context("select an account before sending orders")?;
+    let account = session
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+        .context("selected account is no longer available")?;
+    let contract = session
+        .selected_contract
+        .as_ref()
+        .context("select a contract before sending orders")?;
+    Ok(OrderContext { account, contract })
+}
+
+async fn place_market_order(
+    client: &Client,
+    session: &SessionState,
+    account: &AccountInfo,
+    contract: &ContractSuggestion,
+    order_action: &str,
+    order_qty: i32,
+    action_label: &str,
+    automated: bool,
+    reason_suffix: Option<&str>,
+) -> Result<ManualOrderOutcome> {
+    let url = format!("{}/order/placeorder", session.cfg.env.rest_url());
+    let payload = json!({
+        "accountSpec": account.name,
+        "accountId": account.id,
+        "action": order_action,
+        "symbol": contract.name,
+        "orderQty": order_qty,
+        "orderType": "Market",
+        "timeInForce": session.cfg.time_in_force,
+        "isAutomated": automated
+    });
+
+    let response = client
+        .post(&url)
+        .bearer_auth(&session.tokens.access_token)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("placeorder HTTP {status}: {body}");
+    }
+
+    let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({ "raw": body }));
+    if let Some(failure) = parsed.get("failureReason").and_then(Value::as_str) {
+        if !failure.trim().is_empty() {
+            bail!("placeorder rejected: {failure}");
+        }
+    }
+    if let Some(err_text) = parsed.get("errorText").and_then(Value::as_str) {
+        if !err_text.trim().is_empty() {
+            bail!("placeorder errorText: {err_text}");
+        }
+    }
+
+    let mut message = format!(
+        "{action_label} submitted: {order_action} {order_qty} {} on {}",
+        contract.name, account.name
+    );
+    if let Some(reason) = reason_suffix {
+        message.push_str(&format!(" [{reason}]"));
+    }
+    if let Some(order_id) = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id")) {
+        message.push_str(&format!(" (order {order_id})"));
+    }
+    let marker = session.market.bars.last().map(|bar| TradeMarker {
+        ts_ns: bar.ts_ns,
+        price: bar.close,
+        qty: order_qty,
+        side: match order_action {
+            "Buy" => TradeMarkerSide::Buy,
+            "Sell" => TradeMarkerSide::Sell,
+            _ => unreachable!("unsupported order action"),
+        },
+    });
+    Ok(ManualOrderOutcome { message, marker })
+}
+
+async fn fetch_contract_value_per_point(
+    client: &Client,
+    env: &TradingEnvironment,
+    token: &str,
+    contract: &ContractSuggestion,
+) -> Result<f64> {
+    let contract_maturity_id = json_i64(&contract.raw, "contractMaturityId")
+        .context("selected contract is missing contractMaturityId")?;
+    let maturity_url = format!("{}/contractMaturity/item", env.rest_url());
+    let maturity_response = client
+        .get(&maturity_url)
+        .bearer_auth(token)
+        .query(&[("id", contract_maturity_id.to_string())])
+        .send()
+        .await?;
+    let maturity_status = maturity_response.status();
+    let maturity_body = maturity_response.text().await.unwrap_or_default();
+    if !maturity_status.is_success() {
+        bail!("contractMaturity/item failed ({maturity_status}): {maturity_body}");
+    }
+    let maturity: Value = serde_json::from_str(&maturity_body)?;
+    let product_id =
+        json_i64(&maturity, "productId").context("contractMaturity/item missing productId")?;
+
+    let product_url = format!("{}/product/item", env.rest_url());
+    let product_response = client
+        .get(&product_url)
+        .bearer_auth(token)
+        .query(&[("id", product_id.to_string())])
+        .send()
+        .await?;
+    let product_status = product_response.status();
+    let product_body = product_response.text().await.unwrap_or_default();
+    if !product_status.is_success() {
+        bail!("product/item failed ({product_status}): {product_body}");
+    }
+    let product: Value = serde_json::from_str(&product_body)?;
+    json_number(&product, "valuePerPoint").context("product/item missing valuePerPoint")
+}
+
 async fn fetch_entity_list(
     client: &Client,
     env: &TradingEnvironment,
@@ -785,10 +1130,17 @@ async fn market_data_worker(
     cfg: AppConfig,
     access_token: String,
     contract: ContractSuggestion,
+    value_per_point: Option<f64>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) {
-    if let Err(err) =
-        market_data_worker_inner(cfg, access_token, contract, internal_tx.clone()).await
+    if let Err(err) = market_data_worker_inner(
+        cfg,
+        access_token,
+        contract,
+        value_per_point,
+        internal_tx.clone(),
+    )
+    .await
     {
         let _ = internal_tx.send(InternalEvent::Error(format!("market data: {err}")));
     }
@@ -798,6 +1150,7 @@ async fn market_data_worker_inner(
     cfg: AppConfig,
     access_token: String,
     contract: ContractSuggestion,
+    value_per_point: Option<f64>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.market_ws_url())
@@ -939,6 +1292,8 @@ async fn market_data_worker_inner(
                         contract_id: Some(contract.id),
                         contract_name: Some(contract.name.clone()),
                         bars: series.render_bars(),
+                        trade_markers: Vec::new(),
+                        value_per_point,
                         history_loaded: series.closed_bars.len(),
                         live_bars,
                         status: format!("Subscribed to 1m bars for {}", contract.name),
@@ -1002,7 +1357,11 @@ impl UserSyncStore {
         }
     }
 
-    fn build_snapshots(&self, accounts: &[AccountInfo]) -> Vec<AccountSnapshot> {
+    fn build_snapshots(
+        &self,
+        accounts: &[AccountInfo],
+        market: Option<&MarketSnapshot>,
+    ) -> Vec<AccountSnapshot> {
         accounts
             .iter()
             .map(|account| {
@@ -1113,6 +1472,9 @@ impl UserSyncStore {
                         "openPnl",
                     ],
                 );
+                let unrealized_pnl = unrealized_pnl.or_else(|| {
+                    market.and_then(|market| fallback_unrealized_pnl(&raw_positions, market))
+                });
                 let net_liq = net_liq.or_else(|| match (balance, unrealized_pnl) {
                     (Some(balance), Some(unrealized)) => Some(balance + unrealized),
                     _ => None,
@@ -1121,6 +1483,18 @@ impl UserSyncStore {
                     &raw_positions,
                     &["netPos", "netPosition", "qty", "quantity", "netQty"],
                 );
+                let market_position_qty = market.and_then(|market| {
+                    let values = raw_positions
+                        .iter()
+                        .filter(|position| position_matches_market(position, market))
+                        .filter_map(position_qty)
+                        .collect::<Vec<_>>();
+                    if values.is_empty() {
+                        None
+                    } else {
+                        Some(values.iter().sum())
+                    }
+                });
 
                 AccountSnapshot {
                     account_id: account.id,
@@ -1131,6 +1505,7 @@ impl UserSyncStore {
                     unrealized_pnl,
                     intraday_margin,
                     open_position_qty,
+                    market_position_qty,
                     raw_account,
                     raw_risk,
                     raw_cash,
@@ -1138,6 +1513,23 @@ impl UserSyncStore {
                 }
             })
             .collect()
+    }
+
+    fn contract_position_qty(&self, account_id: i64, contract: &ContractSuggestion) -> Option<f64> {
+        let values = self
+            .positions
+            .get(&account_id)
+            .into_iter()
+            .flat_map(|positions| positions.values())
+            .filter(|position| position_matches_contract(position, contract))
+            .filter_map(position_qty)
+            .collect::<Vec<_>>();
+
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.iter().sum())
+        }
     }
 }
 
@@ -1155,6 +1547,86 @@ fn sum_position_metric(positions: &[Value], keys: &[&str]) -> Option<f64> {
     } else {
         Some(values.iter().sum())
     }
+}
+
+fn fallback_unrealized_pnl(positions: &[Value], market: &MarketSnapshot) -> Option<f64> {
+    let last_close = market.bars.last().map(|bar| bar.close)?;
+    let value_per_point = market.value_per_point?;
+    let values = positions
+        .iter()
+        .filter(|position| position_matches_market(position, market))
+        .filter_map(|position| {
+            let qty = position_qty(position)?;
+            let entry_price = pick_number(position, &["netPrice", "avgPrice", "averagePrice"])?;
+            Some((last_close - entry_price) * qty * value_per_point)
+        })
+        .collect::<Vec<_>>();
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum())
+    }
+}
+
+fn position_matches_contract(position: &Value, contract: &ContractSuggestion) -> bool {
+    let contract_id_match = position_contract_id(position) == Some(contract.id);
+    let contract_maturity_match = json_i64(&contract.raw, "contractMaturityId")
+        .zip(position_contract_maturity_id(position))
+        .is_some_and(|(expected, actual)| expected == actual);
+    let symbol_match =
+        position_symbol(position).is_some_and(|symbol| symbol.eq_ignore_ascii_case(&contract.name));
+
+    contract_id_match || contract_maturity_match || symbol_match
+}
+
+fn position_matches_market(position: &Value, market: &MarketSnapshot) -> bool {
+    let contract_id_match = market
+        .contract_id
+        .is_some_and(|contract_id| position_contract_id(position) == Some(contract_id));
+    let symbol_match = market
+        .contract_name
+        .as_deref()
+        .zip(position_symbol(position))
+        .is_some_and(|(expected, actual)| actual.eq_ignore_ascii_case(expected));
+    contract_id_match || symbol_match
+}
+
+fn position_qty(position: &Value) -> Option<f64> {
+    pick_number(
+        position,
+        &["netPos", "netPosition", "qty", "quantity", "netQty"],
+    )
+}
+
+fn position_contract_id(position: &Value) -> Option<i64> {
+    json_i64(position, "contractId").or_else(|| {
+        position
+            .get("contract")
+            .and_then(|contract| json_i64(contract, "id"))
+    })
+}
+
+fn position_contract_maturity_id(position: &Value) -> Option<i64> {
+    json_i64(position, "contractMaturityId").or_else(|| {
+        position
+            .get("contract")
+            .and_then(|contract| json_i64(contract, "contractMaturityId"))
+    })
+}
+
+fn position_symbol(position: &Value) -> Option<&str> {
+    position
+        .get("symbol")
+        .and_then(Value::as_str)
+        .or_else(|| position.get("contractSymbol").and_then(Value::as_str))
+        .or_else(|| position.get("name").and_then(Value::as_str))
+        .or_else(|| {
+            position
+                .get("contract")
+                .and_then(|contract| contract.get("name"))
+                .and_then(Value::as_str)
+        })
 }
 
 fn extract_entity_envelopes(item: &Value) -> Vec<EntityEnvelope> {
@@ -1297,8 +1769,13 @@ fn parse_bar(value: &Value) -> Option<Bar> {
 fn parse_bar_timestamp_ns(ts: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M%:z").map(|dt| dt.with_timezone(&Utc)))
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%MZ").map(|dt| dt.and_utc()))
+        .or_else(|_| {
+            chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M%:z")
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%MZ").map(|dt| dt.and_utc())
+        })
         .ok()?
         .timestamp_nanos_opt()
 }
@@ -1360,6 +1837,7 @@ fn empty_as_none(value: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn parse_bar_accepts_minute_precision_utc_timestamp() {
@@ -1380,5 +1858,71 @@ mod tests {
 
         assert_eq!(bar.ts_ns, expected_ts);
         assert_eq!(bar.close, 6738.0);
+    }
+
+    #[test]
+    fn contract_position_qty_matches_selected_contract() {
+        let mut store = UserSyncStore::default();
+        store.positions.insert(
+            42,
+            BTreeMap::from([
+                (
+                    1,
+                    json!({
+                        "id": 1,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "netPos": 2
+                    }),
+                ),
+                (
+                    2,
+                    json!({
+                        "id": 2,
+                        "accountId": 42,
+                        "symbol": "ESM6",
+                        "netPos": -1
+                    }),
+                ),
+            ]),
+        );
+
+        let contract = ContractSuggestion {
+            id: 3570918,
+            name: "ESH6".to_string(),
+            description: String::new(),
+            raw: json!({ "contractMaturityId": 53951 }),
+        };
+
+        assert_eq!(store.contract_position_qty(42, &contract), Some(2.0));
+    }
+
+    #[test]
+    fn fallback_unrealized_pnl_uses_latest_close_and_value_per_point() {
+        let market = MarketSnapshot {
+            contract_id: Some(3570918),
+            contract_name: Some("ESH6".to_string()),
+            bars: vec![Bar {
+                ts_ns: 0,
+                open: 6725.0,
+                high: 6730.0,
+                low: 6724.0,
+                close: 6727.25,
+            }],
+            trade_markers: Vec::new(),
+            value_per_point: Some(50.0),
+            history_loaded: 1,
+            live_bars: 0,
+            status: String::new(),
+        };
+
+        let positions = vec![json!({
+            "accountId": 42,
+            "contractId": 3570918,
+            "netPos": 1,
+            "netPrice": 6725.75
+        })];
+
+        assert_eq!(fallback_unrealized_pnl(&positions, &market), Some(75.0));
     }
 }

@@ -1,3 +1,4 @@
+use crate::strategies::hma_angle::HmaAngleConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
 use std::path::Path;
@@ -31,6 +32,19 @@ impl StrategyKind {
             Self::Native => Self::MachineLearning,
             Self::Lua => Self::Native,
             Self::MachineLearning => Self::Lua,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeStrategyKind {
+    HmaAngle,
+}
+
+impl NativeStrategyKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HmaAngle => "HMA Angle",
         }
     }
 }
@@ -311,6 +325,7 @@ impl VimEditor {
 #[derive(Debug, Clone)]
 pub struct StrategyState {
     pub kind: StrategyKind,
+    pub native_hma: HmaAngleConfig,
     pub lua_source_mode: LuaSourceMode,
     pub lua_file_path: String,
     pub lua_editor: VimEditor,
@@ -320,6 +335,7 @@ impl StrategyState {
     pub fn new() -> Self {
         Self {
             kind: StrategyKind::Native,
+            native_hma: HmaAngleConfig::default(),
             lua_source_mode: LuaSourceMode::Editor,
             lua_file_path: String::new(),
             lua_editor: VimEditor::new_with_template(),
@@ -336,7 +352,9 @@ impl StrategyState {
 
     pub fn summary_label(&self) -> String {
         match self.kind {
-            StrategyKind::Native => "Native Rust".to_string(),
+            StrategyKind::Native => {
+                format!("Native Rust / {}", NativeStrategyKind::HmaAngle.label())
+            }
             StrategyKind::MachineLearning => "Machine Learning".to_string(),
             StrategyKind::Lua => match self.lua_source_mode {
                 LuaSourceMode::File => {
@@ -352,5 +370,18 @@ impl StrategyState {
                 }
             },
         }
+    }
+
+    pub fn native_summary(&self) -> String {
+        format!(
+            "{} | len={} angle={:.1} lookback={} bars_required={} longs_only={} inverted={}",
+            NativeStrategyKind::HmaAngle.label(),
+            self.native_hma.hma_length,
+            self.native_hma.min_angle,
+            self.native_hma.angle_lookback,
+            self.native_hma.bars_required_to_trade,
+            self.native_hma.longs_only,
+            self.native_hma.inverted,
+        )
     }
 }

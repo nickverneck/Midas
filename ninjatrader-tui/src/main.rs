@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod config;
+mod strategies;
 mod strategy;
 mod tradovate;
 
@@ -60,14 +61,17 @@ async fn main() -> Result<()> {
                     Some(Ok(CEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
-                        app.handle_service_event(tradovate::ServiceEvent::Error(err.to_string()));
+                        app.handle_service_event(
+                            tradovate::ServiceEvent::Error(err.to_string()),
+                            &cmd_tx,
+                        );
                     }
                     None => break,
                 }
             }
             maybe_service = event_rx.recv() => {
                 if let Some(event) = maybe_service {
-                    app.handle_service_event(event);
+                    app.handle_service_event(event, &cmd_tx);
                 }
             }
         }

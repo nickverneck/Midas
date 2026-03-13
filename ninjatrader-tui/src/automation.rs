@@ -11,14 +11,14 @@ pub fn default_strategy_catalog() -> Vec<StrategyDescriptor> {
         StrategyDescriptor {
             name: "Native Rust",
             priority: "P1",
-            status: "next",
-            note: "Preferred backend. Intended to own realtime strategy execution first.",
+            status: "active",
+            note: "HMA Angle strategy is wired for live closed-bar execution and parameter editing.",
         },
         StrategyDescriptor {
             name: "Lua",
             priority: "P2",
             status: "scaffold",
-            note: "Follows after native Rust. Existing repo Lua runtime can be adapted later.",
+            note: "Editor and file loading are in place; live execution wiring still follows native Rust.",
         },
         StrategyDescriptor {
             name: "PyTorch / GA-RL",
