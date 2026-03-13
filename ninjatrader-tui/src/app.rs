@@ -5,8 +5,8 @@ use crate::strategies::hma_angle::HmaAngleExecutionState;
 use crate::strategies::{PositionSide, StrategySignal, side_from_signed_qty};
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
-    AccountInfo, AccountSnapshot, ContractSuggestion, ManualOrderAction, MarketSnapshot,
-    ServiceCommand, ServiceEvent, TradeMarkerSide,
+    AccountInfo, AccountSnapshot, ContractSuggestion, LatencySnapshot, ManualOrderAction,
+    MarketSnapshot, ServiceCommand, ServiceEvent, TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -18,6 +18,7 @@ use ratatui::widgets::{
     Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs, Wrap,
 };
 use std::collections::VecDeque;
+use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct App {
@@ -38,6 +39,9 @@ pub struct App {
     logs: VecDeque<String>,
     strategy_catalog: Vec<StrategyDescriptor>,
     strategy_runtime: StrategyRuntimeState,
+    strategy_numeric_input: Option<NumericInputState>,
+    latency: LatencySnapshot,
+    last_market_update_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +119,12 @@ struct StrategyRuntimeState {
     ema_execution: EmaCrossExecutionState,
 }
 
+#[derive(Debug, Clone)]
+struct NumericInputState {
+    focus: Focus,
+    value: String,
+}
+
 impl App {
     pub fn new(config: AppConfig) -> Self {
         let form = FormState::from_config(&config);
@@ -136,6 +146,9 @@ impl App {
             logs: VecDeque::new(),
             strategy_catalog: default_strategy_catalog(),
             strategy_runtime: StrategyRuntimeState::default(),
+            strategy_numeric_input: None,
+            latency: LatencySnapshot::default(),
+            last_market_update_at: None,
         };
         app.push_log(
             "Phase 1 enabled: auth, account selection, contract search, 1m history/live."
@@ -206,6 +219,8 @@ impl App {
                 self.contract_results.clear();
                 self.market = MarketSnapshot::default();
                 self.strategy_runtime = StrategyRuntimeState::default();
+                self.latency = LatencySnapshot::default();
+                self.last_market_update_at = None;
                 self.status = "Disconnected".to_string();
                 self.push_log("Disconnected".to_string());
             }
@@ -241,6 +256,7 @@ impl App {
             ServiceEvent::MarketSnapshot(snapshot) => {
                 let contract_changed = self.market.contract_id != snapshot.contract_id;
                 self.market = snapshot;
+                self.last_market_update_at = Some(Instant::now());
                 if contract_changed {
                     self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
                     self.strategy_runtime.pending_target_qty = None;
@@ -249,6 +265,9 @@ impl App {
                         "Contract changed; strategy re-anchored to current bar.".to_string();
                 }
                 self.maybe_run_native_strategy(cmd_tx);
+            }
+            ServiceEvent::Latency(snapshot) => {
+                self.latency = snapshot;
             }
         }
     }
@@ -400,10 +419,12 @@ impl App {
     fn handle_strategy_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {
+                self.clear_strategy_numeric_input();
                 self.focus = self.prev_strategy_focus();
                 return;
             }
             KeyCode::Down | KeyCode::Tab => {
+                self.clear_strategy_numeric_input();
                 self.focus = self.next_strategy_focus();
                 return;
             }
@@ -434,22 +455,45 @@ impl App {
                 _ => {}
             },
             Focus::HmaLength => {
-                if adjust_usize(&mut self.strategy.native_hma.hma_length, key, 2, 1) {
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaLength,
+                    &mut self.strategy.native_hma.hma_length,
+                    key,
+                    2,
+                    1,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
             Focus::HmaMinAngle => {
-                if adjust_float(&mut self.strategy.native_hma.min_angle, key, 0.0, 0.5) {
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaMinAngle,
+                    &mut self.strategy.native_hma.min_angle,
+                    key,
+                    0.0,
+                    0.5,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
             Focus::HmaAngleLookback => {
-                if adjust_usize(&mut self.strategy.native_hma.angle_lookback, key, 1, 1) {
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaAngleLookback,
+                    &mut self.strategy.native_hma.angle_lookback,
+                    key,
+                    1,
+                    1,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
             Focus::HmaBarsRequired => {
-                if adjust_usize(
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaBarsRequired,
                     &mut self.strategy.native_hma.bars_required_to_trade,
                     key,
                     1,
@@ -469,7 +513,9 @@ impl App {
                 }
             }
             Focus::HmaTakeProfitTicks => {
-                if adjust_float(
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaTakeProfitTicks,
                     &mut self.strategy.native_hma.take_profit_ticks,
                     key,
                     0.0,
@@ -479,7 +525,14 @@ impl App {
                 }
             }
             Focus::HmaStopLossTicks => {
-                if adjust_float(&mut self.strategy.native_hma.stop_loss_ticks, key, 0.0, 1.0) {
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaStopLossTicks,
+                    &mut self.strategy.native_hma.stop_loss_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
@@ -489,7 +542,9 @@ impl App {
                 }
             }
             Focus::HmaTrailTriggerTicks => {
-                if adjust_float(
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaTrailTriggerTicks,
                     &mut self.strategy.native_hma.trail_trigger_ticks,
                     key,
                     0.0,
@@ -499,7 +554,9 @@ impl App {
                 }
             }
             Focus::HmaTrailOffsetTicks => {
-                if adjust_float(
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::HmaTrailOffsetTicks,
                     &mut self.strategy.native_hma.trail_offset_ticks,
                     key,
                     0.0,
@@ -509,12 +566,26 @@ impl App {
                 }
             }
             Focus::EmaFastLength => {
-                if adjust_usize(&mut self.strategy.native_ema.fast_length, key, 1, 1) {
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::EmaFastLength,
+                    &mut self.strategy.native_ema.fast_length,
+                    key,
+                    1,
+                    1,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
             Focus::EmaSlowLength => {
-                if adjust_usize(&mut self.strategy.native_ema.slow_length, key, 1, 1) {
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::EmaSlowLength,
+                    &mut self.strategy.native_ema.slow_length,
+                    key,
+                    1,
+                    1,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
@@ -524,7 +595,9 @@ impl App {
                 }
             }
             Focus::EmaTakeProfitTicks => {
-                if adjust_float(
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::EmaTakeProfitTicks,
                     &mut self.strategy.native_ema.take_profit_ticks,
                     key,
                     0.0,
@@ -534,7 +607,14 @@ impl App {
                 }
             }
             Focus::EmaStopLossTicks => {
-                if adjust_float(&mut self.strategy.native_ema.stop_loss_ticks, key, 0.0, 1.0) {
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::EmaStopLossTicks,
+                    &mut self.strategy.native_ema.stop_loss_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                ) {
                     self.disarm_native_strategy();
                 }
             }
@@ -544,7 +624,9 @@ impl App {
                 }
             }
             Focus::EmaTrailTriggerTicks => {
-                if adjust_float(
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::EmaTrailTriggerTicks,
                     &mut self.strategy.native_ema.trail_trigger_ticks,
                     key,
                     0.0,
@@ -554,7 +636,9 @@ impl App {
                 }
             }
             Focus::EmaTrailOffsetTicks => {
-                if adjust_float(
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::EmaTrailOffsetTicks,
                     &mut self.strategy.native_ema.trail_offset_ticks,
                     key,
                     0.0,
@@ -855,6 +939,8 @@ impl App {
                 Span::raw("  "),
                 Span::raw(&self.status),
                 Span::raw("  "),
+                Span::raw(self.latency_summary()),
+                Span::raw("  "),
                 Span::styled(help, Style::default().fg(Color::DarkGray)),
             ]),
         ])
@@ -1058,7 +1144,7 @@ impl App {
         let left = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(8),
+                Constraint::Length(10),
                 Constraint::Length(12),
                 Constraint::Min(8),
             ])
@@ -1384,6 +1470,18 @@ impl App {
                 "Strategy Status: {}",
                 self.strategy_runtime_summary()
             )),
+            Line::from(format!(
+                "REST RTT: {}",
+                format_latency_ms(self.latency.rest_rtt_ms)
+            )),
+            Line::from(format!(
+                "Order RTT: {}",
+                format_latency_ms(self.latency.last_order_ack_ms)
+            )),
+            Line::from(format!(
+                "Market Age: {}",
+                format_age_ms(self.market_update_age_ms())
+            )),
             Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
             Line::from(format!(
                 "Token Override: {}",
@@ -1418,24 +1516,42 @@ impl App {
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => {
                     lines.push(styled_line(
-                        format!("HMA Length: {}", self.strategy.native_hma.hma_length),
+                        format!(
+                            "HMA Length: {}",
+                            self.strategy_numeric_value(
+                                Focus::HmaLength,
+                                self.strategy.native_hma.hma_length.to_string(),
+                            )
+                        ),
                         self.focus == Focus::HmaLength,
                     ));
                     lines.push(styled_line(
-                        format!("Min Angle: {:.1}", self.strategy.native_hma.min_angle),
+                        format!(
+                            "Min Angle: {}",
+                            self.strategy_numeric_value(
+                                Focus::HmaMinAngle,
+                                format!("{:.1}", self.strategy.native_hma.min_angle),
+                            )
+                        ),
                         self.focus == Focus::HmaMinAngle,
                     ));
                     lines.push(styled_line(
                         format!(
                             "Angle Lookback: {}",
-                            self.strategy.native_hma.angle_lookback
+                            self.strategy_numeric_value(
+                                Focus::HmaAngleLookback,
+                                self.strategy.native_hma.angle_lookback.to_string(),
+                            )
                         ),
                         self.focus == Focus::HmaAngleLookback,
                     ));
                     lines.push(styled_line(
                         format!(
                             "Bars Required: {}",
-                            self.strategy.native_hma.bars_required_to_trade
+                            self.strategy_numeric_value(
+                                Focus::HmaBarsRequired,
+                                self.strategy.native_hma.bars_required_to_trade.to_string(),
+                            )
                         ),
                         self.focus == Focus::HmaBarsRequired,
                     ));
@@ -1455,15 +1571,21 @@ impl App {
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Take Profit Ticks: {:.0}",
-                            self.strategy.native_hma.take_profit_ticks
+                            "Take Profit Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::HmaTakeProfitTicks,
+                                format!("{:.0}", self.strategy.native_hma.take_profit_ticks),
+                            )
                         ),
                         self.focus == Focus::HmaTakeProfitTicks,
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Stop Loss Ticks: {:.0}",
-                            self.strategy.native_hma.stop_loss_ticks
+                            "Stop Loss Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::HmaStopLossTicks,
+                                format!("{:.0}", self.strategy.native_hma.stop_loss_ticks),
+                            )
                         ),
                         self.focus == Focus::HmaStopLossTicks,
                     ));
@@ -1476,26 +1598,44 @@ impl App {
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Trail Trigger Ticks: {:.0}",
-                            self.strategy.native_hma.trail_trigger_ticks
+                            "Trail Trigger Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::HmaTrailTriggerTicks,
+                                format!("{:.0}", self.strategy.native_hma.trail_trigger_ticks),
+                            )
                         ),
                         self.focus == Focus::HmaTrailTriggerTicks,
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Trail Offset Ticks: {:.0}",
-                            self.strategy.native_hma.trail_offset_ticks
+                            "Trail Offset Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::HmaTrailOffsetTicks,
+                                format!("{:.0}", self.strategy.native_hma.trail_offset_ticks),
+                            )
                         ),
                         self.focus == Focus::HmaTrailOffsetTicks,
                     ));
                 }
                 NativeStrategyKind::EmaCross => {
                     lines.push(styled_line(
-                        format!("Fast EMA Length: {}", self.strategy.native_ema.fast_length),
+                        format!(
+                            "Fast EMA Length: {}",
+                            self.strategy_numeric_value(
+                                Focus::EmaFastLength,
+                                self.strategy.native_ema.fast_length.to_string(),
+                            )
+                        ),
                         self.focus == Focus::EmaFastLength,
                     ));
                     lines.push(styled_line(
-                        format!("Slow EMA Length: {}", self.strategy.native_ema.slow_length),
+                        format!(
+                            "Slow EMA Length: {}",
+                            self.strategy_numeric_value(
+                                Focus::EmaSlowLength,
+                                self.strategy.native_ema.slow_length.to_string(),
+                            )
+                        ),
                         self.focus == Focus::EmaSlowLength,
                     ));
                     lines.push(styled_line(
@@ -1507,15 +1647,21 @@ impl App {
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Take Profit Ticks: {:.0}",
-                            self.strategy.native_ema.take_profit_ticks
+                            "Take Profit Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::EmaTakeProfitTicks,
+                                format!("{:.0}", self.strategy.native_ema.take_profit_ticks),
+                            )
                         ),
                         self.focus == Focus::EmaTakeProfitTicks,
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Stop Loss Ticks: {:.0}",
-                            self.strategy.native_ema.stop_loss_ticks
+                            "Stop Loss Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::EmaStopLossTicks,
+                                format!("{:.0}", self.strategy.native_ema.stop_loss_ticks),
+                            )
                         ),
                         self.focus == Focus::EmaStopLossTicks,
                     ));
@@ -1528,22 +1674,28 @@ impl App {
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Trail Trigger Ticks: {:.0}",
-                            self.strategy.native_ema.trail_trigger_ticks
+                            "Trail Trigger Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::EmaTrailTriggerTicks,
+                                format!("{:.0}", self.strategy.native_ema.trail_trigger_ticks),
+                            )
                         ),
                         self.focus == Focus::EmaTrailTriggerTicks,
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Trail Offset Ticks: {:.0}",
-                            self.strategy.native_ema.trail_offset_ticks
+                            "Trail Offset Ticks: {}",
+                            self.strategy_numeric_value(
+                                Focus::EmaTrailOffsetTicks,
+                                format!("{:.0}", self.strategy.native_ema.trail_offset_ticks),
+                            )
                         ),
                         self.focus == Focus::EmaTrailOffsetTicks,
                     ));
                 }
             }
             lines.push(Line::from(
-                "Use Left/Right to change values and toggle booleans. Zero TP/SL disables them.",
+                "Type numbers or use Left/Right for numeric fields. Backspace edits typed values. Zero TP/SL disables them.",
             ));
         } else if self.strategy.kind == StrategyKind::Lua {
             lines.push(styled_line(
@@ -2007,6 +2159,20 @@ impl App {
                 | Focus::Cid
                 | Focus::Secret
                 | Focus::TokenPath
+                | Focus::HmaLength
+                | Focus::HmaMinAngle
+                | Focus::HmaAngleLookback
+                | Focus::HmaBarsRequired
+                | Focus::HmaTakeProfitTicks
+                | Focus::HmaStopLossTicks
+                | Focus::HmaTrailTriggerTicks
+                | Focus::HmaTrailOffsetTicks
+                | Focus::EmaFastLength
+                | Focus::EmaSlowLength
+                | Focus::EmaTakeProfitTicks
+                | Focus::EmaStopLossTicks
+                | Focus::EmaTrailTriggerTicks
+                | Focus::EmaTrailOffsetTicks
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
                 | Focus::InstrumentQuery
@@ -2018,6 +2184,32 @@ impl App {
             self.logs.pop_front();
         }
         self.logs.push_back(message);
+    }
+
+    fn clear_strategy_numeric_input(&mut self) {
+        self.strategy_numeric_input = None;
+    }
+
+    fn strategy_numeric_value(&self, focus: Focus, fallback: String) -> String {
+        self.strategy_numeric_input
+            .as_ref()
+            .filter(|draft| draft.focus == focus)
+            .map(|draft| draft.value.clone())
+            .unwrap_or(fallback)
+    }
+
+    fn market_update_age_ms(&self) -> Option<u64> {
+        self.last_market_update_at
+            .map(|instant| instant.elapsed().as_millis() as u64)
+    }
+
+    fn latency_summary(&self) -> String {
+        format!(
+            "REST {} | Order {} | Market {}",
+            format_latency_ms(self.latency.rest_rtt_ms),
+            format_latency_ms(self.latency.last_order_ack_ms),
+            format_age_ms(self.market_update_age_ms()),
+        )
     }
 
     fn reset_native_execution(&mut self) {
@@ -2403,6 +2595,21 @@ fn format_quantity(value: Option<f64>) -> String {
     }
 }
 
+fn format_latency_ms(value: Option<u64>) -> String {
+    match value {
+        Some(value) => format!("{value}ms"),
+        None => "n/a".to_string(),
+    }
+}
+
+fn format_age_ms(value: Option<u64>) -> String {
+    match value {
+        Some(value) if value >= 1_000 => format!("{:.1}s", value as f64 / 1_000.0),
+        Some(value) => format!("{value}ms"),
+        None => "n/a".to_string(),
+    }
+}
+
 fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
@@ -2461,6 +2668,162 @@ fn adjust_float(target: &mut f64, key: KeyEvent, min: f64, step: f64) -> bool {
         }
         _ => false,
     }
+}
+
+fn edit_strategy_usize(
+    draft: &mut Option<NumericInputState>,
+    focus: Focus,
+    target: &mut usize,
+    key: KeyEvent,
+    min: usize,
+    step: usize,
+) -> bool {
+    if matches!(
+        key.code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')
+    ) {
+        *draft = None;
+        return adjust_usize(target, key, min, step);
+    }
+
+    match key.code {
+        KeyCode::Backspace => {
+            let next = numeric_backspace(draft, focus, &target.to_string());
+            if let Some(value) = next.and_then(|value| value.parse::<usize>().ok()) {
+                *target = value.max(min);
+                return true;
+            }
+        }
+        KeyCode::Char(ch)
+            if ch.is_ascii_digit()
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            let next = numeric_append(draft, focus, ch, false);
+            if let Ok(value) = next.parse::<usize>() {
+                *target = value.max(min);
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn edit_strategy_float(
+    draft: &mut Option<NumericInputState>,
+    focus: Focus,
+    target: &mut f64,
+    key: KeyEvent,
+    min: f64,
+    step: f64,
+) -> bool {
+    if matches!(
+        key.code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')
+    ) {
+        *draft = None;
+        return adjust_float(target, key, min, step);
+    }
+
+    match key.code {
+        KeyCode::Backspace => {
+            let current = format_float_input(*target);
+            let next = numeric_backspace(draft, focus, &current);
+            if let Some(value) = parse_float_input(next.as_deref()) {
+                *target = value.max(min);
+                return true;
+            }
+        }
+        KeyCode::Char(ch)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if ch.is_ascii_digit() || ch == '.' {
+                let next = numeric_append(draft, focus, ch, true);
+                if let Some(value) = parse_float_input(Some(next.as_str())) {
+                    *target = value.max(min);
+                    return true;
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn numeric_append(
+    draft: &mut Option<NumericInputState>,
+    focus: Focus,
+    ch: char,
+    allow_decimal: bool,
+) -> String {
+    let entry = match draft {
+        Some(entry) if entry.focus == focus => entry,
+        _ => {
+            *draft = Some(NumericInputState {
+                focus,
+                value: String::new(),
+            });
+            draft.as_mut().expect("draft just inserted")
+        }
+    };
+
+    if ch == '.' {
+        if !allow_decimal || entry.value.contains('.') {
+            return entry.value.clone();
+        }
+        if entry.value.is_empty() {
+            entry.value.push('0');
+        }
+    }
+    entry.value.push(ch);
+    entry.value.clone()
+}
+
+fn numeric_backspace(
+    draft: &mut Option<NumericInputState>,
+    focus: Focus,
+    current: &str,
+) -> Option<String> {
+    let entry = match draft {
+        Some(entry) if entry.focus == focus => entry,
+        _ => {
+            *draft = Some(NumericInputState {
+                focus,
+                value: current.to_string(),
+            });
+            draft.as_mut().expect("draft just inserted")
+        }
+    };
+    entry.value.pop();
+    Some(entry.value.clone())
+}
+
+fn format_float_input(value: f64) -> String {
+    if (value.fract()).abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        let mut text = value.to_string();
+        while text.contains('.') && text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.push('0');
+        }
+        text
+    }
+}
+
+fn parse_float_input(value: Option<&str>) -> Option<f64> {
+    let raw = value?;
+    if raw.is_empty() {
+        return None;
+    }
+    if raw == "." {
+        return Some(0.0);
+    }
+    raw.parse::<f64>().ok()
 }
 
 fn target_qty_for_signal(signal: StrategySignal, current_qty: i32, base_qty: i32) -> Option<i32> {

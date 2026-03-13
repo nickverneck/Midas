@@ -1,6 +1,8 @@
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use base64::Engine as _;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,7 @@ pub enum ServiceEvent {
         results: Vec<ContractSuggestion>,
     },
     MarketSnapshot(MarketSnapshot),
+    Latency(LatencySnapshot),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,11 +178,18 @@ pub struct AccountSnapshot {
     pub raw_positions: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LatencySnapshot {
+    pub rest_rtt_ms: Option<u64>,
+    pub last_order_ack_ms: Option<u64>,
+}
+
 struct ServiceState {
     client: Client,
     session: Option<SessionState>,
     user_task: Option<JoinHandle<()>>,
     market_task: Option<JoinHandle<()>>,
+    latency: LatencySnapshot,
 }
 
 struct SessionState {
@@ -219,6 +229,9 @@ struct ManagedProtectionOrders {
     take_profit_order_id: Option<i64>,
     stop_order_id: Option<i64>,
 }
+
+const TOKEN_REFRESH_LEAD_SECS: i64 = 300;
+const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 
 enum InternalEvent {
     UserEntities(Vec<EntityEnvelope>),
@@ -279,11 +292,19 @@ pub async fn service_loop(
         session: None,
         user_task: None,
         market_task: None,
+        latency: LatencySnapshot::default(),
     };
+    let mut latency_tick = time::interval(Duration::from_secs(5));
+    latency_tick.tick().await;
+    let mut maintenance_tick =
+        time::interval(Duration::from_secs(SESSION_MAINTENANCE_INTERVAL_SECS));
+    maintenance_tick.tick().await;
 
     while let Some(next) = tokio::select! {
         cmd = cmd_rx.recv() => cmd.map(Either::Command),
         internal = internal_rx.recv() => internal.map(Either::Internal),
+        _ = latency_tick.tick() => Some(Either::LatencyTick),
+        _ = maintenance_tick.tick() => Some(Either::MaintenanceTick),
     } {
         match next {
             Either::Command(cmd) => {
@@ -298,6 +319,26 @@ pub async fn service_loop(
                     let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
                 }
             }
+            Either::LatencyTick => {
+                if let Some(session) = state.session.as_ref() {
+                    if let Ok(rest_rtt_ms) = measure_rest_rtt_ms(
+                        &state.client,
+                        &session.cfg.env,
+                        &session.tokens.access_token,
+                    )
+                    .await
+                    {
+                        state.latency.rest_rtt_ms = Some(rest_rtt_ms);
+                        let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+                    }
+                }
+            }
+            Either::MaintenanceTick => {
+                if let Err(err) = maintain_session(&mut state, &event_tx, internal_tx.clone()).await
+                {
+                    let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
+                }
+            }
         }
     }
 
@@ -307,6 +348,8 @@ pub async fn service_loop(
 enum Either {
     Command(ServiceCommand),
     Internal(InternalEvent),
+    LatencyTick,
+    MaintenanceTick,
 }
 
 async fn handle_command(
@@ -318,6 +361,7 @@ async fn handle_command(
     match cmd {
         ServiceCommand::Connect(cfg) => {
             shutdown_tasks(state);
+            state.latency = LatencySnapshot::default();
             let _ = event_tx.send(ServiceEvent::Status(format!(
                 "Authenticating against {}...",
                 cfg.env.label()
@@ -347,6 +391,7 @@ async fn handle_command(
 
             let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts.clone()));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
 
             let account_ids = accounts
                 .iter()
@@ -428,7 +473,9 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
+            let started = time::Instant::now();
             let outcome = submit_manual_order(&state.client, session, action).await?;
+            state.latency.last_order_ack_ms = Some(started.elapsed().as_millis() as u64);
             if let Some(marker) = outcome.marker {
                 session.market.trade_markers.push(marker);
                 if session.market.trade_markers.len() > 200 {
@@ -438,6 +485,7 @@ async fn handle_command(
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
             }
             let _ = event_tx.send(ServiceEvent::Status(outcome.message));
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         ServiceCommand::SetTargetPosition {
             target_qty,
@@ -447,6 +495,7 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
+            let started = time::Instant::now();
             let outcome = submit_target_position_order(
                 &state.client,
                 session,
@@ -455,6 +504,7 @@ async fn handle_command(
                 &reason,
             )
             .await?;
+            state.latency.last_order_ack_ms = Some(started.elapsed().as_millis() as u64);
             if let Some(marker) = outcome.marker {
                 session.market.trade_markers.push(marker);
                 if session.market.trade_markers.len() > 200 {
@@ -464,6 +514,7 @@ async fn handle_command(
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
             }
             let _ = event_tx.send(ServiceEvent::Status(outcome.message));
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         ServiceCommand::SyncNativeProtection {
             signed_qty,
@@ -474,6 +525,7 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
+            let started = time::Instant::now();
             if let Some(message) = sync_native_protection(
                 &state.client,
                 session,
@@ -484,7 +536,9 @@ async fn handle_command(
             )
             .await?
             {
+                state.latency.last_order_ack_ms = Some(started.elapsed().as_millis() as u64);
                 let _ = event_tx.send(ServiceEvent::Status(message));
+                let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             }
         }
     }
@@ -531,6 +585,290 @@ async fn handle_internal(
         }
     }
     Ok(())
+}
+
+async fn maintain_session(
+    state: &mut ServiceState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> Result<()> {
+    let Some(session) = state.session.as_ref() else {
+        return Ok(());
+    };
+
+    let refresh_action = next_token_maintenance_action(&session.cfg, &session.tokens)?;
+    let mut forced_restart = false;
+    let mut status_message = None;
+
+    if let Some(action) = refresh_action {
+        let next_tokens = match action {
+            TokenMaintenanceAction::RefreshCredentials => {
+                request_access_token(&state.client, &session.cfg).await?
+            }
+            TokenMaintenanceAction::ReloadTokenFile => load_runtime_token_bundle(&session.cfg)?,
+        };
+
+        if let Some(session) = state.session.as_mut() {
+            if token_bundle_changed(&session.tokens, &next_tokens) {
+                session.tokens = next_tokens;
+                save_token_cache(&session.cfg.session_cache_path, &session.tokens)?;
+                refresh_session_state(&state.client, session, event_tx).await?;
+                forced_restart = true;
+                status_message = Some(match action {
+                    TokenMaintenanceAction::RefreshCredentials => {
+                        "Session token refreshed; reconnecting background streams.".to_string()
+                    }
+                    TokenMaintenanceAction::ReloadTokenFile => {
+                        "Session token reloaded from file; reconnecting background streams."
+                            .to_string()
+                    }
+                });
+            }
+        }
+    }
+
+    let restart = ensure_background_tasks(state, internal_tx).await?;
+
+    if let Some(message) = status_message {
+        let _ = event_tx.send(ServiceEvent::Status(message));
+    }
+    if restart.user_restarted && !forced_restart {
+        let _ = event_tx.send(ServiceEvent::Status(
+            "User sync stream restarted.".to_string(),
+        ));
+    }
+    if restart.market_restarted && !forced_restart {
+        let contract_name = state
+            .session
+            .as_ref()
+            .and_then(|session| session.selected_contract.as_ref())
+            .map(|contract| contract.name.clone())
+            .unwrap_or_else(|| "selected contract".to_string());
+        let _ = event_tx.send(ServiceEvent::Status(format!(
+            "Market data stream restarted for {contract_name}."
+        )));
+    }
+
+    Ok(())
+}
+
+async fn refresh_session_state(
+    client: &Client,
+    session: &mut SessionState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) -> Result<()> {
+    let accounts = list_accounts(client, &session.cfg.env, &session.tokens.access_token).await?;
+    let mut user_store = UserSyncStore::default();
+    seed_user_store(
+        client,
+        &session.cfg.env,
+        &session.tokens.access_token,
+        &mut user_store,
+    )
+    .await;
+
+    session.accounts = accounts.clone();
+    if let Some(selected_account_id) = session.selected_account_id {
+        if !session
+            .accounts
+            .iter()
+            .any(|account| account.id == selected_account_id)
+        {
+            session.selected_account_id = session.accounts.first().map(|account| account.id);
+        }
+    } else {
+        session.selected_account_id = session.accounts.first().map(|account| account.id);
+    }
+    session.user_store = user_store;
+
+    let snapshots = session
+        .user_store
+        .build_snapshots(&session.accounts, Some(&session.market));
+    let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts));
+    let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenMaintenanceAction {
+    RefreshCredentials,
+    ReloadTokenFile,
+}
+
+fn next_token_maintenance_action(
+    cfg: &AppConfig,
+    tokens: &TokenBundle,
+) -> Result<Option<TokenMaintenanceAction>> {
+    if empty_as_none(&cfg.token_override).is_some() {
+        return Ok(None);
+    }
+
+    match cfg.auth_mode {
+        AuthMode::Credentials => {
+            if token_refresh_due(tokens, Utc::now()) {
+                Ok(Some(TokenMaintenanceAction::RefreshCredentials))
+            } else {
+                Ok(None)
+            }
+        }
+        AuthMode::TokenFile => {
+            let loaded = load_runtime_token_bundle(cfg)?;
+            if token_bundle_changed(tokens, &loaded) {
+                Ok(Some(TokenMaintenanceAction::ReloadTokenFile))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn load_runtime_token_bundle(cfg: &AppConfig) -> Result<TokenBundle> {
+    load_token_file(&cfg.token_path)
+        .or_else(|_| load_token_file(&cfg.session_cache_path))
+        .with_context(|| {
+            format!(
+                "load token from {} or {}",
+                cfg.token_path.display(),
+                cfg.session_cache_path.display()
+            )
+        })
+}
+
+fn token_refresh_due(tokens: &TokenBundle, now: DateTime<Utc>) -> bool {
+    let Some(expires_at) = token_expires_at(tokens) else {
+        return false;
+    };
+    expires_at <= now + chrono::Duration::seconds(TOKEN_REFRESH_LEAD_SECS)
+}
+
+fn token_expires_at(tokens: &TokenBundle) -> Option<DateTime<Utc>> {
+    tokens
+        .expiration_time
+        .as_deref()
+        .and_then(parse_expiration_time)
+        .or_else(|| jwt_expiration_time(&tokens.access_token))
+}
+
+fn parse_expiration_time(raw: &str) -> Option<DateTime<Utc>> {
+    if let Ok(ts) = DateTime::parse_from_rfc3339(raw) {
+        return Some(ts.with_timezone(&Utc));
+    }
+
+    let numeric = raw.trim().parse::<i64>().ok()?;
+    let seconds = if numeric > 10_000_000_000 {
+        numeric / 1000
+    } else {
+        numeric
+    };
+    DateTime::<Utc>::from_timestamp(seconds, 0)
+}
+
+fn jwt_expiration_time(token: &str) -> Option<DateTime<Utc>> {
+    let claims = token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(claims)
+        .or_else(|_| URL_SAFE.decode(claims))
+        .ok()?;
+    let parsed: Value = serde_json::from_slice(&payload).ok()?;
+    let seconds = parsed.get("exp").and_then(Value::as_i64)?;
+    DateTime::<Utc>::from_timestamp(seconds, 0)
+}
+
+fn token_bundle_changed(current: &TokenBundle, next: &TokenBundle) -> bool {
+    current.access_token != next.access_token
+        || current.md_access_token != next.md_access_token
+        || current.expiration_time != next.expiration_time
+        || current.user_id != next.user_id
+        || current.user_name != next.user_name
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TaskRestartState {
+    user_restarted: bool,
+    market_restarted: bool,
+}
+
+async fn ensure_background_tasks(
+    state: &mut ServiceState,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> Result<TaskRestartState> {
+    let Some(session) = state.session.as_ref() else {
+        return Ok(TaskRestartState::default());
+    };
+
+    let user_needed = state
+        .user_task
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished);
+    let market_needed = session.selected_contract.is_some()
+        && state
+            .market_task
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished);
+
+    let user_spawn = if user_needed {
+        Some((
+            session.cfg.clone(),
+            session.tokens.clone(),
+            session
+                .accounts
+                .iter()
+                .map(|account| account.id)
+                .collect::<Vec<_>>(),
+        ))
+    } else {
+        None
+    };
+    let market_spawn = if market_needed {
+        session.selected_contract.as_ref().map(|contract| {
+            (
+                session.cfg.clone(),
+                session.tokens.access_token.clone(),
+                session.tokens.md_access_token.clone(),
+                contract.clone(),
+            )
+        })
+    } else {
+        None
+    };
+
+    if user_needed {
+        if let Some(task) = state.user_task.take() {
+            task.abort();
+        }
+        if let Some((cfg, tokens, account_ids)) = user_spawn {
+            state.user_task = Some(tokio::spawn(user_sync_worker(
+                cfg,
+                tokens,
+                account_ids,
+                internal_tx.clone(),
+            )));
+        }
+    }
+
+    if market_needed {
+        if let Some(task) = state.market_task.take() {
+            task.abort();
+        }
+        if let Some((cfg, access_token, md_access_token, contract)) = market_spawn {
+            let market_specs =
+                fetch_contract_specs(&state.client, &cfg.env, &access_token, &contract)
+                    .await
+                    .ok();
+            state.market_task = Some(tokio::spawn(market_data_worker(
+                cfg,
+                md_access_token,
+                contract,
+                market_specs,
+                internal_tx,
+            )));
+        }
+    }
+
+    Ok(TaskRestartState {
+        user_restarted: user_needed,
+        market_restarted: market_needed,
+    })
 }
 
 fn shutdown_state(state: &mut ServiceState, event_tx: &UnboundedSender<ServiceEvent>) {
@@ -707,6 +1045,16 @@ async fn fetch_auth_me(client: &Client, env: &TradingEnvironment, token: &str) -
         bail!("auth/me failed ({status}): {body}");
     }
     Ok(serde_json::from_str(&body)?)
+}
+
+async fn measure_rest_rtt_ms(
+    client: &Client,
+    env: &TradingEnvironment,
+    token: &str,
+) -> Result<u64> {
+    let started = time::Instant::now();
+    let _ = fetch_auth_me(client, env, token).await?;
+    Ok(started.elapsed().as_millis() as u64)
 }
 
 async fn list_accounts(
@@ -2485,5 +2833,37 @@ mod tests {
         })];
 
         assert_eq!(fallback_unrealized_pnl(&positions, &market), Some(75.0));
+    }
+
+    #[test]
+    fn jwt_expiration_time_reads_exp_claim() {
+        let token = "eyJhbGciOiJub25lIn0.eyJleHAiOjE4OTM0NTYwMDB9.sig";
+        let expires_at = jwt_expiration_time(token).expect("jwt exp should parse");
+
+        let expected = DateTime::<Utc>::from_timestamp(1_893_456_000, 0).unwrap();
+        assert_eq!(expires_at, expected);
+    }
+
+    #[test]
+    fn token_refresh_due_uses_jwt_exp_when_expiration_time_missing() {
+        let tokens = TokenBundle {
+            access_token: "eyJhbGciOiJub25lIn0.eyJleHAiOjE3NzM0MzYwNDR9.sig".to_string(),
+            md_access_token: "eyJhbGciOiJub25lIn0.eyJleHAiOjE3NzM0MzYwNDR9.sig".to_string(),
+            expiration_time: None,
+            user_id: Some(42),
+            user_name: Some("demo".to_string()),
+        };
+
+        let now = DateTime::<Utc>::from_timestamp(1_773_436_044 - 60, 0).unwrap();
+        assert!(token_refresh_due(&tokens, now));
+    }
+
+    #[test]
+    fn parse_expiration_time_accepts_rfc3339() {
+        let parsed = parse_expiration_time("2026-03-13T15:04:05Z").expect("timestamp should parse");
+        let expected = DateTime::parse_from_rfc3339("2026-03-13T15:04:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(parsed, expected);
     }
 }
