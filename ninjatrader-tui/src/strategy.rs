@@ -374,13 +374,16 @@ impl StrategyState {
 
     pub fn native_summary(&self) -> String {
         format!(
-            "{} | len={} angle={:.1} lookback={} bars_required={} longs_only={} inverted={}",
+            "{} | len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
             NativeStrategyKind::HmaAngle.label(),
             self.native_hma.hma_length,
             self.native_hma.min_angle,
             self.native_hma.angle_lookback,
             self.native_hma.bars_required_to_trade,
             self.native_hma.longs_only,
+            self.native_hma.take_profit_ticks,
+            self.native_hma.stop_loss_ticks,
+            self.native_hma.use_trailing_stop,
             self.native_hma.inverted,
         )
     }

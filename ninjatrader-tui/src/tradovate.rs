@@ -35,6 +35,12 @@ pub enum ServiceCommand {
         automated: bool,
         reason: String,
     },
+    SyncNativeProtection {
+        signed_qty: i32,
+        take_profit_price: Option<f64>,
+        stop_price: Option<f64>,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +137,7 @@ pub struct MarketSnapshot {
     pub bars: Vec<Bar>,
     pub trade_markers: Vec<TradeMarker>,
     pub value_per_point: Option<f64>,
+    pub tick_size: Option<f64>,
     pub history_loaded: usize,
     pub live_bars: usize,
     pub status: String,
@@ -161,6 +168,7 @@ pub struct AccountSnapshot {
     pub intraday_margin: Option<f64>,
     pub open_position_qty: Option<f64>,
     pub market_position_qty: Option<f64>,
+    pub market_entry_price: Option<f64>,
     pub raw_account: Option<Value>,
     pub raw_risk: Option<Value>,
     pub raw_cash: Option<Value>,
@@ -182,6 +190,8 @@ struct SessionState {
     selected_account_id: Option<i64>,
     selected_contract: Option<ContractSuggestion>,
     market: MarketSnapshot,
+    managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
+    next_strategy_order_nonce: u64,
 }
 
 #[derive(Default)]
@@ -190,6 +200,24 @@ struct UserSyncStore {
     risk: BTreeMap<i64, Value>,
     cash: BTreeMap<i64, Value>,
     positions: BTreeMap<i64, BTreeMap<i64, Value>>,
+    orders: BTreeMap<i64, BTreeMap<i64, Value>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct StrategyProtectionKey {
+    account_id: i64,
+    contract_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedProtectionOrders {
+    signed_qty: i32,
+    take_profit_price: Option<f64>,
+    stop_price: Option<f64>,
+    take_profit_cl_ord_id: Option<String>,
+    stop_cl_ord_id: Option<String>,
+    take_profit_order_id: Option<i64>,
+    stop_order_id: Option<i64>,
 }
 
 enum InternalEvent {
@@ -341,6 +369,8 @@ async fn handle_command(
                 selected_account_id,
                 selected_contract: None,
                 market: MarketSnapshot::default(),
+                managed_protection: BTreeMap::new(),
+                next_strategy_order_nonce: 1,
             });
         }
         ServiceCommand::SelectAccount { account_id } => {
@@ -375,7 +405,7 @@ async fn handle_command(
                 task.abort();
             }
             session.market = MarketSnapshot::default();
-            let value_per_point = fetch_contract_value_per_point(
+            let market_specs = fetch_contract_specs(
                 &state.client,
                 &session.cfg.env,
                 &session.tokens.access_token,
@@ -390,7 +420,7 @@ async fn handle_command(
                 cfg,
                 token,
                 contract,
-                value_per_point,
+                market_specs,
                 internal_tx,
             )));
         }
@@ -434,6 +464,28 @@ async fn handle_command(
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
             }
             let _ = event_tx.send(ServiceEvent::Status(outcome.message));
+        }
+        ServiceCommand::SyncNativeProtection {
+            signed_qty,
+            take_profit_price,
+            stop_price,
+            reason,
+        } => {
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            if let Some(message) = sync_native_protection(
+                &state.client,
+                session,
+                signed_qty,
+                take_profit_price,
+                stop_price,
+                &reason,
+            )
+            .await?
+            {
+                let _ = event_tx.send(ServiceEvent::Status(message));
+            }
         }
     }
     Ok(())
@@ -740,12 +792,12 @@ struct ManualOrderOutcome {
 
 async fn submit_manual_order(
     client: &Client,
-    session: &SessionState,
+    session: &mut SessionState,
     action: ManualOrderAction,
 ) -> Result<ManualOrderOutcome> {
     let order_ctx = resolve_order_context(session)?;
-    let account = order_ctx.account;
-    let contract = order_ctx.contract;
+    let account = order_ctx.account.clone();
+    let contract = order_ctx.contract.clone();
 
     let (order_action, order_qty, action_label, automated, reason_suffix) = match action {
         ManualOrderAction::Buy => ("Buy", session.cfg.order_qty, "Buy", false, None),
@@ -753,7 +805,7 @@ async fn submit_manual_order(
         ManualOrderAction::Close => {
             let Some(net_qty) = session
                 .user_store
-                .contract_position_qty(account.id, contract)
+                .contract_position_qty(account.id, &contract)
             else {
                 return Ok(ManualOrderOutcome {
                     message: format!(
@@ -778,11 +830,13 @@ async fn submit_manual_order(
         }
     };
 
+    cancel_strategy_protection_for_selected(client, session).await?;
+
     place_market_order(
         client,
         session,
-        account,
-        contract,
+        &account,
+        &contract,
         order_action,
         order_qty,
         action_label,
@@ -794,17 +848,17 @@ async fn submit_manual_order(
 
 async fn submit_target_position_order(
     client: &Client,
-    session: &SessionState,
+    session: &mut SessionState,
     target_qty: i32,
     automated: bool,
     reason: &str,
 ) -> Result<ManualOrderOutcome> {
     let order_ctx = resolve_order_context(session)?;
-    let account = order_ctx.account;
-    let contract = order_ctx.contract;
+    let account = order_ctx.account.clone();
+    let contract = order_ctx.contract.clone();
     let current_qty = session
         .user_store
-        .contract_position_qty(account.id, contract)
+        .contract_position_qty(account.id, &contract)
         .unwrap_or(0.0)
         .round() as i32;
     let delta = target_qty.saturating_sub(current_qty);
@@ -818,6 +872,8 @@ async fn submit_target_position_order(
         });
     }
 
+    cancel_strategy_protection_for_selected(client, session).await?;
+
     let order_action = if delta > 0 { "Buy" } else { "Sell" };
     let order_qty = delta.unsigned_abs() as i32;
     let action_label = "Strategy";
@@ -829,8 +885,8 @@ async fn submit_target_position_order(
     place_market_order(
         client,
         session,
-        account,
-        contract,
+        &account,
+        &contract,
         order_action,
         order_qty,
         action_label,
@@ -859,6 +915,150 @@ fn resolve_order_context<'a>(session: &'a SessionState) -> Result<OrderContext<'
         .as_ref()
         .context("select a contract before sending orders")?;
     Ok(OrderContext { account, contract })
+}
+
+async fn sync_native_protection(
+    client: &Client,
+    session: &mut SessionState,
+    signed_qty: i32,
+    take_profit_price: Option<f64>,
+    stop_price: Option<f64>,
+    reason: &str,
+) -> Result<Option<String>> {
+    let order_ctx = resolve_order_context(session)?;
+    let account = order_ctx.account.clone();
+    let contract = order_ctx.contract.clone();
+    let key = StrategyProtectionKey {
+        account_id: account.id,
+        contract_id: contract.id,
+    };
+    let take_profit_price = sanitize_price(take_profit_price);
+    let stop_price = sanitize_price(stop_price);
+
+    if signed_qty == 0 || (take_profit_price.is_none() && stop_price.is_none()) {
+        let cleared =
+            cancel_strategy_protection_by_key(client, session, key, &account, &contract).await?;
+        if cleared {
+            return Ok(Some(format!(
+                "Native protection cleared for {} on {} ({reason})",
+                contract.name, account.name
+            )));
+        }
+        return Ok(None);
+    }
+
+    let exit_action = if signed_qty > 0 { "Sell" } else { "Buy" };
+    let order_qty = signed_qty.abs().max(1);
+
+    refresh_managed_protection_order_ids(session, key);
+    if let Some(existing) = session.managed_protection.get(&key).cloned() {
+        let same_position = existing.signed_qty == signed_qty;
+        let same_take_profit = prices_match(existing.take_profit_price, take_profit_price);
+        let same_stop = prices_match(existing.stop_price, stop_price);
+        if same_position && same_take_profit && same_stop {
+            return Ok(None);
+        }
+
+        if same_position
+            && same_take_profit
+            && stop_price.is_some()
+            && existing.stop_order_id.is_some()
+            && existing.take_profit_price.is_some() == take_profit_price.is_some()
+        {
+            let stop_order_id = existing.stop_order_id.expect("checked is_some");
+            let next_stop_price = stop_price.expect("checked is_some");
+            modify_native_stop_order(client, session, stop_order_id, order_qty, next_stop_price)
+                .await?;
+            if let Some(state) = session.managed_protection.get_mut(&key) {
+                state.stop_price = Some(next_stop_price);
+            }
+            return Ok(Some(format!(
+                "Native stop updated to {:.2} on {} ({reason})",
+                next_stop_price, contract.name
+            )));
+        }
+    }
+
+    cancel_strategy_protection_by_key(client, session, key, &account, &contract).await?;
+
+    let tp_cl_ord_id = take_profit_price.map(|_| next_strategy_cl_ord_id(session, "tp"));
+    let stop_cl_ord_id = stop_price.map(|_| next_strategy_cl_ord_id(session, "sl"));
+
+    let (take_profit_order_id, stop_order_id, action_label) = match (take_profit_price, stop_price)
+    {
+        (Some(tp), Some(stop)) => {
+            let ids = place_native_oco_orders(
+                client,
+                session,
+                &account,
+                &contract,
+                exit_action,
+                order_qty,
+                tp,
+                tp_cl_ord_id.as_deref(),
+                stop,
+                stop_cl_ord_id.as_deref(),
+            )
+            .await?;
+            (ids.0, ids.1, "TP/SL")
+        }
+        (Some(tp), None) => {
+            let order_id = place_native_limit_order(
+                client,
+                session,
+                &account,
+                &contract,
+                exit_action,
+                order_qty,
+                tp,
+                tp_cl_ord_id.as_deref(),
+            )
+            .await?;
+            (order_id, None, "TP")
+        }
+        (None, Some(stop)) => {
+            let order_id = place_native_stop_order(
+                client,
+                session,
+                &account,
+                &contract,
+                exit_action,
+                order_qty,
+                stop,
+                stop_cl_ord_id.as_deref(),
+            )
+            .await?;
+            (None, order_id, "SL")
+        }
+        (None, None) => unreachable!("checked above"),
+    };
+
+    session.managed_protection.insert(
+        key,
+        ManagedProtectionOrders {
+            signed_qty,
+            take_profit_price,
+            stop_price,
+            take_profit_cl_ord_id: tp_cl_ord_id,
+            stop_cl_ord_id,
+            take_profit_order_id,
+            stop_order_id,
+        },
+    );
+
+    let mut parts = Vec::new();
+    if let Some(price) = take_profit_price {
+        parts.push(format!("tp {:.2}", price));
+    }
+    if let Some(price) = stop_price {
+        parts.push(format!("sl {:.2}", price));
+    }
+    Ok(Some(format!(
+        "Native {action_label} protection live for {} on {}: {} ({reason})",
+        contract.name,
+        account.name,
+        parts.join(", ")
+    )))
 }
 
 async fn place_market_order(
@@ -931,12 +1131,260 @@ async fn place_market_order(
     Ok(ManualOrderOutcome { message, marker })
 }
 
-async fn fetch_contract_value_per_point(
+async fn cancel_strategy_protection_for_selected(
+    client: &Client,
+    session: &mut SessionState,
+) -> Result<bool> {
+    let order_ctx = resolve_order_context(session)?;
+    let account = order_ctx.account.clone();
+    let contract = order_ctx.contract.clone();
+    let key = StrategyProtectionKey {
+        account_id: account.id,
+        contract_id: contract.id,
+    };
+    cancel_strategy_protection_by_key(client, session, key, &account, &contract).await
+}
+
+async fn cancel_strategy_protection_by_key(
+    client: &Client,
+    session: &mut SessionState,
+    key: StrategyProtectionKey,
+    _account: &AccountInfo,
+    _contract: &ContractSuggestion,
+) -> Result<bool> {
+    refresh_managed_protection_order_ids(session, key);
+    let Some(existing) = session.managed_protection.remove(&key) else {
+        return Ok(false);
+    };
+
+    let mut cancelled_any = false;
+    if let Some(order_id) = existing.stop_order_id {
+        cancelled_any |= cancel_order_if_active(client, session, key.account_id, order_id).await?;
+    }
+    if let Some(order_id) = existing.take_profit_order_id {
+        cancelled_any |= cancel_order_if_active(client, session, key.account_id, order_id).await?;
+    }
+    Ok(cancelled_any)
+}
+
+fn refresh_managed_protection_order_ids(session: &mut SessionState, key: StrategyProtectionKey) {
+    let Some(state) = session.managed_protection.get_mut(&key) else {
+        return;
+    };
+    if state.take_profit_order_id.is_none() {
+        if let Some(cl_ord_id) = state.take_profit_cl_ord_id.as_deref() {
+            state.take_profit_order_id = session
+                .user_store
+                .order_id_by_client_id(key.account_id, cl_ord_id);
+        }
+    }
+    if state.stop_order_id.is_none() {
+        if let Some(cl_ord_id) = state.stop_cl_ord_id.as_deref() {
+            state.stop_order_id = session
+                .user_store
+                .order_id_by_client_id(key.account_id, cl_ord_id);
+        }
+    }
+}
+
+fn next_strategy_cl_ord_id(session: &mut SessionState, suffix: &str) -> String {
+    let nonce = session.next_strategy_order_nonce;
+    session.next_strategy_order_nonce = session.next_strategy_order_nonce.saturating_add(1);
+    let ts = Utc::now().timestamp_millis();
+    format!("midas-{ts}-{nonce}-{suffix}")
+}
+
+async fn place_native_limit_order(
+    client: &Client,
+    session: &SessionState,
+    account: &AccountInfo,
+    contract: &ContractSuggestion,
+    action: &str,
+    order_qty: i32,
+    price: f64,
+    cl_ord_id: Option<&str>,
+) -> Result<Option<i64>> {
+    let payload = with_cl_ord_id(
+        json!({
+        "accountSpec": account.name,
+        "accountId": account.id,
+        "action": action,
+        "symbol": contract.name,
+        "orderQty": order_qty,
+        "orderType": "Limit",
+        "price": price,
+        "timeInForce": session.cfg.time_in_force,
+        "isAutomated": true,
+        }),
+        cl_ord_id,
+    );
+    let parsed = post_order_json(client, session, "order/placeorder", &payload).await?;
+    Ok(first_known_order_id(&parsed))
+}
+
+async fn place_native_stop_order(
+    client: &Client,
+    session: &SessionState,
+    account: &AccountInfo,
+    contract: &ContractSuggestion,
+    action: &str,
+    order_qty: i32,
+    stop_price: f64,
+    cl_ord_id: Option<&str>,
+) -> Result<Option<i64>> {
+    let payload = with_cl_ord_id(
+        json!({
+        "accountSpec": account.name,
+        "accountId": account.id,
+        "action": action,
+        "symbol": contract.name,
+        "orderQty": order_qty,
+        "orderType": "Stop",
+        "stopPrice": stop_price,
+        "timeInForce": session.cfg.time_in_force,
+        "isAutomated": true,
+        }),
+        cl_ord_id,
+    );
+    let parsed = post_order_json(client, session, "order/placeorder", &payload).await?;
+    Ok(first_known_order_id(&parsed))
+}
+
+async fn place_native_oco_orders(
+    client: &Client,
+    session: &SessionState,
+    account: &AccountInfo,
+    contract: &ContractSuggestion,
+    action: &str,
+    order_qty: i32,
+    take_profit_price: f64,
+    take_profit_cl_ord_id: Option<&str>,
+    stop_price: f64,
+    stop_cl_ord_id: Option<&str>,
+) -> Result<(Option<i64>, Option<i64>)> {
+    let mut payload = with_cl_ord_id(
+        json!({
+        "accountSpec": account.name,
+        "accountId": account.id,
+        "action": action,
+        "symbol": contract.name,
+        "orderQty": order_qty,
+        "orderType": "Limit",
+        "price": take_profit_price,
+        "timeInForce": session.cfg.time_in_force,
+        "isAutomated": true,
+        "other": {
+            "accountSpec": account.name,
+            "accountId": account.id,
+            "action": action,
+            "symbol": contract.name,
+            "orderQty": order_qty,
+            "orderType": "Stop",
+            "stopPrice": stop_price,
+            "timeInForce": session.cfg.time_in_force,
+            "isAutomated": true,
+        }
+        }),
+        take_profit_cl_ord_id,
+    );
+    if let Some(other) = payload.get_mut("other").and_then(Value::as_object_mut) {
+        if let Some(cl_ord_id) = stop_cl_ord_id {
+            other.insert("clOrdId".to_string(), Value::String(cl_ord_id.to_string()));
+        }
+    }
+    let parsed = post_order_json(client, session, "order/placeOCO", &payload).await?;
+    Ok((
+        first_known_order_id(&parsed),
+        known_order_id(&parsed, &["otherId", "stopOrderId"]),
+    ))
+}
+
+async fn modify_native_stop_order(
+    client: &Client,
+    session: &SessionState,
+    order_id: i64,
+    order_qty: i32,
+    stop_price: f64,
+) -> Result<()> {
+    let payload = json!({
+        "orderId": order_id,
+        "orderQty": order_qty,
+        "orderType": "Stop",
+        "stopPrice": stop_price,
+        "timeInForce": session.cfg.time_in_force,
+        "isAutomated": true,
+    });
+    let _ = post_order_json(client, session, "order/modifyorder", &payload).await?;
+    Ok(())
+}
+
+async fn cancel_order_if_active(
+    client: &Client,
+    session: &SessionState,
+    account_id: i64,
+    order_id: i64,
+) -> Result<bool> {
+    if let Some(orders) = session.user_store.orders.get(&account_id) {
+        if let Some(order) = orders.get(&order_id) {
+            if !order_is_active(order) {
+                return Ok(false);
+            }
+        }
+    }
+
+    let payload = json!({
+        "orderId": order_id,
+        "isAutomated": true,
+    });
+    let _ = post_order_json(client, session, "order/cancelorder", &payload).await?;
+    Ok(true)
+}
+
+async fn post_order_json(
+    client: &Client,
+    session: &SessionState,
+    endpoint: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let url = format!("{}/{}", session.cfg.env.rest_url(), endpoint);
+    let response = client
+        .post(&url)
+        .bearer_auth(&session.tokens.access_token)
+        .json(payload)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("{endpoint} HTTP {status}: {body}");
+    }
+
+    let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({ "raw": body }));
+    if let Some(failure) = parsed.get("failureReason").and_then(Value::as_str) {
+        if !failure.trim().is_empty() {
+            bail!("{endpoint} rejected: {failure}");
+        }
+    }
+    if let Some(err_text) = parsed.get("errorText").and_then(Value::as_str) {
+        if !err_text.trim().is_empty() {
+            bail!("{endpoint} errorText: {err_text}");
+        }
+    }
+    Ok(parsed)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MarketSpecs {
+    value_per_point: Option<f64>,
+    tick_size: Option<f64>,
+}
+
+async fn fetch_contract_specs(
     client: &Client,
     env: &TradingEnvironment,
     token: &str,
     contract: &ContractSuggestion,
-) -> Result<f64> {
+) -> Result<MarketSpecs> {
     let contract_maturity_id = json_i64(&contract.raw, "contractMaturityId")
         .context("selected contract is missing contractMaturityId")?;
     let maturity_url = format!("{}/contractMaturity/item", env.rest_url());
@@ -968,7 +1416,10 @@ async fn fetch_contract_value_per_point(
         bail!("product/item failed ({product_status}): {product_body}");
     }
     let product: Value = serde_json::from_str(&product_body)?;
-    json_number(&product, "valuePerPoint").context("product/item missing valuePerPoint")
+    Ok(MarketSpecs {
+        value_per_point: json_number(&product, "valuePerPoint"),
+        tick_size: json_number(&product, "tickSize").or_else(|| json_number(&product, "minTick")),
+    })
 }
 
 async fn fetch_entity_list(
@@ -998,7 +1449,13 @@ async fn seed_user_store(
     token: &str,
     store: &mut UserSyncStore,
 ) {
-    for entity in ["account", "accountRiskStatus", "cashBalance", "position"] {
+    for entity in [
+        "account",
+        "accountRiskStatus",
+        "cashBalance",
+        "position",
+        "order",
+    ] {
         let Ok(items) = fetch_entity_list(client, env, token, entity).await else {
             continue;
         };
@@ -1130,14 +1587,14 @@ async fn market_data_worker(
     cfg: AppConfig,
     access_token: String,
     contract: ContractSuggestion,
-    value_per_point: Option<f64>,
+    market_specs: Option<MarketSpecs>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) {
     if let Err(err) = market_data_worker_inner(
         cfg,
         access_token,
         contract,
-        value_per_point,
+        market_specs,
         internal_tx.clone(),
     )
     .await
@@ -1150,7 +1607,7 @@ async fn market_data_worker_inner(
     cfg: AppConfig,
     access_token: String,
     contract: ContractSuggestion,
-    value_per_point: Option<f64>,
+    market_specs: Option<MarketSpecs>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.market_ws_url())
@@ -1293,7 +1750,8 @@ async fn market_data_worker_inner(
                         contract_name: Some(contract.name.clone()),
                         bars: series.render_bars(),
                         trade_markers: Vec::new(),
-                        value_per_point,
+                        value_per_point: market_specs.and_then(|specs| specs.value_per_point),
+                        tick_size: market_specs.and_then(|specs| specs.tick_size),
                         history_loaded: series.closed_bars.len(),
                         live_bars,
                         status: format!("Subscribed to 1m bars for {}", contract.name),
@@ -1347,6 +1805,17 @@ impl UserSyncStore {
                     return;
                 };
                 let bucket = self.positions.entry(account_id).or_default();
+                if envelope.deleted {
+                    bucket.remove(&entity_id);
+                } else {
+                    bucket.insert(entity_id, envelope.entity);
+                }
+            }
+            "order" => {
+                let Some(account_id) = extract_account_id("order", &envelope.entity) else {
+                    return;
+                };
+                let bucket = self.orders.entry(account_id).or_default();
                 if envelope.deleted {
                     bucket.remove(&entity_id);
                 } else {
@@ -1495,6 +1964,8 @@ impl UserSyncStore {
                         Some(values.iter().sum())
                     }
                 });
+                let market_entry_price =
+                    market.and_then(|market| weighted_market_entry_price(&raw_positions, market));
 
                 AccountSnapshot {
                     account_id: account.id,
@@ -1506,6 +1977,7 @@ impl UserSyncStore {
                     intraday_margin,
                     open_position_qty,
                     market_position_qty,
+                    market_entry_price,
                     raw_account,
                     raw_risk,
                     raw_cash,
@@ -1530,6 +2002,21 @@ impl UserSyncStore {
         } else {
             Some(values.iter().sum())
         }
+    }
+
+    fn order_id_by_client_id(&self, account_id: i64, cl_ord_id: &str) -> Option<i64> {
+        self.orders
+            .get(&account_id)
+            .into_iter()
+            .flat_map(|orders| orders.values())
+            .find(|order| {
+                order
+                    .get("clOrdId")
+                    .and_then(Value::as_str)
+                    .map(|value| value == cl_ord_id)
+                    .unwrap_or(false)
+            })
+            .and_then(extract_entity_id)
     }
 }
 
@@ -1566,6 +2053,29 @@ fn fallback_unrealized_pnl(positions: &[Value], market: &MarketSnapshot) -> Opti
         None
     } else {
         Some(values.iter().sum())
+    }
+}
+
+fn weighted_market_entry_price(positions: &[Value], market: &MarketSnapshot) -> Option<f64> {
+    let mut weighted_sum = 0.0;
+    let mut total_qty = 0.0;
+    for position in positions
+        .iter()
+        .filter(|position| position_matches_market(position, market))
+    {
+        let qty = position_qty(position)?.abs();
+        if qty <= f64::EPSILON {
+            continue;
+        }
+        let entry_price = pick_number(position, &["netPrice", "avgPrice", "averagePrice"])?;
+        weighted_sum += entry_price * qty;
+        total_qty += qty;
+    }
+
+    if total_qty <= f64::EPSILON {
+        None
+    } else {
+        Some(weighted_sum / total_qty)
     }
 }
 
@@ -1699,7 +2209,13 @@ fn extract_response_entities(payload: &Value) -> Vec<EntityEnvelope> {
         }
     }
 
-    for key in ["account", "accountRiskStatus", "cashBalance", "position"] {
+    for key in [
+        "account",
+        "accountRiskStatus",
+        "cashBalance",
+        "position",
+        "order",
+    ] {
         if let Some(entity) = obj.get(key) {
             if entity.is_object() {
                 out.push(EntityEnvelope {
@@ -1803,6 +2319,50 @@ fn json_i64(value: &Value, key: &str) -> Option<i64> {
         return i64::try_from(v).ok();
     }
     raw.as_str().and_then(|text| text.parse::<i64>().ok())
+}
+
+fn sanitize_price(price: Option<f64>) -> Option<f64> {
+    price.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn with_cl_ord_id(mut payload: Value, cl_ord_id: Option<&str>) -> Value {
+    if let Some(cl_ord_id) = cl_ord_id {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("clOrdId".to_string(), Value::String(cl_ord_id.to_string()));
+        }
+    }
+    payload
+}
+
+fn prices_match(lhs: Option<f64>, rhs: Option<f64>) -> bool {
+    match (lhs, rhs) {
+        (Some(a), Some(b)) => (a - b).abs() <= 1e-9,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn known_order_id(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| json_i64(value, key))
+}
+
+fn first_known_order_id(value: &Value) -> Option<i64> {
+    known_order_id(value, &["orderId", "id", "otherId", "stopOrderId"])
+}
+
+fn order_is_active(order: &Value) -> bool {
+    let Some(status) = order
+        .get("ordStatus")
+        .and_then(Value::as_str)
+        .or_else(|| order.get("status").and_then(Value::as_str))
+    else {
+        return true;
+    };
+
+    !matches!(
+        status.to_ascii_lowercase().as_str(),
+        "filled" | "cancelled" | "canceled" | "rejected" | "expired" | "stopped" | "finished"
+    )
 }
 
 fn extract_entity_id(value: &Value) -> Option<i64> {
@@ -1911,6 +2471,7 @@ mod tests {
             }],
             trade_markers: Vec::new(),
             value_per_point: Some(50.0),
+            tick_size: Some(0.25),
             history_loaded: 1,
             live_bars: 0,
             status: String::new(),
