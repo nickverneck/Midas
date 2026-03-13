@@ -1,5 +1,6 @@
 use crate::automation::{StrategyDescriptor, default_strategy_catalog};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
+use crate::strategies::ema_cross::EmaCrossExecutionState;
 use crate::strategies::hma_angle::HmaAngleExecutionState;
 use crate::strategies::{PositionSide, StrategySignal, side_from_signed_qty};
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
@@ -67,6 +68,7 @@ enum Focus {
     TokenPath,
     Connect,
     StrategyKind,
+    NativeStrategy,
     HmaLength,
     HmaMinAngle,
     HmaAngleLookback,
@@ -78,6 +80,14 @@ enum Focus {
     HmaTrailingStop,
     HmaTrailTriggerTicks,
     HmaTrailOffsetTicks,
+    EmaFastLength,
+    EmaSlowLength,
+    EmaInverted,
+    EmaTakeProfitTicks,
+    EmaStopLossTicks,
+    EmaTrailingStop,
+    EmaTrailTriggerTicks,
+    EmaTrailOffsetTicks,
     LuaSourceMode,
     LuaFilePath,
     LuaEditor,
@@ -102,6 +112,7 @@ struct StrategyRuntimeState {
     pending_target_qty: Option<i32>,
     last_summary: String,
     hma_execution: HmaAngleExecutionState,
+    ema_execution: EmaCrossExecutionState,
 }
 
 impl App {
@@ -132,7 +143,7 @@ impl App {
         );
         app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close.".to_string());
         app.push_log(
-            "Native HMA Angle strategy can auto-trade closed 1m bars once armed from Strategy."
+            "Native HMA Angle and EMA Crossover strategies can auto-trade closed 1m bars once armed from Strategy."
                 .to_string(),
         );
         app
@@ -233,7 +244,7 @@ impl App {
                 if contract_changed {
                     self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
                     self.strategy_runtime.pending_target_qty = None;
-                    self.strategy_runtime.hma_execution = HmaAngleExecutionState::default();
+                    self.reset_native_execution();
                     self.strategy_runtime.last_summary =
                         "Contract changed; strategy re-anchored to current bar.".to_string();
                 }
@@ -356,6 +367,7 @@ impl App {
             Focus::Secret => edit_string(&mut self.form.secret, key),
             Focus::TokenPath => edit_string(&mut self.form.token_path, key),
             Focus::StrategyKind
+            | Focus::NativeStrategy
             | Focus::HmaLength
             | Focus::HmaMinAngle
             | Focus::HmaAngleLookback
@@ -367,6 +379,14 @@ impl App {
             | Focus::HmaTrailingStop
             | Focus::HmaTrailTriggerTicks
             | Focus::HmaTrailOffsetTicks
+            | Focus::EmaFastLength
+            | Focus::EmaSlowLength
+            | Focus::EmaInverted
+            | Focus::EmaTakeProfitTicks
+            | Focus::EmaStopLossTicks
+            | Focus::EmaTrailingStop
+            | Focus::EmaTrailTriggerTicks
+            | Focus::EmaTrailOffsetTicks
             | Focus::LuaSourceMode
             | Focus::LuaFilePath
             | Focus::LuaEditor
@@ -398,6 +418,17 @@ impl App {
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.kind = self.strategy.kind.next();
+                    self.disarm_native_strategy();
+                }
+                _ => {}
+            },
+            Focus::NativeStrategy => match key.code {
+                KeyCode::Left => {
+                    self.strategy.native_strategy = self.strategy.native_strategy.prev();
+                    self.disarm_native_strategy();
+                }
+                KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.strategy.native_strategy = self.strategy.native_strategy.next();
                     self.disarm_native_strategy();
                 }
                 _ => {}
@@ -470,6 +501,61 @@ impl App {
             Focus::HmaTrailOffsetTicks => {
                 if adjust_float(
                     &mut self.strategy.native_hma.trail_offset_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                ) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaFastLength => {
+                if adjust_usize(&mut self.strategy.native_ema.fast_length, key, 1, 1) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaSlowLength => {
+                if adjust_usize(&mut self.strategy.native_ema.slow_length, key, 1, 1) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaInverted => {
+                if toggle_bool(&mut self.strategy.native_ema.inverted, key) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaTakeProfitTicks => {
+                if adjust_float(
+                    &mut self.strategy.native_ema.take_profit_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                ) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaStopLossTicks => {
+                if adjust_float(&mut self.strategy.native_ema.stop_loss_ticks, key, 0.0, 1.0) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaTrailingStop => {
+                if toggle_bool(&mut self.strategy.native_ema.use_trailing_stop, key) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaTrailTriggerTicks => {
+                if adjust_float(
+                    &mut self.strategy.native_ema.trail_trigger_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                ) {
+                    self.disarm_native_strategy();
+                }
+            }
+            Focus::EmaTrailOffsetTicks => {
+                if adjust_float(
+                    &mut self.strategy.native_ema.trail_offset_ticks,
                     key,
                     0.0,
                     1.0,
@@ -657,6 +743,7 @@ impl App {
             | Focus::Secret
             | Focus::TokenPath
             | Focus::StrategyKind
+            | Focus::NativeStrategy
             | Focus::HmaLength
             | Focus::HmaMinAngle
             | Focus::HmaAngleLookback
@@ -668,6 +755,14 @@ impl App {
             | Focus::HmaTrailingStop
             | Focus::HmaTrailTriggerTicks
             | Focus::HmaTrailOffsetTicks
+            | Focus::EmaFastLength
+            | Focus::EmaSlowLength
+            | Focus::EmaInverted
+            | Focus::EmaTakeProfitTicks
+            | Focus::EmaStopLossTicks
+            | Focus::EmaTrailingStop
+            | Focus::EmaTrailTriggerTicks
+            | Focus::EmaTrailOffsetTicks
             | Focus::LuaSourceMode
             | Focus::LuaFilePath
             | Focus::LuaEditor
@@ -1316,81 +1411,137 @@ impl App {
         )];
 
         if self.strategy.kind == StrategyKind::Native {
-            lines.push(Line::from(format!(
-                "Native Strategy: {}",
-                NativeStrategyKind::HmaAngle.label()
-            )));
             lines.push(styled_line(
-                format!("HMA Length: {}", self.strategy.native_hma.hma_length),
-                self.focus == Focus::HmaLength,
+                format!("Native Strategy: {}", self.strategy.native_strategy.label()),
+                self.focus == Focus::NativeStrategy,
             ));
-            lines.push(styled_line(
-                format!("Min Angle: {:.1}", self.strategy.native_hma.min_angle),
-                self.focus == Focus::HmaMinAngle,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Angle Lookback: {}",
-                    self.strategy.native_hma.angle_lookback
-                ),
-                self.focus == Focus::HmaAngleLookback,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Bars Required: {}",
-                    self.strategy.native_hma.bars_required_to_trade
-                ),
-                self.focus == Focus::HmaBarsRequired,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Longs Only: {}",
-                    bool_label(self.strategy.native_hma.longs_only)
-                ),
-                self.focus == Focus::HmaLongsOnly,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Inverted: {}",
-                    bool_label(self.strategy.native_hma.inverted)
-                ),
-                self.focus == Focus::HmaInverted,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Take Profit Ticks: {:.0}",
-                    self.strategy.native_hma.take_profit_ticks
-                ),
-                self.focus == Focus::HmaTakeProfitTicks,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Stop Loss Ticks: {:.0}",
-                    self.strategy.native_hma.stop_loss_ticks
-                ),
-                self.focus == Focus::HmaStopLossTicks,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Trailing Stop: {}",
-                    bool_label(self.strategy.native_hma.use_trailing_stop)
-                ),
-                self.focus == Focus::HmaTrailingStop,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Trail Trigger Ticks: {:.0}",
-                    self.strategy.native_hma.trail_trigger_ticks
-                ),
-                self.focus == Focus::HmaTrailTriggerTicks,
-            ));
-            lines.push(styled_line(
-                format!(
-                    "Trail Offset Ticks: {:.0}",
-                    self.strategy.native_hma.trail_offset_ticks
-                ),
-                self.focus == Focus::HmaTrailOffsetTicks,
-            ));
+            match self.strategy.native_strategy {
+                NativeStrategyKind::HmaAngle => {
+                    lines.push(styled_line(
+                        format!("HMA Length: {}", self.strategy.native_hma.hma_length),
+                        self.focus == Focus::HmaLength,
+                    ));
+                    lines.push(styled_line(
+                        format!("Min Angle: {:.1}", self.strategy.native_hma.min_angle),
+                        self.focus == Focus::HmaMinAngle,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Angle Lookback: {}",
+                            self.strategy.native_hma.angle_lookback
+                        ),
+                        self.focus == Focus::HmaAngleLookback,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Bars Required: {}",
+                            self.strategy.native_hma.bars_required_to_trade
+                        ),
+                        self.focus == Focus::HmaBarsRequired,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Longs Only: {}",
+                            bool_label(self.strategy.native_hma.longs_only)
+                        ),
+                        self.focus == Focus::HmaLongsOnly,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Inverted: {}",
+                            bool_label(self.strategy.native_hma.inverted)
+                        ),
+                        self.focus == Focus::HmaInverted,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Take Profit Ticks: {:.0}",
+                            self.strategy.native_hma.take_profit_ticks
+                        ),
+                        self.focus == Focus::HmaTakeProfitTicks,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Stop Loss Ticks: {:.0}",
+                            self.strategy.native_hma.stop_loss_ticks
+                        ),
+                        self.focus == Focus::HmaStopLossTicks,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Trailing Stop: {}",
+                            bool_label(self.strategy.native_hma.use_trailing_stop)
+                        ),
+                        self.focus == Focus::HmaTrailingStop,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Trail Trigger Ticks: {:.0}",
+                            self.strategy.native_hma.trail_trigger_ticks
+                        ),
+                        self.focus == Focus::HmaTrailTriggerTicks,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Trail Offset Ticks: {:.0}",
+                            self.strategy.native_hma.trail_offset_ticks
+                        ),
+                        self.focus == Focus::HmaTrailOffsetTicks,
+                    ));
+                }
+                NativeStrategyKind::EmaCross => {
+                    lines.push(styled_line(
+                        format!("Fast EMA Length: {}", self.strategy.native_ema.fast_length),
+                        self.focus == Focus::EmaFastLength,
+                    ));
+                    lines.push(styled_line(
+                        format!("Slow EMA Length: {}", self.strategy.native_ema.slow_length),
+                        self.focus == Focus::EmaSlowLength,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Inverted: {}",
+                            bool_label(self.strategy.native_ema.inverted)
+                        ),
+                        self.focus == Focus::EmaInverted,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Take Profit Ticks: {:.0}",
+                            self.strategy.native_ema.take_profit_ticks
+                        ),
+                        self.focus == Focus::EmaTakeProfitTicks,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Stop Loss Ticks: {:.0}",
+                            self.strategy.native_ema.stop_loss_ticks
+                        ),
+                        self.focus == Focus::EmaStopLossTicks,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Trailing Stop: {}",
+                            bool_label(self.strategy.native_ema.use_trailing_stop)
+                        ),
+                        self.focus == Focus::EmaTrailingStop,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Trail Trigger Ticks: {:.0}",
+                            self.strategy.native_ema.trail_trigger_ticks
+                        ),
+                        self.focus == Focus::EmaTrailTriggerTicks,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Trail Offset Ticks: {:.0}",
+                            self.strategy.native_ema.trail_offset_ticks
+                        ),
+                        self.focus == Focus::EmaTrailOffsetTicks,
+                    ));
+                }
+            }
             lines.push(Line::from(
                 "Use Left/Right to change values and toggle booleans. Zero TP/SL disables them.",
             ));
@@ -1433,15 +1584,17 @@ impl App {
     fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
         vec![
             Line::from("Backend order: Native Rust > Lua > Machine Learning."),
-            Line::from("Native HMA executes on newly closed 1m bars after you arm it."),
+            Line::from("Native strategies execute on newly closed 1m bars after you arm them."),
             Line::from("The native engine targets the selected contract position directly."),
-            Line::from("TP, SL, and trailing stop are configured in ticks."),
+            Line::from("TP, SL, and trailing stop are configured in ticks and synced natively."),
             Line::from("Lua can be loaded from file or typed directly in the TUI."),
             Line::from("ML remains selection-only for now."),
             Line::from(""),
             Line::from("Strategy screen controls:"),
-            Line::from("Up/Down moves focus. Left/Right edits HMA params or toggles fields."),
-            Line::from("Enter on Continue arms the native strategy from the current closed bar."),
+            Line::from("Up/Down moves focus. Left/Right edits native params or toggles fields."),
+            Line::from(
+                "Enter on Continue arms the selected native strategy from the current closed bar.",
+            ),
             Line::from(""),
             Line::from("Lua editor controls:"),
             Line::from("Normal: h/j/k/l move, i insert, a append, o open line, x delete."),
@@ -1453,10 +1606,10 @@ impl App {
         let mut lines = vec![
             Line::from(format!("Selected: {}", self.strategy.summary_label())),
             Line::from(match self.strategy.kind {
-                StrategyKind::Native => {
-                    "Native Rust HMA Angle is active and can submit automated market orders."
-                        .to_string()
-                }
+                StrategyKind::Native => format!(
+                    "Native Rust {} is active and can submit automated market orders.",
+                    self.strategy.native_strategy.label()
+                ),
                 StrategyKind::Lua => {
                     "Lua strategy source is ready for later execution wiring.".to_string()
                 }
@@ -1501,36 +1654,67 @@ impl App {
 
     fn strategy_detail_lines(&self) -> Vec<Line<'static>> {
         if self.strategy.kind == StrategyKind::Native {
-            return vec![
-                Line::from("HMA Angle Strategy"),
-                Line::from(format!("Type: {}", NativeStrategyKind::HmaAngle.label())),
-                Line::from(format!(
-                    "Params: len={} min_angle={:.1} lookback={} bars_required={}",
-                    self.strategy.native_hma.hma_length,
-                    self.strategy.native_hma.min_angle,
-                    self.strategy.native_hma.angle_lookback,
-                    self.strategy.native_hma.bars_required_to_trade
-                )),
-                Line::from(format!(
-                    "Flags: longs_only={} inverted={} trailing={}",
-                    bool_label(self.strategy.native_hma.longs_only),
-                    bool_label(self.strategy.native_hma.inverted),
-                    bool_label(self.strategy.native_hma.use_trailing_stop)
-                )),
-                Line::from(format!(
-                    "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
-                    self.strategy.native_hma.take_profit_ticks,
-                    self.strategy.native_hma.stop_loss_ticks,
-                    self.strategy.native_hma.trail_trigger_ticks,
-                    self.strategy.native_hma.trail_offset_ticks,
-                )),
-                Line::from(""),
-                Line::from("Signal logic"),
-                Line::from("Buy: price crosses above zero-lag HMA with sufficient positive angle."),
-                Line::from(
-                    "Sell: price crosses below zero-lag HMA with sufficient negative angle.",
-                ),
-                Line::from("Inverted swaps buy/sell decisions before order routing."),
+            let mut lines = match self.strategy.native_strategy {
+                NativeStrategyKind::HmaAngle => vec![
+                    Line::from("HMA Angle Strategy"),
+                    Line::from(format!("Type: {}", NativeStrategyKind::HmaAngle.label())),
+                    Line::from(format!(
+                        "Params: len={} min_angle={:.1} lookback={} bars_required={}",
+                        self.strategy.native_hma.hma_length,
+                        self.strategy.native_hma.min_angle,
+                        self.strategy.native_hma.angle_lookback,
+                        self.strategy.native_hma.bars_required_to_trade
+                    )),
+                    Line::from(format!(
+                        "Flags: longs_only={} inverted={} trailing={}",
+                        bool_label(self.strategy.native_hma.longs_only),
+                        bool_label(self.strategy.native_hma.inverted),
+                        bool_label(self.strategy.native_hma.use_trailing_stop)
+                    )),
+                    Line::from(format!(
+                        "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
+                        self.strategy.native_hma.take_profit_ticks,
+                        self.strategy.native_hma.stop_loss_ticks,
+                        self.strategy.native_hma.trail_trigger_ticks,
+                        self.strategy.native_hma.trail_offset_ticks,
+                    )),
+                    Line::from(""),
+                    Line::from("Signal logic"),
+                    Line::from(
+                        "Buy: price crosses above zero-lag HMA with sufficient positive angle.",
+                    ),
+                    Line::from(
+                        "Sell: price crosses below zero-lag HMA with sufficient negative angle.",
+                    ),
+                    Line::from("Inverted swaps buy/sell decisions before order routing."),
+                ],
+                NativeStrategyKind::EmaCross => vec![
+                    Line::from("EMA Crossover Strategy"),
+                    Line::from(format!("Type: {}", NativeStrategyKind::EmaCross.label())),
+                    Line::from(format!(
+                        "Params: fast={} slow={}",
+                        self.strategy.native_ema.fast_length, self.strategy.native_ema.slow_length,
+                    )),
+                    Line::from(format!(
+                        "Flags: inverted={} trailing={}",
+                        bool_label(self.strategy.native_ema.inverted),
+                        bool_label(self.strategy.native_ema.use_trailing_stop)
+                    )),
+                    Line::from(format!(
+                        "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
+                        self.strategy.native_ema.take_profit_ticks,
+                        self.strategy.native_ema.stop_loss_ticks,
+                        self.strategy.native_ema.trail_trigger_ticks,
+                        self.strategy.native_ema.trail_offset_ticks,
+                    )),
+                    Line::from(""),
+                    Line::from("Signal logic"),
+                    Line::from("Buy: fast EMA crosses above slow EMA."),
+                    Line::from("Sell: fast EMA crosses below slow EMA."),
+                    Line::from("Inverted swaps buy/sell decisions before order routing."),
+                ],
+            };
+            lines.extend([
                 Line::from(
                     "TP/SL are broker-native and keyed from the confirmed broker entry price.",
                 ),
@@ -1552,7 +1736,8 @@ impl App {
                     "Tick Size: {}",
                     format_money(self.market.tick_size)
                 )),
-            ];
+            ]);
+            return lines;
         }
         if self.strategy.kind != StrategyKind::Lua {
             return vec![
@@ -1712,19 +1897,32 @@ impl App {
     fn strategy_focus_order(&self) -> Vec<Focus> {
         let mut order = vec![Focus::StrategyKind];
         if self.strategy.kind == StrategyKind::Native {
-            order.extend([
-                Focus::HmaLength,
-                Focus::HmaMinAngle,
-                Focus::HmaAngleLookback,
-                Focus::HmaBarsRequired,
-                Focus::HmaLongsOnly,
-                Focus::HmaInverted,
-                Focus::HmaTakeProfitTicks,
-                Focus::HmaStopLossTicks,
-                Focus::HmaTrailingStop,
-                Focus::HmaTrailTriggerTicks,
-                Focus::HmaTrailOffsetTicks,
-            ]);
+            order.push(Focus::NativeStrategy);
+            match self.strategy.native_strategy {
+                NativeStrategyKind::HmaAngle => order.extend([
+                    Focus::HmaLength,
+                    Focus::HmaMinAngle,
+                    Focus::HmaAngleLookback,
+                    Focus::HmaBarsRequired,
+                    Focus::HmaLongsOnly,
+                    Focus::HmaInverted,
+                    Focus::HmaTakeProfitTicks,
+                    Focus::HmaStopLossTicks,
+                    Focus::HmaTrailingStop,
+                    Focus::HmaTrailTriggerTicks,
+                    Focus::HmaTrailOffsetTicks,
+                ]),
+                NativeStrategyKind::EmaCross => order.extend([
+                    Focus::EmaFastLength,
+                    Focus::EmaSlowLength,
+                    Focus::EmaInverted,
+                    Focus::EmaTakeProfitTicks,
+                    Focus::EmaStopLossTicks,
+                    Focus::EmaTrailingStop,
+                    Focus::EmaTrailTriggerTicks,
+                    Focus::EmaTrailOffsetTicks,
+                ]),
+            }
         } else if self.strategy.kind == StrategyKind::Lua {
             order.push(Focus::LuaSourceMode);
             match self.strategy.lua_source_mode {
@@ -1822,10 +2020,15 @@ impl App {
         self.logs.push_back(message);
     }
 
+    fn reset_native_execution(&mut self) {
+        self.strategy_runtime.hma_execution = HmaAngleExecutionState::default();
+        self.strategy_runtime.ema_execution = EmaCrossExecutionState::default();
+    }
+
     fn disarm_native_strategy(&mut self) {
         if self.strategy_runtime.armed {
             self.strategy_runtime.armed = false;
-            self.strategy_runtime.hma_execution = HmaAngleExecutionState::default();
+            self.reset_native_execution();
             self.strategy_runtime.last_summary =
                 "Native strategy config changed; press Continue to re-arm.".to_string();
         }
@@ -1842,12 +2045,18 @@ impl App {
         }
 
         self.strategy_runtime.armed = true;
-        self.strategy_runtime.hma_execution = HmaAngleExecutionState::default();
+        self.reset_native_execution();
         self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
         self.strategy_runtime.last_summary = if self.strategy_runtime.last_closed_bar_ts.is_some() {
-            "Native HMA armed from current closed bar.".to_string()
+            format!(
+                "Native {} armed from current closed bar.",
+                self.strategy.native_strategy.label()
+            )
         } else {
-            "Native HMA armed; waiting for first closed bar.".to_string()
+            format!(
+                "Native {} armed; waiting for first closed bar.",
+                self.strategy.native_strategy.label()
+            )
         };
     }
 
@@ -1873,11 +2082,43 @@ impl App {
             .filter(|price| price.is_finite() && *price > 0.0)
     }
 
+    fn active_native_slug(&self) -> &'static str {
+        self.strategy.native_strategy.slug()
+    }
+
+    fn active_native_uses_protection(&self) -> bool {
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
+            NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
+        }
+    }
+
+    fn sync_active_native_position(&mut self, signed_qty: i32, entry_price: Option<f64>) {
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => self.strategy.native_hma.sync_position(
+                &mut self.strategy_runtime.hma_execution,
+                signed_qty,
+                entry_price,
+            ),
+            NativeStrategyKind::EmaCross => self.strategy.native_ema.sync_position(
+                &mut self.strategy_runtime.ema_execution,
+                signed_qty,
+                entry_price,
+            ),
+        }
+    }
+
     fn take_profit_price(&self, side: PositionSide, entry_price: f64) -> Option<f64> {
-        let offset = self
-            .strategy
-            .native_hma
-            .take_profit_offset(self.market.tick_size)?;
+        let offset = match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => self
+                .strategy
+                .native_hma
+                .take_profit_offset(self.market.tick_size)?,
+            NativeStrategyKind::EmaCross => self
+                .strategy
+                .native_ema
+                .take_profit_offset(self.market.tick_size)?,
+        };
         Some(match side {
             PositionSide::Long => entry_price + offset,
             PositionSide::Short => entry_price - offset,
@@ -1885,17 +2126,34 @@ impl App {
     }
 
     fn combined_stop_price(&mut self, trailing_bar: Option<&crate::tradovate::Bar>) -> Option<f64> {
-        if let Some(bar) = trailing_bar {
-            let _ = self.strategy.native_hma.desired_trailing_stop_price(
-                &mut self.strategy_runtime.hma_execution,
-                bar,
-                self.market.tick_size,
-            );
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                if let Some(bar) = trailing_bar {
+                    let _ = self.strategy.native_hma.desired_trailing_stop_price(
+                        &mut self.strategy_runtime.hma_execution,
+                        bar,
+                        self.market.tick_size,
+                    );
+                }
+                self.strategy.native_hma.current_effective_stop_price(
+                    &self.strategy_runtime.hma_execution,
+                    self.market.tick_size,
+                )
+            }
+            NativeStrategyKind::EmaCross => {
+                if let Some(bar) = trailing_bar {
+                    let _ = self.strategy.native_ema.desired_trailing_stop_price(
+                        &mut self.strategy_runtime.ema_execution,
+                        bar,
+                        self.market.tick_size,
+                    );
+                }
+                self.strategy.native_ema.current_effective_stop_price(
+                    &self.strategy_runtime.ema_execution,
+                    self.market.tick_size,
+                )
+            }
         }
-        self.strategy.native_hma.current_effective_stop_price(
-            &self.strategy_runtime.hma_execution,
-            self.market.tick_size,
-        )
     }
 
     fn maybe_sync_native_protection(
@@ -1906,24 +2164,20 @@ impl App {
         if !self.strategy_runtime.armed || self.strategy.kind != StrategyKind::Native {
             return;
         }
-        if !self.strategy.native_hma.uses_native_protection() {
+        if !self.active_native_uses_protection() {
             return;
         }
 
         let signed_qty = self.actual_market_position_qty();
         let actual_market_entry = self.actual_market_entry_price();
-        self.strategy.native_hma.sync_position(
-            &mut self.strategy_runtime.hma_execution,
-            signed_qty,
-            actual_market_entry,
-        );
+        self.sync_active_native_position(signed_qty, actual_market_entry);
 
         if signed_qty == 0 {
             let _ = cmd_tx.send(ServiceCommand::SyncNativeProtection {
                 signed_qty: 0,
                 take_profit_price: None,
                 stop_price: None,
-                reason: "hma_angle flat".to_string(),
+                reason: format!("{} flat", self.active_native_slug()),
             });
             return;
         }
@@ -1942,9 +2196,9 @@ impl App {
             take_profit_price,
             stop_price,
             reason: if trailing_bar.is_some() {
-                "hma_angle bar sync".to_string()
+                format!("{} bar sync", self.active_native_slug())
             } else {
-                "hma_angle position sync".to_string()
+                format!("{} position sync", self.active_native_slug())
             },
         });
     }
@@ -1979,6 +2233,29 @@ impl App {
         }
     }
 
+    fn evaluate_active_native_strategy(
+        &self,
+        bars: &[crate::tradovate::Bar],
+        current_qty: i32,
+    ) -> (StrategySignal, String) {
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                let evaluation = self
+                    .strategy
+                    .native_hma
+                    .evaluate(bars, side_from_signed_qty(current_qty));
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::EmaCross => {
+                let evaluation = self
+                    .strategy
+                    .native_ema
+                    .evaluate(bars, side_from_signed_qty(current_qty));
+                (evaluation.signal, evaluation.summary())
+            }
+        }
+    }
+
     fn maybe_run_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.strategy_runtime.armed || self.strategy.kind != StrategyKind::Native {
             return;
@@ -1986,11 +2263,7 @@ impl App {
 
         let actual_market_qty = self.actual_market_position_qty();
         let actual_market_entry = self.actual_market_entry_price();
-        self.strategy.native_hma.sync_position(
-            &mut self.strategy_runtime.hma_execution,
-            actual_market_qty,
-            actual_market_entry,
-        );
+        self.sync_active_native_position(actual_market_qty, actual_market_entry);
 
         if self.strategy_runtime.pending_target_qty.is_some() {
             self.strategy_runtime.last_summary =
@@ -2000,15 +2273,19 @@ impl App {
 
         let closed_bars = self.closed_bars().to_vec();
         let Some(last_closed) = closed_bars.last() else {
-            self.strategy_runtime.last_summary =
-                "Native HMA armed; waiting for market data.".to_string();
+            self.strategy_runtime.last_summary = format!(
+                "Native {} armed; waiting for market data.",
+                self.strategy.native_strategy.label()
+            );
             return;
         };
 
         if self.strategy_runtime.last_closed_bar_ts.is_none() {
             self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
-            self.strategy_runtime.last_summary =
-                "Native HMA anchored to current bar; waiting for next close.".to_string();
+            self.strategy_runtime.last_summary = format!(
+                "Native {} anchored to current bar; waiting for next close.",
+                self.strategy.native_strategy.label()
+            );
             return;
         }
 
@@ -2018,14 +2295,11 @@ impl App {
         self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
 
         let current_qty = self.effective_market_position_qty();
-        let evaluation = self
-            .strategy
-            .native_hma
-            .evaluate(&closed_bars, side_from_signed_qty(current_qty));
-        self.strategy_runtime.last_summary = evaluation.summary();
+        let (signal, summary) = self.evaluate_active_native_strategy(&closed_bars, current_qty);
+        self.strategy_runtime.last_summary = summary.clone();
 
         let Some(target_qty) =
-            target_qty_for_signal(evaluation.signal, current_qty, self.base_config.order_qty)
+            target_qty_for_signal(signal, current_qty, self.base_config.order_qty)
         else {
             self.maybe_sync_native_protection(cmd_tx, Some(last_closed));
             return;
@@ -2037,16 +2311,19 @@ impl App {
         }
 
         let reason = format!(
-            "hma_angle {} | {}",
-            evaluation.signal.label(),
-            evaluation.summary()
+            "{} {} | {}",
+            self.active_native_slug(),
+            signal.label(),
+            summary
         );
         if current_qty != 0 {
             self.clear_native_protection(
                 cmd_tx,
                 format!(
-                    "hma_angle target transition {} -> {}",
-                    current_qty, target_qty
+                    "{} target transition {} -> {}",
+                    self.active_native_slug(),
+                    current_qty,
+                    target_qty
                 ),
             );
         }
@@ -2057,8 +2334,11 @@ impl App {
         });
         self.strategy_runtime.pending_target_qty = Some(target_qty);
         self.push_log(format!(
-            "Native HMA target {} -> {} ({})",
-            current_qty, target_qty, reason
+            "Native {} target {} -> {} ({})",
+            self.strategy.native_strategy.label(),
+            current_qty,
+            target_qty,
+            reason
         ));
     }
 }

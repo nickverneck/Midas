@@ -1,3 +1,4 @@
+pub mod ema_cross;
 pub mod hma_angle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

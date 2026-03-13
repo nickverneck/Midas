@@ -12,7 +12,7 @@ pub fn default_strategy_catalog() -> Vec<StrategyDescriptor> {
             name: "Native Rust",
             priority: "P1",
             status: "active",
-            note: "HMA Angle strategy is wired for live closed-bar execution and parameter editing.",
+            note: "HMA Angle and EMA Crossover are wired for live closed-bar execution and parameter editing.",
         },
         StrategyDescriptor {
             name: "Lua",

@@ -1,3 +1,4 @@
+use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
@@ -39,13 +40,33 @@ impl StrategyKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeStrategyKind {
     HmaAngle,
+    EmaCross,
 }
 
 impl NativeStrategyKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::HmaAngle => "HMA Angle",
+            Self::EmaCross => "EMA Crossover",
         }
+    }
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::HmaAngle => "hma_angle",
+            Self::EmaCross => "ema_cross",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::HmaAngle => Self::EmaCross,
+            Self::EmaCross => Self::HmaAngle,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        self.next()
     }
 }
 
@@ -325,7 +346,9 @@ impl VimEditor {
 #[derive(Debug, Clone)]
 pub struct StrategyState {
     pub kind: StrategyKind,
+    pub native_strategy: NativeStrategyKind,
     pub native_hma: HmaAngleConfig,
+    pub native_ema: EmaCrossConfig,
     pub lua_source_mode: LuaSourceMode,
     pub lua_file_path: String,
     pub lua_editor: VimEditor,
@@ -335,7 +358,9 @@ impl StrategyState {
     pub fn new() -> Self {
         Self {
             kind: StrategyKind::Native,
+            native_strategy: NativeStrategyKind::HmaAngle,
             native_hma: HmaAngleConfig::default(),
+            native_ema: EmaCrossConfig::default(),
             lua_source_mode: LuaSourceMode::Editor,
             lua_file_path: String::new(),
             lua_editor: VimEditor::new_with_template(),
@@ -353,7 +378,7 @@ impl StrategyState {
     pub fn summary_label(&self) -> String {
         match self.kind {
             StrategyKind::Native => {
-                format!("Native Rust / {}", NativeStrategyKind::HmaAngle.label())
+                format!("Native Rust / {}", self.native_strategy.label())
             }
             StrategyKind::MachineLearning => "Machine Learning".to_string(),
             StrategyKind::Lua => match self.lua_source_mode {
@@ -373,18 +398,30 @@ impl StrategyState {
     }
 
     pub fn native_summary(&self) -> String {
-        format!(
-            "{} | len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
-            NativeStrategyKind::HmaAngle.label(),
-            self.native_hma.hma_length,
-            self.native_hma.min_angle,
-            self.native_hma.angle_lookback,
-            self.native_hma.bars_required_to_trade,
-            self.native_hma.longs_only,
-            self.native_hma.take_profit_ticks,
-            self.native_hma.stop_loss_ticks,
-            self.native_hma.use_trailing_stop,
-            self.native_hma.inverted,
-        )
+        match self.native_strategy {
+            NativeStrategyKind::HmaAngle => format!(
+                "{} | len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
+                NativeStrategyKind::HmaAngle.label(),
+                self.native_hma.hma_length,
+                self.native_hma.min_angle,
+                self.native_hma.angle_lookback,
+                self.native_hma.bars_required_to_trade,
+                self.native_hma.longs_only,
+                self.native_hma.take_profit_ticks,
+                self.native_hma.stop_loss_ticks,
+                self.native_hma.use_trailing_stop,
+                self.native_hma.inverted,
+            ),
+            NativeStrategyKind::EmaCross => format!(
+                "{} | fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                NativeStrategyKind::EmaCross.label(),
+                self.native_ema.fast_length,
+                self.native_ema.slow_length,
+                self.native_ema.take_profit_ticks,
+                self.native_ema.stop_loss_ticks,
+                self.native_ema.use_trailing_stop,
+                self.native_ema.inverted,
+            ),
+        }
     }
 }
