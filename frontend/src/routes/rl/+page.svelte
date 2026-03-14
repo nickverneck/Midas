@@ -8,7 +8,7 @@
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import GaChart from "$lib/components/GaChart.svelte";
 
-	type ChartTab = 'fitness' | 'performance' | 'drawdown' | 'loss';
+	type ChartTab = 'fitness' | 'performance' | 'drawdown' | 'frontier' | 'loss';
 	type FolderEntry = { name: string; path: string; kind: "dir" | "file"; mtime?: number };
 	
 	type RlPoint = {
@@ -16,10 +16,12 @@
 		fitness: number | null;
 		trainRet: number | null;
 		trainPnl: number | null;
+		trainRealizedPnl: number | null;
 		trainSortino: number | null;
 		trainDrawdown: number | null;
 		evalRet: number | null;
 		evalPnl: number | null;
+		evalRealizedPnl: number | null;
 		evalSortino: number | null;
 		evalDrawdown: number | null;
 		policyLoss: number | null;
@@ -51,11 +53,22 @@
 	let folderEntries = $state<FolderEntry[]>([]);
 	let folderPickerToken = 0;
 
+	const TRAIN_REALIZED_KEYS = ['train_realized_pnl', 'train_pnl_realized', 'train_realized'];
+	const EVAL_REALIZED_KEYS = ['eval_realized_pnl', 'eval_pnl_realized', 'eval_realized'];
+
 	const toNumber = (value: unknown): number | null => {
 		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
 		if (typeof value === 'string' && value.trim() !== '') {
 			const parsed = Number(value);
 			return Number.isFinite(parsed) ? parsed : null;
+		}
+		return null;
+	};
+
+	const firstNumber = (row: Record<string, unknown>, keys: string[]) => {
+		for (const key of keys) {
+			const value = toNumber(row[key]);
+			if (value !== null) return value;
 		}
 		return null;
 	};
@@ -129,6 +142,8 @@
 			if (epoch === null) continue;
 			const valueLoss = toNumber(row.value_loss);
 			const klDiv = toNumber(row.kl_div);
+			const trainRealizedPnl = firstNumber(row, TRAIN_REALIZED_KEYS);
+			const evalRealizedPnl = firstNumber(row, EVAL_REALIZED_KEYS);
 			let algorithm: 'ppo' | 'grpo' | null = null;
 			if (valueLoss !== null) {
 				algorithm = 'ppo';
@@ -140,10 +155,12 @@
 				fitness: toNumber(row.fitness),
 				trainRet: toNumber(row.train_ret_mean),
 				trainPnl: toNumber(row.train_pnl),
+				trainRealizedPnl,
 				trainSortino: toNumber(row.train_sortino),
 				trainDrawdown: toNumber(row.train_drawdown),
 				evalRet: toNumber(row.eval_ret_mean),
 				evalPnl: toNumber(row.eval_pnl),
+				evalRealizedPnl,
 				evalSortino: toNumber(row.eval_sortino),
 				evalDrawdown: toNumber(row.eval_drawdown),
 				policyLoss: toNumber(row.policy_loss),
@@ -230,6 +247,27 @@
 	const toSeries = (picker: (row: RlPoint) => number | null) =>
 		epochData.map((row) => ({ x: row.epoch, y: picker(row) }));
 
+	const toFrontierSeries = (
+		drawdownPicker: (row: RlPoint) => number | null,
+		realizedPicker: (row: RlPoint) => number | null,
+		pnlPicker: (row: RlPoint) => number | null
+	) =>
+		epochData.flatMap((row) => {
+			const drawdown = drawdownPicker(row);
+			const realizedPnl = realizedPicker(row);
+			const pnl = pnlPicker(row);
+			const value = realizedPnl ?? pnl;
+			if (drawdown === null || value === null) return [];
+			return [
+				{
+					x: drawdown,
+					y: value,
+					epoch: row.epoch,
+					metricLabel: realizedPnl !== null ? 'Realized PnL' : 'PnL'
+				}
+			];
+		});
+
 	let resolvedWeights = $derived.by(() => ({
 		pnl: toNumber(fitnessWeights.pnl) ?? 1,
 		sortino: toNumber(fitnessWeights.sortino) ?? 1,
@@ -254,6 +292,35 @@
 			}
 		}
 	};
+
+	let hasTrainRealized = $derived.by(() =>
+		epochData.some((row) => row.trainRealizedPnl !== null)
+	);
+	let hasEvalRealized = $derived.by(() =>
+		epochData.some((row) => row.evalRealizedPnl !== null)
+	);
+	let frontierAxisLabel = $derived.by(() => {
+		const realizedSeriesCount = Number(hasTrainRealized) + Number(hasEvalRealized);
+		if (realizedSeriesCount === 2) return 'Realized PnL';
+		if (realizedSeriesCount === 1) return 'Realized PnL / PnL';
+		return 'PnL';
+	});
+	let frontierNote = $derived.by(() => {
+		const hasTrainPnl = epochData.some((row) => row.trainPnl !== null);
+		const hasEvalPnl = epochData.some((row) => row.evalPnl !== null);
+		const trainFallback = hasTrainPnl && !hasTrainRealized;
+		const evalFallback = hasEvalPnl && !hasEvalRealized;
+		if (trainFallback && evalFallback) {
+			return 'This RL run does not expose realized-PnL columns, so the frontier uses the logged train and eval PnL values.';
+		}
+		if (trainFallback) {
+			return 'Train frontier points use logged PnL because this run does not include train realized-PnL columns.';
+		}
+		if (evalFallback) {
+			return 'Eval frontier points use logged PnL because this run does not include eval realized-PnL columns.';
+		}
+		return '';
+	});
 
 	let fitnessChartData = $derived.by(() => ({
 		datasets: [
@@ -321,6 +388,78 @@
 				tension: 0.1
 			}
 		]
+	}));
+
+	let frontierChartData = $derived.by(() => {
+		const datasets = [];
+		const trainData = toFrontierSeries(
+			(row) => row.trainDrawdown,
+			(row) => row.trainRealizedPnl,
+			(row) => row.trainPnl
+		);
+		const evalData = toFrontierSeries(
+			(row) => row.evalDrawdown,
+			(row) => row.evalRealizedPnl,
+			(row) => row.evalPnl
+		);
+
+		if (trainData.length > 0) {
+			datasets.push({
+				label: hasTrainRealized ? 'Train Realized PnL vs Drawdown' : 'Train PnL vs Drawdown',
+				data: trainData,
+				borderColor: 'rgb(148, 163, 184)',
+				backgroundColor: 'rgba(148, 163, 184, 0.55)',
+				showLine: false,
+				pointRadius: 3
+			});
+		}
+
+		if (evalData.length > 0) {
+			datasets.push({
+				label: hasEvalRealized ? 'Eval Realized PnL vs Drawdown' : 'Eval PnL vs Drawdown',
+				data: evalData,
+				borderColor: 'rgb(34, 197, 94)',
+				backgroundColor: 'rgba(34, 197, 94, 0.45)',
+				showLine: false,
+				pointRadius: 3
+			});
+		}
+
+		return { labels: [], datasets };
+	});
+
+	let frontierOptions = $derived.by(() => ({
+		scales: {
+			x: {
+				type: 'linear' as const,
+				title: { display: true, text: 'Max Drawdown (%)' }
+			},
+			y: {
+				title: { display: true, text: frontierAxisLabel }
+			}
+		},
+		plugins: {
+			tooltip: {
+				callbacks: {
+					label: (ctx: any) => {
+						const raw = ctx.raw as {
+							x?: number;
+							y?: number;
+							epoch?: number;
+							metricLabel?: string;
+						};
+						const drawdown = raw?.x ?? ctx.parsed?.x;
+						const pnl = raw?.y ?? ctx.parsed?.y;
+						return [
+							ctx.dataset.label ?? 'Frontier Point',
+							`Epoch: ${raw?.epoch ?? '—'}`,
+							`Drawdown: ${drawdown ?? '—'}`,
+							`${raw?.metricLabel ?? frontierAxisLabel}: ${pnl ?? '—'}`
+						];
+					}
+				}
+			}
+		}
 	}));
 
 	let lossChartData = $derived.by(() => ({
@@ -424,10 +563,11 @@
 			</Card.Header>
 			<Card.Content>
 				<Tabs.Root bind:value={chartTab} class="w-full">
-					<Tabs.List class="grid w-full grid-cols-2 lg:grid-cols-4 lg:w-[640px] mb-4">
+					<Tabs.List class="mb-4 grid w-full grid-cols-2 lg:w-[820px] lg:grid-cols-5">
 						<Tabs.Trigger value="fitness">Fitness</Tabs.Trigger>
 						<Tabs.Trigger value="performance">Performance</Tabs.Trigger>
 						<Tabs.Trigger value="drawdown">Drawdown</Tabs.Trigger>
+						<Tabs.Trigger value="frontier">Frontier</Tabs.Trigger>
 						<Tabs.Trigger value="loss">Loss</Tabs.Trigger>
 					</Tabs.List>
 					<Tabs.Content value="fitness">
@@ -444,6 +584,24 @@
 						<div class="h-[320px]">
 							<GaChart data={drawdownChartData} options={chartOptions} />
 						</div>
+					</Tabs.Content>
+					<Tabs.Content value="frontier">
+						{#if frontierChartData.datasets.length > 0}
+							<div class="space-y-3">
+								<div class="h-[320px]">
+									<GaChart data={frontierChartData} options={frontierOptions} type="scatter" />
+								</div>
+								{#if frontierNote}
+									<p class="text-xs text-muted-foreground">
+										{frontierNote}
+									</p>
+								{/if}
+							</div>
+						{:else}
+							<div class="flex h-[320px] items-center justify-center text-sm text-muted-foreground">
+								Not enough drawdown and PnL data to build the frontier yet.
+							</div>
+						{/if}
 					</Tabs.Content>
 					<Tabs.Content value="loss">
 						<div class="h-[320px]">
