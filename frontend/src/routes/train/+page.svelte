@@ -10,6 +10,7 @@
 
 	type TrainMode = 'ga' | 'rl';
 	type RlAlgorithm = 'ppo' | 'grpo';
+	type MlBackend = 'libtorch' | 'burn' | 'candle' | 'mlx';
 	type ConsoleLine = { type: string; text: string };
 	type DataMode = 'full' | 'windowed';
 	type StartChoice = 'new' | 'resume';
@@ -42,11 +43,12 @@
 	const defaultStepBars = 128;
 	
 	let gaParams = $state({
+		backend: "libtorch",
 		outdir: "runs_ga",
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
-		device: "cpu",
+		device: "auto",
 		"batch-candidates": 0,
 		generations: 5,
 		"pop-size": 6,
@@ -84,11 +86,12 @@
 
 	let rlParams = $state({
 		algorithm: "ppo",
+		backend: "libtorch",
 		outdir: "runs_rl",
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
-		device: "cpu",
+		device: "auto",
 		window: defaultWindowBars,
 		step: defaultStepBars,
 		epochs: 10,
@@ -596,6 +599,7 @@
 			return;
 		}
 		const params = mode === 'ga' ? buildGaParams() : buildRlParams();
+		const backend = (typeof params.backend === 'string' ? params.backend : 'libtorch') as MlBackend;
 		const fallbackDir = trainMode === 'rl' ? "runs_rl" : "runs_ga";
 		const outdir = typeof params.outdir === 'string' ? params.outdir : fallbackDir;
 		abortController?.abort();
@@ -604,7 +608,7 @@
 		const verb = startChoice === 'resume' ? 'Resuming' : 'Starting';
 		const suffix = startChoice === 'resume' ? ' from checkpoint' : '';
 		const algoInfo = mode === 'rl' ? ` (${rlAlgorithm.toUpperCase()})` : '';
-		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()}${algoInfo} training${suffix}...` }];
+		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()}${algoInfo} training on ${String(backend).toUpperCase()}${suffix}...` }];
 		fitnessByGen = new Map();
 		if (liveLogUpdates) {
 			startLogPolling(outdir);
@@ -754,7 +758,7 @@
 										Continue from Checkpoint
 									</Button>
 									<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
-										{diagnosticsLoading ? 'Running diagnostics...' : 'Run CUDA diagnostics'}
+										{diagnosticsLoading ? 'Running diagnostics...' : 'Run libtorch + MLX diagnostics'}
 									</Button>
 								</div>
 							{:else}
@@ -765,7 +769,7 @@
 									</Badge>
 								</div>
 								<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
-									{diagnosticsLoading ? 'Running diagnostics...' : 'Run CUDA diagnostics'}
+									{diagnosticsLoading ? 'Running diagnostics...' : 'Run libtorch + MLX diagnostics'}
 								</Button>
 								{#if startChoice === 'resume'}
 									<div class="grid gap-2">
@@ -782,7 +786,7 @@
 											</Button>
 										</div>
 										<div class="text-xs text-muted-foreground">
-											GA checkpoints use .bin; RL checkpoints use .pt.
+											GA checkpoints still use `.bin`. Policy artifacts are backend-specific: `libtorch` writes `.pt`, Candle GA/RL writes `.safetensors`, and Burn GA writes portable JSON today.
 										</div>
 									</div>
 								{/if}
@@ -887,12 +891,26 @@
 													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
+															<Label for="ga-backend">Backend</Label>
+															<select
+																id="ga-backend"
+																bind:value={gaParams.backend}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="libtorch">libtorch</option>
+																<option value="burn">burn</option>
+																<option value="candle">candle</option>
+																<option value="mlx">mlx</option>
+															</select>
+														</div>
+														<div class="grid gap-2">
 															<Label for="ga-device">Device</Label>
 															<select
 																id="ga-device"
 																bind:value={gaParams.device}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
+																<option value="auto">Auto</option>
 																<option value="cpu">CPU</option>
 																<option value="mps">MPS</option>
 																<option value="cuda">CUDA</option>
@@ -907,6 +925,18 @@
 																bind:value={gaParams["batch-candidates"]}
 															/>
 															<p class="text-xs text-muted-foreground">0 uses auto batching.</p>
+														</div>
+														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+															<div class="font-medium uppercase tracking-wide text-foreground">Backend rollout status</div>
+															{#if gaParams.backend === 'libtorch'}
+																<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
+															{:else if gaParams.backend === 'burn'}
+																<div>`burn` is implemented for GA in this branch. Use `cpu` for the Burn ndarray path, enable the Burn CUDA Cargo feature on the Linux box when you want native CUDA, and select `mps` on macOS when the burn-mlx toolchain is installed.</div>
+															{:else if gaParams.backend === 'candle'}
+																<div>`candle` is implemented for GA in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
+															{:else}
+																<div>`mlx` is reserved for a separate runner path so Apple-dev and Linux-CUDA benchmarking can slot into the same workflow later.</div>
+															{/if}
 														</div>
 													</div>
 												</details>
@@ -1162,16 +1192,42 @@
 													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
 													<div class="mt-4 grid gap-4 md:grid-cols-2">
 														<div class="grid gap-2">
+															<Label for="rl-backend">Backend</Label>
+															<select
+																id="rl-backend"
+																bind:value={rlParams.backend}
+																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+															>
+																<option value="libtorch">libtorch</option>
+																<option value="burn">burn</option>
+																<option value="candle">candle</option>
+																<option value="mlx">mlx</option>
+															</select>
+														</div>
+														<div class="grid gap-2">
 															<Label for="rl-device">Device</Label>
 															<select
 																id="rl-device"
 																bind:value={rlParams.device}
 																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 															>
+																<option value="auto">Auto</option>
 																<option value="cpu">CPU</option>
 																<option value="mps">MPS</option>
 																<option value="cuda">CUDA</option>
 															</select>
+														</div>
+														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+															<div class="font-medium uppercase tracking-wide text-foreground">Backend rollout status</div>
+															{#if rlParams.backend === 'libtorch'}
+																<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
+															{:else if rlParams.backend === 'burn'}
+																<div>`burn` is implemented for GA in this branch, but the RL runner is still not implemented yet.</div>
+															{:else if rlParams.backend === 'candle'}
+																<div>`candle` is implemented for RL PPO and GRPO in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
+															{:else}
+																<div>`mlx` is reserved for a separate runner path so Apple-dev and Linux-CUDA benchmarking can slot into the same workflow later.</div>
+															{/if}
 														</div>
 											</div>
 										</details>
@@ -1514,7 +1570,7 @@
 						{#if diagnosticsOutput}
 							<div class="text-zinc-300 whitespace-pre-wrap">{diagnosticsOutput}</div>
 						{:else}
-							<div class="text-zinc-600 italic">Run diagnostics to see CUDA/tch info.</div>
+							<div class="text-zinc-600 italic">Run diagnostics to see libtorch and MLX viability info. Candle GA and RL are already runnable from the main form.</div>
 						{/if}
 					</ScrollArea>
 				</Card.Content>

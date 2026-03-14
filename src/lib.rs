@@ -3,6 +3,7 @@
 pub mod backtesting;
 pub mod env;
 pub mod features;
+pub mod ml;
 pub mod sampler;
 pub mod script;
 

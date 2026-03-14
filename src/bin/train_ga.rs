@@ -1,29 +1,88 @@
 #[path = "train_ga/args.rs"]
 mod args;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
+#[path = "train_ga/backends/mod.rs"]
+mod backends;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
+#[path = "train_ga/config.rs"]
+mod config;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_ga/data.rs"]
 mod data;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
+#[path = "train_ga/evolution.rs"]
+mod evolution;
+#[cfg(feature = "torch")]
 #[path = "train_ga/ga.rs"]
 mod ga;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_ga/metrics.rs"]
 mod metrics;
+#[cfg(feature = "torch")]
 #[path = "train_ga/model.rs"]
 mod model;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
+#[path = "train_ga/portable.rs"]
+mod portable;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
+#[path = "train_ga/types.rs"]
+mod types;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_ga/util.rs"]
 mod util;
 
+use args::Args;
 use chrono::Local;
 use clap::Parser;
 use midas_env::env::MarginMode;
+use midas_env::ml::{self, MlBackend, TrainerKind};
 use std::path::{Path, PathBuf};
 
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 fn write_behavior_csv(
     path: &Path,
     generation: usize,
     candidate_idx: usize,
     split: &str,
     data: &data::DataSet,
-    metrics: &ga::CandidateResult,
-    rows: &[ga::BehaviorRow],
+    metrics: &types::CandidateResult,
+    rows: &[types::BehaviorRow],
 ) -> anyhow::Result<()> {
     let mut wtr = csv::Writer::from_path(path)?;
     wtr.write_record([
@@ -144,12 +203,63 @@ fn write_behavior_csv(
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args = args::Args::parse();
+    let mut args = Args::parse();
     args.outdir = resolve_outdir(args.outdir, "runs_ga");
-    run(args)
+    let stack = ml::resolve_training_stack(TrainerKind::Ga, &args.backend, &args.device)?;
+    ml::print_training_stack(&stack);
+    match stack.backend {
+        MlBackend::Libtorch => run_libtorch(args, stack),
+        MlBackend::Burn => run_burn(args, stack),
+        MlBackend::Candle => run_candle(args, stack),
+        MlBackend::Mlx => ml::ensure_backend_is_implemented(&stack),
+    }
 }
 
-fn run(args: args::Args) -> anyhow::Result<()> {
+#[cfg(feature = "torch")]
+fn run_libtorch(args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    run(args, stack)
+}
+
+#[cfg(not(feature = "torch"))]
+fn run_libtorch(_args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "backend '{}' was selected, but this build does not include the libtorch GA runner. Re-run with the 'torch' Cargo feature.",
+        stack.backend
+    )
+}
+
+#[cfg(feature = "backend-burn")]
+fn run_burn(args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    run(args, stack)
+}
+
+#[cfg(not(feature = "backend-burn"))]
+fn run_burn(_args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "backend '{}' was selected, but this build does not include the Burn GA runner. Re-run with the 'backend-burn' Cargo feature.",
+        stack.backend
+    )
+}
+
+#[cfg(feature = "backend-candle")]
+fn run_candle(args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    run(args, stack)
+}
+
+#[cfg(not(feature = "backend-candle"))]
+fn run_candle(_args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "backend '{}' was selected, but this build does not include the Candle GA runner. Re-run with the 'backend-candle' Cargo feature.",
+        stack.backend
+    )
+}
+
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
+fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     use anyhow::Context;
     use rand::prelude::*;
     use rand_distr::{Distribution, Normal};
@@ -163,8 +273,14 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     let behavior_dir = args.outdir.join("behavior");
     std::fs::create_dir_all(&behavior_dir)?;
 
-    let device = util::resolve_device(args.device.as_deref());
-    util::print_device(&device);
+    let device = backends::resolve_device(&stack)?;
+    stack.effective_runtime = device.effective_runtime();
+    ml::write_run_metadata(&args.outdir.join("training_stack.json"), &stack, Some("ga"))?;
+    println!(
+        "info: effective runtime resolved to {}",
+        stack.effective_runtime
+    );
+    backends::print_device(&stack, device)?;
     if args.workers > 0 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(args.workers)
@@ -260,7 +376,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     }
 
     let obs_dim = train.obs_dim;
-    let genome_len = model::param_count(obs_dim, args.hidden, args.layers);
+    let genome_len = backends::param_count(&stack, obs_dim, args.hidden, args.layers)?;
 
     let mut rng = args
         .seed
@@ -273,7 +389,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         if !checkpoint.exists() {
             anyhow::bail!("checkpoint not found: {}", checkpoint.display());
         }
-        let (resume_gen, loaded_pop) = ga::load_checkpoint(checkpoint)
+        let (resume_gen, loaded_pop) = evolution::load_checkpoint(checkpoint)
             .with_context(|| format!("load checkpoint {}", checkpoint.display()))?;
         start_gen = resume_gen;
         if loaded_pop.is_empty() {
@@ -308,8 +424,8 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     }
 
     let log_path = args.outdir.join("ga_log.csv");
-    let mut log_has_eval_fitness;
-    let mut log_has_selection_fitness;
+    let log_has_eval_fitness;
+    let log_has_selection_fitness;
     if log_path.exists() {
         let meta = std::fs::metadata(&log_path)?;
         if meta.len() == 0 {
@@ -358,13 +474,13 @@ fn run(args: args::Args) -> anyhow::Result<()> {
     for generation in start_gen..args.generations {
         let gen_start = std::time::Instant::now();
         println!(
-            "\nGeneration {} | Evaluating {} candidates (device={:?})",
+            "\nGeneration {} | Evaluating {} candidates (device={})",
             generation,
             pop.len(),
-            device
+            device.label()
         );
 
-        let base_cfg = ga::CandidateConfig {
+        let base_cfg = config::CandidateConfig {
             initial_balance: args.initial_balance,
             max_position: args.max_position,
             margin_mode,
@@ -399,7 +515,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
 
         let mut batch_candidates = if args.batch_candidates > 0 {
             args.batch_candidates
-        } else if matches!(device, tch::Device::Cuda(_) | tch::Device::Mps) {
+        } else if device.is_accelerated() {
             pop.len()
         } else {
             1
@@ -417,72 +533,77 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             );
         }
 
-        let eval_results: Vec<(usize, ga::CandidateResult, Option<ga::CandidateResult>)> =
-            if batch_candidates > 1 {
-                let mut results = Vec::with_capacity(pop.len());
-                let mut offset = 0usize;
-                for chunk in pop.chunks(batch_candidates) {
-                    let train_results = ga::evaluate_candidates_batch(
+        let eval_results: Vec<(
+            usize,
+            types::CandidateResult,
+            Option<types::CandidateResult>,
+        )> = if batch_candidates > 1 {
+            let mut results = Vec::with_capacity(pop.len());
+            let mut offset = 0usize;
+            for chunk in pop.chunks(batch_candidates) {
+                let train_results = backends::evaluate_candidates_batch(
+                    &stack,
+                    chunk,
+                    &train,
+                    &windows_train,
+                    &base_cfg,
+                    false,
+                )?;
+                let mut eval_iter = if args.skip_val_eval {
+                    None
+                } else {
+                    let eval_results = backends::evaluate_candidates_batch(
+                        &stack,
                         chunk,
+                        &val,
+                        &windows_val,
+                        &base_cfg,
+                        true,
+                    )?;
+                    Some(eval_results.into_iter())
+                };
+                for (i, train_metrics) in train_results.into_iter().enumerate() {
+                    let eval_metrics = eval_iter.as_mut().and_then(|iter| iter.next());
+                    results.push((offset + i, train_metrics, eval_metrics));
+                }
+                offset += chunk.len();
+            }
+            results
+        } else {
+            pop.par_iter()
+                .enumerate()
+                .map(|(idx, genome)| {
+                    let train_metrics = backends::evaluate_candidate(
+                        &stack,
+                        genome,
                         &train,
                         &windows_train,
                         &base_cfg,
                         false,
-                    );
-                    let mut eval_iter = if args.skip_val_eval {
+                    )?;
+                    let eval_metrics = if args.skip_val_eval {
                         None
                     } else {
-                        Some(
-                            ga::evaluate_candidates_batch(
-                                chunk,
-                                &val,
-                                &windows_val,
-                                &base_cfg,
-                                true,
-                            )
-                            .into_iter(),
-                        )
-                    };
-                    for (i, train_metrics) in train_results.into_iter().enumerate() {
-                        let eval_metrics = eval_iter.as_mut().and_then(|iter| iter.next());
-                        results.push((offset + i, train_metrics, eval_metrics));
-                    }
-                    offset += chunk.len();
-                }
-                results
-            } else {
-                pop.par_iter()
-                    .enumerate()
-                    .map(|(idx, genome)| {
-                        let train_metrics = ga::evaluate_candidate(
+                        Some(backends::evaluate_candidate(
+                            &stack,
                             genome,
-                            &train,
-                            &windows_train,
+                            &val,
+                            &windows_val,
                             &base_cfg,
-                            false,
-                        );
-                        let eval_metrics = if args.skip_val_eval {
-                            None
-                        } else {
-                            Some(ga::evaluate_candidate(
-                                genome,
-                                &val,
-                                &windows_val,
-                                &base_cfg,
-                                true,
-                            ))
-                        };
-                        (idx, train_metrics, eval_metrics)
-                    })
-                    .collect()
-            };
+                            true,
+                        )?)
+                    };
+                    Ok::<_, anyhow::Error>((idx, train_metrics, eval_metrics))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         let mut scored: Vec<(
             f64,
             usize,
             Vec<f32>,
-            Option<ga::CandidateResult>,
-            ga::CandidateResult,
+            Option<types::CandidateResult>,
+            types::CandidateResult,
         )> = Vec::with_capacity(pop.len());
 
         let mut results = eval_results;
@@ -702,7 +823,13 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             }
 
             let (train_behavior_metrics, train_history) =
-                ga::evaluate_candidate_with_history(genome, &train, &windows_train, &base_cfg);
+                backends::evaluate_candidate_with_history(
+                    &stack,
+                    genome,
+                    &train,
+                    &windows_train,
+                    &base_cfg,
+                )?;
             let train_path =
                 behavior_dir.join(format!("train_gen{}_idx{}.csv", generation, *best_idx));
             write_behavior_csv(
@@ -716,7 +843,13 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             )?;
             if !args.skip_val_eval {
                 let (val_behavior_metrics, val_history) =
-                    ga::evaluate_candidate_with_history(genome, &val, &windows_val, &base_cfg);
+                    backends::evaluate_candidate_with_history(
+                        &stack,
+                        genome,
+                        &val,
+                        &windows_val,
+                        &base_cfg,
+                    )?;
                 let val_path =
                     behavior_dir.join(format!("val_gen{}_idx{}.csv", generation, *best_idx));
                 write_behavior_csv(
@@ -734,13 +867,21 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         let should_save =
             args.save_top_n > 0 && args.save_every > 0 && generation % args.save_every == 0;
         if should_save {
+            let policy_ext = backends::policy_extension(&stack);
+            let needs_portable_sidecar = policy_ext != "portable.json";
             for (rank, (_fit, _idx, genome, _eval_metrics, _train_metrics)) in
                 scored.iter().take(args.save_top_n).enumerate()
             {
-                let policy_path = args
-                    .outdir
-                    .join(format!("policy_gen{}_rank{}.pt", generation, rank));
-                model::save_policy(
+                let policy_path = args.outdir.join(format!(
+                    "policy_gen{}_rank{}.{}",
+                    generation, rank, policy_ext
+                ));
+                let portable_path = args.outdir.join(format!(
+                    "policy_gen{}_rank{}.portable.json",
+                    generation, rank
+                ));
+                backends::save_policy(
+                    &stack,
                     obs_dim,
                     args.hidden,
                     args.layers,
@@ -748,6 +889,15 @@ fn run(args: args::Args) -> anyhow::Result<()> {
                     genome,
                     &policy_path,
                 )?;
+                if needs_portable_sidecar {
+                    portable::save_policy_json(
+                        obs_dim,
+                        args.hidden,
+                        args.layers,
+                        genome,
+                        &portable_path,
+                    )?;
+                }
             }
         }
 
@@ -763,7 +913,7 @@ fn run(args: args::Args) -> anyhow::Result<()> {
         while new_pop.len() < target_pop_size {
             let parent_a = elites.choose(&mut rng).unwrap();
             let parent_b = elites.choose(&mut rng).unwrap();
-            let mut child = ga::crossover(parent_a, parent_b, &mut rng);
+            let mut child = evolution::crossover(parent_a, parent_b, &mut rng);
             for v in child.iter_mut() {
                 *v += normal_mut.sample(&mut rng);
             }
@@ -775,12 +925,12 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             let ckpt_path = args
                 .outdir
                 .join(format!("checkpoint_gen{}.bin", generation));
-            ga::save_checkpoint(&ckpt_path, generation, &pop)?;
+            evolution::save_checkpoint(&ckpt_path, generation, &pop)?;
         }
     }
 
     if let Some(best_genome) = best_overall_genome {
-        let base_cfg = ga::CandidateConfig {
+        let base_cfg = config::CandidateConfig {
             initial_balance: args.initial_balance,
             max_position: args.max_position,
             margin_mode,
@@ -812,14 +962,27 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             invalid_revert_penalty_growth: args.invalid_revert_penalty_growth,
             flat_hold_penalty_growth: args.flat_hold_penalty_growth,
         };
-        let metrics = ga::evaluate_candidate(&best_genome, &test, &windows_test, &base_cfg, false);
+        let metrics = backends::evaluate_candidate(
+            &stack,
+            &best_genome,
+            &test,
+            &windows_test,
+            &base_cfg,
+            false,
+        )?;
         println!(
             "test | fitness {:.2} | pnl {:.2} | sortino {:.2} | mdd {:.2}",
             metrics.fitness, metrics.eval_pnl, metrics.eval_sortino, metrics.eval_drawdown
         );
 
-        let best_path = args.outdir.join("best_overall_policy.pt");
-        model::save_policy(
+        let best_path = args.outdir.join(format!(
+            "best_overall_policy.{}",
+            backends::policy_extension(&stack)
+        ));
+        let best_portable_path = args.outdir.join("best_overall_policy.portable.json");
+        let needs_portable_sidecar = backends::policy_extension(&stack) != "portable.json";
+        backends::save_policy(
+            &stack,
             obs_dim,
             args.hidden,
             args.layers,
@@ -827,6 +990,15 @@ fn run(args: args::Args) -> anyhow::Result<()> {
             &best_genome,
             &best_path,
         )?;
+        if needs_portable_sidecar {
+            portable::save_policy_json(
+                obs_dim,
+                args.hidden,
+                args.layers,
+                &best_genome,
+                &best_portable_path,
+            )?;
+        }
         println!("Saved best overall policy to {}", best_path.display());
     }
 
