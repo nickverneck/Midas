@@ -1,57 +1,112 @@
 #[path = "train_rl/args.rs"]
 mod args;
+#[cfg(feature = "backend-candle")]
+#[path = "train_rl/candle.rs"]
+mod candle;
+#[cfg(any(feature = "torch", feature = "backend-candle"))]
+#[path = "train_rl/common.rs"]
+mod common;
+#[cfg(any(feature = "torch", feature = "backend-candle"))]
 #[path = "train_rl/data.rs"]
 mod data;
+#[cfg(feature = "torch")]
 #[path = "train_rl/grpo.rs"]
 mod grpo;
+#[cfg(any(feature = "torch", feature = "backend-candle"))]
 #[path = "train_rl/metrics.rs"]
 mod metrics;
+#[cfg(feature = "torch")]
 #[path = "train_rl/model.rs"]
 mod model;
+#[cfg(feature = "torch")]
 #[path = "train_rl/ppo.rs"]
 mod ppo;
+#[cfg(feature = "torch")]
 #[path = "train_rl/util.rs"]
 mod util;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
-use anyhow::Context;
 use chrono::Local;
 use clap::Parser;
-use midas_env::env::{EnvConfig, MarginMode};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng, seq::SliceRandom};
+use midas_env::ml::{self, MlBackend, TrainerKind};
+#[cfg(feature = "torch")]
 use tch::nn;
+#[cfg(feature = "torch")]
 use tch::nn::OptimizerConfig;
 
 use args::Args;
+#[cfg(feature = "torch")]
 use ppo::{LossStats, RolloutConfig, RolloutMetrics};
 
 fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
     args.outdir = resolve_outdir(args.outdir, "runs_rl", args.load_checkpoint.is_some());
+    let stack = ml::resolve_training_stack(TrainerKind::Rl, &args.backend, &args.device)?;
+    ml::print_training_stack(&stack);
+    match stack.backend {
+        MlBackend::Libtorch => run_libtorch(args, stack),
+        MlBackend::Candle => run_candle(args, stack),
+        MlBackend::Burn | MlBackend::Mlx => ml::ensure_backend_is_implemented(&stack),
+    }
+}
 
+#[cfg(feature = "torch")]
+fn run_libtorch(args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    run(args, stack)
+}
+
+#[cfg(not(feature = "torch"))]
+fn run_libtorch(_args: Args, _stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "backend 'libtorch' requires the 'torch' Cargo feature. Re-run with `cargo run --features torch --bin train_rl -- --backend libtorch ...`."
+    )
+}
+
+#[cfg(feature = "backend-candle")]
+fn run_candle(args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    candle::run(args, stack)
+}
+
+#[cfg(not(feature = "backend-candle"))]
+fn run_candle(_args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "backend '{}' requires the 'backend-candle' Cargo feature. Re-run with `cargo run --features backend-candle --bin train_rl -- --backend candle ...`.",
+        stack.backend
+    )
+}
+
+#[cfg(feature = "torch")]
+fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.outdir)?;
     println!("info: run directory {}", args.outdir.display());
 
-    let device = util::resolve_device(args.device.as_deref());
+    let device = util::resolve_device(stack.requested_runtime);
+    stack.effective_runtime = util::runtime_from_device(&device);
+    ml::write_run_metadata(
+        &args.outdir.join("training_stack.json"),
+        &stack,
+        Some(&args.algorithm),
+    )?;
+    println!(
+        "info: effective runtime resolved to {}",
+        stack.effective_runtime
+    );
     util::print_device(&device);
 
     let seed = args.seed.unwrap_or_else(|| rand::thread_rng().r#gen());
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let (train_path, val_path, test_path) = util::resolve_paths(&args)?;
+    let (train_path, val_path, test_path) = common::resolve_paths(&args)?;
     let train = data::load_dataset(&train_path, args.globex && !args.rth)?;
     let val = data::load_dataset(&val_path, args.globex && !args.rth)?;
     let test = data::load_dataset(&test_path, args.globex && !args.rth)?;
 
-    let (margin_cfg, session_cfg) = util::load_symbol_config(&args.symbol_config, &train.symbol)?;
+    let (margin_cfg, session_cfg) = common::load_symbol_config(&args.symbol_config, &train.symbol)?;
     let margin_mode = match args.margin_mode.as_str() {
         "per-contract" => MarginMode::PerContract,
         "price" => MarginMode::Price,
-        _ => util::infer_margin_mode(&train.symbol, margin_cfg),
+        _ => common::infer_margin_mode(&train.symbol, margin_cfg),
     };
     let contract_multiplier = if args.contract_multiplier > 0.0 {
         args.contract_multiplier
@@ -61,7 +116,7 @@ fn main() -> anyhow::Result<()> {
     let margin_per_contract = args
         .margin_per_contract
         .or(margin_cfg)
-        .unwrap_or_else(|| util::infer_margin(&train.symbol));
+        .unwrap_or_else(|| common::infer_margin(&train.symbol));
     let use_globex = if let Some(session) = session_cfg {
         match session.as_str() {
             "rth" => false,
@@ -411,6 +466,7 @@ fn is_default_outdir(outdir: &Path, default_base: &str) -> bool {
     outdir == Path::new(default_base) || outdir == Path::new(&format!("./{default_base}"))
 }
 
+#[cfg(feature = "torch")]
 fn format_duration(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
     let millis = duration.subsec_millis();
@@ -423,6 +479,7 @@ fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
+#[cfg(feature = "torch")]
 fn average_metrics(values: &[RolloutMetrics]) -> RolloutMetrics {
     if values.is_empty() {
         return RolloutMetrics {
@@ -451,6 +508,7 @@ fn average_metrics(values: &[RolloutMetrics]) -> RolloutMetrics {
     }
 }
 
+#[cfg(feature = "torch")]
 fn average_losses(values: &[LossStats]) -> LossStats {
     if values.is_empty() {
         return LossStats {
@@ -479,6 +537,7 @@ fn average_losses(values: &[LossStats]) -> LossStats {
     }
 }
 
+#[cfg(feature = "torch")]
 fn average_grpo_losses(values: &[grpo::GrpoLossStats]) -> grpo::GrpoLossStats {
     if values.is_empty() {
         return grpo::GrpoLossStats {
@@ -507,6 +566,7 @@ fn average_grpo_losses(values: &[grpo::GrpoLossStats]) -> grpo::GrpoLossStats {
     }
 }
 
+#[cfg(feature = "torch")]
 fn load_checkpoint(vs: &mut nn::VarStore, device: tch::Device, path: &Path) -> anyhow::Result<()> {
     match vs.load(path) {
         Ok(()) => return Ok(()),
@@ -531,6 +591,7 @@ fn load_checkpoint(vs: &mut nn::VarStore, device: tch::Device, path: &Path) -> a
     Ok(())
 }
 
+#[cfg(feature = "torch")]
 fn load_torchscript_checkpoint(
     vs: &mut nn::VarStore,
     device: tch::Device,
@@ -554,12 +615,14 @@ fn load_torchscript_checkpoint(
     Ok(())
 }
 
+#[cfg(feature = "torch")]
 struct CheckpointImportSummary {
     imported_tensors: usize,
     policy_aliases: usize,
     skipped_value_tensors: usize,
 }
 
+#[cfg(feature = "torch")]
 fn apply_named_parameters(
     vs: &mut nn::VarStore,
     params: Vec<(String, tch::Tensor)>,

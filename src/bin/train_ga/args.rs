@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-#[command(about = "Rust GA-only neuroevolution trainer (CUDA via libtorch)")]
+#[command(about = "Rust GA-only neuroevolution trainer with selectable ML backends")]
 pub struct Args {
     #[arg(long)]
     pub parquet: Option<PathBuf>,
@@ -21,8 +21,10 @@ pub struct Args {
     pub window: usize,
     #[arg(long, default_value_t = 256)]
     pub step: usize,
-    #[arg(long)]
-    pub device: Option<String>,
+    #[arg(long, default_value = "libtorch", value_parser = ["libtorch", "burn", "candle", "mlx"])]
+    pub backend: String,
+    #[arg(long, default_value = "auto", value_parser = ["auto", "cpu", "cuda", "cuda:0", "mps"])]
+    pub device: String,
     #[arg(long, default_value_t = true)]
     pub globex: bool,
     #[arg(long)]

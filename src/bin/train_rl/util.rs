@@ -1,38 +1,56 @@
 use anyhow::Result;
 use midas_env::env::MarginMode;
+use midas_env::ml::ComputeRuntime;
 use std::env;
 use std::path::{Path, PathBuf};
 
 use crate::args::Args;
 
-pub fn resolve_device(requested: Option<&str>) -> tch::Device {
+pub fn resolve_device(requested: ComputeRuntime) -> tch::Device {
     preload_cuda_dlls();
     use tch::Device;
-    match requested.unwrap_or("") {
-        "cuda" | "cuda:0" => {
+    match requested {
+        ComputeRuntime::Cuda => {
             if tch::Cuda::is_available() {
                 Device::Cuda(0)
             } else {
                 Device::Cpu
             }
         }
-        "mps" => {
-            let mps_device = Device::Mps;
-            let mps_ok = std::panic::catch_unwind(|| {
-                let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, mps_device));
-            })
-            .is_ok();
-            if mps_ok { mps_device } else { Device::Cpu }
+        ComputeRuntime::Mps => {
+            if mps_available() {
+                Device::Mps
+            } else {
+                Device::Cpu
+            }
         }
-        "cpu" => Device::Cpu,
-        _ => {
+        ComputeRuntime::Cpu => Device::Cpu,
+        ComputeRuntime::Auto => {
             if tch::Cuda::is_available() {
                 Device::Cuda(0)
+            } else if mps_available() {
+                Device::Mps
             } else {
                 Device::Cpu
             }
         }
     }
+}
+
+pub fn runtime_from_device(device: &tch::Device) -> ComputeRuntime {
+    match device {
+        tch::Device::Cuda(_) => ComputeRuntime::Cuda,
+        tch::Device::Mps => ComputeRuntime::Mps,
+        _ => ComputeRuntime::Cpu,
+    }
+}
+
+fn mps_available() -> bool {
+    let mps_device = tch::Device::Mps;
+    std::panic::catch_unwind(|| {
+        let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, mps_device));
+    })
+    .is_ok()
 }
 
 fn preload_cuda_dlls() {
@@ -130,9 +148,10 @@ pub fn print_device(device: &tch::Device) {
         println!("info: using mps");
     } else {
         println!(
-            "info: using {:?} (CUDA available={})",
+            "info: using {:?} (CUDA available={}, MPS available={})",
             device,
-            tch::Cuda::is_available()
+            tch::Cuda::is_available(),
+            mps_available()
         );
     }
 }

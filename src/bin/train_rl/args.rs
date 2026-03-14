@@ -21,8 +21,10 @@ pub struct Args {
     pub window: usize,
     #[arg(long, default_value_t = 256)]
     pub step: usize,
-    #[arg(long)]
-    pub device: Option<String>,
+    #[arg(long, default_value = "libtorch", value_parser = ["libtorch", "burn", "candle", "mlx"])]
+    pub backend: String,
+    #[arg(long, default_value = "auto", value_parser = ["auto", "cpu", "cuda", "cuda:0", "mps"])]
+    pub device: String,
     #[arg(long, default_value_t = true)]
     pub globex: bool,
     #[arg(long)]

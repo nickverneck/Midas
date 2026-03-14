@@ -1,12 +1,25 @@
 import { spawn } from 'child_process';
 import {
     loadDotEnv,
+    resolveBackendFeatures,
     resolveCargoBin,
     resolveProjectRoot,
-    resolveTorchEnv
-} from '$lib/server/torch_env';
+    resolveTrainerEnv,
+    type MlBackend
+} from '$lib/server/ml_env';
 
 type TrainEngine = 'ga' | 'rl';
+const coerceBackend = (value: unknown): MlBackend => {
+    switch (value) {
+        case 'burn':
+        case 'candle':
+        case 'mlx':
+        case 'libtorch':
+            return value;
+        default:
+            return 'libtorch';
+    }
+};
 
 const buildCliArgs = (params: Record<string, unknown>) => {
     const args: string[] = [];
@@ -26,18 +39,21 @@ export const POST = async ({ request }: RequestEvent) => {
     const payload = await request.json();
     const engine = (payload?.engine ?? 'ga') as TrainEngine;
     const params = (payload?.params ?? payload ?? {}) as Record<string, unknown>;
+    const backend = coerceBackend(params.backend);
     const { signal } = request;
 
     const root = resolveProjectRoot();
     const cliArgs = buildCliArgs(params);
     const dotenv = loadDotEnv(root);
-    const env = resolveTorchEnv(root, { ...process.env, ...dotenv });
+    const env = resolveTrainerEnv(root, { ...process.env, ...dotenv }, backend);
+    const runtime = typeof params.device === 'string' ? params.device : 'auto';
+    const features = resolveBackendFeatures(backend, env, runtime);
 
     const command = resolveCargoBin(env);
     const args: string[] =
         engine === 'rl'
-            ? ['run', '--features', 'torch', '--bin', 'train_rl', '--', ...cliArgs]
-            : ['run', '--features', 'torch', '--bin', 'train_ga', '--', ...cliArgs];
+            ? ['run', '--features', features.join(','), '--bin', 'train_rl', '--', ...cliArgs]
+            : ['run', '--features', features.join(','), '--bin', 'train_ga', '--', ...cliArgs];
 
     const stream = new ReadableStream({
         start(controller) {

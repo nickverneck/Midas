@@ -1,106 +1,11 @@
-use anyhow::Result;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use tch::{Device, Tensor, kind::Kind, no_grad};
 
+use crate::config::CandidateConfig;
 use crate::data::{DataSet, build_observation};
 use crate::metrics::{compute_sortino, max_drawdown};
 use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
-use midas_env::env::{MarginMode, VIOLATION_PENALTY};
-
-#[derive(Clone)]
-pub struct CandidateConfig {
-    pub initial_balance: f64,
-    pub max_position: i32,
-    pub margin_mode: MarginMode,
-    pub contract_multiplier: f64,
-    pub margin_per_contract: f64,
-    pub disable_margin: bool,
-    pub w_pnl: f64,
-    pub w_sortino: f64,
-    pub w_mdd: f64,
-    pub sortino_annualization: f64,
-    pub hidden: usize,
-    pub layers: usize,
-    pub eval_windows: usize,
-    pub device: tch::Device,
-    pub ignore_session: bool,
-    pub drawdown_penalty: f64,
-    pub drawdown_penalty_growth: f64,
-    pub session_close_penalty: f64,
-    pub auto_close_minutes_before_close: f64,
-    pub max_hold_bars_positive: usize,
-    pub max_hold_bars_drawdown: usize,
-    pub hold_duration_penalty: f64,
-    pub hold_duration_penalty_growth: f64,
-    pub hold_duration_penalty_positive_scale: f64,
-    pub hold_duration_penalty_negative_scale: f64,
-    pub invalid_revert_penalty: f64,
-    pub invalid_revert_penalty_growth: f64,
-    pub flat_hold_penalty: f64,
-    pub flat_hold_penalty_growth: f64,
-    pub max_flat_hold_bars: usize,
-}
-
-#[derive(Clone)]
-pub struct CandidateResult {
-    pub fitness: f64,
-    pub eval_pnl: f64,
-    pub eval_pnl_realized: f64,
-    pub eval_pnl_total: f64,
-    pub eval_sortino: f64,
-    pub eval_drawdown: f64,
-    pub eval_ret_mean: f64,
-    pub debug_non_hold: usize,
-    pub debug_non_zero_pos: usize,
-    pub debug_mean_abs_pnl: f64,
-    pub debug_buy: usize,
-    pub debug_sell: usize,
-    pub debug_hold: usize,
-    pub debug_revert: usize,
-    pub debug_session_violations: usize,
-    pub debug_margin_violations: usize,
-    pub debug_position_violations: usize,
-    pub debug_drawdown_penalty: f64,
-    pub debug_invalid_revert_penalty: f64,
-    pub debug_hold_duration_penalty: f64,
-    pub debug_flat_hold_penalty: f64,
-    pub debug_session_close_penalty: f64,
-}
-
-#[derive(Clone)]
-pub struct BehaviorRow {
-    pub window_idx: usize,
-    pub step: usize,
-    pub data_idx: usize,
-    pub action_idx: i32,
-    pub action: String,
-    pub position_before: i32,
-    pub position_after: i32,
-    pub equity_before: f64,
-    pub equity_after: f64,
-    pub cash: f64,
-    pub unrealized_pnl: f64,
-    pub realized_pnl: f64,
-    pub pnl_change: f64,
-    pub realized_pnl_change: f64,
-    pub reward: f64,
-    pub commission_paid: f64,
-    pub slippage_paid: f64,
-    pub drawdown_penalty: f64,
-    pub session_close_penalty: f64,
-    pub invalid_revert_penalty: f64,
-    pub hold_duration_penalty: f64,
-    pub flat_hold_penalty: f64,
-    pub auto_close_executed: bool,
-    pub session_open: bool,
-    pub margin_ok: bool,
-    pub minutes_to_close: Option<f64>,
-    pub session_closed_violation: bool,
-    pub margin_call_violation: bool,
-    pub position_limit_violation: bool,
-}
+use crate::types::{BehaviorRow, CandidateResult};
+use midas_env::env::VIOLATION_PENALTY;
 
 struct CandidateStats {
     eval_pnls: Vec<f64>,
@@ -226,7 +131,8 @@ fn evaluate_candidate_internal(
     use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
     use tch::nn::Module;
 
-    let vs = tch::nn::VarStore::new(cfg.device);
+    let device = cfg.device.as_tch_device();
+    let vs = tch::nn::VarStore::new(device);
     let policy = build_mlp(
         &vs.root(),
         data.obs_dim as i64,
@@ -260,7 +166,7 @@ fn evaluate_candidate_internal(
     };
 
     let obs_dim = data.obs_dim as i64;
-    let mut obs_device = Tensor::zeros(&[1, obs_dim], (Kind::Float, cfg.device));
+    let mut obs_device = Tensor::zeros(&[1, obs_dim], (Kind::Float, device));
 
     let mut eval_pnls = Vec::new();
     let mut eval_pnls_realized = Vec::new();
@@ -564,7 +470,8 @@ pub fn evaluate_candidates_batch(
     }
 
     let batch = genomes.len();
-    let policy = build_batched_policy(genomes, data.obs_dim, cfg.hidden, cfg.layers, cfg.device);
+    let device = cfg.device.as_tch_device();
+    let policy = build_batched_policy(genomes, data.obs_dim, cfg.hidden, cfg.layers, device);
 
     let env_cfg = EnvConfig {
         max_position: cfg.max_position,
@@ -593,7 +500,7 @@ pub fn evaluate_candidates_batch(
     let mut stats: Vec<CandidateStats> = (0..batch).map(|_| CandidateStats::new()).collect();
     let obs_dim = data.obs_dim as i64;
     let batch_dim = batch as i64;
-    let mut obs_device = Tensor::zeros(&[batch_dim, obs_dim], (Kind::Float, cfg.device));
+    let mut obs_device = Tensor::zeros(&[batch_dim, obs_dim], (Kind::Float, device));
 
     for &(start, end) in windows.iter().take(cfg.eval_windows) {
         if end <= start + 1 {
@@ -761,58 +668,4 @@ pub fn evaluate_candidates_batch(
     }
 
     stats.into_iter().map(|s| s.finish(cfg)).collect()
-}
-
-pub fn crossover(a: &[f32], b: &[f32], rng: &mut impl Rng) -> Vec<f32> {
-    let mut out = Vec::with_capacity(a.len());
-    for i in 0..a.len() {
-        if rng.gen_bool(0.5) {
-            out.push(a[i]);
-        } else {
-            out.push(b[i]);
-        }
-    }
-    out
-}
-
-#[derive(Serialize, Deserialize)]
-struct Checkpoint {
-    generation: usize,
-    pop: Vec<Vec<f32>>,
-}
-
-fn parse_generation_from_path(path: &Path) -> Option<usize> {
-    let stem = path.file_stem()?.to_string_lossy();
-    let marker = "checkpoint_gen";
-    let start = stem.find(marker)? + marker.len();
-    let digits: String = stem[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse().ok()
-    }
-}
-
-pub fn load_checkpoint(path: &Path) -> Result<(usize, Vec<Vec<f32>>)> {
-    let data = std::fs::read(path)?;
-    if let Ok(ckpt) = bincode::deserialize::<Checkpoint>(&data) {
-        return Ok((ckpt.generation.saturating_add(1), ckpt.pop));
-    }
-    let pop: Vec<Vec<f32>> = bincode::deserialize(&data)?;
-    let start_gen = parse_generation_from_path(path)
-        .unwrap_or(0)
-        .saturating_add(1);
-    Ok((start_gen, pop))
-}
-
-pub fn save_checkpoint(path: &Path, generation: usize, pop: &[Vec<f32>]) -> Result<()> {
-    let data = bincode::serialize(&Checkpoint {
-        generation,
-        pop: pop.to_vec(),
-    })?;
-    std::fs::write(path, data)?;
-    Ok(())
 }
