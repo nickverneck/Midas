@@ -9,6 +9,7 @@ import {
 } from '$lib/server/ml_env';
 
 type TrainEngine = 'ga' | 'rl';
+type BuildProfile = 'debug' | 'release';
 const coerceBackend = (value: unknown): MlBackend => {
     switch (value) {
         case 'burn':
@@ -18,8 +19,12 @@ const coerceBackend = (value: unknown): MlBackend => {
             return value;
         default:
             return 'libtorch';
-    }
+	}
 };
+
+const coerceProfile = (value: unknown): BuildProfile => (
+	value === 'release' ? 'release' : 'debug'
+);
 
 const buildCliArgs = (params: Record<string, unknown>) => {
     const args: string[] = [];
@@ -39,6 +44,7 @@ export const POST = async ({ request }: RequestEvent) => {
     const payload = await request.json();
     const engine = (payload?.engine ?? 'ga') as TrainEngine;
     const params = (payload?.params ?? payload ?? {}) as Record<string, unknown>;
+    const profile = coerceProfile(payload?.profile);
     const backend = coerceBackend(params.backend);
     const { signal } = request;
 
@@ -50,14 +56,20 @@ export const POST = async ({ request }: RequestEvent) => {
     const features = resolveBackendFeatures(backend, env, runtime);
 
     const command = resolveCargoBin(env);
-    const args: string[] =
-        engine === 'rl'
-            ? ['run', '--features', features.join(','), '--bin', 'train_rl', '--', ...cliArgs]
-            : ['run', '--features', features.join(','), '--bin', 'train_ga', '--', ...cliArgs];
+    const cargoArgs = ['run'];
+    if (profile === 'release') {
+        cargoArgs.push('--release');
+    }
+    cargoArgs.push('--features', features.join(','));
+    if (engine === 'rl') {
+        cargoArgs.push('--bin', 'train_rl', '--', ...cliArgs);
+    } else {
+        cargoArgs.push('--bin', 'train_ga', '--', ...cliArgs);
+    }
 
     const stream = new ReadableStream({
         start(controller) {
-            const child = spawn(command, args, {
+            const child = spawn(command, cargoArgs, {
                 cwd: root,
                 env
             });

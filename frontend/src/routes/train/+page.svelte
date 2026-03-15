@@ -11,6 +11,7 @@
 	type TrainMode = 'ga' | 'rl';
 	type RlAlgorithm = 'ppo' | 'grpo';
 	type MlBackend = 'libtorch' | 'burn' | 'candle' | 'mlx';
+	type BuildProfile = 'debug' | 'release';
 	type ConsoleLine = { type: string; text: string };
 	type DataMode = 'full' | 'windowed';
 	type StartChoice = 'new' | 'resume';
@@ -39,6 +40,7 @@
 	let diagnosticsError = $state<string | null>(null);
 	let diagnosticsLoading = $state(false);
 	let diagnosticsEnv = $state<Record<string, string | null> | null>(null);
+	let buildProfile = $state<BuildProfile>('debug');
 	const defaultWindowBars = 7 * 24 * 60;
 	const defaultStepBars = 128;
 	
@@ -608,7 +610,12 @@
 		const verb = startChoice === 'resume' ? 'Resuming' : 'Starting';
 		const suffix = startChoice === 'resume' ? ' from checkpoint' : '';
 		const algoInfo = mode === 'rl' ? ` (${rlAlgorithm.toUpperCase()})` : '';
-		consoleOutput = [{ type: 'system', text: `${verb} ${mode.toUpperCase()}${algoInfo} training on ${String(backend).toUpperCase()}${suffix}...` }];
+		consoleOutput = [
+			{
+				type: 'system',
+				text: `${verb} ${mode.toUpperCase()}${algoInfo} training on ${String(backend).toUpperCase()} using ${buildProfile.toUpperCase()} build${suffix}...`
+			}
+		];
 		fitnessByGen = new Map();
 		if (liveLogUpdates) {
 			startLogPolling(outdir);
@@ -621,7 +628,7 @@
 			const response = await fetch('/api/train', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ engine: mode, params }),
+				body: JSON.stringify({ engine: mode, params, profile: buildProfile }),
 				signal: abortController.signal
 			});
 
@@ -767,6 +774,21 @@
 									<Badge variant="secondary">
 										{startChoice === 'resume' ? 'Resume from Checkpoint' : 'New Training'}
 									</Badge>
+								</div>
+								<div class="grid gap-2">
+									<Label for="build-profile">Build Profile</Label>
+									<select
+										id="build-profile"
+										bind:value={buildProfile}
+										disabled={training}
+										class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+									>
+										<option value="debug">Debug</option>
+										<option value="release">Release</option>
+									</select>
+									<div class="text-xs text-muted-foreground">
+										`release` uses optimized Rust binaries and is the right choice for backend speed comparisons. `debug` compiles faster while you are iterating.
+									</div>
 								</div>
 								<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
 									{diagnosticsLoading ? 'Running diagnostics...' : 'Run libtorch + MLX diagnostics'}
