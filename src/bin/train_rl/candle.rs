@@ -303,10 +303,12 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         let mut loss_stats_grpo = Vec::with_capacity(train_count);
 
         if use_grpo {
-            for _ in 0..train_count {
+            // Train on distinct shuffled windows each epoch; each GRPO group
+            // replays the same market segment with fresh stochastic actions.
+            for window in train_windows.iter().take(train_count) {
                 let group = rollout_group(
                     &train,
-                    &train_windows,
+                    &[*window],
                     &policy,
                     &env_cfg,
                     &rollout_cfg,

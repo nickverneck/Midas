@@ -25,11 +25,23 @@ mod ppo;
 #[path = "train_rl/util.rs"]
 mod util;
 
+#[cfg(feature = "torch")]
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use clap::Parser;
 use midas_env::ml::{self, MlBackend, TrainerKind};
+#[cfg(feature = "torch")]
+use midas_env::env::{EnvConfig, MarginMode};
+#[cfg(feature = "torch")]
+use rand::rngs::StdRng;
+#[cfg(feature = "torch")]
+use rand::{Rng, SeedableRng, seq::SliceRandom};
+#[cfg(feature = "torch")]
+use std::io::Write;
+#[cfg(feature = "torch")]
+use std::time::Instant;
 #[cfg(feature = "torch")]
 use tch::nn;
 #[cfg(feature = "torch")]
@@ -282,11 +294,12 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         let mut loss_stats_grpo = Vec::with_capacity(train_count);
 
         if use_grpo {
-            // GRPO training: group-based rollouts
-            for _ in 0..train_count {
+            // Train on distinct shuffled windows each epoch; each GRPO group
+            // replays the same market segment with fresh stochastic actions.
+            for window in train_windows.iter().take(train_count) {
                 let group = grpo::rollout_group(
                     &train,
-                    &train_windows,
+                    &[*window],
                     &policy,
                     &env_cfg,
                     grpo_cfg.group_size,
