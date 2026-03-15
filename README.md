@@ -21,12 +21,12 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - Both Rust trainers now accept `--backend libtorch|burn|candle|mlx` and `--device auto|cpu|cuda|mps`.
 - `libtorch` is implemented for both Rust trainers today.
 - `candle` now runs both the GA trainer and the RL PPO/GRPO trainer in this branch, saving `.safetensors` checkpoints.
-- `burn` now runs the GA trainer in this branch. The current runtime split is Burn CPU via `burn-ndarray`, native Burn CUDA via the optional `backend-burn-cuda` Cargo feature, and Apple GPU via `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
+- `burn` now runs the GA trainer in this branch. The current runtime split is Burn CPU via `burn-cpu`, native Burn CUDA via the optional `backend-burn-cuda` Cargo feature, and Apple GPU via `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
 - `mlx` is still a separate planned backend slot rather than the Burn Apple GPU path.
 - Successful runs write `training_stack.json` beside the log files so benchmark tooling can group results by backend/runtime/algorithm/host.
 - The training page diagnostics now run both the existing libtorch probe and `python/examples/mlx_probe.py`, so Apple MLX viability can be checked before a full MLX trainer exists.
 - Candle frontend runs now compile with `backend-candle` automatically, add `backend-candle-accelerate` on macOS unless `MIDAS_CANDLE_ACCELERATE=0`, and can opt into CUDA on Linux with `MIDAS_CANDLE_CUDA=1`.
-- Burn frontend runs always compile with `backend-burn`, add `backend-burn-cuda` when `MIDAS_BURN_CUDA=1`, and add `backend-burn-mlx` only when you explicitly target `mps` or opt into it with `MIDAS_BURN_MLX=1`.
+- Burn frontend runs always compile with `backend-burn`, add `backend-burn-cuda` when `MIDAS_BURN_CUDA=1`, add `backend-burn-mlx` only when you explicitly target `mps` or opt into it with `MIDAS_BURN_MLX=1`, and add `backend-burn-ndarray` only when `MIDAS_BURN_NDARRAY=1` or `MIDAS_BURN_CPU_BACKEND=ndarray`.
 - `burn-mlx` currently needs both `cmake` and an active Xcode Metal Toolchain. On this machine the MLX source build progressed after installing `cmake`, but `xcrun metal` still reports the Metal toolchain as unavailable.
 - Rollout details live in [`docs/ml_backend_rollout.md`](docs/ml_backend_rollout.md).
 
@@ -43,6 +43,8 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
   `cargo run --features backend-candle --bin train_rl -- --backend candle --device cpu --algorithm ppo --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --test-parquet data/val/SPY.parquet --outdir runs_rl_candle`
 - Rust GA-only trainer on Burn CPU:  
   `cargo run --features backend-burn --bin train_ga -- --backend burn --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_cpu`
+- Rust GA-only trainer on Burn legacy ndarray CPU:  
+  `MIDAS_BURN_CPU_BACKEND=ndarray cargo run --features backend-burn,backend-burn-ndarray --bin train_ga -- --backend burn --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_ndarray`
 - Rust GA-only trainer on Burn CUDA (Linux box):  
   `cargo run --features backend-burn,backend-burn-cuda --bin train_ga -- --backend burn --device cuda --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_cuda`
 - Rust GA-only trainer on Burn MLX (macOS Apple GPU, toolchain required):  

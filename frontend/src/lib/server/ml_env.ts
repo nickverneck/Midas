@@ -156,6 +156,12 @@ export const resolveBackendFeatures = (
         case 'burn':
             features.push('backend-burn');
             if (
+                env.MIDAS_BURN_NDARRAY === '1' ||
+                (env.MIDAS_BURN_CPU_BACKEND ?? '').toLowerCase() === 'ndarray'
+            ) {
+                features.push('backend-burn-ndarray');
+            }
+            if (
                 process.platform === 'darwin' &&
                 (normalizedRuntime === 'mps' ||
                     (normalizedRuntime === 'auto' && env.MIDAS_BURN_MLX === '1'))

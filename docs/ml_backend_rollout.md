@@ -6,7 +6,7 @@ This branch establishes a single backend-selection surface for both GA and RL tr
 
 - `libtorch` is implemented for GA and RL.
 - `candle` is implemented for GA training and RL PPO/GRPO training in this branch. It currently targets CPU by default, exports `.safetensors`, and keeps CUDA behind the optional `backend-candle-cuda` Cargo feature.
-- `burn` is implemented for GA training in this branch. It currently targets CPU via `burn-ndarray`, can target Linux CUDA with the optional `backend-burn-cuda` Cargo feature, and can target Apple GPU through `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
+- `burn` is implemented for GA training in this branch. It currently targets CPU via `burn-cpu`, can target Linux CUDA with the optional `backend-burn-cuda` Cargo feature, can target Apple GPU through `burn-mlx` with the optional `backend-burn-mlx` Cargo feature, and can still compile the legacy `burn-ndarray` CPU path behind `backend-burn-ndarray`.
 - `mlx` remains a separate first-class CLI/UI option, but it still intentionally fails fast until a dedicated runner exists.
 - GA orchestration now calls through a backend runner boundary in `src/bin/train_ga/backends/` instead of reaching directly into the `tch` policy code. RL now has a matching Candle runner in `src/bin/train_rl/candle.rs` for PPO and GRPO.
 - Every successful training run now writes `training_stack.json` into the run directory so benchmark scripts can compare backend/runtime/algorithm combinations later.
@@ -31,7 +31,7 @@ Current runtime policy:
 
 ## Machine strategy
 
-- Dev machine (macOS): use `burn --device cpu` for a pure Rust CPU path, `burn --device mps` with `backend-burn-mlx` for Apple GPU viability, `libtorch --device auto` for the existing MPS path, and `candle --device cpu` for a second Rust-native CPU comparison.
+- Dev machine (macOS): use `burn --device cpu` for the new Burn CPU path, `burn --device mps` with `backend-burn-mlx` for Apple GPU viability, `libtorch --device auto` for the existing MPS path, and `candle --device cpu` for a second Rust-native CPU comparison.
 - Training machine (Linux + NVIDIA): use `burn --device cuda` with `backend-burn,backend-burn-cuda` for native Burn CUDA, then compare that against `libtorch --device cuda` and the Candle CUDA path.
 - Inference machine (lightweight CPU): prioritize `--device cpu`; Candle writes `.safetensors` for both GA and RL, while Burn GA writes portable JSON policy artifacts today.
 

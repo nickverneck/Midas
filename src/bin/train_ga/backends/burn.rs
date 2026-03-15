@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use burn::tensor::{Tensor, TensorData, activation, backend::Backend};
-use burn_ndarray::NdArray;
+use burn_cpu::{Cpu, CpuDevice};
 use midas_env::ml::ComputeRuntime;
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
@@ -10,6 +10,8 @@ use std::path::Path;
 use burn_cuda::{Cuda, CudaDevice};
 #[cfg(feature = "backend-burn-mlx")]
 use burn_mlx::{Mlx, MlxDevice};
+#[cfg(feature = "backend-burn-ndarray")]
+use burn_ndarray::NdArray;
 
 use crate::config::{CandidateConfig, ExecutionTarget};
 use crate::data::{DataSet, build_observation};
@@ -17,11 +19,13 @@ use crate::metrics::{compute_sortino, max_drawdown};
 use crate::types::{BehaviorRow, CandidateResult};
 use midas_env::env::VIOLATION_PENALTY;
 
-type CpuBackend = NdArray<f32>;
+type CpuBackend = Cpu<f32, i32>;
 #[cfg(feature = "backend-burn-cuda")]
 type CudaBackend = Cuda<f32, i32>;
 #[cfg(feature = "backend-burn-mlx")]
 type MlxBackend = Mlx<f32>;
+#[cfg(feature = "backend-burn-ndarray")]
+type LegacyCpuBackend = NdArray<f32>;
 
 struct LinearLayer<B: Backend> {
     weight: Tensor<B, 2>,
@@ -235,7 +239,13 @@ pub fn resolve_device(requested: ComputeRuntime) -> Result<ExecutionTarget> {
 
 pub fn print_device(device: ExecutionTarget) {
     match device {
-        ExecutionTarget::Cpu => println!("info: burn backend using cpu (ndarray)"),
+        ExecutionTarget::Cpu => {
+            if use_legacy_ndarray_cpu() {
+                println!("info: burn backend using cpu (ndarray legacy)");
+            } else {
+                println!("info: burn backend using cpu (burn-cpu)");
+            }
+        }
         ExecutionTarget::Cuda(idx) => println!("info: burn backend using cuda:{idx}"),
         ExecutionTarget::Mps => println!("info: burn backend using apple gpu (burn-mlx)"),
     }
@@ -261,7 +271,16 @@ pub fn evaluate_candidate(
 ) -> Result<CandidateResult> {
     match cfg.device {
         ExecutionTarget::Cpu => {
-            let device = <CpuBackend as Backend>::Device::default();
+            if use_legacy_ndarray_cpu() {
+                #[cfg(feature = "backend-burn-ndarray")]
+                {
+                    let device = <LegacyCpuBackend as Backend>::Device::default();
+                    return evaluate_candidate_inner::<LegacyCpuBackend>(
+                        genome, data, windows, cfg, &device, None,
+                    );
+                }
+            }
+            let device = CpuDevice::default();
             evaluate_candidate_inner::<CpuBackend>(genome, data, windows, cfg, &device, None)
         }
         #[cfg(feature = "backend-burn-cuda")]
@@ -294,7 +313,22 @@ pub fn evaluate_candidate_with_history(
     let mut history = Vec::new();
     let metrics = match cfg.device {
         ExecutionTarget::Cpu => {
-            let device = <CpuBackend as Backend>::Device::default();
+            if use_legacy_ndarray_cpu() {
+                #[cfg(feature = "backend-burn-ndarray")]
+                {
+                    let device = <LegacyCpuBackend as Backend>::Device::default();
+                    let metrics = evaluate_candidate_inner::<LegacyCpuBackend>(
+                        genome,
+                        data,
+                        windows,
+                        cfg,
+                        &device,
+                        Some(&mut history),
+                    )?;
+                    return Ok((metrics, history));
+                }
+            }
+            let device = CpuDevice::default();
             evaluate_candidate_inner::<CpuBackend>(
                 genome,
                 data,
@@ -634,6 +668,28 @@ fn argmax_index(values: &[f32]) -> usize {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(idx, _)| idx)
         .unwrap_or(0)
+}
+
+fn use_legacy_ndarray_cpu() -> bool {
+    #[cfg(feature = "backend-burn-ndarray")]
+    {
+        matches!(
+            std::env::var("MIDAS_BURN_CPU_BACKEND")
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("ndarray") | Some("legacy")
+        ) || matches!(
+            std::env::var("MIDAS_BURN_NDARRAY").ok().as_deref(),
+            Some("1")
+        )
+    }
+    #[cfg(not(feature = "backend-burn-ndarray"))]
+    {
+        false
+    }
 }
 
 fn auto_device() -> Result<ExecutionTarget> {

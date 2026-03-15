@@ -931,7 +931,7 @@
 															{#if gaParams.backend === 'libtorch'}
 																<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
 															{:else if gaParams.backend === 'burn'}
-																<div>`burn` is implemented for GA in this branch. Use `cpu` for the Burn ndarray path, enable the Burn CUDA Cargo feature on the Linux box when you want native CUDA, and select `mps` on macOS when the burn-mlx toolchain is installed.</div>
+																<div>`burn` is implemented for GA in this branch. Use `cpu` for the Burn CPU backend, enable the Burn CUDA Cargo feature on the Linux box when you want native CUDA, select `mps` on macOS when the burn-mlx toolchain is installed, and set `MIDAS_BURN_CPU_BACKEND=ndarray` only when you want the legacy CPU path.</div>
 															{:else if gaParams.backend === 'candle'}
 																<div>`candle` is implemented for GA in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
 															{:else}

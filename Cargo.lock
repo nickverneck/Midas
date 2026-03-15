@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "burn",
+ "burn-cpu",
  "burn-cuda",
  "burn-mlx",
  "burn-ndarray",

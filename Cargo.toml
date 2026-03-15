@@ -28,6 +28,7 @@ tch = { version = "0.22.0", optional = true }
 candle-core = { git = "https://github.com/huggingface/candle.git", optional = true }
 candle-nn = { git = "https://github.com/huggingface/candle.git", optional = true }
 burn = { version = "0.20.1", optional = true }
+burn-cpu = { version = "0.20.1", optional = true }
 burn-ndarray = { version = "0.20.1", optional = true }
 burn-cuda = { version = "0.20.1", optional = true }
 burn-mlx = { git = "https://github.com/eidolons-ai/burn-mlx.git", branch = "burn-0-20", optional = true }
@@ -40,7 +41,8 @@ mlua = { version = "0.9", features = ["lua54", "vendored"] }
 default = []
 python = ["pyo3/extension-module", "pyo3", "numpy"]
 torch = ["tch"]
-backend-burn = ["dep:burn", "dep:burn-ndarray"]
+backend-burn = ["dep:burn", "dep:burn-cpu"]
+backend-burn-ndarray = ["backend-burn", "dep:burn-ndarray"]
 backend-burn-cuda = ["backend-burn", "dep:burn-cuda"]
 backend-burn-mlx = ["backend-burn", "dep:burn-mlx"]
 backend-candle = ["dep:candle-core", "dep:candle-nn"]

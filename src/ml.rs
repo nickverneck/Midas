@@ -182,7 +182,8 @@ pub fn resolve_training_stack(
         ],
         (TrainerKind::Ga, MlBackend::Burn) => vec![
             "Implemented for GA training in this branch.".to_string(),
-            "Uses Burn 0.20 with burn-ndarray for CPU by default.".to_string(),
+            "Uses Burn 0.20 with burn-cpu for CPU by default.".to_string(),
+            "Enable the optional 'backend-burn-ndarray' feature plus MIDAS_BURN_CPU_BACKEND=ndarray if you want the legacy ndarray CPU path for comparison.".to_string(),
             "Enable native Burn CUDA on the Linux training box with the 'backend-burn-cuda' Cargo feature.".to_string(),
             "Enable burn-mlx on macOS with the 'backend-burn-mlx' Cargo feature when the local MLX toolchain is installed.".to_string(),
         ],
