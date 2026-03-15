@@ -7,7 +7,7 @@ use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyS
 use crate::tradovate::{
     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, ContractSuggestion,
     InstrumentSessionWindow, LatencySnapshot, ManualOrderAction, MarketSnapshot, ServiceCommand,
-    ServiceEvent, TradeMarkerSide,
+    ServiceEvent, TradeMarker, TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -266,6 +266,9 @@ impl App {
                         "Contract changed; strategy re-anchored to current bar.".to_string();
                 }
                 self.maybe_run_native_strategy(cmd_tx);
+            }
+            ServiceEvent::TradeMarkersUpdated(markers) => {
+                self.market.trade_markers = markers;
             }
             ServiceEvent::Latency(snapshot) => {
                 self.latency = snapshot;
@@ -1243,32 +1246,52 @@ impl App {
             .enumerate()
             .map(|(idx, bar)| (idx as f64, bar.close))
             .collect::<Vec<_>>();
-        let (min_close, max_close) = bars
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min_v, max_v), bar| {
-                (min_v.min(bar.close), max_v.max(bar.close))
-            });
-        let y_bounds = if min_close.is_finite() && max_close.is_finite() && min_close < max_close {
-            [min_close, max_close]
-        } else if min_close.is_finite() {
-            [min_close - 1.0, min_close + 1.0]
-        } else {
-            [0.0, 1.0]
-        };
-        let title = match &self.market.contract_name {
+        let selected_snapshot = self.selected_snapshot();
+        let selected_account_id = selected_snapshot.map(|snapshot| snapshot.account_id);
+        let entry_price = selected_snapshot
+            .filter(|snapshot| snapshot.market_position_qty.unwrap_or_default().abs() > f64::EPSILON)
+            .and_then(|snapshot| snapshot.market_entry_price)
+            .filter(|price| price.is_finite());
+        let take_profit_price = selected_snapshot
+            .and_then(|snapshot| snapshot.selected_contract_take_profit_price)
+            .filter(|price| price.is_finite());
+        let stop_price = selected_snapshot
+            .and_then(|snapshot| snapshot.selected_contract_stop_price)
+            .filter(|price| price.is_finite());
+        let mut chart_prices = bars.iter().map(|bar| bar.close).collect::<Vec<_>>();
+        let mut title = match &self.market.contract_name {
             Some(name) => format!(
                 "1m Market Data [{}] hist={} live={}",
                 name, self.market.history_loaded, self.market.live_bars
             ),
             None => "1m Market Data".to_string(),
         };
-        let marker_offset = ((y_bounds[1] - y_bounds[0]).abs() * 0.02).max(0.25);
+        let mut overlay_labels = Vec::new();
+        if let Some(price) = entry_price {
+            overlay_labels.push(format!("EP {price:.2}"));
+            chart_prices.push(price);
+        }
+        if let Some(price) = take_profit_price {
+            overlay_labels.push(format!("TP {price:.2}"));
+            chart_prices.push(price);
+        }
+        if let Some(price) = stop_price {
+            overlay_labels.push(format!("SL {price:.2}"));
+            chart_prices.push(price);
+        }
+        if !overlay_labels.is_empty() {
+            title.push_str(" | ");
+            title.push_str(&overlay_labels.join(" "));
+        }
         let first_ts = bars.first().map(|bar| bar.ts_ns).unwrap_or_default();
         let last_ts = bars.last().map(|bar| bar.ts_ns).unwrap_or_default();
         let mut buy_marker_points = Vec::new();
         let mut sell_marker_points = Vec::new();
         for marker in &self.market.trade_markers {
             if marker.ts_ns < first_ts || marker.ts_ns > last_ts {
+                continue;
+            }
+            if !trade_marker_matches_selection(marker, selected_account_id, &self.market) {
                 continue;
             }
             let Some((idx, _)) = bars
@@ -1278,19 +1301,26 @@ impl App {
             else {
                 continue;
             };
-            let point = match marker.side {
-                TradeMarkerSide::Buy => {
-                    (idx as f64, (marker.price - marker_offset).max(y_bounds[0]))
-                }
-                TradeMarkerSide::Sell => {
-                    (idx as f64, (marker.price + marker_offset).min(y_bounds[1]))
-                }
-            };
+            chart_prices.push(marker.price);
+            let point = (idx as f64, marker.price);
             match marker.side {
                 TradeMarkerSide::Buy => buy_marker_points.push(point),
                 TradeMarkerSide::Sell => sell_marker_points.push(point),
             }
         }
+        let (min_close, max_close) = chart_prices.iter().copied().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(min_v, max_v), price| (min_v.min(price), max_v.max(price)),
+        );
+        let y_bounds = if min_close.is_finite() && max_close.is_finite() && min_close < max_close {
+            let padding = ((max_close - min_close).abs() * 0.05)
+                .max(self.market.tick_size.unwrap_or(0.25));
+            [min_close - padding, max_close + padding]
+        } else if min_close.is_finite() {
+            [min_close - 1.0, min_close + 1.0]
+        } else {
+            [0.0, 1.0]
+        };
         let mut segment_points = Vec::with_capacity(points.len().saturating_sub(1));
         let mut segment_colors = Vec::with_capacity(points.len().saturating_sub(1));
         for window in points.windows(2) {
@@ -1317,6 +1347,11 @@ impl App {
             .collect::<Vec<_>>();
 
         let last_point_data = points.last().copied().map(|point| vec![point]);
+        let line_end = points.len().max(2) as f64 - 1.0;
+        let entry_line = entry_price.map(|price| vec![(0.0, price), (line_end, price)]);
+        let take_profit_line =
+            take_profit_price.map(|price| vec![(0.0, price), (line_end, price)]);
+        let stop_line = stop_price.map(|price| vec![(0.0, price), (line_end, price)]);
         if let Some(last_point) = points.last().copied() {
             let last_point_color = if points.len() >= 2 && last_point.1 < points[points.len() - 2].1
             {
@@ -1332,10 +1367,37 @@ impl App {
                     .data(last_point_data.as_deref().unwrap_or(&[])),
             );
         }
+        if let Some(line) = entry_line.as_deref() {
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(Color::Yellow))
+                    .data(line),
+            );
+        }
+        if let Some(line) = take_profit_line.as_deref() {
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(Color::Green))
+                    .data(line),
+            );
+        }
+        if let Some(line) = stop_line.as_deref() {
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(Color::Red))
+                    .data(line),
+            );
+        }
         if !buy_marker_points.is_empty() {
             datasets.push(
                 Dataset::default()
-                    .marker(symbols::Marker::Block)
+                    .marker(symbols::Marker::Dot)
                     .graph_type(GraphType::Scatter)
                     .style(Style::default().fg(Color::Cyan))
                     .data(&buy_marker_points),
@@ -1476,11 +1538,23 @@ impl App {
                 format_latency_ms(self.latency.rest_rtt_ms)
             )),
             Line::from(format!(
-                "Order RTT: {}",
+                "Order Submit RTT: {}",
                 format_latency_ms(self.latency.last_order_ack_ms)
             )),
             Line::from(format!(
-                "Market Age: {}",
+                "Order Seen: {}",
+                format_latency_ms(self.latency.last_order_seen_ms)
+            )),
+            Line::from(format!(
+                "Exec Ack: {}",
+                format_latency_ms(self.latency.last_exec_report_ms)
+            )),
+            Line::from(format!(
+                "First Fill: {}",
+                format_latency_ms(self.latency.last_fill_ms)
+            )),
+            Line::from(format!(
+                "Market Update Age: {}",
                 format_age_ms(self.market_update_age_ms())
             )),
             Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
@@ -1994,10 +2068,8 @@ impl App {
             Line::from(format!("Balance: {}", format_money(snapshot.balance))),
             Line::from(format!("Cash: {}", format_money(snapshot.cash_balance))),
             Line::from(format!("NetLiq: {}", format_money(snapshot.net_liq))),
-            Line::from(format!(
-                "Unrealized PnL: {}",
-                format_money(snapshot.unrealized_pnl)
-            )),
+            pnl_line("Session Realized PnL", snapshot.realized_pnl),
+            pnl_line("Unrealized PnL", snapshot.unrealized_pnl),
             Line::from(format!(
                 "Intraday Margin: {}",
                 format_money(snapshot.intraday_margin)
@@ -2009,6 +2081,18 @@ impl App {
             Line::from(format!(
                 "Selected Contract Qty: {}",
                 format_quantity(snapshot.market_position_qty)
+            )),
+            Line::from(format!(
+                "Entry Price: {}",
+                format_money(snapshot.market_entry_price)
+            )),
+            Line::from(format!(
+                "Take Profit: {}",
+                format_money(snapshot.selected_contract_take_profit_price)
+            )),
+            Line::from(format!(
+                "Stop Loss: {}",
+                format_money(snapshot.selected_contract_stop_price)
             )),
             Line::from(match &self.market.contract_name {
                 Some(name) => format!("Active Contract: {name}"),
@@ -2219,9 +2303,12 @@ impl App {
 
     fn latency_summary(&self) -> String {
         format!(
-            "REST {} | Order {} | Market {}",
+            "REST {} | Submit {} | Seen {} | Ack {} | Fill {} | Market {}",
             format_latency_ms(self.latency.rest_rtt_ms),
             format_latency_ms(self.latency.last_order_ack_ms),
+            format_latency_ms(self.latency.last_order_seen_ms),
+            format_latency_ms(self.latency.last_exec_report_ms),
+            format_latency_ms(self.latency.last_fill_ms),
             format_age_ms(self.market_update_age_ms()),
         )
     }
@@ -2714,8 +2801,31 @@ fn styled_line(text: String, focused: bool) -> Line<'static> {
     }
 }
 
+fn pnl_line(label: &str, value: Option<f64>) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("{label}: ")),
+        Span::styled(format_signed_money(value), pnl_style(value)),
+    ])
+}
+
+fn pnl_style(value: Option<f64>) -> Style {
+    match value {
+        Some(value) if value > 0.0 => Style::default().fg(Color::Green),
+        Some(value) if value < 0.0 => Style::default().fg(Color::Red),
+        _ => Style::default(),
+    }
+}
+
 fn format_money(value: Option<f64>) -> String {
     match value {
+        Some(value) => format!("{value:.2}"),
+        None => "n/a".to_string(),
+    }
+}
+
+fn format_signed_money(value: Option<f64>) -> String {
+    match value {
+        Some(value) if value > 0.0 => format!("+{value:.2}"),
         Some(value) => format!("{value:.2}"),
         None => "n/a".to_string(),
     }
@@ -2741,6 +2851,40 @@ fn format_age_ms(value: Option<u64>) -> String {
         Some(value) => format!("{value}ms"),
         None => "n/a".to_string(),
     }
+}
+
+fn trade_marker_matches_selection(
+    marker: &TradeMarker,
+    selected_account_id: Option<i64>,
+    market: &MarketSnapshot,
+) -> bool {
+    let account_matches = selected_account_id
+        .zip(marker.account_id)
+        .map(|(selected, marker_account)| selected == marker_account)
+        .unwrap_or(true);
+    if !account_matches {
+        return false;
+    }
+
+    if marker.contract_id.is_none() && marker.contract_name.is_none() {
+        return true;
+    }
+
+    let contract_id_matches = marker
+        .contract_id
+        .zip(market.contract_id)
+        .map(|(marker_contract_id, market_contract_id)| marker_contract_id == market_contract_id)
+        .unwrap_or(false);
+    let contract_name_matches = marker
+        .contract_name
+        .as_deref()
+        .zip(market.contract_name.as_deref())
+        .map(|(marker_contract_name, market_contract_name)| {
+            marker_contract_name.eq_ignore_ascii_case(market_contract_name)
+        })
+        .unwrap_or(false);
+
+    contract_id_matches || contract_name_matches
 }
 
 fn bool_label(value: bool) -> &'static str {

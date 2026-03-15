@@ -13,6 +13,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
@@ -70,6 +71,7 @@ pub enum ServiceEvent {
         results: Vec<ContractSuggestion>,
     },
     MarketSnapshot(MarketSnapshot),
+    TradeMarkersUpdated(Vec<TradeMarker>),
     Latency(LatencySnapshot),
 }
 
@@ -194,6 +196,10 @@ pub enum TradeMarkerSide {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeMarker {
+    pub fill_id: Option<i64>,
+    pub account_id: Option<i64>,
+    pub contract_id: Option<i64>,
+    pub contract_name: Option<String>,
     pub ts_ns: i64,
     pub price: f64,
     pub qty: i32,
@@ -207,11 +213,14 @@ pub struct AccountSnapshot {
     pub balance: Option<f64>,
     pub cash_balance: Option<f64>,
     pub net_liq: Option<f64>,
+    pub realized_pnl: Option<f64>,
     pub unrealized_pnl: Option<f64>,
     pub intraday_margin: Option<f64>,
     pub open_position_qty: Option<f64>,
     pub market_position_qty: Option<f64>,
     pub market_entry_price: Option<f64>,
+    pub selected_contract_take_profit_price: Option<f64>,
+    pub selected_contract_stop_price: Option<f64>,
     pub raw_account: Option<Value>,
     pub raw_risk: Option<Value>,
     pub raw_cash: Option<Value>,
@@ -222,6 +231,9 @@ pub struct AccountSnapshot {
 pub struct LatencySnapshot {
     pub rest_rtt_ms: Option<u64>,
     pub last_order_ack_ms: Option<u64>,
+    pub last_order_seen_ms: Option<u64>,
+    pub last_exec_report_ms: Option<u64>,
+    pub last_fill_ms: Option<u64>,
 }
 
 struct ServiceState {
@@ -236,6 +248,8 @@ struct SessionState {
     cfg: AppConfig,
     tokens: TokenBundle,
     accounts: Vec<AccountInfo>,
+    user_request_tx: UnboundedSender<UserSocketCommand>,
+    order_latency_tracker: Option<OrderLatencyTracker>,
     user_store: UserSyncStore,
     selected_account_id: Option<i64>,
     selected_contract: Option<ContractSuggestion>,
@@ -251,6 +265,7 @@ struct UserSyncStore {
     cash: BTreeMap<i64, Value>,
     positions: BTreeMap<i64, BTreeMap<i64, Value>>,
     orders: BTreeMap<i64, BTreeMap<i64, Value>>,
+    fills: BTreeMap<i64, BTreeMap<i64, Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -380,6 +395,22 @@ enum InternalEvent {
     Error(String),
 }
 
+struct UserSocketCommand {
+    endpoint: String,
+    query: Option<String>,
+    body: Option<Value>,
+    response_tx: oneshot::Sender<Result<Value, String>>,
+}
+
+struct OrderLatencyTracker {
+    started_at: time::Instant,
+    cl_ord_id: String,
+    order_id: Option<i64>,
+    seen_recorded: bool,
+    exec_report_recorded: bool,
+    fill_recorded: bool,
+}
+
 #[derive(Debug, Clone)]
 struct EntityEnvelope {
     entity_type: String,
@@ -420,6 +451,23 @@ impl LiveSeries {
         }
         out
     }
+}
+
+fn spawn_user_sync_task(
+    cfg: AppConfig,
+    tokens: TokenBundle,
+    account_ids: Vec<i64>,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> (UnboundedSender<UserSocketCommand>, JoinHandle<()>) {
+    let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(user_sync_worker(
+        cfg,
+        tokens,
+        account_ids,
+        request_rx,
+        internal_tx,
+    ));
+    (request_tx, task)
 }
 
 pub async fn service_loop(
@@ -527,7 +575,7 @@ async fn handle_command(
             .await;
 
             let selected_account_id = accounts.first().map(|account| account.id);
-            let snapshots = user_store.build_snapshots(&accounts, None);
+            let snapshots = user_store.build_snapshots(&accounts, None, &BTreeMap::new());
 
             let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts.clone()));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
@@ -539,17 +587,20 @@ async fn handle_command(
                 .collect::<Vec<_>>();
             let user_cfg = cfg.clone();
             let user_tokens = tokens.clone();
-            state.user_task = Some(tokio::spawn(user_sync_worker(
+            let (user_request_tx, user_task) = spawn_user_sync_task(
                 user_cfg,
                 user_tokens,
                 account_ids,
                 internal_tx.clone(),
-            )));
+            );
+            state.user_task = Some(user_task);
 
             state.session = Some(SessionState {
                 cfg,
                 tokens,
                 accounts,
+                user_request_tx,
+                order_latency_tracker: None,
                 user_store,
                 selected_account_id,
                 selected_contract: None,
@@ -565,7 +616,11 @@ async fn handle_command(
             session.selected_account_id = Some(account_id);
             let snapshots = session
                 .user_store
-                .build_snapshots(&session.accounts, Some(&session.market));
+                .build_snapshots(
+                    &session.accounts,
+                    Some(&session.market),
+                    &session.managed_protection,
+                );
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
         }
         ServiceCommand::SearchContracts { query, limit } => {
@@ -613,16 +668,12 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            let started = time::Instant::now();
-            let outcome = submit_manual_order(&state.client, session, action).await?;
-            state.latency.last_order_ack_ms = Some(started.elapsed().as_millis() as u64);
-            if let Some(marker) = outcome.marker {
-                session.market.trade_markers.push(marker);
-                if session.market.trade_markers.len() > 200 {
-                    let overflow = session.market.trade_markers.len() - 200;
-                    session.market.trade_markers.drain(0..overflow);
-                }
-                let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
+            let outcome = submit_manual_order(session, action).await?;
+            if let Some(submit_rtt_ms) = outcome.submit_rtt_ms {
+                state.latency.last_order_ack_ms = Some(submit_rtt_ms);
+                state.latency.last_order_seen_ms = None;
+                state.latency.last_exec_report_ms = None;
+                state.latency.last_fill_ms = None;
             }
             let _ = event_tx.send(ServiceEvent::Status(outcome.message));
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
@@ -635,23 +686,13 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            let started = time::Instant::now();
-            let outcome = submit_target_position_order(
-                &state.client,
-                session,
-                target_qty,
-                automated,
-                &reason,
-            )
-            .await?;
-            state.latency.last_order_ack_ms = Some(started.elapsed().as_millis() as u64);
-            if let Some(marker) = outcome.marker {
-                session.market.trade_markers.push(marker);
-                if session.market.trade_markers.len() > 200 {
-                    let overflow = session.market.trade_markers.len() - 200;
-                    session.market.trade_markers.drain(0..overflow);
-                }
-                let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
+            let outcome =
+                submit_target_position_order(session, target_qty, automated, &reason).await?;
+            if let Some(submit_rtt_ms) = outcome.submit_rtt_ms {
+                state.latency.last_order_ack_ms = Some(submit_rtt_ms);
+                state.latency.last_order_seen_ms = None;
+                state.latency.last_exec_report_ms = None;
+                state.latency.last_fill_ms = None;
             }
             let _ = event_tx.send(ServiceEvent::Status(outcome.message));
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
@@ -665,18 +706,16 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            let started = time::Instant::now();
-            if let Some(message) = sync_native_protection(
-                &state.client,
-                session,
-                signed_qty,
-                take_profit_price,
-                stop_price,
-                &reason,
-            )
-            .await?
+            if let Some(message) =
+                sync_native_protection(session, signed_qty, take_profit_price, stop_price, &reason)
+                    .await?
             {
-                state.latency.last_order_ack_ms = Some(started.elapsed().as_millis() as u64);
+                let snapshots = session.user_store.build_snapshots(
+                    &session.accounts,
+                    Some(&session.market),
+                    &session.managed_protection,
+                );
+                let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
                 let _ = event_tx.send(ServiceEvent::Status(message));
                 let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             }
@@ -695,13 +734,36 @@ async fn handle_internal(
             let Some(session) = state.session.as_mut() else {
                 return Ok(());
             };
-            for envelope in entities {
-                session.user_store.apply(envelope);
+            let mut latency_changed = false;
+            let mut trade_markers_changed = false;
+            for envelope in &entities {
+                latency_changed |= update_latency_from_envelope(session, &mut state.latency, &envelope);
+                session.user_store.apply(envelope.clone());
+            }
+            for envelope in &entities {
+                if envelope.deleted || !envelope.entity_type.eq_ignore_ascii_case("fill") {
+                    continue;
+                }
+                if let Some(marker) = trade_marker_from_fill(session, &envelope.entity) {
+                    trade_markers_changed |= record_trade_marker(session, marker);
+                }
             }
             let snapshots = session
                 .user_store
-                .build_snapshots(&session.accounts, Some(&session.market));
+                .build_snapshots(
+                    &session.accounts,
+                    Some(&session.market),
+                    &session.managed_protection,
+                );
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+            if trade_markers_changed {
+                let _ = event_tx.send(ServiceEvent::TradeMarkersUpdated(
+                    session.market.trade_markers.clone(),
+                ));
+            }
+            if latency_changed {
+                let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            }
         }
         InternalEvent::UserSocketStatus(message) => {
             let _ = event_tx.send(ServiceEvent::Status(message));
@@ -713,7 +775,11 @@ async fn handle_internal(
                 session.market = snapshot.clone();
                 let snapshots = session
                     .user_store
-                    .build_snapshots(&session.accounts, Some(&session.market));
+                    .build_snapshots(
+                        &session.accounts,
+                        Some(&session.market),
+                        &session.managed_protection,
+                    );
                 let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
                 return Ok(());
@@ -823,7 +889,11 @@ async fn refresh_session_state(
 
     let snapshots = session
         .user_store
-        .build_snapshots(&session.accounts, Some(&session.market));
+        .build_snapshots(
+            &session.accounts,
+            Some(&session.market),
+            &session.managed_protection,
+        );
     let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts));
     let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
     Ok(())
@@ -977,12 +1047,16 @@ async fn ensure_background_tasks(
             task.abort();
         }
         if let Some((cfg, tokens, account_ids)) = user_spawn {
-            state.user_task = Some(tokio::spawn(user_sync_worker(
+            let (user_request_tx, user_task) = spawn_user_sync_task(
                 cfg,
                 tokens,
                 account_ids,
                 internal_tx.clone(),
-            )));
+            );
+            if let Some(session) = state.session.as_mut() {
+                session.user_request_tx = user_request_tx;
+            }
+            state.user_task = Some(user_task);
         }
     }
 
@@ -1275,11 +1349,10 @@ async fn search_contracts(
 
 struct ManualOrderOutcome {
     message: String,
-    marker: Option<TradeMarker>,
+    submit_rtt_ms: Option<u64>,
 }
 
 async fn submit_manual_order(
-    client: &Client,
     session: &mut SessionState,
     action: ManualOrderAction,
 ) -> Result<ManualOrderOutcome> {
@@ -1300,7 +1373,7 @@ async fn submit_manual_order(
                         "Close ignored: no open {} position on {}",
                         contract.name, account.name
                     ),
-                    marker: None,
+                    submit_rtt_ms: None,
                 });
             };
             let close_qty = net_qty.abs().round() as i32;
@@ -1310,7 +1383,7 @@ async fn submit_manual_order(
                         "Close ignored: no open {} position on {}",
                         contract.name, account.name
                     ),
-                    marker: None,
+                    submit_rtt_ms: None,
                 });
             }
             let close_action = if net_qty > 0.0 { "Sell" } else { "Buy" };
@@ -1318,10 +1391,9 @@ async fn submit_manual_order(
         }
     };
 
-    cancel_strategy_protection_for_selected(client, session).await?;
+    cancel_strategy_protection_for_selected(session).await?;
 
     place_market_order(
-        client,
         session,
         &account,
         &contract,
@@ -1335,7 +1407,6 @@ async fn submit_manual_order(
 }
 
 async fn submit_target_position_order(
-    client: &Client,
     session: &mut SessionState,
     target_qty: i32,
     automated: bool,
@@ -1356,11 +1427,11 @@ async fn submit_target_position_order(
                 "Strategy target already satisfied: {} at {} on {} ({reason})",
                 target_qty, contract.name, account.name
             ),
-            marker: None,
+            submit_rtt_ms: None,
         });
     }
 
-    cancel_strategy_protection_for_selected(client, session).await?;
+    cancel_strategy_protection_for_selected(session).await?;
 
     let order_action = if delta > 0 { "Buy" } else { "Sell" };
     let order_qty = delta.unsigned_abs() as i32;
@@ -1371,7 +1442,6 @@ async fn submit_target_position_order(
     ));
 
     place_market_order(
-        client,
         session,
         &account,
         &contract,
@@ -1406,7 +1476,6 @@ fn resolve_order_context<'a>(session: &'a SessionState) -> Result<OrderContext<'
 }
 
 async fn sync_native_protection(
-    client: &Client,
     session: &mut SessionState,
     signed_qty: i32,
     take_profit_price: Option<f64>,
@@ -1424,8 +1493,7 @@ async fn sync_native_protection(
     let stop_price = sanitize_price(stop_price);
 
     if signed_qty == 0 || (take_profit_price.is_none() && stop_price.is_none()) {
-        let cleared =
-            cancel_strategy_protection_by_key(client, session, key, &account, &contract).await?;
+        let cleared = cancel_strategy_protection_by_key(session, key, &account, &contract).await?;
         if cleared {
             return Ok(Some(format!(
                 "Native protection cleared for {} on {} ({reason})",
@@ -1455,8 +1523,7 @@ async fn sync_native_protection(
         {
             let stop_order_id = existing.stop_order_id.expect("checked is_some");
             let next_stop_price = stop_price.expect("checked is_some");
-            modify_native_stop_order(client, session, stop_order_id, order_qty, next_stop_price)
-                .await?;
+            modify_native_stop_order(session, stop_order_id, order_qty, next_stop_price).await?;
             if let Some(state) = session.managed_protection.get_mut(&key) {
                 state.stop_price = Some(next_stop_price);
             }
@@ -1467,7 +1534,7 @@ async fn sync_native_protection(
         }
     }
 
-    cancel_strategy_protection_by_key(client, session, key, &account, &contract).await?;
+    cancel_strategy_protection_by_key(session, key, &account, &contract).await?;
 
     let tp_cl_ord_id = take_profit_price.map(|_| next_strategy_cl_ord_id(session, "tp"));
     let stop_cl_ord_id = stop_price.map(|_| next_strategy_cl_ord_id(session, "sl"));
@@ -1476,7 +1543,6 @@ async fn sync_native_protection(
     {
         (Some(tp), Some(stop)) => {
             let ids = place_native_oco_orders(
-                client,
                 session,
                 &account,
                 &contract,
@@ -1492,7 +1558,6 @@ async fn sync_native_protection(
         }
         (Some(tp), None) => {
             let order_id = place_native_limit_order(
-                client,
                 session,
                 &account,
                 &contract,
@@ -1506,7 +1571,6 @@ async fn sync_native_protection(
         }
         (None, Some(stop)) => {
             let order_id = place_native_stop_order(
-                client,
                 session,
                 &account,
                 &contract,
@@ -1550,8 +1614,7 @@ async fn sync_native_protection(
 }
 
 async fn place_market_order(
-    client: &Client,
-    session: &SessionState,
+    session: &mut SessionState,
     account: &AccountInfo,
     contract: &ContractSuggestion,
     order_action: &str,
@@ -1560,8 +1623,16 @@ async fn place_market_order(
     automated: bool,
     reason_suffix: Option<&str>,
 ) -> Result<ManualOrderOutcome> {
-    let url = format!("{}/order/placeorder", session.cfg.env.rest_url());
-    let payload = json!({
+    let cl_ord_id = next_strategy_cl_ord_id(session, "entry");
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        started_at: time::Instant::now(),
+        cl_ord_id: cl_ord_id.clone(),
+        order_id: None,
+        seen_recorded: false,
+        exec_report_recorded: false,
+        fill_recorded: false,
+    });
+    let payload = with_cl_ord_id(json!({
         "accountSpec": account.name,
         "accountId": account.id,
         "action": order_action,
@@ -1570,28 +1641,34 @@ async fn place_market_order(
         "orderType": "Market",
         "timeInForce": session.cfg.time_in_force,
         "isAutomated": automated
-    });
+    }), Some(cl_ord_id.as_str()));
 
-    let response = client
-        .post(&url)
-        .bearer_auth(&session.tokens.access_token)
-        .json(&payload)
-        .send()
-        .await?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("placeorder HTTP {status}: {body}");
+    let parsed = match request_order_json(session, "order/placeorder", &payload).await {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            session.order_latency_tracker = None;
+            return Err(err);
+        }
+    };
+    let submit_rtt_ms = session
+        .order_latency_tracker
+        .as_ref()
+        .map(|tracker| tracker.started_at.elapsed().as_millis() as u64);
+    let response_order_id = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id"));
+    if let Some(tracker) = session.order_latency_tracker.as_mut() {
+        if tracker.cl_ord_id == cl_ord_id {
+            tracker.order_id = response_order_id;
+        }
     }
-
-    let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({ "raw": body }));
     if let Some(failure) = parsed.get("failureReason").and_then(Value::as_str) {
         if !failure.trim().is_empty() {
+            session.order_latency_tracker = None;
             bail!("placeorder rejected: {failure}");
         }
     }
     if let Some(err_text) = parsed.get("errorText").and_then(Value::as_str) {
         if !err_text.trim().is_empty() {
+            session.order_latency_tracker = None;
             bail!("placeorder errorText: {err_text}");
         }
     }
@@ -1603,24 +1680,17 @@ async fn place_market_order(
     if let Some(reason) = reason_suffix {
         message.push_str(&format!(" [{reason}]"));
     }
-    if let Some(order_id) = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id")) {
+    if let Some(order_id) = response_order_id {
         message.push_str(&format!(" (order {order_id})"));
     }
-    let marker = session.market.bars.last().map(|bar| TradeMarker {
-        ts_ns: bar.ts_ns,
-        price: bar.close,
-        qty: order_qty,
-        side: match order_action {
-            "Buy" => TradeMarkerSide::Buy,
-            "Sell" => TradeMarkerSide::Sell,
-            _ => unreachable!("unsupported order action"),
-        },
-    });
-    Ok(ManualOrderOutcome { message, marker })
+    message.push_str(&format!(" [clOrdId {cl_ord_id}]"));
+    Ok(ManualOrderOutcome {
+        message,
+        submit_rtt_ms,
+    })
 }
 
 async fn cancel_strategy_protection_for_selected(
-    client: &Client,
     session: &mut SessionState,
 ) -> Result<bool> {
     let order_ctx = resolve_order_context(session)?;
@@ -1630,11 +1700,10 @@ async fn cancel_strategy_protection_for_selected(
         account_id: account.id,
         contract_id: contract.id,
     };
-    cancel_strategy_protection_by_key(client, session, key, &account, &contract).await
+    cancel_strategy_protection_by_key(session, key, &account, &contract).await
 }
 
 async fn cancel_strategy_protection_by_key(
-    client: &Client,
     session: &mut SessionState,
     key: StrategyProtectionKey,
     _account: &AccountInfo,
@@ -1645,14 +1714,20 @@ async fn cancel_strategy_protection_by_key(
         return Ok(false);
     };
 
-    let mut cancelled_any = false;
-    if let Some(order_id) = existing.stop_order_id {
-        cancelled_any |= cancel_order_if_active(client, session, key.account_id, order_id).await?;
+    let session = &*session;
+    match (existing.stop_order_id, existing.take_profit_order_id) {
+        (Some(stop_order_id), Some(take_profit_order_id)) => {
+            let (stop_cancelled, take_profit_cancelled) = tokio::try_join!(
+                cancel_order_if_active(session, key.account_id, stop_order_id),
+                cancel_order_if_active(session, key.account_id, take_profit_order_id),
+            )?;
+            Ok(stop_cancelled || take_profit_cancelled)
+        }
+        (Some(order_id), None) | (None, Some(order_id)) => {
+            cancel_order_if_active(session, key.account_id, order_id).await
+        }
+        (None, None) => Ok(false),
     }
-    if let Some(order_id) = existing.take_profit_order_id {
-        cancelled_any |= cancel_order_if_active(client, session, key.account_id, order_id).await?;
-    }
-    Ok(cancelled_any)
 }
 
 fn refresh_managed_protection_order_ids(session: &mut SessionState, key: StrategyProtectionKey) {
@@ -1683,7 +1758,6 @@ fn next_strategy_cl_ord_id(session: &mut SessionState, suffix: &str) -> String {
 }
 
 async fn place_native_limit_order(
-    client: &Client,
     session: &SessionState,
     account: &AccountInfo,
     contract: &ContractSuggestion,
@@ -1706,12 +1780,11 @@ async fn place_native_limit_order(
         }),
         cl_ord_id,
     );
-    let parsed = post_order_json(client, session, "order/placeorder", &payload).await?;
+    let parsed = request_order_json(session, "order/placeorder", &payload).await?;
     Ok(first_known_order_id(&parsed))
 }
 
 async fn place_native_stop_order(
-    client: &Client,
     session: &SessionState,
     account: &AccountInfo,
     contract: &ContractSuggestion,
@@ -1734,12 +1807,11 @@ async fn place_native_stop_order(
         }),
         cl_ord_id,
     );
-    let parsed = post_order_json(client, session, "order/placeorder", &payload).await?;
+    let parsed = request_order_json(session, "order/placeorder", &payload).await?;
     Ok(first_known_order_id(&parsed))
 }
 
 async fn place_native_oco_orders(
-    client: &Client,
     session: &SessionState,
     account: &AccountInfo,
     contract: &ContractSuggestion,
@@ -1780,7 +1852,7 @@ async fn place_native_oco_orders(
             other.insert("clOrdId".to_string(), Value::String(cl_ord_id.to_string()));
         }
     }
-    let parsed = post_order_json(client, session, "order/placeOCO", &payload).await?;
+    let parsed = request_order_json(session, "order/placeOCO", &payload).await?;
     Ok((
         first_known_order_id(&parsed),
         known_order_id(&parsed, &["otherId", "stopOrderId"]),
@@ -1788,7 +1860,6 @@ async fn place_native_oco_orders(
 }
 
 async fn modify_native_stop_order(
-    client: &Client,
     session: &SessionState,
     order_id: i64,
     order_qty: i32,
@@ -1802,12 +1873,11 @@ async fn modify_native_stop_order(
         "timeInForce": session.cfg.time_in_force,
         "isAutomated": true,
     });
-    let _ = post_order_json(client, session, "order/modifyorder", &payload).await?;
+    let _ = request_order_json(session, "order/modifyorder", &payload).await?;
     Ok(())
 }
 
 async fn cancel_order_if_active(
-    client: &Client,
     session: &SessionState,
     account_id: i64,
     order_id: i64,
@@ -1824,30 +1894,30 @@ async fn cancel_order_if_active(
         "orderId": order_id,
         "isAutomated": true,
     });
-    let _ = post_order_json(client, session, "order/cancelorder", &payload).await?;
+    let _ = request_order_json(session, "order/cancelorder", &payload).await?;
     Ok(true)
 }
 
-async fn post_order_json(
-    client: &Client,
+async fn request_order_json(
     session: &SessionState,
     endpoint: &str,
     payload: &Value,
 ) -> Result<Value> {
-    let url = format!("{}/{}", session.cfg.env.rest_url(), endpoint);
-    let response = client
-        .post(&url)
-        .bearer_auth(&session.tokens.access_token)
-        .json(payload)
-        .send()
-        .await?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("{endpoint} HTTP {status}: {body}");
-    }
+    let request_tx = session.user_request_tx.clone();
+    let (response_tx, response_rx) = oneshot::channel();
+    request_tx
+        .send(UserSocketCommand {
+            endpoint: endpoint.to_string(),
+            query: None,
+            body: Some(payload.clone()),
+            response_tx,
+        })
+        .map_err(|_| anyhow::anyhow!("user websocket request channel is closed"))?;
 
-    let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({ "raw": body }));
+    let parsed = response_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("user websocket response channel was dropped"))?
+        .map_err(anyhow::Error::msg)?;
     if let Some(failure) = parsed.get("failureReason").and_then(Value::as_str) {
         if !failure.trim().is_empty() {
             bail!("{endpoint} rejected: {failure}");
@@ -1859,6 +1929,205 @@ async fn post_order_json(
         }
     }
     Ok(parsed)
+}
+
+fn update_latency_from_envelope(
+    session: &mut SessionState,
+    latency: &mut LatencySnapshot,
+    envelope: &EntityEnvelope,
+) -> bool {
+    if envelope.deleted {
+        return false;
+    }
+    let Some(tracker) = session.order_latency_tracker.as_mut() else {
+        return false;
+    };
+
+    match envelope.entity_type.to_ascii_lowercase().as_str() {
+        "order" => {
+            if !tracker_matches_entity(tracker, &envelope.entity) || tracker.seen_recorded {
+                return false;
+            }
+            tracker.seen_recorded = true;
+            latency.last_order_seen_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            true
+        }
+        "executionreport" => {
+            if !tracker_matches_entity(tracker, &envelope.entity) || tracker.exec_report_recorded {
+                return false;
+            }
+            tracker.exec_report_recorded = true;
+            latency.last_exec_report_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            true
+        }
+        "fill" => {
+            if !tracker_matches_entity(tracker, &envelope.entity) || tracker.fill_recorded {
+                return false;
+            }
+            tracker.fill_recorded = true;
+            latency.last_fill_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn tracker_matches_entity(tracker: &mut OrderLatencyTracker, entity: &Value) -> bool {
+    let entity_cl_ord_id = entity.get("clOrdId").and_then(Value::as_str);
+    let entity_order_id = json_i64(entity, "orderId").or_else(|| json_i64(entity, "id"));
+
+    if let Some(expected_order_id) = tracker.order_id {
+        if entity_order_id == Some(expected_order_id) {
+            return true;
+        }
+    }
+
+    if entity_cl_ord_id.is_some_and(|value| value == tracker.cl_ord_id) {
+        if tracker.order_id.is_none() {
+            tracker.order_id = entity_order_id;
+        }
+        return true;
+    }
+
+    false
+}
+
+fn record_trade_marker(session: &mut SessionState, marker: TradeMarker) -> bool {
+    if let Some(fill_id) = marker.fill_id {
+        if session
+            .market
+            .trade_markers
+            .iter()
+            .any(|existing| existing.fill_id == Some(fill_id))
+        {
+            return false;
+        }
+    }
+
+    session.market.trade_markers.push(marker);
+    if session.market.trade_markers.len() > 200 {
+        let overflow = session.market.trade_markers.len() - 200;
+        session.market.trade_markers.drain(0..overflow);
+    }
+    true
+}
+
+fn trade_marker_from_fill(session: &SessionState, fill: &Value) -> Option<TradeMarker> {
+    let fill_id = extract_entity_id(fill)?;
+    let account_id = extract_account_id("fill", fill)?;
+    let order_id = json_i64(fill, "orderId");
+    let order = order_id.and_then(|order_id| session.user_store.find_order(account_id, order_id));
+    let side = order
+        .and_then(trade_side_from_order)
+        .or_else(|| trade_side_from_fill(fill))?;
+    let price = pick_number(fill, &["price", "fillPrice", "lastPrice", "avgPrice"])?;
+    let qty = pick_number(fill, &["qty", "fillQty", "lastQty", "quantity"])?
+        .abs()
+        .round() as i32;
+    if qty <= 0 {
+        return None;
+    }
+
+    let ts_ns = json_timestamp_ns(fill, &["timestamp", "fillTime", "createdTime"])
+        .or_else(|| session.market.bars.last().map(|bar| bar.ts_ns))?;
+    let contract_id = json_i64(fill, "contractId")
+        .or_else(|| fill.get("contract").and_then(|contract| json_i64(contract, "id")))
+        .or_else(|| order.and_then(order_contract_id));
+    let contract_name = fill
+        .get("symbol")
+        .and_then(Value::as_str)
+        .or_else(|| fill.get("contractSymbol").and_then(Value::as_str))
+        .or_else(|| fill.get("name").and_then(Value::as_str))
+        .or_else(|| order.and_then(order_symbol))
+        .map(ToString::to_string);
+
+    Some(TradeMarker {
+        fill_id: Some(fill_id),
+        account_id: Some(account_id),
+        contract_id,
+        contract_name,
+        ts_ns,
+        price,
+        qty,
+        side,
+    })
+}
+
+fn trade_side_from_order(order: &Value) -> Option<TradeMarkerSide> {
+    order
+        .get("action")
+        .and_then(Value::as_str)
+        .and_then(trade_side_from_text)
+}
+
+fn trade_side_from_fill(fill: &Value) -> Option<TradeMarkerSide> {
+    ["buySell", "side", "action"]
+        .iter()
+        .find_map(|key| fill.get(*key).and_then(Value::as_str))
+        .and_then(trade_side_from_text)
+}
+
+fn trade_side_from_text(value: &str) -> Option<TradeMarkerSide> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "buy" | "bot" | "b" | "long" => Some(TradeMarkerSide::Buy),
+        "sell" | "sld" | "s" | "short" => Some(TradeMarkerSide::Sell),
+        _ => None,
+    }
+}
+
+fn order_contract_id(order: &Value) -> Option<i64> {
+    json_i64(order, "contractId").or_else(|| order.get("contract").and_then(|contract| json_i64(contract, "id")))
+}
+
+fn order_symbol(order: &Value) -> Option<&str> {
+    order
+        .get("symbol")
+        .and_then(Value::as_str)
+        .or_else(|| order.get("contractSymbol").and_then(Value::as_str))
+        .or_else(|| order.get("name").and_then(Value::as_str))
+        .or_else(|| {
+            order
+                .get("contract")
+                .and_then(|contract| contract.get("name"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn json_timestamp_ns(value: &Value, keys: &[&str]) -> Option<i64> {
+    for key in keys {
+        let Some(raw) = value.get(*key) else {
+            continue;
+        };
+        if let Some(timestamp) = raw.as_i64().and_then(normalize_unix_timestamp_ns) {
+            return Some(timestamp);
+        }
+        if let Some(text) = raw.as_str() {
+            if let Some(timestamp) = parse_bar_timestamp_ns(text) {
+                return Some(timestamp);
+            }
+            if let Ok(parsed) = text.parse::<i64>() {
+                if let Some(timestamp) = normalize_unix_timestamp_ns(parsed) {
+                    return Some(timestamp);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn normalize_unix_timestamp_ns(raw: i64) -> Option<i64> {
+    let magnitude = raw.unsigned_abs();
+    if magnitude >= 1_000_000_000_000_000_000 {
+        Some(raw)
+    } else if magnitude >= 1_000_000_000_000_000 {
+        raw.checked_mul(1_000)
+    } else if magnitude >= 1_000_000_000_000 {
+        raw.checked_mul(1_000_000)
+    } else if magnitude >= 1_000_000_000 {
+        raw.checked_mul(1_000_000_000)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1945,6 +2214,7 @@ async fn seed_user_store(
         "cashBalance",
         "position",
         "order",
+        "fill",
     ] {
         let Ok(items) = fetch_entity_list(client, env, token, entity).await else {
             continue;
@@ -1963,9 +2233,12 @@ async fn user_sync_worker(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
+    request_rx: UnboundedReceiver<UserSocketCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) {
-    if let Err(err) = user_sync_worker_inner(cfg, tokens, account_ids, internal_tx.clone()).await {
+    if let Err(err) =
+        user_sync_worker_inner(cfg, tokens, account_ids, request_rx, internal_tx.clone()).await
+    {
         let _ = internal_tx.send(InternalEvent::Error(format!("user sync: {err}")));
     }
 }
@@ -1974,6 +2247,7 @@ async fn user_sync_worker_inner(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
+    mut request_rx: UnboundedReceiver<UserSocketCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.user_ws_url())
@@ -1992,6 +2266,7 @@ async fn user_sync_worker_inner(
 
     let mut sync_id = None;
     let mut authorized = false;
+    let mut pending_requests = HashMap::<u64, oneshot::Sender<Result<Value, String>>>::new();
     let mut heartbeat = time::interval(Duration::from_millis(cfg.heartbeat_ms.max(250)));
     heartbeat.tick().await;
 
@@ -1999,6 +2274,35 @@ async fn user_sync_worker_inner(
         tokio::select! {
             _ = heartbeat.tick(), if authorized => {
                 let _ = write.send(Message::Text("[]".to_string())).await;
+            }
+            outbound = request_rx.recv() => {
+                let Some(outbound) = outbound else {
+                    break;
+                };
+                if !authorized {
+                    let _ = outbound
+                        .response_tx
+                        .send(Err("user websocket is not authorized".to_string()));
+                    continue;
+                }
+
+                message_id += 1;
+                let request_id = message_id;
+                pending_requests.insert(request_id, outbound.response_tx);
+                let frame = create_message(
+                    &outbound.endpoint,
+                    request_id,
+                    outbound.query.as_deref(),
+                    outbound.body.as_ref(),
+                );
+                if let Err(err) = write.send(Message::Text(frame)).await {
+                    if let Some(response_tx) = pending_requests.remove(&request_id) {
+                        let _ = response_tx.send(Err(format!(
+                            "user websocket send error: {err}"
+                        )));
+                    }
+                    bail!("user websocket send error: {err}");
+                }
             }
             next = read.next() => {
                 let raw = match next {
@@ -2046,6 +2350,7 @@ async fn user_sync_worker_inner(
                             .send(Message::Text(create_message(
                                 "user/syncrequest",
                                 message_id,
+                                None,
                                 Some(&body),
                             )))
                             .await?;
@@ -2059,6 +2364,13 @@ async fn user_sync_worker_inner(
                             let _ = internal_tx.send(InternalEvent::UserEntities(envelopes));
                         }
                         continue;
+                    }
+
+                    if let Some(request_id) = response_id {
+                        if let Some(response_tx) = pending_requests.remove(&request_id) {
+                            let _ = response_tx.send(parse_socket_response(&item));
+                            continue;
+                        }
                     }
 
                     let envelopes = extract_entity_envelopes(&item);
@@ -2171,6 +2483,7 @@ async fn market_data_worker_inner(
                             .send(Message::Text(create_message(
                                 "md/getChart",
                                 message_id,
+                                None,
                                 Some(&body),
                             )))
                             .await?;
@@ -2313,6 +2626,17 @@ impl UserSyncStore {
                     bucket.insert(entity_id, envelope.entity);
                 }
             }
+            "fill" => {
+                let Some(account_id) = extract_account_id("fill", &envelope.entity) else {
+                    return;
+                };
+                let bucket = self.fills.entry(account_id).or_default();
+                if envelope.deleted {
+                    bucket.remove(&entity_id);
+                } else {
+                    bucket.insert(entity_id, envelope.entity);
+                }
+            }
             _ => {}
         }
     }
@@ -2321,6 +2645,7 @@ impl UserSyncStore {
         &self,
         accounts: &[AccountInfo],
         market: Option<&MarketSnapshot>,
+        managed_protection: &BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     ) -> Vec<AccountSnapshot> {
         accounts
             .iter()
@@ -2380,6 +2705,63 @@ impl UserSyncStore {
                         ],
                     )
                 });
+                let realized_pnl = raw_risk
+                    .as_ref()
+                    .and_then(|value| {
+                        pick_number(
+                            value,
+                            &[
+                                "realizedPnL",
+                                "realizedPnl",
+                                "realizedProfitAndLoss",
+                                "realizedProfitLoss",
+                                "sessionRealizedPnL",
+                                "sessionRealizedPnl",
+                                "todayRealizedPnL",
+                                "todayRealizedPnl",
+                                "closedPnL",
+                                "closedPnl",
+                                "dayPnL",
+                                "dayPnl",
+                                "dailyPnL",
+                                "dailyPnl",
+                            ],
+                        )
+                    })
+                    .or_else(|| {
+                        raw_account.as_ref().and_then(|value| {
+                            pick_number(
+                                value,
+                                &[
+                                    "realizedPnL",
+                                    "realizedPnl",
+                                    "realizedProfitAndLoss",
+                                    "realizedProfitLoss",
+                                    "sessionRealizedPnL",
+                                    "sessionRealizedPnl",
+                                    "todayRealizedPnL",
+                                    "todayRealizedPnl",
+                                    "closedPnL",
+                                    "closedPnl",
+                                ],
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        raw_cash.as_ref().and_then(|value| {
+                            pick_number(
+                                value,
+                                &[
+                                    "realizedPnL",
+                                    "realizedPnl",
+                                    "sessionRealizedPnL",
+                                    "sessionRealizedPnl",
+                                    "todayRealizedPnL",
+                                    "todayRealizedPnl",
+                                ],
+                            )
+                        })
+                    });
                 let intraday_margin = raw_risk
                     .as_ref()
                     .and_then(|value| {
@@ -2457,6 +2839,16 @@ impl UserSyncStore {
                 });
                 let market_entry_price =
                     market.and_then(|market| weighted_market_entry_price(&raw_positions, market));
+                let (selected_contract_take_profit_price, selected_contract_stop_price) = market
+                    .and_then(|market| {
+                        market.contract_id.map(|contract_id| StrategyProtectionKey {
+                            account_id: account.id,
+                            contract_id,
+                        })
+                    })
+                    .and_then(|key| managed_protection.get(&key))
+                    .map(|orders| (orders.take_profit_price, orders.stop_price))
+                    .unwrap_or((None, None));
 
                 AccountSnapshot {
                     account_id: account.id,
@@ -2464,11 +2856,14 @@ impl UserSyncStore {
                     balance,
                     cash_balance,
                     net_liq,
+                    realized_pnl,
                     unrealized_pnl,
                     intraday_margin,
                     open_position_qty,
                     market_position_qty,
                     market_entry_price,
+                    selected_contract_take_profit_price,
+                    selected_contract_stop_price,
                     raw_account,
                     raw_risk,
                     raw_cash,
@@ -2476,6 +2871,10 @@ impl UserSyncStore {
                 }
             })
             .collect()
+    }
+
+    fn find_order(&self, account_id: i64, order_id: i64) -> Option<&Value> {
+        self.orders.get(&account_id)?.get(&order_id)
     }
 
     fn contract_position_qty(&self, account_id: i64, contract: &ContractSuggestion) -> Option<f64> {
@@ -2706,6 +3105,8 @@ fn extract_response_entities(payload: &Value) -> Vec<EntityEnvelope> {
         "cashBalance",
         "position",
         "order",
+        "executionReport",
+        "fill",
     ] {
         if let Some(entity) = obj.get(key) {
             if entity.is_object() {
@@ -2753,11 +3154,26 @@ fn parse_frame(raw: &str) -> (char, Option<Value>) {
     (frame_type, value)
 }
 
-fn create_message(endpoint: &str, id: u64, body: Option<&Value>) -> String {
-    if let Some(body) = body {
-        format!("{endpoint}\n{id}\n\n{}", body)
+fn create_message(endpoint: &str, id: u64, query: Option<&str>, body: Option<&Value>) -> String {
+    match (query, body) {
+        (Some(query), Some(body)) => format!("{endpoint}\n{id}\n{query}\n{body}"),
+        (Some(query), None) => format!("{endpoint}\n{id}\n{query}"),
+        (None, Some(body)) => format!("{endpoint}\n{id}\n\n{body}"),
+        (None, None) => format!("{endpoint}\n{id}\n\n"),
+    }
+}
+
+fn parse_socket_response(message: &Value) -> Result<Value, String> {
+    let Some(status) = parse_status_code(message) else {
+        return Err("websocket response missing status code".to_string());
+    };
+    let payload = message.get("d").cloned().unwrap_or(Value::Null);
+    if (200..300).contains(&status) {
+        Ok(payload)
+    } else if let Some(text) = payload.as_str() {
+        Err(format!("websocket request failed ({status}): {text}"))
     } else {
-        format!("{endpoint}\n{id}\n\n")
+        Err(format!("websocket request failed ({status}): {payload}"))
     }
 }
 
@@ -3000,6 +3416,288 @@ mod tests {
 
         let now = DateTime::<Utc>::from_timestamp(1_773_436_044 - 60, 0).unwrap();
         assert!(token_refresh_due(&tokens, now));
+    }
+
+    #[test]
+    fn create_message_formats_body_only_requests_for_websocket() {
+        let body = json!({
+            "accountId": 42,
+            "orderQty": 1
+        });
+
+        let actual = create_message("order/placeorder", 7, None, Some(&body));
+
+        assert_eq!(
+            actual,
+            "order/placeorder\n7\n\n{\"accountId\":42,\"orderQty\":1}"
+        );
+    }
+
+    #[test]
+    fn parse_socket_response_maps_status_and_payload() {
+        let ok = json!({
+            "i": 3,
+            "s": 200,
+            "d": { "orderId": 99 }
+        });
+        let err = json!({
+            "i": 4,
+            "s": 400,
+            "d": "bad request"
+        });
+
+        assert_eq!(
+            parse_socket_response(&ok).expect("success payload"),
+            json!({ "orderId": 99 })
+        );
+        assert_eq!(
+            parse_socket_response(&err).expect_err("error payload"),
+            "websocket request failed (400): bad request"
+        );
+    }
+
+    #[test]
+    fn tracker_matches_entity_binds_order_id_from_cl_ord_id() {
+        let mut tracker = OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            cl_ord_id: "midas-1-entry".to_string(),
+            order_id: None,
+            seen_recorded: false,
+            exec_report_recorded: false,
+            fill_recorded: false,
+        };
+        let entity = json!({
+            "orderId": 42,
+            "clOrdId": "midas-1-entry"
+        });
+
+        assert!(tracker_matches_entity(&mut tracker, &entity));
+        assert_eq!(tracker.order_id, Some(42));
+    }
+
+    #[test]
+    fn update_latency_from_envelope_records_seen_ack_and_fill() {
+        let (user_request_tx, _user_request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut session = SessionState {
+            cfg: AppConfig::default(),
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            accounts: Vec::new(),
+            user_request_tx,
+            order_latency_tracker: Some(OrderLatencyTracker {
+                started_at: time::Instant::now(),
+                cl_ord_id: "midas-1-entry".to_string(),
+                order_id: Some(42),
+                seen_recorded: false,
+                exec_report_recorded: false,
+                fill_recorded: false,
+            }),
+            user_store: UserSyncStore::default(),
+            selected_account_id: None,
+            selected_contract: None,
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            next_strategy_order_nonce: 1,
+        };
+        let mut latency = LatencySnapshot::default();
+
+        let order = EntityEnvelope {
+            entity_type: "order".to_string(),
+            deleted: false,
+            entity: json!({ "orderId": 42 }),
+        };
+        let exec_report = EntityEnvelope {
+            entity_type: "executionReport".to_string(),
+            deleted: false,
+            entity: json!({ "orderId": 42, "execType": "New" }),
+        };
+        let fill = EntityEnvelope {
+            entity_type: "fill".to_string(),
+            deleted: false,
+            entity: json!({ "orderId": 42, "price": 5000.25, "qty": 1 }),
+        };
+
+        assert!(update_latency_from_envelope(&mut session, &mut latency, &order));
+        assert!(update_latency_from_envelope(
+            &mut session,
+            &mut latency,
+            &exec_report
+        ));
+        assert!(update_latency_from_envelope(&mut session, &mut latency, &fill));
+        assert!(latency.last_order_seen_ms.is_some());
+        assert!(latency.last_exec_report_ms.is_some());
+        assert!(latency.last_fill_ms.is_some());
+    }
+
+    #[test]
+    fn trade_marker_from_fill_uses_order_action_for_side_and_contract() {
+        let (user_request_tx, _user_request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut user_store = UserSyncStore::default();
+        user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                77,
+                json!({
+                    "id": 77,
+                    "accountId": 42,
+                    "action": "Sell",
+                    "contractId": 3570918,
+                    "symbol": "ESH6"
+                }),
+            )]),
+        );
+        let session = SessionState {
+            cfg: AppConfig::default(),
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            accounts: Vec::new(),
+            user_request_tx,
+            order_latency_tracker: None,
+            user_store,
+            selected_account_id: Some(42),
+            selected_contract: None,
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            next_strategy_order_nonce: 1,
+        };
+        let fill = json!({
+            "id": 501,
+            "accountId": 42,
+            "orderId": 77,
+            "price": 5000.25,
+            "qty": 1,
+            "timestamp": "2026-03-15T13:45:00Z"
+        });
+
+        let marker = trade_marker_from_fill(&session, &fill).expect("fill marker should resolve");
+
+        assert_eq!(marker.fill_id, Some(501));
+        assert_eq!(marker.account_id, Some(42));
+        assert_eq!(marker.contract_id, Some(3570918));
+        assert_eq!(marker.contract_name.as_deref(), Some("ESH6"));
+        assert_eq!(marker.side, TradeMarkerSide::Sell);
+        assert_eq!(marker.price, 5000.25);
+        assert_eq!(marker.qty, 1);
+    }
+
+    #[test]
+    fn record_trade_marker_deduplicates_fill_ids() {
+        let (user_request_tx, _user_request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut session = SessionState {
+            cfg: AppConfig::default(),
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            accounts: Vec::new(),
+            user_request_tx,
+            order_latency_tracker: None,
+            user_store: UserSyncStore::default(),
+            selected_account_id: Some(42),
+            selected_contract: None,
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            next_strategy_order_nonce: 1,
+        };
+        let marker = TradeMarker {
+            fill_id: Some(501),
+            account_id: Some(42),
+            contract_id: Some(3570918),
+            contract_name: Some("ESH6".to_string()),
+            ts_ns: 1,
+            price: 5000.25,
+            qty: 1,
+            side: TradeMarkerSide::Buy,
+        };
+
+        assert!(record_trade_marker(&mut session, marker.clone()));
+        assert!(!record_trade_marker(&mut session, marker));
+        assert_eq!(session.market.trade_markers.len(), 1);
+    }
+
+    #[test]
+    fn build_snapshots_include_realized_pnl_and_protection_prices() {
+        let mut store = UserSyncStore::default();
+        store.risk.insert(
+            42,
+            json!({
+                "accountId": 42,
+                "balance": 10000.0,
+                "realizedPnL": 125.5
+            }),
+        );
+        store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1,
+                    "netPrice": 5000.0
+                }),
+            )]),
+        );
+        let market = MarketSnapshot {
+            contract_id: Some(3570918),
+            contract_name: Some("ESH6".to_string()),
+            bars: vec![Bar {
+                ts_ns: 0,
+                open: 4999.0,
+                high: 5002.0,
+                low: 4998.0,
+                close: 5001.0,
+            }],
+            trade_markers: Vec::new(),
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 1,
+            live_bars: 0,
+            status: String::new(),
+        };
+        let managed_protection = BTreeMap::from([(
+            StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            ManagedProtectionOrders {
+                signed_qty: 1,
+                take_profit_price: Some(5004.0),
+                stop_price: Some(4998.0),
+                take_profit_cl_ord_id: None,
+                stop_cl_ord_id: None,
+                take_profit_order_id: None,
+                stop_order_id: None,
+            },
+        )]);
+        let accounts = vec![AccountInfo {
+            id: 42,
+            name: "sim".to_string(),
+            raw: json!({ "id": 42, "name": "sim" }),
+        }];
+
+        let snapshots = store.build_snapshots(&accounts, Some(&market), &managed_protection);
+        let snapshot = snapshots.first().expect("snapshot should exist");
+
+        assert_eq!(snapshot.realized_pnl, Some(125.5));
+        assert_eq!(snapshot.market_entry_price, Some(5000.0));
+        assert_eq!(snapshot.selected_contract_take_profit_price, Some(5004.0));
+        assert_eq!(snapshot.selected_contract_stop_price, Some(4998.0));
     }
 
     #[test]
