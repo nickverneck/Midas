@@ -24,6 +24,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceCommand {
@@ -1038,7 +1039,7 @@ pub async fn service_loop(
 ) {
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = ServiceState {
-        client: Client::new(),
+        client: Client::builder().tcp_nodelay(true).build().unwrap(),
         session: None,
         user_task: None,
         market_task: None,
@@ -2917,9 +2918,18 @@ async fn user_sync_worker_inner(
     mut request_rx: UnboundedReceiver<UserSocketCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.user_ws_url())
-        .await
-        .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
+    let ws_config = WebSocketConfig {
+        write_buffer_size: 4096,
+        max_write_buffer_size: 4096,
+        ..Default::default()
+    };
+    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
+        cfg.env.user_ws_url(),
+        Some(ws_config),
+        true, // disable Nagle (TCP_NODELAY)
+    )
+    .await
+    .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
     let (mut write, mut read) = ws_stream.split();
 
     let mut message_id = 1_u64;
@@ -3088,9 +3098,18 @@ async fn market_data_worker_inner(
     market_specs: Option<MarketSpecs>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.market_ws_url())
-        .await
-        .with_context(|| format!("connect {}", cfg.env.market_ws_url()))?;
+    let ws_config = WebSocketConfig {
+        write_buffer_size: 4096,
+        max_write_buffer_size: 4096,
+        ..Default::default()
+    };
+    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
+        cfg.env.market_ws_url(),
+        Some(ws_config),
+        true, // disable Nagle (TCP_NODELAY)
+    )
+    .await
+    .with_context(|| format!("connect {}", cfg.env.market_ws_url()))?;
     let (mut write, mut read) = ws_stream.split();
 
     let mut message_id = 1_u64;
