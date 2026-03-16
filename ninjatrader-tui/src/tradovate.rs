@@ -240,15 +240,18 @@ struct ServiceState {
     client: Client,
     session: Option<SessionState>,
     user_task: Option<JoinHandle<()>>,
+    exec_task: Option<JoinHandle<()>>,
     market_task: Option<JoinHandle<()>>,
+    rest_probe_task: Option<JoinHandle<()>>,
     latency: LatencySnapshot,
+    snapshot_revision: u64,
 }
 
 struct SessionState {
     cfg: AppConfig,
     tokens: TokenBundle,
     accounts: Vec<AccountInfo>,
-    user_request_tx: UnboundedSender<UserSocketCommand>,
+    exec_request_tx: UnboundedSender<UserSocketCommand>,
     order_latency_tracker: Option<OrderLatencyTracker>,
     user_store: UserSyncStore,
     selected_account_id: Option<i64>,
@@ -258,7 +261,7 @@ struct SessionState {
     next_strategy_order_nonce: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct UserSyncStore {
     accounts: BTreeMap<i64, Value>,
     risk: BTreeMap<i64, Value>,
@@ -390,6 +393,11 @@ fn minutes_until(start: DateTime<chrono_tz::Tz>, end: DateTime<chrono_tz::Tz>) -
 
 enum InternalEvent {
     UserEntities(Vec<EntityEnvelope>),
+    SnapshotsBuilt {
+        revision: u64,
+        snapshots: Vec<AccountSnapshot>,
+    },
+    RestLatencyMeasured(u64),
     UserSocketStatus(String),
     Market(MarketSnapshot),
     Error(String),
@@ -458,16 +466,56 @@ fn spawn_user_sync_task(
     tokens: TokenBundle,
     account_ids: Vec<i64>,
     internal_tx: UnboundedSender<InternalEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(user_sync_worker(cfg, tokens, account_ids, internal_tx))
+}
+
+fn spawn_execution_socket_task(
+    cfg: AppConfig,
+    tokens: TokenBundle,
+    internal_tx: UnboundedSender<InternalEvent>,
 ) -> (UnboundedSender<UserSocketCommand>, JoinHandle<()>) {
     let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(user_sync_worker(
-        cfg,
-        tokens,
-        account_ids,
-        request_rx,
-        internal_tx,
-    ));
+    let task = tokio::spawn(execution_socket_worker(cfg, tokens, request_rx, internal_tx));
     (request_tx, task)
+}
+
+fn spawn_rest_probe_task(
+    client: Client,
+    cfg: AppConfig,
+    access_token: String,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(5));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Ok(rest_rtt_ms) = measure_rest_rtt_ms(&client, &cfg.env, &access_token).await {
+                let _ = internal_tx.send(InternalEvent::RestLatencyMeasured(rest_rtt_ms));
+            }
+        }
+    })
+}
+
+fn request_snapshot_refresh(state: &mut ServiceState, internal_tx: &UnboundedSender<InternalEvent>) {
+    let Some(session) = state.session.as_ref() else {
+        return;
+    };
+    state.snapshot_revision = state.snapshot_revision.saturating_add(1);
+    let revision = state.snapshot_revision;
+    let accounts = session.accounts.clone();
+    let market = session.market.clone();
+    let managed_protection = session.managed_protection.clone();
+    let user_store = session.user_store.clone();
+    let internal_tx = internal_tx.clone();
+    tokio::spawn(async move {
+        let snapshots = user_store.build_snapshots(&accounts, Some(&market), &managed_protection);
+        let _ = internal_tx.send(InternalEvent::SnapshotsBuilt {
+            revision,
+            snapshots,
+        });
+    });
 }
 
 pub async fn service_loop(
@@ -479,19 +527,20 @@ pub async fn service_loop(
         client: Client::new(),
         session: None,
         user_task: None,
+        exec_task: None,
         market_task: None,
+        rest_probe_task: None,
         latency: LatencySnapshot::default(),
+        snapshot_revision: 0,
     };
-    let mut latency_tick = time::interval(Duration::from_secs(5));
-    latency_tick.tick().await;
     let mut maintenance_tick =
         time::interval(Duration::from_secs(SESSION_MAINTENANCE_INTERVAL_SECS));
     maintenance_tick.tick().await;
 
     while let Some(next) = tokio::select! {
+        biased;
         cmd = cmd_rx.recv() => cmd.map(Either::Command),
         internal = internal_rx.recv() => internal.map(Either::Internal),
-        _ = latency_tick.tick() => Some(Either::LatencyTick),
         _ = maintenance_tick.tick() => Some(Either::MaintenanceTick),
     } {
         match next {
@@ -503,22 +552,10 @@ pub async fn service_loop(
                 }
             }
             Either::Internal(internal) => {
-                if let Err(err) = handle_internal(internal, &mut state, &event_tx).await {
+                if let Err(err) =
+                    handle_internal(internal, &mut state, &event_tx, internal_tx.clone()).await
+                {
                     let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
-                }
-            }
-            Either::LatencyTick => {
-                if let Some(session) = state.session.as_ref() {
-                    if let Ok(rest_rtt_ms) = measure_rest_rtt_ms(
-                        &state.client,
-                        &session.cfg.env,
-                        &session.tokens.access_token,
-                    )
-                    .await
-                    {
-                        state.latency.rest_rtt_ms = Some(rest_rtt_ms);
-                        let _ = event_tx.send(ServiceEvent::Latency(state.latency));
-                    }
                 }
             }
             Either::MaintenanceTick => {
@@ -536,7 +573,6 @@ pub async fn service_loop(
 enum Either {
     Command(ServiceCommand),
     Internal(InternalEvent),
-    LatencyTick,
     MaintenanceTick,
 }
 
@@ -587,19 +623,32 @@ async fn handle_command(
                 .collect::<Vec<_>>();
             let user_cfg = cfg.clone();
             let user_tokens = tokens.clone();
-            let (user_request_tx, user_task) = spawn_user_sync_task(
+            let user_task = spawn_user_sync_task(
                 user_cfg,
                 user_tokens,
                 account_ids,
                 internal_tx.clone(),
             );
+            let (exec_request_tx, exec_task) = spawn_execution_socket_task(
+                cfg.clone(),
+                tokens.clone(),
+                internal_tx.clone(),
+            );
+            let rest_probe_task = spawn_rest_probe_task(
+                state.client.clone(),
+                cfg.clone(),
+                tokens.access_token.clone(),
+                internal_tx.clone(),
+            );
             state.user_task = Some(user_task);
+            state.exec_task = Some(exec_task);
+            state.rest_probe_task = Some(rest_probe_task);
 
             state.session = Some(SessionState {
                 cfg,
                 tokens,
                 accounts,
-                user_request_tx,
+                exec_request_tx,
                 order_latency_tracker: None,
                 user_store,
                 selected_account_id,
@@ -614,14 +663,7 @@ async fn handle_command(
                 bail!("not connected");
             };
             session.selected_account_id = Some(account_id);
-            let snapshots = session
-                .user_store
-                .build_snapshots(
-                    &session.accounts,
-                    Some(&session.market),
-                    &session.managed_protection,
-                );
-            let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+            request_snapshot_refresh(state, &internal_tx);
         }
         ServiceCommand::SearchContracts { query, limit } => {
             let Some(session) = state.session.as_ref() else {
@@ -710,12 +752,7 @@ async fn handle_command(
                 sync_native_protection(session, signed_qty, take_profit_price, stop_price, &reason)
                     .await?
             {
-                let snapshots = session.user_store.build_snapshots(
-                    &session.accounts,
-                    Some(&session.market),
-                    &session.managed_protection,
-                );
-                let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+                request_snapshot_refresh(state, &internal_tx);
                 let _ = event_tx.send(ServiceEvent::Status(message));
                 let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             }
@@ -728,6 +765,7 @@ async fn handle_internal(
     internal: InternalEvent,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
+    internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     match internal {
         InternalEvent::UserEntities(entities) => {
@@ -748,22 +786,27 @@ async fn handle_internal(
                     trade_markers_changed |= record_trade_marker(session, marker);
                 }
             }
-            let snapshots = session
-                .user_store
-                .build_snapshots(
-                    &session.accounts,
-                    Some(&session.market),
-                    &session.managed_protection,
-                );
-            let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
             if trade_markers_changed {
                 let _ = event_tx.send(ServiceEvent::TradeMarkersUpdated(
                     session.market.trade_markers.clone(),
                 ));
             }
+            request_snapshot_refresh(state, &internal_tx);
             if latency_changed {
                 let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             }
+        }
+        InternalEvent::SnapshotsBuilt {
+            revision,
+            snapshots,
+        } => {
+            if revision == state.snapshot_revision && state.session.is_some() {
+                let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+            }
+        }
+        InternalEvent::RestLatencyMeasured(rest_rtt_ms) => {
+            state.latency.rest_rtt_ms = Some(rest_rtt_ms);
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         InternalEvent::UserSocketStatus(message) => {
             let _ = event_tx.send(ServiceEvent::Status(message));
@@ -773,14 +816,7 @@ async fn handle_internal(
                 let mut snapshot = snapshot;
                 snapshot.trade_markers = session.market.trade_markers.clone();
                 session.market = snapshot.clone();
-                let snapshots = session
-                    .user_store
-                    .build_snapshots(
-                        &session.accounts,
-                        Some(&session.market),
-                        &session.managed_protection,
-                    );
-                let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+                request_snapshot_refresh(state, &internal_tx);
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
                 return Ok(());
             }
@@ -819,6 +855,18 @@ async fn maintain_session(
                 session.tokens = next_tokens;
                 save_token_cache(&session.cfg.session_cache_path, &session.tokens)?;
                 refresh_session_state(&state.client, session, event_tx).await?;
+                if let Some(task) = state.user_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = state.exec_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = state.market_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = state.rest_probe_task.take() {
+                    task.abort();
+                }
                 forced_restart = true;
                 status_message = Some(match action {
                     TokenMaintenanceAction::RefreshCredentials => {
@@ -843,6 +891,11 @@ async fn maintain_session(
             "User sync stream restarted.".to_string(),
         ));
     }
+    if restart.exec_restarted && !forced_restart {
+        let _ = event_tx.send(ServiceEvent::Status(
+            "Execution websocket restarted.".to_string(),
+        ));
+    }
     if restart.market_restarted && !forced_restart {
         let contract_name = state
             .session
@@ -853,6 +906,11 @@ async fn maintain_session(
         let _ = event_tx.send(ServiceEvent::Status(format!(
             "Market data stream restarted for {contract_name}."
         )));
+    }
+    if restart.rest_probe_restarted && !forced_restart {
+        let _ = event_tx.send(ServiceEvent::Status(
+            "REST latency probe restarted.".to_string(),
+        ));
     }
 
     Ok(())
@@ -995,7 +1053,9 @@ fn token_bundle_changed(current: &TokenBundle, next: &TokenBundle) -> bool {
 #[derive(Debug, Clone, Copy, Default)]
 struct TaskRestartState {
     user_restarted: bool,
+    exec_restarted: bool,
     market_restarted: bool,
+    rest_probe_restarted: bool,
 }
 
 async fn ensure_background_tasks(
@@ -1010,11 +1070,19 @@ async fn ensure_background_tasks(
         .user_task
         .as_ref()
         .is_none_or(tokio::task::JoinHandle::is_finished);
+    let exec_needed = state
+        .exec_task
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished);
     let market_needed = session.selected_contract.is_some()
         && state
             .market_task
             .as_ref()
             .is_none_or(tokio::task::JoinHandle::is_finished);
+    let rest_probe_needed = state
+        .rest_probe_task
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished);
 
     let user_spawn = if user_needed {
         Some((
@@ -1026,6 +1094,11 @@ async fn ensure_background_tasks(
                 .map(|account| account.id)
                 .collect::<Vec<_>>(),
         ))
+    } else {
+        None
+    };
+    let exec_spawn = if exec_needed {
+        Some((session.cfg.clone(), session.tokens.clone()))
     } else {
         None
     };
@@ -1041,22 +1114,36 @@ async fn ensure_background_tasks(
     } else {
         None
     };
+    let rest_probe_spawn = if rest_probe_needed {
+        Some((
+            state.client.clone(),
+            session.cfg.clone(),
+            session.tokens.access_token.clone(),
+        ))
+    } else {
+        None
+    };
 
     if user_needed {
         if let Some(task) = state.user_task.take() {
             task.abort();
         }
         if let Some((cfg, tokens, account_ids)) = user_spawn {
-            let (user_request_tx, user_task) = spawn_user_sync_task(
-                cfg,
-                tokens,
-                account_ids,
-                internal_tx.clone(),
-            );
+            state.user_task = Some(spawn_user_sync_task(cfg, tokens, account_ids, internal_tx.clone()));
+        }
+    }
+
+    if exec_needed {
+        if let Some(task) = state.exec_task.take() {
+            task.abort();
+        }
+        if let Some((cfg, tokens)) = exec_spawn {
+            let (exec_request_tx, exec_task) =
+                spawn_execution_socket_task(cfg, tokens, internal_tx.clone());
             if let Some(session) = state.session.as_mut() {
-                session.user_request_tx = user_request_tx;
+                session.exec_request_tx = exec_request_tx;
             }
-            state.user_task = Some(user_task);
+            state.exec_task = Some(exec_task);
         }
     }
 
@@ -1074,14 +1161,30 @@ async fn ensure_background_tasks(
                 md_access_token,
                 contract,
                 market_specs,
-                internal_tx,
+                internal_tx.clone(),
             )));
+        }
+    }
+
+    if rest_probe_needed {
+        if let Some(task) = state.rest_probe_task.take() {
+            task.abort();
+        }
+        if let Some((client, cfg, access_token)) = rest_probe_spawn {
+            state.rest_probe_task = Some(spawn_rest_probe_task(
+                client,
+                cfg,
+                access_token,
+                internal_tx.clone(),
+            ));
         }
     }
 
     Ok(TaskRestartState {
         user_restarted: user_needed,
+        exec_restarted: exec_needed,
         market_restarted: market_needed,
+        rest_probe_restarted: rest_probe_needed,
     })
 }
 
@@ -1095,7 +1198,13 @@ fn shutdown_tasks(state: &mut ServiceState) {
     if let Some(task) = state.user_task.take() {
         task.abort();
     }
+    if let Some(task) = state.exec_task.take() {
+        task.abort();
+    }
     if let Some(task) = state.market_task.take() {
+        task.abort();
+    }
+    if let Some(task) = state.rest_probe_task.take() {
         task.abort();
     }
 }
@@ -1903,7 +2012,7 @@ async fn request_order_json(
     endpoint: &str,
     payload: &Value,
 ) -> Result<Value> {
-    let request_tx = session.user_request_tx.clone();
+    let request_tx = session.exec_request_tx.clone();
     let (response_tx, response_rx) = oneshot::channel();
     request_tx
         .send(UserSocketCommand {
@@ -2233,12 +2342,9 @@ async fn user_sync_worker(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
-    request_rx: UnboundedReceiver<UserSocketCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) {
-    if let Err(err) =
-        user_sync_worker_inner(cfg, tokens, account_ids, request_rx, internal_tx.clone()).await
-    {
+    if let Err(err) = user_sync_worker_inner(cfg, tokens, account_ids, internal_tx.clone()).await {
         let _ = internal_tx.send(InternalEvent::Error(format!("user sync: {err}")));
     }
 }
@@ -2247,7 +2353,6 @@ async fn user_sync_worker_inner(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
-    mut request_rx: UnboundedReceiver<UserSocketCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.user_ws_url())
@@ -2266,7 +2371,6 @@ async fn user_sync_worker_inner(
 
     let mut sync_id = None;
     let mut authorized = false;
-    let mut pending_requests = HashMap::<u64, oneshot::Sender<Result<Value, String>>>::new();
     let mut heartbeat = time::interval(Duration::from_millis(cfg.heartbeat_ms.max(250)));
     heartbeat.tick().await;
 
@@ -2274,35 +2378,6 @@ async fn user_sync_worker_inner(
         tokio::select! {
             _ = heartbeat.tick(), if authorized => {
                 let _ = write.send(Message::Text("[]".to_string())).await;
-            }
-            outbound = request_rx.recv() => {
-                let Some(outbound) = outbound else {
-                    break;
-                };
-                if !authorized {
-                    let _ = outbound
-                        .response_tx
-                        .send(Err("user websocket is not authorized".to_string()));
-                    continue;
-                }
-
-                message_id += 1;
-                let request_id = message_id;
-                pending_requests.insert(request_id, outbound.response_tx);
-                let frame = create_message(
-                    &outbound.endpoint,
-                    request_id,
-                    outbound.query.as_deref(),
-                    outbound.body.as_ref(),
-                );
-                if let Err(err) = write.send(Message::Text(frame)).await {
-                    if let Some(response_tx) = pending_requests.remove(&request_id) {
-                        let _ = response_tx.send(Err(format!(
-                            "user websocket send error: {err}"
-                        )));
-                    }
-                    bail!("user websocket send error: {err}");
-                }
             }
             next = read.next() => {
                 let raw = match next {
@@ -2329,7 +2404,14 @@ async fn user_sync_worker_inner(
                     let status = parse_status_code(&item);
                     let response_id = item.get("i").and_then(Value::as_u64);
 
-                    if !authorized && status == Some(200) && response_id == Some(authorize_id) {
+                    if !authorized && response_id == Some(authorize_id) {
+                        let Some(status) = status else {
+                            continue;
+                        };
+                        if status != 200 {
+                            bail!("user websocket authorize failed ({status})");
+                        }
+
                         authorized = true;
                         message_id += 1;
                         sync_id = Some(message_id);
@@ -2366,16 +2448,140 @@ async fn user_sync_worker_inner(
                         continue;
                     }
 
-                    if let Some(request_id) = response_id {
-                        if let Some(response_tx) = pending_requests.remove(&request_id) {
-                            let _ = response_tx.send(parse_socket_response(&item));
-                            continue;
-                        }
-                    }
-
                     let envelopes = extract_entity_envelopes(&item);
                     if !envelopes.is_empty() {
                         let _ = internal_tx.send(InternalEvent::UserEntities(envelopes));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn execution_socket_worker(
+    cfg: AppConfig,
+    tokens: TokenBundle,
+    request_rx: UnboundedReceiver<UserSocketCommand>,
+    internal_tx: UnboundedSender<InternalEvent>,
+) {
+    if let Err(err) =
+        execution_socket_worker_inner(cfg, tokens, request_rx, internal_tx.clone()).await
+    {
+        let _ = internal_tx.send(InternalEvent::Error(format!("execution websocket: {err}")));
+    }
+}
+
+async fn execution_socket_worker_inner(
+    cfg: AppConfig,
+    tokens: TokenBundle,
+    mut request_rx: UnboundedReceiver<UserSocketCommand>,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> Result<()> {
+    let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.user_ws_url())
+        .await
+        .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
+    let (mut write, mut read) = ws_stream.split();
+
+    let mut message_id = 1_u64;
+    let authorize_id = message_id;
+    write
+        .send(Message::Text(format!(
+            "authorize\n{}\n\n{}",
+            authorize_id, tokens.access_token
+        )))
+        .await?;
+
+    let mut authorized = false;
+    let mut pending_requests = HashMap::<u64, oneshot::Sender<Result<Value, String>>>::new();
+    let mut heartbeat = time::interval(Duration::from_millis(cfg.heartbeat_ms.max(250)));
+    heartbeat.tick().await;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            outbound = request_rx.recv() => {
+                let Some(outbound) = outbound else {
+                    break;
+                };
+                if !authorized {
+                    let _ = outbound
+                        .response_tx
+                        .send(Err("execution websocket is not authorized".to_string()));
+                    continue;
+                }
+
+                message_id += 1;
+                let request_id = message_id;
+                pending_requests.insert(request_id, outbound.response_tx);
+                let frame = create_message(
+                    &outbound.endpoint,
+                    request_id,
+                    outbound.query.as_deref(),
+                    outbound.body.as_ref(),
+                );
+                if let Err(err) = write.send(Message::Text(frame)).await {
+                    if let Some(response_tx) = pending_requests.remove(&request_id) {
+                        let _ = response_tx
+                            .send(Err(format!("execution websocket send error: {err}")));
+                    }
+                    bail!("execution websocket send error: {err}");
+                }
+            }
+            _ = heartbeat.tick(), if authorized => {
+                let _ = write.send(Message::Text("[]".to_string())).await;
+            }
+            next = read.next() => {
+                let raw = match next {
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(Message::Binary(bytes))) => String::from_utf8_lossy(&bytes).to_string(),
+                    Some(Ok(Message::Close(_))) => {
+                        let reason = "execution websocket closed".to_string();
+                        for (_, response_tx) in pending_requests.drain() {
+                            let _ = response_tx.send(Err(reason.clone()));
+                        }
+                        let _ = internal_tx.send(InternalEvent::UserSocketStatus(
+                            "Execution websocket closed".to_string(),
+                        ));
+                        break;
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(err)) => bail!("execution websocket read error: {err}"),
+                    None => break,
+                };
+
+                let (frame_type, payload) = parse_frame(&raw);
+                if frame_type != 'a' {
+                    continue;
+                }
+                let Some(Value::Array(items)) = payload else {
+                    continue;
+                };
+
+                for item in items {
+                    let status = parse_status_code(&item);
+                    let response_id = item.get("i").and_then(Value::as_u64);
+
+                    if !authorized && response_id == Some(authorize_id) {
+                        let Some(status) = status else {
+                            continue;
+                        };
+                        if status != 200 {
+                            bail!("execution websocket authorize failed ({status})");
+                        }
+                        authorized = true;
+                        let _ = internal_tx.send(InternalEvent::UserSocketStatus(
+                            "Execution websocket authorized".to_string(),
+                        ));
+                        continue;
+                    }
+
+                    if let Some(request_id) = response_id {
+                        if let Some(response_tx) = pending_requests.remove(&request_id) {
+                            let _ = response_tx.send(parse_socket_response(&item));
+                        }
                     }
                 }
             }
@@ -3477,7 +3683,7 @@ mod tests {
 
     #[test]
     fn update_latency_from_envelope_records_seen_ack_and_fill() {
-        let (user_request_tx, _user_request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (exec_request_tx, _exec_request_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut session = SessionState {
             cfg: AppConfig::default(),
             tokens: TokenBundle {
@@ -3488,7 +3694,7 @@ mod tests {
                 user_name: None,
             },
             accounts: Vec::new(),
-            user_request_tx,
+            exec_request_tx,
             order_latency_tracker: Some(OrderLatencyTracker {
                 started_at: time::Instant::now(),
                 cl_ord_id: "midas-1-entry".to_string(),
@@ -3536,7 +3742,7 @@ mod tests {
 
     #[test]
     fn trade_marker_from_fill_uses_order_action_for_side_and_contract() {
-        let (user_request_tx, _user_request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (exec_request_tx, _exec_request_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut user_store = UserSyncStore::default();
         user_store.orders.insert(
             42,
@@ -3561,7 +3767,7 @@ mod tests {
                 user_name: None,
             },
             accounts: Vec::new(),
-            user_request_tx,
+            exec_request_tx,
             order_latency_tracker: None,
             user_store,
             selected_account_id: Some(42),
@@ -3592,7 +3798,7 @@ mod tests {
 
     #[test]
     fn record_trade_marker_deduplicates_fill_ids() {
-        let (user_request_tx, _user_request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (exec_request_tx, _exec_request_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut session = SessionState {
             cfg: AppConfig::default(),
             tokens: TokenBundle {
@@ -3603,7 +3809,7 @@ mod tests {
                 user_name: None,
             },
             accounts: Vec::new(),
-            user_request_tx,
+            exec_request_tx,
             order_latency_tracker: None,
             user_store: UserSyncStore::default(),
             selected_account_id: Some(42),
