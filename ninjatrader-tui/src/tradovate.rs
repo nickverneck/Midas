@@ -476,10 +476,7 @@ pub async fn service_loop(
 ) {
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = ServiceState {
-        client: Client::builder()
-            .tcp_nodelay(true)
-            .build()
-            .unwrap_or_else(|_| Client::new()),
+        client: Client::new(),
         session: None,
         user_task: None,
         market_task: None,
@@ -2253,11 +2250,7 @@ async fn user_sync_worker_inner(
     mut request_rx: UnboundedReceiver<UserSocketCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
-        cfg.env.user_ws_url(),
-        None,
-        true,
-    )
+    let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.user_ws_url())
         .await
         .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
     let (mut write, mut read) = ws_stream.split();
@@ -2419,11 +2412,7 @@ async fn market_data_worker_inner(
     market_specs: Option<MarketSpecs>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
-        cfg.env.market_ws_url(),
-        None,
-        true,
-    )
+    let (ws_stream, _) = tokio_tungstenite::connect_async(cfg.env.market_ws_url())
         .await
         .with_context(|| format!("connect {}", cfg.env.market_ws_url()))?;
     let (mut write, mut read) = ws_stream.split();
