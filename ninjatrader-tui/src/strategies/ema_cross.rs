@@ -1,7 +1,8 @@
 use crate::strategies::{PositionSide, StrategySignal};
 use crate::tradovate::Bar;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmaCrossConfig {
     pub fast_length: usize,
     pub slow_length: usize,

@@ -1,8 +1,5 @@
 use crate::automation::{StrategyDescriptor, default_strategy_catalog};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
-use crate::strategies::ema_cross::EmaCrossExecutionState;
-use crate::strategies::hma_angle::HmaAngleExecutionState;
-use crate::strategies::{PositionSide, StrategySignal, side_from_signed_qty};
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, ContractSuggestion,
@@ -116,8 +113,6 @@ struct StrategyRuntimeState {
     last_closed_bar_ts: Option<i64>,
     pending_target_qty: Option<i32>,
     last_summary: String,
-    hma_execution: HmaAngleExecutionState,
-    ema_execution: EmaCrossExecutionState,
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +176,7 @@ impl App {
     pub fn handle_service_event(
         &mut self,
         event: ServiceEvent,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        _cmd_tx: &UnboundedSender<ServiceCommand>,
     ) {
         match event {
             ServiceEvent::Status(message) => {
@@ -190,11 +185,6 @@ impl App {
             }
             ServiceEvent::Error(message) => {
                 self.status = format!("Error: {message}");
-                if self.strategy_runtime.pending_target_qty.take().is_some() {
-                    self.push_log(
-                        "Cleared pending automated target after service error.".to_string(),
-                    );
-                }
                 self.push_log(format!("ERROR: {message}"));
             }
             ServiceEvent::Connected {
@@ -234,17 +224,6 @@ impl App {
             }
             ServiceEvent::AccountSnapshotsLoaded(snapshots) => {
                 self.account_snapshots = snapshots;
-                if let Some(pending) = self.strategy_runtime.pending_target_qty {
-                    let actual = self.actual_market_position_qty();
-                    if actual == pending {
-                        self.strategy_runtime.pending_target_qty = None;
-                        self.strategy_runtime.last_summary =
-                            format!("Position confirmed at target {actual}");
-                    }
-                }
-                if self.strategy_runtime.armed && self.strategy.kind == StrategyKind::Native {
-                    self.maybe_sync_native_protection(cmd_tx, None);
-                }
             }
             ServiceEvent::ContractSearchResults { query, results } => {
                 self.contract_results = results;
@@ -255,23 +234,21 @@ impl App {
                 ));
             }
             ServiceEvent::MarketSnapshot(snapshot) => {
-                let contract_changed = self.market.contract_id != snapshot.contract_id;
                 self.market = snapshot;
                 self.last_market_update_at = Some(Instant::now());
-                if contract_changed {
-                    self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
-                    self.strategy_runtime.pending_target_qty = None;
-                    self.reset_native_execution();
-                    self.strategy_runtime.last_summary =
-                        "Contract changed; strategy re-anchored to current bar.".to_string();
-                }
-                self.maybe_run_native_strategy(cmd_tx);
             }
             ServiceEvent::TradeMarkersUpdated(markers) => {
                 self.market.trade_markers = markers;
             }
             ServiceEvent::Latency(snapshot) => {
                 self.latency = snapshot;
+            }
+            ServiceEvent::ExecutionState(snapshot) => {
+                self.strategy.apply_execution_config(&snapshot.config);
+                self.strategy_runtime.armed = snapshot.runtime.armed;
+                self.strategy_runtime.last_closed_bar_ts = snapshot.runtime.last_closed_bar_ts;
+                self.strategy_runtime.pending_target_qty = snapshot.runtime.pending_target_qty;
+                self.strategy_runtime.last_summary = snapshot.runtime.last_summary;
             }
         }
     }
@@ -322,7 +299,7 @@ impl App {
 
         match self.screen {
             Screen::Login => self.handle_login_key(key, cmd_tx),
-            Screen::Strategy => self.handle_strategy_key(key),
+            Screen::Strategy => self.handle_strategy_key(key, cmd_tx),
             Screen::Selection => self.handle_selection_key(key, cmd_tx),
             Screen::Dashboard => self.handle_dashboard_key(key, cmd_tx),
         }
@@ -420,7 +397,7 @@ impl App {
         }
     }
 
-    fn handle_strategy_key(&mut self, key: KeyEvent) {
+    fn handle_strategy_key(&mut self, key: KeyEvent, cmd_tx: &UnboundedSender<ServiceCommand>) {
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {
                 self.clear_strategy_numeric_input();
@@ -439,22 +416,22 @@ impl App {
             Focus::StrategyKind => match key.code {
                 KeyCode::Left => {
                     self.strategy.kind = self.strategy.kind.prev();
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.kind = self.strategy.kind.next();
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
             Focus::NativeStrategy => match key.code {
                 KeyCode::Left => {
                     self.strategy.native_strategy = self.strategy.native_strategy.prev();
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_strategy = self.strategy.native_strategy.next();
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
@@ -467,7 +444,7 @@ impl App {
                     2,
                     1,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaMinAngle => {
@@ -479,7 +456,7 @@ impl App {
                     0.0,
                     0.5,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaAngleLookback => {
@@ -491,7 +468,7 @@ impl App {
                     1,
                     1,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaBarsRequired => {
@@ -503,17 +480,17 @@ impl App {
                     1,
                     1,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaLongsOnly => {
                 if toggle_bool(&mut self.strategy.native_hma.longs_only, key) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaInverted => {
                 if toggle_bool(&mut self.strategy.native_hma.inverted, key) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaTakeProfitTicks => {
@@ -525,7 +502,7 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaStopLossTicks => {
@@ -537,12 +514,12 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaTrailingStop => {
                 if toggle_bool(&mut self.strategy.native_hma.use_trailing_stop, key) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaTrailTriggerTicks => {
@@ -554,7 +531,7 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::HmaTrailOffsetTicks => {
@@ -566,7 +543,7 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaFastLength => {
@@ -578,7 +555,7 @@ impl App {
                     1,
                     1,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaSlowLength => {
@@ -590,12 +567,12 @@ impl App {
                     1,
                     1,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaInverted => {
                 if toggle_bool(&mut self.strategy.native_ema.inverted, key) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTakeProfitTicks => {
@@ -607,7 +584,7 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaStopLossTicks => {
@@ -619,12 +596,12 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTrailingStop => {
                 if toggle_bool(&mut self.strategy.native_ema.use_trailing_stop, key) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTrailTriggerTicks => {
@@ -636,7 +613,7 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTrailOffsetTicks => {
@@ -648,13 +625,13 @@ impl App {
                     0.0,
                     1.0,
                 ) {
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::LuaSourceMode => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.lua_source_mode = self.strategy.lua_source_mode.toggle();
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
@@ -672,18 +649,18 @@ impl App {
                     }
                 } else {
                     edit_string(&mut self.strategy.lua_file_path, key);
-                    self.disarm_native_strategy();
+                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::LuaEditor => {
                 let _ = self.strategy.lua_editor.handle_key(key);
-                self.disarm_native_strategy();
+                self.disarm_native_strategy(cmd_tx);
             }
             Focus::StrategyContinue => {
                 if key.code == KeyCode::Enter {
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
-                    self.arm_native_strategy();
+                    self.arm_native_strategy(cmd_tx);
                     self.push_log(format!(
                         "Strategy selected: {}",
                         self.strategy.summary_label()
@@ -2313,44 +2290,22 @@ impl App {
         )
     }
 
-    fn reset_native_execution(&mut self) {
-        self.strategy_runtime.hma_execution = HmaAngleExecutionState::default();
-        self.strategy_runtime.ema_execution = EmaCrossExecutionState::default();
+    fn sync_execution_strategy_config(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        let _ = cmd_tx.send(ServiceCommand::SetExecutionStrategyConfig(
+            self.strategy.execution_config(),
+        ));
     }
 
-    fn disarm_native_strategy(&mut self) {
-        if self.strategy_runtime.armed {
-            self.strategy_runtime.armed = false;
-            self.reset_native_execution();
-            self.strategy_runtime.last_summary =
-                "Native strategy config changed; press Continue to re-arm.".to_string();
-        }
+    fn disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        self.sync_execution_strategy_config(cmd_tx);
+        let _ = cmd_tx.send(ServiceCommand::DisarmExecutionStrategy {
+            reason: "Native strategy config changed; press Continue to re-arm.".to_string(),
+        });
     }
 
-    fn arm_native_strategy(&mut self) {
-        self.strategy_runtime.pending_target_qty = None;
-        if self.strategy.kind != StrategyKind::Native {
-            self.strategy_runtime.armed = false;
-            self.strategy_runtime.last_closed_bar_ts = None;
-            self.strategy_runtime.last_summary =
-                "Selected strategy is not an armed native runtime.".to_string();
-            return;
-        }
-
-        self.strategy_runtime.armed = true;
-        self.reset_native_execution();
-        self.strategy_runtime.last_closed_bar_ts = self.latest_closed_bar_ts();
-        self.strategy_runtime.last_summary = if self.strategy_runtime.last_closed_bar_ts.is_some() {
-            format!(
-                "Native {} armed from current closed bar.",
-                self.strategy.native_strategy.label()
-            )
-        } else {
-            format!(
-                "Native {} armed; waiting for first closed bar.",
-                self.strategy.native_strategy.label()
-            )
-        };
+    fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        self.sync_execution_strategy_config(cmd_tx);
+        let _ = cmd_tx.send(ServiceCommand::ArmExecutionStrategy);
     }
 
     fn closed_bars(&self) -> &[crate::tradovate::Bar] {
@@ -2400,159 +2355,6 @@ impl App {
         }
     }
 
-    fn actual_market_position_qty(&self) -> i32 {
-        self.selected_snapshot()
-            .and_then(|snapshot| snapshot.market_position_qty)
-            .unwrap_or(0.0)
-            .round() as i32
-    }
-
-    fn actual_market_entry_price(&self) -> Option<f64> {
-        self.selected_snapshot()
-            .and_then(|snapshot| snapshot.market_entry_price)
-            .filter(|price| price.is_finite() && *price > 0.0)
-    }
-
-    fn active_native_slug(&self) -> &'static str {
-        self.strategy.native_strategy.slug()
-    }
-
-    fn active_native_uses_protection(&self) -> bool {
-        match self.strategy.native_strategy {
-            NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
-            NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
-        }
-    }
-
-    fn sync_active_native_position(&mut self, signed_qty: i32, entry_price: Option<f64>) {
-        match self.strategy.native_strategy {
-            NativeStrategyKind::HmaAngle => self.strategy.native_hma.sync_position(
-                &mut self.strategy_runtime.hma_execution,
-                signed_qty,
-                entry_price,
-            ),
-            NativeStrategyKind::EmaCross => self.strategy.native_ema.sync_position(
-                &mut self.strategy_runtime.ema_execution,
-                signed_qty,
-                entry_price,
-            ),
-        }
-    }
-
-    fn take_profit_price(&self, side: PositionSide, entry_price: f64) -> Option<f64> {
-        let offset = match self.strategy.native_strategy {
-            NativeStrategyKind::HmaAngle => self
-                .strategy
-                .native_hma
-                .take_profit_offset(self.market.tick_size)?,
-            NativeStrategyKind::EmaCross => self
-                .strategy
-                .native_ema
-                .take_profit_offset(self.market.tick_size)?,
-        };
-        Some(match side {
-            PositionSide::Long => entry_price + offset,
-            PositionSide::Short => entry_price - offset,
-        })
-    }
-
-    fn combined_stop_price(&mut self, trailing_bar: Option<&crate::tradovate::Bar>) -> Option<f64> {
-        match self.strategy.native_strategy {
-            NativeStrategyKind::HmaAngle => {
-                if let Some(bar) = trailing_bar {
-                    let _ = self.strategy.native_hma.desired_trailing_stop_price(
-                        &mut self.strategy_runtime.hma_execution,
-                        bar,
-                        self.market.tick_size,
-                    );
-                }
-                self.strategy.native_hma.current_effective_stop_price(
-                    &self.strategy_runtime.hma_execution,
-                    self.market.tick_size,
-                )
-            }
-            NativeStrategyKind::EmaCross => {
-                if let Some(bar) = trailing_bar {
-                    let _ = self.strategy.native_ema.desired_trailing_stop_price(
-                        &mut self.strategy_runtime.ema_execution,
-                        bar,
-                        self.market.tick_size,
-                    );
-                }
-                self.strategy.native_ema.current_effective_stop_price(
-                    &self.strategy_runtime.ema_execution,
-                    self.market.tick_size,
-                )
-            }
-        }
-    }
-
-    fn maybe_sync_native_protection(
-        &mut self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-        trailing_bar: Option<&crate::tradovate::Bar>,
-    ) {
-        if !self.strategy_runtime.armed || self.strategy.kind != StrategyKind::Native {
-            return;
-        }
-        if !self.active_native_uses_protection() {
-            return;
-        }
-
-        let signed_qty = self.actual_market_position_qty();
-        let actual_market_entry = self.actual_market_entry_price();
-        self.sync_active_native_position(signed_qty, actual_market_entry);
-
-        if signed_qty == 0 {
-            let _ = cmd_tx.send(ServiceCommand::SyncNativeProtection {
-                signed_qty: 0,
-                take_profit_price: None,
-                stop_price: None,
-                reason: format!("{} flat", self.active_native_slug()),
-            });
-            return;
-        }
-
-        let Some(entry_price) = actual_market_entry else {
-            return;
-        };
-        let Some(side) = side_from_signed_qty(signed_qty) else {
-            return;
-        };
-
-        let take_profit_price = self.take_profit_price(side, entry_price);
-        let stop_price = self.combined_stop_price(trailing_bar);
-        let _ = cmd_tx.send(ServiceCommand::SyncNativeProtection {
-            signed_qty,
-            take_profit_price,
-            stop_price,
-            reason: if trailing_bar.is_some() {
-                format!("{} bar sync", self.active_native_slug())
-            } else {
-                format!("{} position sync", self.active_native_slug())
-            },
-        });
-    }
-
-    fn clear_native_protection(
-        &self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-        reason: impl Into<String>,
-    ) {
-        let _ = cmd_tx.send(ServiceCommand::SyncNativeProtection {
-            signed_qty: 0,
-            take_profit_price: None,
-            stop_price: None,
-            reason: reason.into(),
-        });
-    }
-
-    fn effective_market_position_qty(&self) -> i32 {
-        self.strategy_runtime
-            .pending_target_qty
-            .unwrap_or_else(|| self.actual_market_position_qty())
-    }
-
     fn strategy_runtime_summary(&self) -> String {
         if !self.strategy_runtime.last_summary.is_empty() {
             return self.strategy_runtime.last_summary.clone();
@@ -2564,195 +2366,15 @@ impl App {
         }
     }
 
-    fn evaluate_active_native_strategy(
-        &self,
-        bars: &[crate::tradovate::Bar],
-        current_qty: i32,
-    ) -> (StrategySignal, String) {
-        match self.strategy.native_strategy {
-            NativeStrategyKind::HmaAngle => {
-                let evaluation = self
-                    .strategy
-                    .native_hma
-                    .evaluate(bars, side_from_signed_qty(current_qty));
-                (evaluation.signal, evaluation.summary())
-            }
-            NativeStrategyKind::EmaCross => {
-                let evaluation = self
-                    .strategy
-                    .native_ema
-                    .evaluate(bars, side_from_signed_qty(current_qty));
-                (evaluation.signal, evaluation.summary())
-            }
-        }
+    fn effective_market_position_qty(&self) -> i32 {
+        self.strategy_runtime.pending_target_qty.unwrap_or_else(|| {
+            self.selected_snapshot()
+                .and_then(|snapshot| snapshot.market_position_qty)
+                .unwrap_or(0.0)
+                .round() as i32
+        })
     }
 
-    fn maybe_run_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
-        if !self.strategy_runtime.armed || self.strategy.kind != StrategyKind::Native {
-            return;
-        }
-
-        let actual_market_qty = self.actual_market_position_qty();
-        let actual_market_entry = self.actual_market_entry_price();
-        self.sync_active_native_position(actual_market_qty, actual_market_entry);
-
-        if self.strategy_runtime.pending_target_qty.is_some() {
-            self.strategy_runtime.last_summary =
-                "Waiting for prior automated order to settle.".to_string();
-            return;
-        }
-
-        let closed_bars = self.closed_bars().to_vec();
-        let Some(last_closed) = closed_bars.last() else {
-            self.strategy_runtime.last_summary = format!(
-                "Native {} armed; waiting for market data.",
-                self.strategy.native_strategy.label()
-            );
-            return;
-        };
-
-        if self.strategy_runtime.last_closed_bar_ts.is_none() {
-            self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
-            self.strategy_runtime.last_summary = format!(
-                "Native {} anchored to current bar; waiting for next close.",
-                self.strategy.native_strategy.label()
-            );
-            return;
-        }
-
-        if self.strategy_runtime.last_closed_bar_ts == Some(last_closed.ts_ns) {
-            return;
-        }
-        self.strategy_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
-
-        let session_window = self.session_window_at(last_closed.ts_ns);
-        let actual_qty = self.actual_market_position_qty();
-        if let Some(window) = session_window {
-            if window.hold_entries {
-                if self.strategy_runtime.pending_target_qty.is_some() {
-                    self.strategy_runtime.last_summary = if window.session_open {
-                        format!(
-                            "Session hold active; waiting for prior automated order before close."
-                        )
-                    } else {
-                        "Session closed; waiting for prior automated order and reopen.".to_string()
-                    };
-                    return;
-                }
-
-                if actual_qty != 0 {
-                    self.clear_native_protection(
-                        cmd_tx,
-                        format!("{} session auto-close", self.active_native_slug(),),
-                    );
-                    let reason = if window.session_open {
-                        format!(
-                            "{} session auto-close {:.0}m before {} close",
-                            self.active_native_slug(),
-                            window.minutes_to_close.unwrap_or_default(),
-                            self.market
-                                .session_profile
-                                .map(|profile| profile.label())
-                                .unwrap_or("session")
-                        )
-                    } else {
-                        format!(
-                            "{} session hold until {} reopen",
-                            self.active_native_slug(),
-                            self.market
-                                .session_profile
-                                .map(|profile| profile.label())
-                                .unwrap_or("session")
-                        )
-                    };
-                    let summary = if window.session_open {
-                        format!(
-                            "Session hold active; flattening {} {:.0}m before close.",
-                            actual_qty,
-                            window.minutes_to_close.unwrap_or_default()
-                        )
-                    } else {
-                        format!(
-                            "Session closed; flattening {} and holding until reopen.",
-                            actual_qty
-                        )
-                    };
-                    let _ = cmd_tx.send(ServiceCommand::SetTargetPosition {
-                        target_qty: 0,
-                        automated: true,
-                        reason: reason.clone(),
-                    });
-                    self.strategy_runtime.pending_target_qty = Some(0);
-                    self.strategy_runtime.last_summary = summary.clone();
-                    self.push_log(format!(
-                        "Native {} session hold flattened {} ({})",
-                        self.strategy.native_strategy.label(),
-                        actual_qty,
-                        reason
-                    ));
-                    return;
-                }
-
-                self.maybe_sync_native_protection(cmd_tx, Some(last_closed));
-                self.strategy_runtime.last_summary = if window.session_open {
-                    format!(
-                        "Session hold active; no new entries with {:.0}m to close.",
-                        window.minutes_to_close.unwrap_or_default()
-                    )
-                } else {
-                    "Session closed; holding flat until reopen.".to_string()
-                };
-                return;
-            }
-        }
-
-        let current_qty = self.effective_market_position_qty();
-        let (signal, summary) = self.evaluate_active_native_strategy(&closed_bars, current_qty);
-        self.strategy_runtime.last_summary = summary.clone();
-
-        let Some(target_qty) =
-            target_qty_for_signal(signal, current_qty, self.base_config.order_qty)
-        else {
-            self.maybe_sync_native_protection(cmd_tx, Some(last_closed));
-            return;
-        };
-
-        if target_qty == current_qty {
-            self.maybe_sync_native_protection(cmd_tx, Some(last_closed));
-            return;
-        }
-
-        let reason = format!(
-            "{} {} | {}",
-            self.active_native_slug(),
-            signal.label(),
-            summary
-        );
-        if current_qty != 0 {
-            self.clear_native_protection(
-                cmd_tx,
-                format!(
-                    "{} target transition {} -> {}",
-                    self.active_native_slug(),
-                    current_qty,
-                    target_qty
-                ),
-            );
-        }
-        let _ = cmd_tx.send(ServiceCommand::SetTargetPosition {
-            target_qty,
-            automated: true,
-            reason: reason.clone(),
-        });
-        self.strategy_runtime.pending_target_qty = Some(target_qty);
-        self.push_log(format!(
-            "Native {} target {} -> {} ({})",
-            self.strategy.native_strategy.label(),
-            current_qty,
-            target_qty,
-            reason
-        ));
-    }
 }
 
 impl FormState {
@@ -3101,22 +2723,6 @@ fn parse_float_input(value: Option<&str>) -> Option<f64> {
         return Some(0.0);
     }
     raw.parse::<f64>().ok()
-}
-
-fn target_qty_for_signal(signal: StrategySignal, current_qty: i32, base_qty: i32) -> Option<i32> {
-    let base_qty = base_qty.max(1);
-    match signal {
-        StrategySignal::Hold => None,
-        StrategySignal::EnterLong => Some(base_qty),
-        StrategySignal::EnterShort => Some(-base_qty),
-        StrategySignal::ExitLongOnShortSignal => {
-            if current_qty > 0 {
-                Some(0)
-            } else {
-                None
-            }
-        }
-    }
 }
 
 fn json_preview(snapshot: &AccountSnapshot) -> String {

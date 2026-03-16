@@ -1,4 +1,11 @@
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
+use crate::strategies::ema_cross::EmaCrossExecutionState;
+use crate::strategies::hma_angle::HmaAngleExecutionState;
+use crate::strategies::{StrategySignal, side_from_signed_qty};
+use crate::strategy::{
+    ExecutionRuntimeSnapshot, ExecutionStateSnapshot, ExecutionStrategyConfig, NativeStrategyKind,
+    StrategyKind,
+};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
@@ -18,9 +25,10 @@ use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceCommand {
     Connect(AppConfig),
+    ReplayState,
     SelectAccount {
         account_id: i64,
     },
@@ -45,16 +53,21 @@ pub enum ServiceCommand {
         stop_price: Option<f64>,
         reason: String,
     },
+    SetExecutionStrategyConfig(ExecutionStrategyConfig),
+    ArmExecutionStrategy,
+    DisarmExecutionStrategy {
+        reason: String,
+    },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ManualOrderAction {
     Buy,
     Sell,
     Close,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceEvent {
     Status(String),
     Error(String),
@@ -73,6 +86,7 @@ pub enum ServiceEvent {
     MarketSnapshot(MarketSnapshot),
     TradeMarkersUpdated(Vec<TradeMarker>),
     Latency(LatencySnapshot),
+    ExecutionState(ExecutionStateSnapshot),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +265,8 @@ struct SessionState {
     tokens: TokenBundle,
     accounts: Vec<AccountInfo>,
     request_tx: UnboundedSender<UserSocketCommand>,
+    execution_config: ExecutionStrategyConfig,
+    execution_runtime: ExecutionRuntimeState,
     order_latency_tracker: Option<OrderLatencyTracker>,
     user_store: UserSyncStore,
     selected_account_id: Option<i64>,
@@ -258,6 +274,32 @@ struct SessionState {
     market: MarketSnapshot,
     managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     next_strategy_order_nonce: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExecutionRuntimeState {
+    armed: bool,
+    last_closed_bar_ts: Option<i64>,
+    pending_target_qty: Option<i32>,
+    last_summary: String,
+    hma_execution: HmaAngleExecutionState,
+    ema_execution: EmaCrossExecutionState,
+}
+
+impl ExecutionRuntimeState {
+    fn snapshot(&self) -> ExecutionRuntimeSnapshot {
+        ExecutionRuntimeSnapshot {
+            armed: self.armed,
+            last_closed_bar_ts: self.last_closed_bar_ts,
+            pending_target_qty: self.pending_target_qty,
+            last_summary: self.last_summary.clone(),
+        }
+    }
+
+    fn reset_execution(&mut self) {
+        self.hma_execution = HmaAngleExecutionState::default();
+        self.ema_execution = EmaCrossExecutionState::default();
+    }
 }
 
 #[derive(Clone, Default)]
@@ -515,6 +557,481 @@ fn request_snapshot_refresh(state: &mut ServiceState, internal_tx: &UnboundedSen
     });
 }
 
+fn execution_state_snapshot(session: &SessionState) -> ExecutionStateSnapshot {
+    ExecutionStateSnapshot {
+        config: session.execution_config.clone(),
+        runtime: session.execution_runtime.snapshot(),
+    }
+}
+
+fn emit_execution_state(event_tx: &UnboundedSender<ServiceEvent>, session: &SessionState) {
+    let _ = event_tx.send(ServiceEvent::ExecutionState(execution_state_snapshot(session)));
+}
+
+fn closed_bars(session: &SessionState) -> &[Bar] {
+    let closed_len = session.market.history_loaded.min(session.market.bars.len());
+    &session.market.bars[..closed_len]
+}
+
+fn latest_closed_bar_ts(session: &SessionState) -> Option<i64> {
+    closed_bars(session).last().map(|bar| bar.ts_ns)
+}
+
+fn session_window_at(session: &SessionState, ts_ns: i64) -> Option<InstrumentSessionWindow> {
+    session
+        .market
+        .session_profile
+        .map(|profile| profile.evaluate(ts_ns))
+}
+
+fn selected_contract_positions<'a>(session: &'a SessionState) -> Vec<&'a Value> {
+    let Some(account_id) = session.selected_account_id else {
+        return Vec::new();
+    };
+    let Some(contract) = session.selected_contract.as_ref() else {
+        return Vec::new();
+    };
+    session
+        .user_store
+        .positions
+        .get(&account_id)
+        .into_iter()
+        .flat_map(|positions| positions.values())
+        .filter(|position| position_matches_contract(position, contract))
+        .collect()
+}
+
+fn selected_market_position_qty(session: &SessionState) -> i32 {
+    let qty = selected_contract_positions(session)
+        .into_iter()
+        .filter_map(position_qty)
+        .sum::<f64>();
+    qty.round() as i32
+}
+
+fn selected_market_entry_price(session: &SessionState) -> Option<f64> {
+    let positions = selected_contract_positions(session);
+    let mut weighted_sum = 0.0;
+    let mut total_qty = 0.0;
+    for position in positions {
+        let qty = position_qty(position)?.abs();
+        if qty <= f64::EPSILON {
+            continue;
+        }
+        let entry_price = pick_number(position, &["netPrice", "avgPrice", "averagePrice"])?;
+        weighted_sum += entry_price * qty;
+        total_qty += qty;
+    }
+
+    if total_qty <= f64::EPSILON {
+        None
+    } else {
+        Some(weighted_sum / total_qty)
+    }
+}
+
+fn active_native_slug(session: &SessionState) -> &'static str {
+    session.execution_config.native_strategy.slug()
+}
+
+fn active_native_label(session: &SessionState) -> &'static str {
+    session.execution_config.native_strategy.label()
+}
+
+fn active_native_uses_protection(session: &SessionState) -> bool {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => session.execution_config.native_hma.uses_native_protection(),
+        NativeStrategyKind::EmaCross => session.execution_config.native_ema.uses_native_protection(),
+    }
+}
+
+fn sync_active_execution_position(session: &mut SessionState, signed_qty: i32, entry_price: Option<f64>) {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => session.execution_config.native_hma.sync_position(
+            &mut session.execution_runtime.hma_execution,
+            signed_qty,
+            entry_price,
+        ),
+        NativeStrategyKind::EmaCross => session.execution_config.native_ema.sync_position(
+            &mut session.execution_runtime.ema_execution,
+            signed_qty,
+            entry_price,
+        ),
+    }
+}
+
+fn take_profit_price(session: &SessionState, entry_price: f64, signed_qty: i32) -> Option<f64> {
+    let side = side_from_signed_qty(signed_qty)?;
+    let offset = match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => session
+            .execution_config
+            .native_hma
+            .take_profit_offset(session.market.tick_size)?,
+        NativeStrategyKind::EmaCross => session
+            .execution_config
+            .native_ema
+            .take_profit_offset(session.market.tick_size)?,
+    };
+
+    Some(match side {
+        crate::strategies::PositionSide::Long => entry_price + offset,
+        crate::strategies::PositionSide::Short => entry_price - offset,
+    })
+}
+
+fn combined_stop_price(session: &mut SessionState, trailing_bar: Option<&Bar>) -> Option<f64> {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => {
+            if let Some(bar) = trailing_bar {
+                let _ = session.execution_config.native_hma.desired_trailing_stop_price(
+                    &mut session.execution_runtime.hma_execution,
+                    bar,
+                    session.market.tick_size,
+                );
+            }
+            session.execution_config.native_hma.current_effective_stop_price(
+                &session.execution_runtime.hma_execution,
+                session.market.tick_size,
+            )
+        }
+        NativeStrategyKind::EmaCross => {
+            if let Some(bar) = trailing_bar {
+                let _ = session.execution_config.native_ema.desired_trailing_stop_price(
+                    &mut session.execution_runtime.ema_execution,
+                    bar,
+                    session.market.tick_size,
+                );
+            }
+            session.execution_config.native_ema.current_effective_stop_price(
+                &session.execution_runtime.ema_execution,
+                session.market.tick_size,
+            )
+        }
+    }
+}
+
+async fn sync_execution_protection(
+    session: &mut SessionState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+    trailing_bar: Option<&Bar>,
+) -> Result<()> {
+    if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
+        return Ok(());
+    }
+    if !active_native_uses_protection(session) {
+        return Ok(());
+    }
+
+    let signed_qty = selected_market_position_qty(session);
+    let entry_price = selected_market_entry_price(session);
+    sync_active_execution_position(session, signed_qty, entry_price);
+    let reason = if signed_qty == 0 {
+        format!("{} flat", active_native_slug(session))
+    } else if trailing_bar.is_some() {
+        format!("{} bar sync", active_native_slug(session))
+    } else {
+        format!("{} position sync", active_native_slug(session))
+    };
+
+    let (take_profit_price, stop_price) = if signed_qty == 0 {
+        (None, None)
+    } else if let Some(entry_price) = entry_price {
+        (
+            take_profit_price(session, entry_price, signed_qty),
+            combined_stop_price(session, trailing_bar),
+        )
+    } else {
+        return Ok(());
+    };
+
+    if let Some(message) = sync_native_protection(
+        session,
+        signed_qty,
+        take_profit_price,
+        stop_price,
+        &reason,
+    )
+    .await?
+    {
+        let _ = event_tx.send(ServiceEvent::Status(message));
+    }
+
+    Ok(())
+}
+
+fn effective_market_position_qty(session: &SessionState) -> i32 {
+    session
+        .execution_runtime
+        .pending_target_qty
+        .unwrap_or_else(|| selected_market_position_qty(session))
+}
+
+fn evaluate_active_execution_strategy(
+    session: &SessionState,
+    bars: &[Bar],
+    current_qty: i32,
+) -> (StrategySignal, String) {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => {
+            let evaluation = session
+                .execution_config
+                .native_hma
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (evaluation.signal, evaluation.summary())
+        }
+        NativeStrategyKind::EmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_ema
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (evaluation.signal, evaluation.summary())
+        }
+    }
+}
+
+fn target_qty_for_signal(signal: StrategySignal, current_qty: i32, base_qty: i32) -> Option<i32> {
+    let base_qty = base_qty.max(1);
+    match signal {
+        StrategySignal::Hold => None,
+        StrategySignal::EnterLong => Some(base_qty),
+        StrategySignal::EnterShort => Some(-base_qty),
+        StrategySignal::ExitLongOnShortSignal => {
+            if current_qty > 0 {
+                Some(0)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn arm_execution_strategy(session: &mut SessionState) {
+    session.execution_runtime.pending_target_qty = None;
+    session.execution_runtime.reset_execution();
+    if session.execution_config.kind != StrategyKind::Native {
+        session.execution_runtime.armed = false;
+        session.execution_runtime.last_closed_bar_ts = None;
+        session.execution_runtime.last_summary =
+            "Selected strategy is not an armed native runtime.".to_string();
+        return;
+    }
+
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = latest_closed_bar_ts(session);
+    session.execution_runtime.last_summary =
+        if session.execution_runtime.last_closed_bar_ts.is_some() {
+            format!(
+                "Native {} armed from current closed bar.",
+                active_native_label(session)
+            )
+        } else {
+            format!(
+                "Native {} armed; waiting for first closed bar.",
+                active_native_label(session)
+            )
+        };
+}
+
+fn disarm_execution_strategy(session: &mut SessionState, reason: String) {
+    if !session.execution_runtime.armed && session.execution_runtime.last_summary == reason {
+        return;
+    }
+    session.execution_runtime.armed = false;
+    session.execution_runtime.pending_target_qty = None;
+    session.execution_runtime.last_closed_bar_ts = None;
+    session.execution_runtime.reset_execution();
+    session.execution_runtime.last_summary = reason;
+}
+
+async fn handle_execution_account_sync(
+    session: &mut SessionState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) -> Result<()> {
+    let actual_qty = selected_market_position_qty(session);
+    let actual_entry = selected_market_entry_price(session);
+    sync_active_execution_position(session, actual_qty, actual_entry);
+
+    let mut runtime_changed = false;
+    if session.execution_runtime.pending_target_qty == Some(actual_qty) {
+        session.execution_runtime.pending_target_qty = None;
+        session.execution_runtime.last_summary = format!("Position confirmed at target {actual_qty}");
+        runtime_changed = true;
+    }
+
+    if session.execution_runtime.armed && session.execution_config.kind == StrategyKind::Native {
+        sync_execution_protection(session, event_tx, None).await?;
+    }
+
+    if runtime_changed {
+        emit_execution_state(event_tx, session);
+    }
+
+    Ok(())
+}
+
+async fn maybe_run_execution_strategy(
+    session: &mut SessionState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) -> Result<()> {
+    if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
+        return Ok(());
+    }
+
+    let actual_market_qty = selected_market_position_qty(session);
+    let actual_market_entry = selected_market_entry_price(session);
+    sync_active_execution_position(session, actual_market_qty, actual_market_entry);
+
+    if session.execution_runtime.pending_target_qty.is_some() {
+        session.execution_runtime.last_summary =
+            "Waiting for prior automated order to settle.".to_string();
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    let closed_bars = closed_bars(session).to_vec();
+    let Some(last_closed) = closed_bars.last().cloned() else {
+        session.execution_runtime.last_summary = format!(
+            "Native {} armed; waiting for market data.",
+            active_native_label(session)
+        );
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    };
+
+    if session.execution_runtime.last_closed_bar_ts.is_none() {
+        session.execution_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+        session.execution_runtime.last_summary = format!(
+            "Native {} anchored to current bar; waiting for next close.",
+            active_native_label(session)
+        );
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if session.execution_runtime.last_closed_bar_ts == Some(last_closed.ts_ns) {
+        return Ok(());
+    }
+    session.execution_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+
+    if let Some(window) = session_window_at(session, last_closed.ts_ns) {
+        if window.hold_entries {
+            if actual_market_qty != 0 {
+                if let Some(message) = sync_native_protection(
+                    session,
+                    0,
+                    None,
+                    None,
+                    &format!("{} session auto-close", active_native_slug(session)),
+                )
+                .await?
+                {
+                    let _ = event_tx.send(ServiceEvent::Status(message));
+                }
+                let reason = if window.session_open {
+                    format!(
+                        "{} session auto-close {:.0}m before {} close",
+                        active_native_slug(session),
+                        window.minutes_to_close.unwrap_or_default(),
+                        session
+                            .market
+                            .session_profile
+                            .map(|profile| profile.label())
+                            .unwrap_or("session")
+                    )
+                } else {
+                    format!(
+                        "{} session hold until {} reopen",
+                        active_native_slug(session),
+                        session
+                            .market
+                            .session_profile
+                            .map(|profile| profile.label())
+                            .unwrap_or("session")
+                    )
+                };
+                let outcome = submit_target_position_order(session, 0, true, &reason).await?;
+                let _ = event_tx.send(ServiceEvent::Status(outcome.message));
+                session.execution_runtime.pending_target_qty = Some(0);
+                session.execution_runtime.last_summary = if window.session_open {
+                    format!(
+                        "Session hold active; flattening {} {:.0}m before close.",
+                        actual_market_qty,
+                        window.minutes_to_close.unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "Session closed; flattening {} and holding until reopen.",
+                        actual_market_qty
+                    )
+                };
+                emit_execution_state(event_tx, session);
+                return Ok(());
+            }
+
+            sync_execution_protection(session, event_tx, Some(&last_closed)).await?;
+            session.execution_runtime.last_summary = if window.session_open {
+                format!(
+                    "Session hold active; no new entries with {:.0}m to close.",
+                    window.minutes_to_close.unwrap_or_default()
+                )
+            } else {
+                "Session closed; holding flat until reopen.".to_string()
+            };
+            emit_execution_state(event_tx, session);
+            return Ok(());
+        }
+    }
+
+    let current_qty = effective_market_position_qty(session);
+    let (signal, summary) = evaluate_active_execution_strategy(session, &closed_bars, current_qty);
+    session.execution_runtime.last_summary = summary.clone();
+
+    let Some(target_qty) =
+        target_qty_for_signal(signal, current_qty, session.cfg.order_qty)
+    else {
+        sync_execution_protection(session, event_tx, Some(&last_closed)).await?;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    };
+
+    if target_qty == current_qty {
+        sync_execution_protection(session, event_tx, Some(&last_closed)).await?;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if current_qty != 0 {
+        if let Some(message) = sync_native_protection(
+            session,
+            0,
+            None,
+            None,
+            &format!(
+                "{} target transition {} -> {}",
+                active_native_slug(session),
+                current_qty,
+                target_qty
+            ),
+        )
+        .await?
+        {
+            let _ = event_tx.send(ServiceEvent::Status(message));
+        }
+    }
+
+    let reason = format!(
+        "{} {} | {}",
+        active_native_slug(session),
+        signal.label(),
+        summary
+    );
+    let outcome = submit_target_position_order(session, target_qty, true, &reason).await?;
+    let _ = event_tx.send(ServiceEvent::Status(outcome.message));
+    session.execution_runtime.pending_target_qty = Some(target_qty);
+    emit_execution_state(event_tx, session);
+    Ok(())
+}
+
 pub async fn service_loop(
     mut cmd_rx: UnboundedReceiver<ServiceCommand>,
     event_tx: UnboundedSender<ServiceEvent>,
@@ -639,6 +1156,8 @@ async fn handle_command(
                 tokens,
                 accounts,
                 request_tx,
+                execution_config: ExecutionStrategyConfig::default(),
+                execution_runtime: ExecutionRuntimeState::default(),
                 order_latency_tracker: None,
                 user_store,
                 selected_account_id,
@@ -647,12 +1166,46 @@ async fn handle_command(
                 managed_protection: BTreeMap::new(),
                 next_strategy_order_nonce: 1,
             });
+            if let Some(session) = state.session.as_ref() {
+                emit_execution_state(event_tx, session);
+            }
+        }
+        ServiceCommand::ReplayState => {
+            let Some(session) = state.session.as_ref() else {
+                let _ = event_tx.send(ServiceEvent::Disconnected);
+                return Ok(());
+            };
+            let _ = event_tx.send(ServiceEvent::Connected {
+                env: session.cfg.env,
+                user_name: session.tokens.user_name.clone(),
+                auth_mode: session.cfg.auth_mode,
+            });
+            let _ = event_tx.send(ServiceEvent::AccountsLoaded(session.accounts.clone()));
+            let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(
+                session.user_store.build_snapshots(
+                    &session.accounts,
+                    Some(&session.market),
+                    &session.managed_protection,
+                ),
+            ));
+            if session.market.contract_id.is_some()
+                || session.market.contract_name.is_some()
+                || !session.market.bars.is_empty()
+                || !session.market.status.is_empty()
+            {
+                let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
+            }
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            emit_execution_state(event_tx, session);
         }
         ServiceCommand::SelectAccount { account_id } => {
-            let Some(session) = state.session.as_mut() else {
-                bail!("not connected");
-            };
-            session.selected_account_id = Some(account_id);
+            {
+                let Some(session) = state.session.as_mut() else {
+                    bail!("not connected");
+                };
+                session.selected_account_id = Some(account_id);
+                handle_execution_account_sync(session, event_tx).await?;
+            }
             request_snapshot_refresh(state, &internal_tx);
         }
         ServiceCommand::SearchContracts { query, limit } => {
@@ -686,6 +1239,12 @@ async fn handle_command(
             .await
             .ok();
             session.selected_contract = Some(contract.clone());
+            session.execution_runtime.last_closed_bar_ts = None;
+            session.execution_runtime.pending_target_qty = None;
+            session.execution_runtime.reset_execution();
+            session.execution_runtime.last_summary =
+                "Selected contract changed; waiting for market data.".to_string();
+            emit_execution_state(event_tx, session);
             let cfg = session.cfg.clone();
             let token = session.tokens.md_access_token.clone();
             state.market_task = Some(tokio::spawn(market_data_worker(
@@ -747,6 +1306,37 @@ async fn handle_command(
                 let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             }
         }
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            if session.execution_config != config {
+                session.execution_config = config;
+                if session.execution_runtime.armed {
+                    session.execution_runtime.armed = false;
+                    session.execution_runtime.pending_target_qty = None;
+                    session.execution_runtime.last_closed_bar_ts = None;
+                    session.execution_runtime.reset_execution();
+                    session.execution_runtime.last_summary =
+                        "Native strategy config changed; press Continue to re-arm.".to_string();
+                }
+                emit_execution_state(event_tx, session);
+            }
+        }
+        ServiceCommand::ArmExecutionStrategy => {
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            arm_execution_strategy(session);
+            emit_execution_state(event_tx, session);
+        }
+        ServiceCommand::DisarmExecutionStrategy { reason } => {
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            disarm_execution_strategy(session, reason);
+            emit_execution_state(event_tx, session);
+        }
     }
     Ok(())
 }
@@ -759,27 +1349,31 @@ async fn handle_internal(
 ) -> Result<()> {
     match internal {
         InternalEvent::UserEntities(entities) => {
-            let Some(session) = state.session.as_mut() else {
-                return Ok(());
-            };
             let mut latency_changed = false;
             let mut trade_markers_changed = false;
-            for envelope in &entities {
-                latency_changed |= update_latency_from_envelope(session, &mut state.latency, &envelope);
-                session.user_store.apply(envelope.clone());
-            }
-            for envelope in &entities {
-                if envelope.deleted || !envelope.entity_type.eq_ignore_ascii_case("fill") {
-                    continue;
+            {
+                let Some(session) = state.session.as_mut() else {
+                    return Ok(());
+                };
+                for envelope in &entities {
+                    latency_changed |=
+                        update_latency_from_envelope(session, &mut state.latency, &envelope);
+                    session.user_store.apply(envelope.clone());
                 }
-                if let Some(marker) = trade_marker_from_fill(session, &envelope.entity) {
-                    trade_markers_changed |= record_trade_marker(session, marker);
+                for envelope in &entities {
+                    if envelope.deleted || !envelope.entity_type.eq_ignore_ascii_case("fill") {
+                        continue;
+                    }
+                    if let Some(marker) = trade_marker_from_fill(session, &envelope.entity) {
+                        trade_markers_changed |= record_trade_marker(session, marker);
+                    }
                 }
-            }
-            if trade_markers_changed {
-                let _ = event_tx.send(ServiceEvent::TradeMarkersUpdated(
-                    session.market.trade_markers.clone(),
-                ));
+                if trade_markers_changed {
+                    let _ = event_tx.send(ServiceEvent::TradeMarkersUpdated(
+                        session.market.trade_markers.clone(),
+                    ));
+                }
+                handle_execution_account_sync(session, event_tx).await?;
             }
             request_snapshot_refresh(state, &internal_tx);
             if latency_changed {
@@ -802,10 +1396,15 @@ async fn handle_internal(
             let _ = event_tx.send(ServiceEvent::Status(message));
         }
         InternalEvent::Market(snapshot) => {
-            if let Some(session) = state.session.as_mut() {
-                let mut snapshot = snapshot;
-                snapshot.trade_markers = session.market.trade_markers.clone();
-                session.market = snapshot.clone();
+            if state.session.is_some() {
+                let snapshot = {
+                    let session = state.session.as_mut().expect("checked session above");
+                    let mut snapshot = snapshot;
+                    snapshot.trade_markers = session.market.trade_markers.clone();
+                    session.market = snapshot.clone();
+                    maybe_run_execution_strategy(session, event_tx).await?;
+                    snapshot
+                };
                 request_snapshot_refresh(state, &internal_tx);
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
                 return Ok(());
@@ -3566,6 +4165,8 @@ mod tests {
             },
             accounts: Vec::new(),
             request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
             order_latency_tracker: Some(OrderLatencyTracker {
                 started_at: time::Instant::now(),
                 cl_ord_id: "midas-1-entry".to_string(),
@@ -3639,6 +4240,8 @@ mod tests {
             },
             accounts: Vec::new(),
             request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
             order_latency_tracker: None,
             user_store,
             selected_account_id: Some(42),
@@ -3681,6 +4284,8 @@ mod tests {
             },
             accounts: Vec::new(),
             request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
             order_latency_tracker: None,
             user_store: UserSyncStore::default(),
             selected_account_id: Some(42),

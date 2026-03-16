@@ -1,10 +1,11 @@
 use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrategyKind {
     Native,
     Lua,
@@ -37,7 +38,7 @@ impl StrategyKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NativeStrategyKind {
     HmaAngle,
     EmaCross,
@@ -354,6 +355,48 @@ pub struct StrategyState {
     pub lua_editor: VimEditor,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecutionStrategyConfig {
+    pub kind: StrategyKind,
+    pub native_strategy: NativeStrategyKind,
+    pub native_hma: HmaAngleConfig,
+    pub native_ema: EmaCrossConfig,
+}
+
+impl Default for ExecutionStrategyConfig {
+    fn default() -> Self {
+        Self {
+            kind: StrategyKind::Native,
+            native_strategy: NativeStrategyKind::HmaAngle,
+            native_hma: HmaAngleConfig::default(),
+            native_ema: EmaCrossConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ExecutionRuntimeSnapshot {
+    pub armed: bool,
+    pub last_closed_bar_ts: Option<i64>,
+    pub pending_target_qty: Option<i32>,
+    pub last_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecutionStateSnapshot {
+    pub config: ExecutionStrategyConfig,
+    pub runtime: ExecutionRuntimeSnapshot,
+}
+
+impl Default for ExecutionStateSnapshot {
+    fn default() -> Self {
+        Self {
+            config: ExecutionStrategyConfig::default(),
+            runtime: ExecutionRuntimeSnapshot::default(),
+        }
+    }
+}
+
 impl StrategyState {
     pub fn new() -> Self {
         Self {
@@ -423,5 +466,21 @@ impl StrategyState {
                 self.native_ema.inverted,
             ),
         }
+    }
+
+    pub fn execution_config(&self) -> ExecutionStrategyConfig {
+        ExecutionStrategyConfig {
+            kind: self.kind,
+            native_strategy: self.native_strategy,
+            native_hma: self.native_hma.clone(),
+            native_ema: self.native_ema.clone(),
+        }
+    }
+
+    pub fn apply_execution_config(&mut self, config: &ExecutionStrategyConfig) {
+        self.kind = config.kind;
+        self.native_strategy = config.native_strategy;
+        self.native_hma = config.native_hma.clone();
+        self.native_ema = config.native_ema.clone();
     }
 }
