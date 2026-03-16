@@ -362,7 +362,12 @@ pub struct ExecutionStrategyConfig {
     pub native_strategy: NativeStrategyKind,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
+    #[serde(default = "default_order_qty")]
     pub order_qty: i32,
+}
+
+fn default_order_qty() -> i32 {
+    1
 }
 
 impl Default for ExecutionStrategyConfig {
