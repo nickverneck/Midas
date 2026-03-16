@@ -1036,7 +1036,7 @@ async fn maybe_run_execution_strategy(
     session.execution_runtime.last_summary = summary.clone();
 
     let Some(target_qty) =
-        target_qty_for_signal(signal, current_qty, session.cfg.order_qty)
+        target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
     else {
         sync_execution_protection(session, event_tx, Some(&last_closed)).await?;
         emit_execution_state(event_tx, session);

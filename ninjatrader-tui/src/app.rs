@@ -71,6 +71,7 @@ enum Focus {
     TokenPath,
     Connect,
     StrategyKind,
+    OrderQty,
     NativeStrategy,
     HmaLength,
     HmaMinAngle,
@@ -370,6 +371,7 @@ impl App {
             Focus::Secret => edit_string(&mut self.form.secret, key),
             Focus::TokenPath => edit_string(&mut self.form.token_path, key),
             Focus::StrategyKind
+            | Focus::OrderQty
             | Focus::NativeStrategy
             | Focus::HmaLength
             | Focus::HmaMinAngle
@@ -439,6 +441,18 @@ impl App {
                 }
                 _ => {}
             },
+            Focus::OrderQty => {
+                if edit_strategy_i32(
+                    &mut self.strategy_numeric_input,
+                    Focus::OrderQty,
+                    &mut self.strategy.order_qty,
+                    key,
+                    1,
+                    1,
+                ) {
+                    self.disarm_native_strategy(cmd_tx);
+                }
+            }
             Focus::HmaLength => {
                 if edit_strategy_usize(
                     &mut self.strategy_numeric_input,
@@ -838,6 +852,7 @@ impl App {
             | Focus::Secret
             | Focus::TokenPath
             | Focus::StrategyKind
+            | Focus::OrderQty
             | Focus::NativeStrategy
             | Focus::HmaLength
             | Focus::HmaMinAngle
@@ -1596,6 +1611,17 @@ impl App {
             self.focus == Focus::StrategyKind,
         )];
 
+        lines.push(styled_line(
+            format!(
+                "Order Qty: {}",
+                self.strategy_numeric_value(
+                    Focus::OrderQty,
+                    self.strategy.order_qty.to_string(),
+                )
+            ),
+            self.focus == Focus::OrderQty,
+        ));
+
         if self.strategy.kind == StrategyKind::Native {
             lines.push(styled_line(
                 format!("Native Strategy: {}", self.strategy.native_strategy.label()),
@@ -2157,7 +2183,7 @@ impl App {
     }
 
     fn strategy_focus_order(&self) -> Vec<Focus> {
-        let mut order = vec![Focus::StrategyKind];
+        let mut order = vec![Focus::StrategyKind, Focus::OrderQty];
         if self.strategy.kind == StrategyKind::Native {
             order.push(Focus::NativeStrategy);
             match self.strategy.native_strategy {
@@ -2269,6 +2295,7 @@ impl App {
                 | Focus::Cid
                 | Focus::Secret
                 | Focus::TokenPath
+                | Focus::OrderQty
                 | Focus::HmaLength
                 | Focus::HmaMinAngle
                 | Focus::HmaAngleLookback
@@ -2635,6 +2662,56 @@ fn edit_strategy_usize(
         {
             let next = numeric_append(draft, focus, ch, false);
             if let Ok(value) = next.parse::<usize>() {
+                *target = value.max(min);
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn edit_strategy_i32(
+    draft: &mut Option<NumericInputState>,
+    focus: Focus,
+    target: &mut i32,
+    key: KeyEvent,
+    min: i32,
+    step: i32,
+) -> bool {
+    if matches!(
+        key.code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')
+    ) {
+        *draft = None;
+        match key.code {
+            KeyCode::Left => {
+                *target = target.saturating_sub(step).max(min);
+                return true;
+            }
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                *target = target.saturating_add(step).max(min);
+                return true;
+            }
+            _ => return false,
+        }
+    }
+
+    match key.code {
+        KeyCode::Backspace => {
+            let next = numeric_backspace(draft, focus, &target.to_string());
+            if let Some(value) = next.and_then(|value| value.parse::<i32>().ok()) {
+                *target = value.max(min);
+                return true;
+            }
+        }
+        KeyCode::Char(ch)
+            if ch.is_ascii_digit()
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            let next = numeric_append(draft, focus, ch, false);
+            if let Ok(value) = next.parse::<i32>() {
                 *target = value.max(min);
                 return true;
             }

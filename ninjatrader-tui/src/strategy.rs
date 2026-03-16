@@ -350,6 +350,7 @@ pub struct StrategyState {
     pub native_strategy: NativeStrategyKind,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
+    pub order_qty: i32,
     pub lua_source_mode: LuaSourceMode,
     pub lua_file_path: String,
     pub lua_editor: VimEditor,
@@ -361,6 +362,7 @@ pub struct ExecutionStrategyConfig {
     pub native_strategy: NativeStrategyKind,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
+    pub order_qty: i32,
 }
 
 impl Default for ExecutionStrategyConfig {
@@ -370,6 +372,7 @@ impl Default for ExecutionStrategyConfig {
             native_strategy: NativeStrategyKind::HmaAngle,
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
+            order_qty: 1,
         }
     }
 }
@@ -404,6 +407,7 @@ impl StrategyState {
             native_strategy: NativeStrategyKind::HmaAngle,
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
+            order_qty: 1,
             lua_source_mode: LuaSourceMode::Editor,
             lua_file_path: String::new(),
             lua_editor: VimEditor::new_with_template(),
@@ -443,8 +447,9 @@ impl StrategyState {
     pub fn native_summary(&self) -> String {
         match self.native_strategy {
             NativeStrategyKind::HmaAngle => format!(
-                "{} | len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaAngle.label(),
+                self.order_qty,
                 self.native_hma.hma_length,
                 self.native_hma.min_angle,
                 self.native_hma.angle_lookback,
@@ -456,8 +461,9 @@ impl StrategyState {
                 self.native_hma.inverted,
             ),
             NativeStrategyKind::EmaCross => format!(
-                "{} | fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::EmaCross.label(),
+                self.order_qty,
                 self.native_ema.fast_length,
                 self.native_ema.slow_length,
                 self.native_ema.take_profit_ticks,
@@ -474,6 +480,7 @@ impl StrategyState {
             native_strategy: self.native_strategy,
             native_hma: self.native_hma.clone(),
             native_ema: self.native_ema.clone(),
+            order_qty: self.order_qty,
         }
     }
 
@@ -482,5 +489,6 @@ impl StrategyState {
         self.native_strategy = config.native_strategy;
         self.native_hma = config.native_hma.clone();
         self.native_ema = config.native_ema.clone();
+        self.order_qty = config.order_qty;
     }
 }
