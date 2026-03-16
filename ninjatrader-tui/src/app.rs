@@ -2,9 +2,9 @@ use crate::automation::{StrategyDescriptor, default_strategy_catalog};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
-    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, ContractSuggestion,
-    InstrumentSessionWindow, LatencySnapshot, ManualOrderAction, MarketSnapshot, ServiceCommand,
-    ServiceEvent, TradeMarker, TradeMarkerSide,
+    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
+    ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
+    MarketSnapshot, ServiceCommand, ServiceEvent, TradeMarker, TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -31,6 +31,7 @@ pub struct App {
     account_snapshots: Vec<AccountSnapshot>,
     selected_account: usize,
     instrument_query: String,
+    bar_type: BarType,
     contract_results: Vec<ContractSuggestion>,
     selected_contract: usize,
     market: MarketSnapshot,
@@ -96,6 +97,7 @@ enum Focus {
     StrategyContinue,
     AccountList,
     InstrumentQuery,
+    BarTypeToggle,
     ContractList,
 }
 
@@ -136,6 +138,7 @@ impl App {
             account_snapshots: Vec::new(),
             selected_account: 0,
             instrument_query: String::new(),
+            bar_type: BarType::default(),
             contract_results: Vec::new(),
             selected_contract: 0,
             market: MarketSnapshot::default(),
@@ -393,6 +396,7 @@ impl App {
             | Focus::StrategyContinue
             | Focus::AccountList
             | Focus::InstrumentQuery
+            | Focus::BarTypeToggle
             | Focus::ContractList => {}
         }
     }
@@ -680,6 +684,7 @@ impl App {
             | Focus::Connect
             | Focus::AccountList
             | Focus::InstrumentQuery
+            | Focus::BarTypeToggle
             | Focus::ContractList => {}
         }
     }
@@ -745,7 +750,7 @@ impl App {
                     if let Some(contract) =
                         self.contract_results.get(self.selected_contract).cloned()
                     {
-                        let _ = cmd_tx.send(ServiceCommand::SubscribeBars { contract });
+                        let _ = cmd_tx.send(ServiceCommand::SubscribeBars { contract, bar_type: self.bar_type });
                         self.screen = Screen::Strategy;
                         self.focus = Focus::StrategyKind;
                     }
@@ -771,7 +776,7 @@ impl App {
                         return;
                     }
                     KeyCode::Down => {
-                        self.focus = Focus::ContractList;
+                        self.focus = Focus::BarTypeToggle;
                         return;
                     }
                     KeyCode::Left => {
@@ -779,7 +784,7 @@ impl App {
                         return;
                     }
                     KeyCode::Right => {
-                        self.focus = Focus::ContractList;
+                        self.focus = Focus::BarTypeToggle;
                         return;
                     }
                     _ => {}
@@ -793,6 +798,31 @@ impl App {
                     }
                 } else {
                     edit_string(&mut self.instrument_query, key);
+                }
+            }
+            Focus::BarTypeToggle => {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        self.bar_type = self.bar_type.toggle();
+                        return;
+                    }
+                    KeyCode::Up => {
+                        self.focus = Focus::InstrumentQuery;
+                        return;
+                    }
+                    KeyCode::Down => {
+                        self.focus = Focus::ContractList;
+                        return;
+                    }
+                    KeyCode::Left => {
+                        self.focus = Focus::InstrumentQuery;
+                        return;
+                    }
+                    KeyCode::Right => {
+                        self.focus = Focus::ContractList;
+                        return;
+                    }
+                    _ => {}
                 }
             }
             Focus::AccountList
@@ -1060,7 +1090,7 @@ impl App {
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
+                Constraint::Length(5),
                 Constraint::Min(10),
                 Constraint::Length(8),
             ])
@@ -1071,8 +1101,12 @@ impl App {
                 format!("Query: {}", self.instrument_query),
                 self.focus == Focus::InstrumentQuery,
             ),
+            styled_line(
+                format!("Bar Type: {}", self.bar_type.label()),
+                self.focus == Focus::BarTypeToggle,
+            ),
             Line::from(
-                "Enter to search contracts. Enter on a result subscribes and opens Strategy.",
+                "Enter to search / toggle bar type. Enter on a result subscribes.",
             ),
         ])
         .block(

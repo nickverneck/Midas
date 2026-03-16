@@ -39,6 +39,7 @@ pub enum ServiceCommand {
     },
     SubscribeBars {
         contract: ContractSuggestion,
+        bar_type: BarType,
     },
     ManualOrder {
         action: ManualOrderAction,
@@ -132,6 +133,51 @@ pub struct AccountInfo {
     pub id: i64,
     pub name: String,
     pub raw: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BarType {
+    Minute1,
+    Range1,
+}
+
+impl BarType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Minute1 => "1 Min",
+            Self::Range1 => "1 Range",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Minute1 => Self::Range1,
+            Self::Range1 => Self::Minute1,
+        }
+    }
+
+    pub fn chart_description(self) -> Value {
+        match self {
+            Self::Minute1 => json!({
+                "underlyingType": "MinuteBar",
+                "elementSize": 1,
+                "elementSizeUnit": "UnderlyingUnits",
+                "withHistogram": false
+            }),
+            Self::Range1 => json!({
+                "underlyingType": "Tick",
+                "elementSize": 1,
+                "elementSizeUnit": "Range",
+                "withHistogram": false
+            }),
+        }
+    }
+}
+
+impl Default for BarType {
+    fn default() -> Self {
+        Self::Minute1
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,6 +318,7 @@ struct SessionState {
     user_store: UserSyncStore,
     selected_account_id: Option<i64>,
     selected_contract: Option<ContractSuggestion>,
+    bar_type: BarType,
     market: MarketSnapshot,
     managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     next_strategy_order_nonce: u64,
@@ -1001,6 +1048,14 @@ async fn maybe_run_execution_strategy(
         return Ok(());
     }
 
+    let _ = event_tx.send(ServiceEvent::Status(format!(
+        "Strategy {} signal: {} (qty {} -> {})",
+        active_native_slug(session),
+        signal.label(),
+        current_qty,
+        target_qty
+    )));
+
     if current_qty != 0 {
         if let Some(message) = sync_native_protection(
             session,
@@ -1163,6 +1218,7 @@ async fn handle_command(
                 user_store,
                 selected_account_id,
                 selected_contract: None,
+                bar_type: BarType::default(),
                 market: MarketSnapshot::default(),
                 managed_protection: BTreeMap::new(),
                 next_strategy_order_nonce: 1,
@@ -1223,7 +1279,7 @@ async fn handle_command(
             .await?;
             let _ = event_tx.send(ServiceEvent::ContractSearchResults { query, results });
         }
-        ServiceCommand::SubscribeBars { contract } => {
+        ServiceCommand::SubscribeBars { contract, bar_type } => {
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
@@ -1240,6 +1296,7 @@ async fn handle_command(
             .await
             .ok();
             session.selected_contract = Some(contract.clone());
+            session.bar_type = bar_type;
             session.execution_runtime.last_closed_bar_ts = None;
             session.execution_runtime.pending_target_qty = None;
             session.execution_runtime.reset_execution();
@@ -1253,6 +1310,7 @@ async fn handle_command(
                 token,
                 contract,
                 market_specs,
+                bar_type,
                 internal_tx,
             )));
         }
@@ -1719,11 +1777,17 @@ async fn ensure_background_tasks(
                 fetch_contract_specs(&state.client, &cfg.env, &access_token, &contract)
                     .await
                     .ok();
+            let bar_type = state
+                .session
+                .as_ref()
+                .map(|s| s.bar_type)
+                .unwrap_or_default();
             state.market_task = Some(tokio::spawn(market_data_worker(
                 cfg,
                 md_access_token,
                 contract,
                 market_specs,
+                bar_type,
                 internal_tx.clone(),
             )));
         }
@@ -2562,8 +2626,17 @@ async fn cancel_order_if_active(
         "orderId": order_id,
         "isAutomated": true,
     });
-    let _ = request_order_json(session, "order/cancelorder", &payload).await?;
-    Ok(true)
+    match request_order_json(session, "order/cancelorder", &payload).await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("TooLate") || msg.contains("Already cancelled") {
+                Ok(false)
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 async fn request_order_json(
@@ -3076,6 +3149,7 @@ async fn market_data_worker(
     access_token: String,
     contract: ContractSuggestion,
     market_specs: Option<MarketSpecs>,
+    bar_type: BarType,
     internal_tx: UnboundedSender<InternalEvent>,
 ) {
     if let Err(err) = market_data_worker_inner(
@@ -3083,6 +3157,7 @@ async fn market_data_worker(
         access_token,
         contract,
         market_specs,
+        bar_type,
         internal_tx.clone(),
     )
     .await
@@ -3096,6 +3171,7 @@ async fn market_data_worker_inner(
     access_token: String,
     contract: ContractSuggestion,
     market_specs: Option<MarketSpecs>,
+    bar_type: BarType,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
@@ -3164,12 +3240,7 @@ async fn market_data_worker_inner(
                         chart_req_id = Some(message_id);
                         let body = json!({
                             "symbol": contract.id,
-                            "chartDescription": {
-                                "underlyingType": "MinuteBar",
-                                "elementSize": 1,
-                                "elementSizeUnit": "UnderlyingUnits",
-                                "withHistogram": false
-                            },
+                            "chartDescription": bar_type.chart_description(),
                             "timeRange": {
                                 "asMuchAsElements": cfg.history_bars
                             }
