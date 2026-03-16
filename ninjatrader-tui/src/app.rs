@@ -1228,12 +1228,12 @@ impl App {
         if self.market.bars.is_empty() {
             let empty = Paragraph::new(vec![
                 Line::from(self.market.status.clone()),
-                Line::from("Select a contract to load 1-minute history + live bars."),
+                Line::from("Select a contract to load history + live bars."),
             ])
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("1m Market Data"),
+                    .title(format!("{} Market Data", self.bar_type.label())),
             );
             frame.render_widget(empty, area);
             return;
@@ -1270,12 +1270,13 @@ impl App {
             .and_then(|snapshot| snapshot.selected_contract_stop_price)
             .filter(|price| price.is_finite());
         let mut chart_prices = bars.iter().map(|bar| bar.close).collect::<Vec<_>>();
+        let bar_label = self.bar_type.label();
         let mut title = match &self.market.contract_name {
             Some(name) => format!(
-                "1m Market Data [{}] hist={} live={}",
+                "{bar_label} Market Data [{}] hist={} live={}",
                 name, self.market.history_loaded, self.market.live_bars
             ),
-            None => "1m Market Data".to_string(),
+            None => format!("{bar_label} Market Data"),
         };
         let mut overlay_labels = Vec::new();
         if let Some(price) = entry_price {

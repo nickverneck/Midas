@@ -1094,7 +1094,13 @@ pub async fn service_loop(
 ) {
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = ServiceState {
-        client: Client::builder().tcp_nodelay(true).build().unwrap(),
+        client: Client::builder()
+            .tcp_nodelay(true)
+            .pool_idle_timeout(Duration::from_secs(300))
+            .pool_max_idle_per_host(4)
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .unwrap(),
         session: None,
         user_task: None,
         market_task: None,
@@ -2992,8 +2998,8 @@ async fn user_sync_worker_inner(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
-        write_buffer_size: 4096,
-        max_write_buffer_size: 4096,
+        write_buffer_size: 0,
+        max_write_buffer_size: usize::MAX,
         ..Default::default()
     };
     let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
@@ -3175,8 +3181,8 @@ async fn market_data_worker_inner(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
-        write_buffer_size: 4096,
-        max_write_buffer_size: 4096,
+        write_buffer_size: 0,
+        max_write_buffer_size: usize::MAX,
         ..Default::default()
     };
     let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
