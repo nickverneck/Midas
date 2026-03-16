@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -2976,6 +2977,78 @@ async fn seed_user_store(
     }
 }
 
+/// Create a low-latency WebSocket connection with TCP_NODELAY and TCP_QUICKACK (Linux).
+async fn connect_low_latency_ws(
+    url: &str,
+    ws_config: WebSocketConfig,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let request = url.into_client_request()?;
+    let host = request
+        .uri()
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("no host in URL"))?;
+    let port = request.uri().port_u16().unwrap_or(443);
+
+    let addr = format!("{host}:{port}")
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {host}"))?;
+
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_nodelay(true)?;
+    socket.set_nonblocking(true)?;
+
+    // Minimize socket buffer sizes to reduce kernel-side latency
+    let _ = socket.set_recv_buffer_size(64 * 1024);
+    let _ = socket.set_send_buffer_size(64 * 1024);
+
+    // Start non-blocking connect (returns EINPROGRESS)
+    let _ = socket.connect(&addr.into());
+
+    let std_stream: std::net::TcpStream = socket.into();
+    let tcp_stream = tokio::net::TcpStream::from_std(std_stream)?;
+    // Wait for the async connect to complete
+    tcp_stream.writable().await?;
+
+    // Re-apply TCP_NODELAY after connect (some OS reset it)
+    tcp_stream.set_nodelay(true)?;
+
+    // Linux: disable delayed ACKs
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = tcp_stream.as_raw_fd();
+        unsafe {
+            let val: i32 = 1;
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_QUICKACK,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of::<i32>() as libc::socklen_t,
+            );
+        }
+    }
+
+    let (ws, resp) = tokio_tungstenite::client_async_tls_with_config(
+        request,
+        tcp_stream,
+        Some(ws_config),
+        None,
+    )
+    .await?;
+    Ok((ws, resp))
+}
+
 async fn user_sync_worker(
     cfg: AppConfig,
     tokens: TokenBundle,
@@ -3002,13 +3075,9 @@ async fn user_sync_worker_inner(
         max_write_buffer_size: usize::MAX,
         ..Default::default()
     };
-    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
-        cfg.env.user_ws_url(),
-        Some(ws_config),
-        true, // disable Nagle (TCP_NODELAY)
-    )
-    .await
-    .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
+    let (ws_stream, _) = connect_low_latency_ws(cfg.env.user_ws_url(), ws_config)
+        .await
+        .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
     let (mut write, mut read) = ws_stream.split();
 
     let mut message_id = 1_u64;
@@ -3185,13 +3254,9 @@ async fn market_data_worker_inner(
         max_write_buffer_size: usize::MAX,
         ..Default::default()
     };
-    let (ws_stream, _) = tokio_tungstenite::connect_async_with_config(
-        cfg.env.market_ws_url(),
-        Some(ws_config),
-        true, // disable Nagle (TCP_NODELAY)
-    )
-    .await
-    .with_context(|| format!("connect {}", cfg.env.market_ws_url()))?;
+    let (ws_stream, _) = connect_low_latency_ws(cfg.env.market_ws_url(), ws_config)
+        .await
+        .with_context(|| format!("connect {}", cfg.env.market_ws_url()))?;
     let (mut write, mut read) = ws_stream.split();
 
     let mut message_id = 1_u64;
