@@ -1,0 +1,185 @@
+{
+  "engine": "rl",
+  "profile": "release",
+  "host": "http://127.0.0.1:4173",
+  "params": {
+    "algorithm": "ppo",
+    "backend": "candle",
+    "device": "cpu",
+    "outdir": "runs_rl/es_candle_fold2_2026-03-15T08-43-08-762Z",
+    "train-parquet": "data/train/01-04-2026/ES_F.parquet",
+    "val-parquet": "data/train/01-12-2026/ES_F.parquet",
+    "test-parquet": "data/train/01-20-2026/ES_F.parquet",
+    "windowed": true,
+    "window": 700,
+    "step": 128,
+    "epochs": 18,
+    "train-windows": 24,
+    "ppo-epochs": 4,
+    "eval-windows": 999,
+    "lr": 0.0003,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "clip": 0.2,
+    "vf-coef": 0.5,
+    "ent-coef": 0.01,
+    "hidden": 128,
+    "layers": 2,
+    "log-interval": 1,
+    "checkpoint-every": 1,
+    "w-pnl": 1,
+    "w-sortino": 1,
+    "w-mdd": 0.5,
+    "initial-balance": 10000,
+    "max-position": 0,
+    "margin-mode": "per-contract",
+    "margin-per-contract": 500,
+    "contract-multiplier": 50,
+    "auto-close-minutes-before-close": 5
+  },
+  "runDir": "runs_rl/es_candle_fold2_2026-03-15T08-43-08-762Z",
+  "exitCode": 0,
+  "metricKey": "fitness",
+  "rowCount": 18,
+  "fitnessSummary": [
+    {
+      "gen": 0,
+      "fitness": -5708.6056
+    },
+    {
+      "gen": 1,
+      "fitness": -6204.6271
+    },
+    {
+      "gen": 2,
+      "fitness": -3864.6262
+    },
+    {
+      "gen": 3,
+      "fitness": -8090.8732
+    },
+    {
+      "gen": 4,
+      "fitness": -4708.1858
+    },
+    {
+      "gen": 5,
+      "fitness": -3890.9709
+    },
+    {
+      "gen": 6,
+      "fitness": -4897.2171
+    },
+    {
+      "gen": 7,
+      "fitness": -1427.1922
+    },
+    {
+      "gen": 8,
+      "fitness": -780.7485
+    },
+    {
+      "gen": 9,
+      "fitness": -5383.1184
+    },
+    {
+      "gen": 10,
+      "fitness": -5807.6359
+    },
+    {
+      "gen": 11,
+      "fitness": 1511.9831
+    },
+    {
+      "gen": 12,
+      "fitness": -4197.4261
+    },
+    {
+      "gen": 13,
+      "fitness": 124.7357
+    },
+    {
+      "gen": 14,
+      "fitness": -4565.8998
+    },
+    {
+      "gen": 15,
+      "fitness": -1626.7534
+    },
+    {
+      "gen": 16,
+      "fitness": -4474.5481
+    },
+    {
+      "gen": 17,
+      "fitness": -6039.9343
+    }
+  ],
+  "finalRow": {
+    "epoch": 17,
+    "train_ret_mean": -0.0003,
+    "train_pnl": -2083.3333,
+    "train_sortino": -0.0052,
+    "train_drawdown": 7913.1917,
+    "eval_ret_mean": -0.0004,
+    "eval_pnl": -1864.2241,
+    "eval_sortino": -0.0017,
+    "eval_drawdown": 8733.2922,
+    "fitness": -6039.9343,
+    "policy_loss": -0.000103,
+    "value_loss": 75776097.244303,
+    "entropy": 1.035524,
+    "total_loss": 37888048.619548
+  },
+  "bestRow": {
+    "epoch": 11,
+    "train_ret_mean": 0.0005,
+    "train_pnl": 5365.625,
+    "train_sortino": 0.0342,
+    "train_drawdown": 7707.3521,
+    "eval_ret_mean": -0.0007,
+    "eval_pnl": 173.7069,
+    "eval_sortino": 0.0205,
+    "eval_drawdown": 10752.4655,
+    "fitness": 1511.9831,
+    "policy_loss": -0.001081,
+    "value_loss": 88237674.381185,
+    "entropy": 1.049726,
+    "total_loss": 44118837.18929
+  },
+  "bestEvalPnlMetricKey": "eval_pnl",
+  "bestEvalPnlRow": {
+    "epoch": 16,
+    "train_ret_mean": -0.0001,
+    "train_pnl": -910.4167,
+    "train_sortino": 0.0039,
+    "train_drawdown": 7128.2708,
+    "eval_ret_mean": 0.0006,
+    "eval_pnl": 3327.8017,
+    "eval_sortino": 0.0629,
+    "eval_drawdown": 10208.8922,
+    "fitness": -4474.5481,
+    "policy_loss": -0.001492,
+    "value_loss": 76395644.133504,
+    "entropy": 1.107959,
+    "total_loss": 38197822.065043
+  },
+  "stdoutInsights": {
+    "testLine": "test | ret -0.0001 | pnl -658.1019 | sortino 0.0098 | mdd 9937.1685",
+    "saveLines": [
+      "Saved final PPO checkpoint to runs_rl/es_candle_fold2_2026-03-15T08-43-08-762Z/ppo_final.safetensors"
+    ]
+  },
+  "trainingStack": {
+    "trainer": "rl",
+    "backend": "candle",
+    "requested_runtime": "cpu",
+    "effective_runtime": "cpu",
+    "implementation_status": "implemented",
+    "cargo_feature": "backend-candle",
+    "algorithm": "ppo",
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "generatedAt": "2026-03-15T08:44:02.552Z"
+}

@@ -1,8 +1,12 @@
-use tch::{Device, Tensor, kind::Kind, no_grad};
+use tch::{Device, Kind, Tensor, no_grad};
 
+use crate::actions::{
+    POLICY_ACTION_DIM, env_action_for_target, env_action_label, policy_action_label,
+    policy_target_position,
+};
 use crate::config::CandidateConfig;
 use crate::data::{DataSet, build_observation};
-use crate::metrics::{compute_sortino, max_drawdown};
+use crate::metrics::{candidate_fitness, compute_sortino, liquidation_cost, max_drawdown};
 use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
 use crate::types::{BehaviorRow, CandidateResult};
 use midas_env::env::VIOLATION_PENALTY;
@@ -84,7 +88,14 @@ impl CandidateStats {
             self.eval_pnls_total.iter().sum::<f64>() / self.eval_pnls_total.len() as f64
         };
 
-        let fitness = cfg.w_pnl * eval_pnl + cfg.w_sortino * eval_sortino - cfg.w_mdd * eval_draw;
+        let fitness = candidate_fitness(
+            eval_pnl,
+            eval_sortino,
+            eval_draw,
+            cfg.w_pnl,
+            cfg.w_sortino,
+            cfg.w_mdd,
+        );
 
         CandidateResult {
             fitness,
@@ -157,6 +168,9 @@ fn evaluate_candidate_internal(
         hold_duration_penalty_growth: cfg.hold_duration_penalty_growth,
         hold_duration_penalty_positive_scale: cfg.hold_duration_penalty_positive_scale,
         hold_duration_penalty_negative_scale: cfg.hold_duration_penalty_negative_scale,
+        min_hold_bars: cfg.min_hold_bars,
+        early_exit_penalty: cfg.early_exit_penalty,
+        early_flip_penalty: cfg.early_flip_penalty,
         invalid_revert_penalty: cfg.invalid_revert_penalty,
         flat_hold_penalty: cfg.flat_hold_penalty,
         invalid_revert_penalty_growth: cfg.invalid_revert_penalty_growth,
@@ -187,7 +201,6 @@ fn evaluate_candidate_internal(
     let mut drawdown_penalty_sum = 0.0f64;
     let mut invalid_revert_penalty_sum = 0.0f64;
     let mut hold_duration_penalty_sum = 0.0f64;
-    let mut violation_penalty_sum = 0.0f64;
     let mut flat_hold_penalty_sum = 0.0f64;
     let mut session_close_penalty_sum = 0.0f64;
 
@@ -215,6 +228,11 @@ fn evaluate_candidate_internal(
                 data,
                 t,
                 position,
+                env.state()
+                    .step
+                    .saturating_sub(env.state().position_entry_step),
+                env.state().flat_steps,
+                cfg.max_position,
                 equity,
                 env.state().unrealized_pnl,
                 env.state().realized_pnl,
@@ -227,29 +245,18 @@ fn evaluate_candidate_internal(
 
             let action_idx = no_grad(|| {
                 let logits = policy.forward(&obs_device);
-                let probs = logits.softmax(-1, Kind::Float);
-                let sample = probs.multinomial(1, true);
-                sample.int64_value(&[0, 0]) as i32
+                select_action_from_logits(&logits)
             });
 
-            let action = match action_idx {
-                0 => {
-                    act_buy += 1;
-                    Action::Buy
-                }
-                1 => {
-                    act_sell += 1;
-                    Action::Sell
-                }
-                2 => {
-                    act_hold += 1;
-                    Action::Hold
-                }
-                _ => {
-                    act_revert += 1;
-                    Action::Revert
-                }
-            };
+            let policy_label = policy_action_label(action_idx);
+            let target_position = policy_target_position(action_idx);
+            let action = env_action_for_target(position_before, target_position);
+            match action {
+                Action::Buy => act_buy += 1,
+                Action::Sell => act_sell += 1,
+                Action::Hold => act_hold += 1,
+                Action::Revert => act_revert += 1,
+            }
 
             let session_open = if cfg.ignore_session {
                 true
@@ -276,12 +283,6 @@ fn evaluate_candidate_internal(
                     minutes_to_close,
                 },
             );
-            let action_label = match info.effective_action {
-                Action::Buy => "buy",
-                Action::Sell => "sell",
-                Action::Hold => "hold",
-                Action::Revert => "revert",
-            };
             if info.session_closed_violation {
                 session_violations += 1;
                 window_violation_penalty += VIOLATION_PENALTY;
@@ -303,7 +304,8 @@ fn evaluate_candidate_internal(
                     step: step_idx,
                     data_idx: t,
                     action_idx,
-                    action: action_label.to_string(),
+                    action: policy_label.to_string(),
+                    effective_action: env_action_label(info.effective_action).to_string(),
                     position_before,
                     position_after: state.position,
                     equity_before,
@@ -349,8 +351,19 @@ fn evaluate_candidate_internal(
         }
 
         let realized_pnl = env.state().realized_pnl;
-        let total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
-        let pnl_sum = realized_pnl
+        let mut total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
+        let exit_cost = liquidation_cost(
+            env.state().position,
+            env_cfg.commission_round_turn,
+            env_cfg.slippage_per_contract,
+        );
+        if exit_cost > 0.0 {
+            total_pnl -= exit_cost;
+            let last_eq = eq_curve.last().copied().unwrap_or(cfg.initial_balance);
+            eq_curve.push(last_eq - exit_cost);
+            pnl_buf.push(-exit_cost);
+        }
+        let pnl_sum = total_pnl
             - window_drawdown_penalty
             - window_invalid_revert_penalty
             - window_hold_duration_penalty
@@ -365,7 +378,6 @@ fn evaluate_candidate_internal(
         hold_duration_penalty_sum += window_hold_duration_penalty;
         flat_hold_penalty_sum += window_flat_hold_penalty;
         session_close_penalty_sum += window_session_close_penalty;
-        violation_penalty_sum += window_violation_penalty;
 
         let mut prev_eq = cfg.initial_balance;
         for (i, &pnl) in pnl_buf.iter().enumerate() {
@@ -399,7 +411,14 @@ fn evaluate_candidate_internal(
         eval_pnls_total.iter().sum::<f64>() / eval_pnls_total.len() as f64
     };
 
-    let fitness = cfg.w_pnl * eval_pnl + cfg.w_sortino * eval_sortino - cfg.w_mdd * eval_draw;
+    let fitness = candidate_fitness(
+        eval_pnl,
+        eval_sortino,
+        eval_draw,
+        cfg.w_pnl,
+        cfg.w_sortino,
+        cfg.w_mdd,
+    );
 
     CandidateResult {
         fitness,
@@ -489,6 +508,9 @@ pub fn evaluate_candidates_batch(
         hold_duration_penalty_growth: cfg.hold_duration_penalty_growth,
         hold_duration_penalty_positive_scale: cfg.hold_duration_penalty_positive_scale,
         hold_duration_penalty_negative_scale: cfg.hold_duration_penalty_negative_scale,
+        min_hold_bars: cfg.min_hold_bars,
+        early_exit_penalty: cfg.early_exit_penalty,
+        early_flip_penalty: cfg.early_flip_penalty,
         invalid_revert_penalty: cfg.invalid_revert_penalty,
         flat_hold_penalty: cfg.flat_hold_penalty,
         invalid_revert_penalty_growth: cfg.invalid_revert_penalty_growth,
@@ -533,6 +555,11 @@ pub fn evaluate_candidates_batch(
                     data,
                     t,
                     positions[i],
+                    env.state()
+                        .step
+                        .saturating_sub(env.state().position_entry_step),
+                    env.state().flat_steps,
+                    cfg.max_position,
                     equities[i],
                     env.state().unrealized_pnl,
                     env.state().realized_pnl,
@@ -547,9 +574,7 @@ pub fn evaluate_candidates_batch(
             obs_device.copy_(&obs_cpu);
 
             let logits = no_grad(|| policy.forward(&obs_device));
-            let probs = logits.softmax(-1, Kind::Float);
-            let sample = probs.multinomial(1, true);
-            let sample_cpu = sample.squeeze_dim(-1).to_device(Device::Cpu);
+            let action_indices = select_actions_from_batch_logits(&logits, batch);
 
             let session_open = if cfg.ignore_session {
                 true
@@ -568,25 +593,15 @@ pub fn evaluate_candidates_batch(
             let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
             for i in 0..batch {
-                let action_idx = sample_cpu.int64_value(&[i as i64]) as i32;
-                let action = match action_idx {
-                    0 => {
-                        stats[i].act_buy += 1;
-                        Action::Buy
-                    }
-                    1 => {
-                        stats[i].act_sell += 1;
-                        Action::Sell
-                    }
-                    2 => {
-                        stats[i].act_hold += 1;
-                        Action::Hold
-                    }
-                    _ => {
-                        stats[i].act_revert += 1;
-                        Action::Revert
-                    }
-                };
+                let action_idx = action_indices[i];
+                let target_position = policy_target_position(action_idx);
+                let action = env_action_for_target(positions[i], target_position);
+                match action {
+                    Action::Buy => stats[i].act_buy += 1,
+                    Action::Sell => stats[i].act_sell += 1,
+                    Action::Hold => stats[i].act_hold += 1,
+                    Action::Revert => stats[i].act_revert += 1,
+                }
 
                 let (_reward, info) = envs[i].step(
                     action,
@@ -632,9 +647,20 @@ pub fn evaluate_candidates_batch(
 
         for i in 0..batch {
             let realized_pnl = envs[i].state().realized_pnl;
-            let total_pnl =
+            let mut total_pnl =
                 envs[i].state().cash + envs[i].state().unrealized_pnl - cfg.initial_balance;
-            let pnl_sum = realized_pnl
+            let exit_cost = liquidation_cost(
+                envs[i].state().position,
+                env_cfg.commission_round_turn,
+                env_cfg.slippage_per_contract,
+            );
+            if exit_cost > 0.0 {
+                total_pnl -= exit_cost;
+                let last_eq = eq_curves[i].last().copied().unwrap_or(cfg.initial_balance);
+                eq_curves[i].push(last_eq - exit_cost);
+                pnl_bufs[i].push(-exit_cost);
+            }
+            let pnl_sum = total_pnl
                 - window_drawdown_penalty[i]
                 - window_invalid_revert_penalty[i]
                 - window_hold_duration_penalty[i]
@@ -668,4 +694,39 @@ pub fn evaluate_candidates_batch(
     }
 
     stats.into_iter().map(|s| s.finish(cfg)).collect()
+}
+
+fn select_action_from_logits(logits: &Tensor) -> i32 {
+    let logits_cpu = logits.squeeze_dim(0).to_device(Device::Cpu);
+    let mut values = vec![0f32; logits_cpu.numel()];
+    let len = values.len();
+    logits_cpu.copy_data(&mut values, len);
+    argmax_index(&values) as i32
+}
+
+fn select_actions_from_batch_logits(logits: &Tensor, batch: usize) -> Vec<i32> {
+    let logits_cpu = logits.to_device(Device::Cpu);
+    let mut values = vec![0f32; logits_cpu.numel()];
+    let len = values.len();
+    logits_cpu.copy_data(&mut values, len);
+
+    values
+        .chunks_exact(POLICY_ACTION_DIM)
+        .take(batch)
+        .map(|row| argmax_index(row) as i32)
+        .collect()
+}
+
+fn argmax_index(values: &[f32]) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_value = f32::NEG_INFINITY;
+
+    for (idx, value) in values.iter().copied().enumerate() {
+        if value > best_value {
+            best_idx = idx;
+            best_value = value;
+        }
+    }
+
+    best_idx
 }

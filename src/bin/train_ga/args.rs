@@ -54,6 +54,10 @@ pub struct Args {
     pub workers: usize,
     #[arg(long, default_value_t = 0.33)]
     pub elite_frac: f64,
+    #[arg(long, default_value_t = 0.33)]
+    pub parent_pool_frac: f64,
+    #[arg(long, default_value_t = 0.0)]
+    pub immigrant_frac: f64,
     #[arg(long, default_value_t = 0.05)]
     pub mutation_sigma: f64,
     #[arg(long, default_value_t = 0.5)]
@@ -71,6 +75,8 @@ pub struct Args {
     pub save_every: usize,
     #[arg(long, default_value_t = 1)]
     pub checkpoint_every: usize,
+    #[arg(long, default_value_t = 1)]
+    pub behavior_every: usize,
     #[arg(long)]
     pub load_checkpoint: Option<PathBuf>,
     #[arg(long, default_value_t = 1.0)]
@@ -109,6 +115,12 @@ pub struct Args {
     pub hold_duration_penalty_positive_scale: f64,
     #[arg(long, default_value_t = 1.5)]
     pub hold_duration_penalty_negative_scale: f64,
+    #[arg(long, default_value_t = 0)]
+    pub min_hold_bars: usize,
+    #[arg(long, default_value_t = 0.0)]
+    pub early_exit_penalty: f64,
+    #[arg(long, default_value_t = 0.0)]
+    pub early_flip_penalty: f64,
     #[arg(long, default_value_t = 7.0)]
     pub invalid_revert_penalty: f64,
     #[arg(long, default_value_t = 0.5)]

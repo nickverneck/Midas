@@ -70,6 +70,12 @@ pub struct EnvConfig {
     pub hold_duration_penalty_positive_scale: f64,
     /// Scale factor when PnL is decreasing after max hold bars.
     pub hold_duration_penalty_negative_scale: f64,
+    /// Minimum bars to stay in a position before exiting or flipping.
+    pub min_hold_bars: usize,
+    /// Penalty per missing bar when flattening before min_hold_bars.
+    pub early_exit_penalty: f64,
+    /// Penalty per missing bar when flipping before min_hold_bars.
+    pub early_flip_penalty: f64,
     /// Penalty for using Revert when flat.
     pub invalid_revert_penalty: f64,
     /// Linear growth for consecutive invalid Revert penalties.
@@ -105,6 +111,9 @@ impl Default for EnvConfig {
             hold_duration_penalty_growth: 0.0,
             hold_duration_penalty_positive_scale: 0.5,
             hold_duration_penalty_negative_scale: 1.5,
+            min_hold_bars: 0,
+            early_exit_penalty: 0.0,
+            early_flip_penalty: 0.0,
             invalid_revert_penalty: 0.0,
             invalid_revert_penalty_growth: 0.0,
             flat_hold_penalty: 0.0,
@@ -443,7 +452,49 @@ impl TradingEnv {
             0.0
         };
 
-        let session_close_penalty = 0.0;
+        let missing_hold_bars = if self.state.position != 0
+            && self.cfg.min_hold_bars > 0
+            && hold_bars < self.cfg.min_hold_bars
+        {
+            (self.cfg.min_hold_bars - hold_bars) as f64
+        } else {
+            0.0
+        };
+        let early_exit_penalty = if !auto_close_executed
+            && self.state.position != 0
+            && target_position == 0
+            && missing_hold_bars > 0.0
+        {
+            self.cfg.early_exit_penalty * missing_hold_bars
+        } else {
+            0.0
+        };
+        let early_flip_penalty = if !auto_close_executed
+            && self.state.position != 0
+            && target_position != 0
+            && self.state.position.signum() != target_position.signum()
+            && missing_hold_bars > 0.0
+        {
+            self.cfg.early_flip_penalty * missing_hold_bars
+        } else {
+            0.0
+        };
+
+        let session_close_penalty = if self.state.position != 0 && self.cfg.session_close_penalty > 0.0
+        {
+            if let Some(minutes_to_close) = ctx.minutes_to_close {
+                if minutes_to_close.is_finite() && (0.0..=60.0).contains(&minutes_to_close) {
+                    let urgency = 1.0 - (minutes_to_close / 60.0);
+                    self.cfg.session_close_penalty * urgency * self.state.position.abs() as f64
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
 
         let flat_hold_penalty = if self.state.position == 0
             && self.cfg.max_flat_hold_bars > 0
@@ -501,6 +552,12 @@ impl TradingEnv {
         }
         if hold_duration_penalty > 0.0 {
             reward -= hold_duration_penalty;
+        }
+        if early_exit_penalty > 0.0 {
+            reward -= early_exit_penalty;
+        }
+        if early_flip_penalty > 0.0 {
+            reward -= early_flip_penalty;
         }
         if flat_hold_penalty > 0.0 {
             reward -= flat_hold_penalty;
@@ -758,6 +815,44 @@ mod tests {
         assert_eq!(env.state.position, 1);
         assert!(info2.hold_duration_penalty == 0.0);
         assert!(info3.hold_duration_penalty > 0.0);
+    }
+
+    #[test]
+    fn early_exit_penalty_applies_before_min_hold() {
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                min_hold_bars: 3,
+                early_exit_penalty: 2.0,
+                enforce_margin: false,
+                ..Default::default()
+            },
+        );
+        let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
+        let (reward, _info) = env.step(Action::Sell, 100.0, StepContext::default());
+        assert!(reward < -3.0);
+        assert_eq!(env.state.position, 0);
+    }
+
+    #[test]
+    fn early_flip_penalty_applies_before_min_hold() {
+        let mut env = TradingEnv::new(
+            100.0,
+            1000.0,
+            EnvConfig {
+                min_hold_bars: 4,
+                early_flip_penalty: 3.0,
+                max_position: 1,
+                enforce_margin: false,
+                ..Default::default()
+            },
+        );
+        let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
+        let (reward, info) = env.step(Action::Revert, 100.0, StepContext::default());
+        assert!(reward < -5.0);
+        assert!(matches!(info.effective_action, Action::Revert));
+        assert_eq!(env.state.position, -1);
     }
 
     #[test]

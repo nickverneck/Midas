@@ -1,0 +1,136 @@
+{
+  "engine": "rl",
+  "profile": "release",
+  "host": "http://127.0.0.1:4173",
+  "params": {
+    "algorithm": "ppo",
+    "backend": "candle",
+    "device": "cpu",
+    "outdir": "runs_rl/es_candle_fold2",
+    "train-parquet": "data/train/01-04-2026/ES_F.parquet",
+    "val-parquet": "data/train/01-12-2026/ES_F.parquet",
+    "test-parquet": "data/train/01-20-2026/ES_F.parquet",
+    "windowed": true,
+    "window": 700,
+    "step": 128,
+    "epochs": 6,
+    "train-windows": 12,
+    "ppo-epochs": 4,
+    "eval-windows": 4,
+    "lr": 0.0003,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "clip": 0.2,
+    "vf-coef": 0.5,
+    "ent-coef": 0.01,
+    "hidden": 128,
+    "layers": 2,
+    "log-interval": 1,
+    "checkpoint-every": 1,
+    "w-pnl": 1,
+    "w-sortino": 1,
+    "w-mdd": 0.5,
+    "initial-balance": 10000,
+    "max-position": 0,
+    "margin-mode": "per-contract",
+    "margin-per-contract": 500,
+    "contract-multiplier": 50,
+    "auto-close-minutes-before-close": 5
+  },
+  "runDir": "runs_rl/es_candle_fold2",
+  "exitCode": 0,
+  "metricKey": "fitness",
+  "rowCount": 6,
+  "fitnessSummary": [
+    {
+      "gen": 0,
+      "fitness": -3433.1321
+    },
+    {
+      "gen": 1,
+      "fitness": -2785.5612
+    },
+    {
+      "gen": 2,
+      "fitness": -2435.0939
+    },
+    {
+      "gen": 3,
+      "fitness": 1391.796
+    },
+    {
+      "gen": 4,
+      "fitness": -6167.0592
+    },
+    {
+      "gen": 5,
+      "fitness": -1847.9626
+    }
+  ],
+  "finalRow": {
+    "epoch": 5,
+    "train_ret_mean": 0.0002,
+    "train_pnl": 1195.8333,
+    "train_sortino": 0.0332,
+    "train_drawdown": 6087.6583,
+    "eval_ret_mean": 0,
+    "eval_pnl": -1775,
+    "eval_sortino": -0.0018,
+    "eval_drawdown": 9106.3875,
+    "fitness": -1847.9626,
+    "policy_loss": -0.000321,
+    "value_loss": 17857973.825317,
+    "entropy": 0.855365,
+    "total_loss": 8928986.909078
+  },
+  "bestRow": {
+    "epoch": 3,
+    "train_ret_mean": 0.0005,
+    "train_pnl": 4028.125,
+    "train_sortino": 0.0377,
+    "train_drawdown": 5272.7333,
+    "eval_ret_mean": -0.0004,
+    "eval_pnl": 2265.625,
+    "eval_sortino": -0.0099,
+    "eval_drawdown": 9840.3125,
+    "fitness": 1391.796,
+    "policy_loss": -0.000259,
+    "value_loss": 29399780.080607,
+    "entropy": 0.843946,
+    "total_loss": 14699890.034241
+  },
+  "bestEvalPnlRow": {
+    "epoch": 2,
+    "train_ret_mean": 0.0001,
+    "train_pnl": 90.625,
+    "train_sortino": 0.0206,
+    "train_drawdown": 5051.4792,
+    "eval_ret_mean": 0.0008,
+    "eval_pnl": 3653.125,
+    "eval_sortino": 0.0469,
+    "eval_drawdown": 7833.5875,
+    "fitness": -2435.0939,
+    "policy_loss": 0.000496,
+    "value_loss": 31649299.962362,
+    "entropy": 0.918741,
+    "total_loss": 15824649.976725
+  },
+  "stdoutInsights": {
+    "testLine": "test | ret -0.0018 | pnl -8162.5000 | sortino 0.0027 | mdd 13150.5125",
+    "saveLines": [
+      "Saved final PPO checkpoint to runs_rl/es_candle_fold2/ppo_final.safetensors"
+    ]
+  },
+  "trainingStack": {
+    "trainer": "rl",
+    "backend": "candle",
+    "requested_runtime": "cpu",
+    "effective_runtime": "cpu",
+    "implementation_status": "implemented",
+    "cargo_feature": "backend-candle",
+    "algorithm": "ppo",
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "generatedAt": "2026-03-15T08:31:26.770Z"
+}

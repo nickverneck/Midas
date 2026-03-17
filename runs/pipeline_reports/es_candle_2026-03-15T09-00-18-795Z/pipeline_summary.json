@@ -1,0 +1,342 @@
+{
+  "generatedAt": "2026-03-15T09:02:42.197Z",
+  "host": "http://127.0.0.1:4173",
+  "profile": "release",
+  "step": 128,
+  "window": 700,
+  "mode": "ga",
+  "reportDir": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_candle_2026-03-15T09-00-18-795Z",
+  "results": [
+    {
+      "engine": "ga",
+      "profile": "release",
+      "host": "http://127.0.0.1:4173",
+      "params": {
+        "backend": "candle",
+        "device": "cpu",
+        "outdir": "runs_ga/es_candle_fold1_2026-03-15T09-00-18-795Z",
+        "train-parquet": "data/train/12-29-2025/ES_F.parquet",
+        "val-parquet": "data/train/01-04-2026/ES_F.parquet",
+        "test-parquet": "data/train/01-12-2026/ES_F.parquet",
+        "windowed": true,
+        "window": 700,
+        "step": 128,
+        "generations": 50,
+        "pop-size": 12,
+        "workers": 2,
+        "batch-candidates": 0,
+        "elite-frac": 0.33,
+        "mutation-sigma": 0.05,
+        "init-sigma": 0.5,
+        "hidden": 128,
+        "layers": 2,
+        "eval-windows": 999,
+        "save-top-n": 3,
+        "save-every": 1,
+        "checkpoint-every": 1,
+        "selection-train-weight": 0.1,
+        "selection-eval-weight": 0.9,
+        "selection-gap-penalty": 0.1,
+        "w-pnl": 1,
+        "w-sortino": 1,
+        "w-mdd": 0.25,
+        "initial-balance": 10000,
+        "max-position": 0,
+        "margin-mode": "per-contract",
+        "margin-per-contract": 500,
+        "contract-multiplier": 50,
+        "auto-close-minutes-before-close": 5,
+        "selection-use-eval": true
+      },
+      "runDir": "runs_ga/es_candle_fold1_2026-03-15T09-00-18-795Z",
+      "exitCode": 0,
+      "metricKey": "selection_fitness",
+      "rowCount": 600,
+      "fitnessSummary": [
+        {
+          "gen": 0,
+          "fitness": -214753.0667
+        },
+        {
+          "gen": 1,
+          "fitness": -129305.3948
+        },
+        {
+          "gen": 2,
+          "fitness": -87833.091
+        },
+        {
+          "gen": 3,
+          "fitness": -86161.6466
+        },
+        {
+          "gen": 4,
+          "fitness": -153898.7929
+        },
+        {
+          "gen": 5,
+          "fitness": -58342.5164
+        },
+        {
+          "gen": 6,
+          "fitness": -12069.721
+        },
+        {
+          "gen": 7,
+          "fitness": -6770.807
+        },
+        {
+          "gen": 8,
+          "fitness": -5419.5112
+        },
+        {
+          "gen": 9,
+          "fitness": -14959.7629
+        },
+        {
+          "gen": 10,
+          "fitness": -10215.6746
+        },
+        {
+          "gen": 11,
+          "fitness": -15786.4466
+        },
+        {
+          "gen": 12,
+          "fitness": -18567.1769
+        },
+        {
+          "gen": 13,
+          "fitness": -6384.9987
+        },
+        {
+          "gen": 14,
+          "fitness": -12545.5061
+        },
+        {
+          "gen": 15,
+          "fitness": -7364.105
+        },
+        {
+          "gen": 16,
+          "fitness": -11446.6866
+        },
+        {
+          "gen": 17,
+          "fitness": -11965.3512
+        },
+        {
+          "gen": 18,
+          "fitness": -11873.5436
+        },
+        {
+          "gen": 19,
+          "fitness": -5516.3759
+        },
+        {
+          "gen": 20,
+          "fitness": -10554.0319
+        },
+        {
+          "gen": 21,
+          "fitness": -9288.4451
+        },
+        {
+          "gen": 22,
+          "fitness": -6361.8892
+        },
+        {
+          "gen": 23,
+          "fitness": -10418.968
+        },
+        {
+          "gen": 24,
+          "fitness": -9850.8648
+        },
+        {
+          "gen": 25,
+          "fitness": -8353.265
+        },
+        {
+          "gen": 26,
+          "fitness": -11619.4394
+        },
+        {
+          "gen": 27,
+          "fitness": -10183.094
+        },
+        {
+          "gen": 28,
+          "fitness": -9147.2601
+        },
+        {
+          "gen": 29,
+          "fitness": -7565.6871
+        },
+        {
+          "gen": 30,
+          "fitness": -11414.6253
+        },
+        {
+          "gen": 31,
+          "fitness": -10549.8545
+        },
+        {
+          "gen": 32,
+          "fitness": -6986.0655
+        },
+        {
+          "gen": 33,
+          "fitness": -6651.5566
+        },
+        {
+          "gen": 34,
+          "fitness": -7623.5451
+        },
+        {
+          "gen": 35,
+          "fitness": -4295.218
+        },
+        {
+          "gen": 36,
+          "fitness": -13641.8391
+        },
+        {
+          "gen": 37,
+          "fitness": -8206.2011
+        },
+        {
+          "gen": 38,
+          "fitness": -11008.3999
+        },
+        {
+          "gen": 39,
+          "fitness": -9917.4502
+        },
+        {
+          "gen": 40,
+          "fitness": -11028.2532
+        },
+        {
+          "gen": 41,
+          "fitness": -5113.7208
+        },
+        {
+          "gen": 42,
+          "fitness": -9460.2836
+        },
+        {
+          "gen": 43,
+          "fitness": -8274.5677
+        },
+        {
+          "gen": 44,
+          "fitness": -9534.7437
+        },
+        {
+          "gen": 45,
+          "fitness": -6892.8692
+        },
+        {
+          "gen": 46,
+          "fitness": -8228.3877
+        },
+        {
+          "gen": 47,
+          "fitness": -10243.6732
+        },
+        {
+          "gen": 48,
+          "fitness": -9994.6144
+        },
+        {
+          "gen": 49,
+          "fitness": -8867.0303
+        }
+      ],
+      "finalRow": {
+        "gen": 49,
+        "idx": 11,
+        "w_pnl": 1,
+        "w_sortino": 1,
+        "w_mdd": 0.25,
+        "fitness": -46780.5055,
+        "eval_fitness": -92864.1305,
+        "selection_fitness": -92864.1305,
+        "eval_fitness_pnl": -90517.8199,
+        "eval_pnl_realized": 399.1477,
+        "eval_pnl_total": 83.3136,
+        "eval_sortino": 0.0019,
+        "eval_drawdown": 9385.25,
+        "eval_ret_mean": 0.00001575,
+        "train_fitness_pnl": -44330.5091,
+        "train_pnl_realized": -33.3333,
+        "train_pnl_total": -198.2348,
+        "train_sortino": 0.0035,
+        "train_drawdown": 9800,
+        "train_ret_mean": 0.0000358
+      },
+      "bestRow": {
+        "gen": 28,
+        "idx": 9,
+        "w_pnl": 1,
+        "w_sortino": 1,
+        "w_mdd": 0.25,
+        "fitness": -15233.3367,
+        "eval_fitness": -7390.7238,
+        "selection_fitness": -8174.9851,
+        "eval_fitness_pnl": -5275.7577,
+        "eval_pnl_realized": -198.0114,
+        "eval_pnl_total": -812.7966,
+        "eval_sortino": -0.0036,
+        "eval_drawdown": 8459.85,
+        "eval_ret_mean": -0.00002603,
+        "train_fitness_pnl": -12824.7215,
+        "train_pnl_realized": -219.3182,
+        "train_pnl_total": -361.2667,
+        "train_sortino": -0.0026,
+        "train_drawdown": 9634.45,
+        "train_ret_mean": -0.00002198
+      },
+      "bestEvalPnlMetricKey": "eval_pnl_total",
+      "bestEvalPnlRow": {
+        "gen": 1,
+        "idx": 0,
+        "w_pnl": 1,
+        "w_sortino": 1,
+        "w_mdd": 0.25,
+        "fitness": -384785.5173,
+        "eval_fitness": -121224.7324,
+        "selection_fitness": -147580.8109,
+        "eval_fitness_pnl": -104342.7427,
+        "eval_pnl_realized": 9623.5795,
+        "eval_pnl_total": 9663.3489,
+        "eval_sortino": 0.1104,
+        "eval_drawdown": 67528.4,
+        "eval_ret_mean": 0.00113678,
+        "train_fitness_pnl": -376359.9723,
+        "train_pnl_realized": -1451.8939,
+        "train_pnl_total": -3854.703,
+        "train_sortino": -0.0201,
+        "train_drawdown": 33702.1,
+        "train_ret_mean": -0.00056197
+      },
+      "stdoutInsights": {
+        "testLine": "test | fitness -72126.28 | pnl -64518.09 | sortino -0.01 | mdd 30432.75",
+        "saveLines": []
+      },
+      "trainingStack": {
+        "trainer": "ga",
+        "backend": "candle",
+        "requested_runtime": "cpu",
+        "effective_runtime": "cpu",
+        "implementation_status": "implemented",
+        "cargo_feature": "backend-candle",
+        "algorithm": "ga",
+        "os": "macos",
+        "arch": "aarch64"
+      },
+      "generatedAt": "2026-03-15T09:02:42.187Z"
+    }
+  ]
+}

@@ -2,8 +2,6 @@ use anyhow::{Context, Result, bail};
 use burn::tensor::{Tensor, TensorData, activation, backend::Backend};
 use burn_cpu::{Cpu, CpuDevice};
 use midas_env::ml::ComputeRuntime;
-use rand::distributions::WeightedIndex;
-use rand::prelude::Distribution;
 use std::path::Path;
 
 #[cfg(feature = "backend-burn-cuda")]
@@ -13,9 +11,13 @@ use burn_mlx::{Mlx, MlxDevice};
 #[cfg(feature = "backend-burn-ndarray")]
 use burn_ndarray::NdArray;
 
+use crate::actions::{
+    POLICY_ACTION_DIM, env_action_for_target, env_action_label, policy_action_label,
+    policy_target_position,
+};
 use crate::config::{CandidateConfig, ExecutionTarget};
 use crate::data::{DataSet, build_observation};
-use crate::metrics::{compute_sortino, max_drawdown};
+use crate::metrics::{candidate_fitness, compute_sortino, liquidation_cost, max_drawdown};
 use crate::types::{BehaviorRow, CandidateResult};
 use midas_env::env::VIOLATION_PENALTY;
 
@@ -113,7 +115,14 @@ impl CandidateStats {
             self.eval_pnls_total.iter().sum::<f64>() / self.eval_pnls_total.len() as f64
         };
 
-        let fitness = cfg.w_pnl * eval_pnl + cfg.w_sortino * eval_sortino - cfg.w_mdd * eval_draw;
+        let fitness = candidate_fitness(
+            eval_pnl,
+            eval_sortino,
+            eval_draw,
+            cfg.w_pnl,
+            cfg.w_sortino,
+            cfg.w_mdd,
+        );
 
         CandidateResult {
             fitness,
@@ -183,7 +192,7 @@ impl<B: Backend> BurnPolicy<B> {
             in_dim = hidden;
         }
 
-        let out_dim = 4usize;
+        let out_dim = POLICY_ACTION_DIM;
         let weight_len = in_dim * out_dim;
         let bias_len = out_dim;
         let weight = Tensor::<B, 2>::from_data(
@@ -258,7 +267,7 @@ pub fn param_count(input_dim: usize, hidden: usize, layers: usize) -> Result<usi
         count += in_dim * hidden + hidden;
         in_dim = hidden;
     }
-    count += in_dim * 4 + 4;
+    count += in_dim * POLICY_ACTION_DIM + POLICY_ACTION_DIM;
     Ok(count)
 }
 
@@ -410,8 +419,6 @@ fn evaluate_candidate_inner<B: Backend>(
 
     let policy =
         BurnPolicy::<B>::from_genome(genome, data.obs_dim, cfg.hidden, cfg.layers, device)?;
-    let mut rng = rand::thread_rng();
-
     let env_cfg = EnvConfig {
         max_position: cfg.max_position,
         margin_mode: cfg.margin_mode,
@@ -428,6 +435,9 @@ fn evaluate_candidate_inner<B: Backend>(
         hold_duration_penalty_growth: cfg.hold_duration_penalty_growth,
         hold_duration_penalty_positive_scale: cfg.hold_duration_penalty_positive_scale,
         hold_duration_penalty_negative_scale: cfg.hold_duration_penalty_negative_scale,
+        min_hold_bars: cfg.min_hold_bars,
+        early_exit_penalty: cfg.early_exit_penalty,
+        early_flip_penalty: cfg.early_flip_penalty,
         invalid_revert_penalty: cfg.invalid_revert_penalty,
         flat_hold_penalty: cfg.flat_hold_penalty,
         invalid_revert_penalty_growth: cfg.invalid_revert_penalty_growth,
@@ -462,31 +472,25 @@ fn evaluate_candidate_inner<B: Backend>(
                 data,
                 t,
                 position,
+                env.state()
+                    .step
+                    .saturating_sub(env.state().position_entry_step),
+                env.state().flat_steps,
+                cfg.max_position,
                 equity,
                 env.state().unrealized_pnl,
                 env.state().realized_pnl,
                 cfg.initial_balance,
             );
-            let action_idx = sample_action::<B>(&policy, device, &obs, &mut rng)?;
-
-            let action = match action_idx {
-                0 => {
-                    stats.act_buy += 1;
-                    Action::Buy
-                }
-                1 => {
-                    stats.act_sell += 1;
-                    Action::Sell
-                }
-                2 => {
-                    stats.act_hold += 1;
-                    Action::Hold
-                }
-                _ => {
-                    stats.act_revert += 1;
-                    Action::Revert
-                }
-            };
+            let action_idx = select_action::<B>(&policy, device, &obs)?;
+            let policy_label = policy_action_label(action_idx);
+            let action = env_action_for_target(position_before, policy_target_position(action_idx));
+            match action {
+                Action::Buy => stats.act_buy += 1,
+                Action::Sell => stats.act_sell += 1,
+                Action::Hold => stats.act_hold += 1,
+                Action::Revert => stats.act_revert += 1,
+            }
 
             let session_open = if cfg.ignore_session {
                 true
@@ -513,13 +517,6 @@ fn evaluate_candidate_inner<B: Backend>(
                     minutes_to_close,
                 },
             );
-            let action_label = match info.effective_action {
-                Action::Buy => "buy",
-                Action::Sell => "sell",
-                Action::Hold => "hold",
-                Action::Revert => "revert",
-            };
-
             if info.session_closed_violation {
                 stats.session_violations += 1;
                 window_violation_penalty += VIOLATION_PENALTY;
@@ -541,7 +538,8 @@ fn evaluate_candidate_inner<B: Backend>(
                     step: step_idx,
                     data_idx: t,
                     action_idx,
-                    action: action_label.to_string(),
+                    action: policy_label.to_string(),
+                    effective_action: env_action_label(info.effective_action).to_string(),
                     position_before,
                     position_after: state.position,
                     equity_before,
@@ -587,8 +585,19 @@ fn evaluate_candidate_inner<B: Backend>(
         }
 
         let realized_pnl = env.state().realized_pnl;
-        let total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
-        let pnl_sum = realized_pnl
+        let mut total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
+        let exit_cost = liquidation_cost(
+            env.state().position,
+            env_cfg.commission_round_turn,
+            env_cfg.slippage_per_contract,
+        );
+        if exit_cost > 0.0 {
+            total_pnl -= exit_cost;
+            let last_eq = eq_curve.last().copied().unwrap_or(cfg.initial_balance);
+            eq_curve.push(last_eq - exit_cost);
+            pnl_buf.push(-exit_cost);
+        }
+        let pnl_sum = total_pnl
             - window_drawdown_penalty
             - window_invalid_revert_penalty
             - window_hold_duration_penalty
@@ -619,11 +628,10 @@ fn evaluate_candidate_inner<B: Backend>(
     Ok(stats.finish(cfg))
 }
 
-fn sample_action<B: Backend>(
+fn select_action<B: Backend>(
     policy: &BurnPolicy<B>,
     device: &B::Device,
     obs: &[f32],
-    rng: &mut rand::rngs::ThreadRng,
 ) -> Result<i32> {
     let obs_tensor =
         Tensor::<B, 2>::from_data(TensorData::new(obs.to_vec(), [1, obs.len()]), device);
@@ -632,42 +640,21 @@ fn sample_action<B: Backend>(
         .into_data()
         .to_vec::<f32>()
         .context("extract burn logits into host memory")?;
-    Ok(sample_from_logits(&values, rng))
-}
-
-fn sample_from_logits(logits: &[f32], rng: &mut rand::rngs::ThreadRng) -> i32 {
-    let max_logit = logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, |a, b| a.max(b));
-    let weights: Vec<f64> = logits
-        .iter()
-        .map(|logit| {
-            let weight = (*logit - max_logit).exp() as f64;
-            if weight.is_finite() && weight > 0.0 {
-                weight
-            } else {
-                0.0
-            }
-        })
-        .collect();
-
-    if weights.iter().all(|weight| *weight <= 0.0) {
-        return argmax_index(logits) as i32;
-    }
-
-    WeightedIndex::new(&weights)
-        .map(|dist| dist.sample(rng) as i32)
-        .unwrap_or_else(|_| argmax_index(logits) as i32)
+    Ok(argmax_index(&values) as i32)
 }
 
 fn argmax_index(values: &[f32]) -> usize {
-    values
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(idx, _)| idx)
-        .unwrap_or(0)
+    let mut best_idx = 0usize;
+    let mut best_value = f32::NEG_INFINITY;
+
+    for (idx, value) in values.iter().copied().enumerate() {
+        if value > best_value {
+            best_idx = idx;
+            best_value = value;
+        }
+    }
+
+    best_idx
 }
 
 fn use_legacy_ndarray_cpu() -> bool {

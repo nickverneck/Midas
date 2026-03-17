@@ -74,7 +74,7 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         Some(&low),
         volume.as_deref(),
     );
-    let feature_cols = ordered_feature_cols(feats, &open, &close, &high, &low)?;
+    let feature_cols = ordered_feature_cols(feats, &open, &close, &high, &low, volume.as_deref())?;
 
     let session_open = session_open_from_df.or_else(|| {
         datetime_ns
@@ -142,38 +142,42 @@ pub fn build_observation(
     data: &DataSet,
     idx: usize,
     position: i32,
+    bars_in_position: usize,
+    flat_steps: usize,
+    max_position: i32,
     equity: f64,
     unrealized_pnl: f64,
     realized_pnl: f64,
     initial_balance: f64,
 ) -> Vec<f32> {
-    use chrono::Timelike;
+    use chrono::{Datelike, Timelike};
+    use chrono_tz::America::New_York;
     let mut obs = Vec::with_capacity(data.obs_dim);
 
-    if idx < data.open.len() {
-        obs.push(data.open[idx]);
-    } else {
-        obs.push(f64::NAN);
-    }
+    let prev_idx = idx.saturating_sub(1);
+    let prev_prev_idx = idx.saturating_sub(2);
+    let prev_close = data.close.get(prev_idx).copied().unwrap_or(f64::NAN);
+    let prev_prev_close = data.close.get(prev_prev_idx).copied().unwrap_or(f64::NAN);
+    let open_t = data.open.get(idx).copied().unwrap_or(f64::NAN);
 
+    obs.push(relative_change(open_t, prev_close));
+    obs.push(relative_change(prev_close, prev_prev_close));
     if idx > 0 {
-        obs.push(data.close[idx - 1]);
         if let Some(vol) = data.volume.as_ref() {
-            obs.push(vol[idx - 1]);
+            let current = vol.get(prev_idx).copied().unwrap_or(f64::NAN);
+            let previous = vol.get(prev_prev_idx).copied().unwrap_or(f64::NAN);
+            obs.push(log_volume_delta(current, previous));
         }
-    } else {
+    } else if data.volume.is_some() {
         obs.push(f64::NAN);
-        if data.volume.is_some() {
-            obs.push(f64::NAN);
-        }
     }
 
-    obs.push(equity);
     let denom = if initial_balance.abs() < 1e-8 {
         1.0
     } else {
         initial_balance
     };
+    obs.push((equity / denom) - 1.0);
     obs.push(unrealized_pnl / denom);
     obs.push(realized_pnl / denom);
 
@@ -184,29 +188,55 @@ pub fn build_observation(
     if let Some(dt) = data
         .datetime_ns
         .as_ref()
-        .and_then(|d| d.get(idx.saturating_sub(1)))
+        .and_then(|d| d.get(prev_idx))
     {
         let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(*dt);
-        let hour = dt.hour() as f64 + dt.minute() as f64 / 60.0;
-        let angle = 2.0 * std::f64::consts::PI * (hour / 24.0);
-        obs.push(angle.sin());
-        obs.push(angle.cos());
+        let dt_et = dt.with_timezone(&New_York);
+        let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;
+        let hour_angle = 2.0 * std::f64::consts::PI * (hour / 24.0);
+        let weekday = dt_et.weekday().num_days_from_monday() as f64;
+        let weekday_angle = 2.0 * std::f64::consts::PI * (weekday / 7.0);
+        obs.push(hour_angle.sin());
+        obs.push(hour_angle.cos());
+        obs.push(weekday_angle.sin());
+        obs.push(weekday_angle.cos());
     } else {
+        obs.push(f64::NAN);
+        obs.push(f64::NAN);
         obs.push(f64::NAN);
         obs.push(f64::NAN);
     }
 
-    obs.push(position as f64);
+    let minutes_to_close = data
+        .minutes_to_close
+        .as_ref()
+        .and_then(|m| m.get(prev_idx))
+        .copied()
+        .unwrap_or(f64::NAN);
+    obs.push(if minutes_to_close.is_finite() {
+        (minutes_to_close / (24.0 * 60.0)).clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    });
+
+    let max_position = if max_position > 0 {
+        max_position as f64
+    } else {
+        1.0
+    };
+    obs.push(position as f64 / max_position);
+    obs.push((bars_in_position as f64 / 390.0).clamp(0.0, 4.0));
+    obs.push((flat_steps as f64 / 390.0).clamp(0.0, 4.0));
 
     let session_val = data
         .session_open
         .as_ref()
-        .and_then(|m| m.get(idx.saturating_sub(1)))
+        .and_then(|m| m.get(prev_idx))
         .map(|b| if *b { 1.0 } else { 0.0 })
         .unwrap_or(f64::NAN);
     let margin_val = data
         .margin_ok
-        .get(idx.saturating_sub(1))
+        .get(prev_idx)
         .map(|b| if *b { 1.0 } else { 0.0 })
         .unwrap_or(f64::NAN);
     obs.push(session_val);
@@ -223,53 +253,86 @@ fn ordered_feature_cols(
     close: &[f64],
     high: &[f64],
     low: &[f64],
+    volume: Option<&[f64]>,
 ) -> Result<Vec<Vec<f64>>> {
     let atr_14 = feats
         .get("atr_14")
-        .expect("missing atr_14 for delta features");
+        .expect("missing atr_14 for delta features")
+        .clone();
     let ema_11 = feats
         .get("ema_11")
-        .expect("missing ema_11 for delta features");
+        .expect("missing ema_11 for delta features")
+        .clone();
     let ema_53 = feats
         .get("ema_53")
-        .expect("missing ema_53 for delta features");
+        .expect("missing ema_53 for delta features")
+        .clone();
     let hma_11 = feats
         .get("hma_11")
-        .expect("missing hma_11 for delta features");
+        .expect("missing hma_11 for delta features")
+        .clone();
     let kama_19 = feats
         .get("kama_19")
-        .expect("missing kama_19 for delta features");
+        .expect("missing kama_19 for delta features")
+        .clone();
     let vwap_dist_20 = feats
         .get(&format!("vwap_dist_{}", midas_env::features::VWAP_PERIOD))
-        .expect("missing vwap distance for delta features");
+        .expect("missing vwap distance for delta features")
+        .clone();
     let rvol_20 = feats
         .get(&format!("rvol_{}", midas_env::features::RVOL_PERIOD))
-        .expect("missing rvol for delta features");
+        .expect("missing rvol for delta features")
+        .clone();
+    let obv = feats.remove("obv").expect("missing obv feature");
+    let obv_impulse = normalized_obv_impulse(&obv, volume);
 
     let ret_1 = log_return(close, 1);
     let ret_3 = log_return(close, 3);
-    let gap_open = gap_open_series(open, close, atr_14);
-    let body_1 = candle_body_series(open, close, atr_14);
-    let upper_wick_1 = upper_wick_series(open, close, high, atr_14);
-    let lower_wick_1 = lower_wick_series(open, close, low, atr_14);
-    let ema_11_slope = normalized_delta(ema_11, atr_14);
-    let hma_11_slope = normalized_delta(hma_11, atr_14);
-    let kama_19_slope = normalized_delta(kama_19, atr_14);
-    let fast_slow_spread = normalized_spread(ema_11, ema_53, atr_14);
+    let gap_open = gap_open_series(open, close, &atr_14);
+    let body_1 = candle_body_series(open, close, &atr_14);
+    let upper_wick_1 = upper_wick_series(open, close, high, &atr_14);
+    let lower_wick_1 = lower_wick_series(open, close, low, &atr_14);
+    let ema_11_slope = normalized_delta(&ema_11, &atr_14);
+    let hma_11_slope = normalized_delta(&hma_11, &atr_14);
+    let kama_19_slope = normalized_delta(&kama_19, &atr_14);
+    let fast_slow_spread = normalized_spread(&ema_11, &ema_53, &atr_14);
     let fast_slow_spread_delta = first_difference(&fast_slow_spread);
-    let vwap_dist_delta = first_difference(vwap_dist_20);
-    let rvol_delta = first_difference(rvol_20);
+    let vwap_dist_delta = first_difference(&vwap_dist_20);
+    let rvol_delta = first_difference(&rvol_20);
 
     let mut cols = Vec::new();
     for &p in midas_env::features::periods() {
-        cols.push(feats.remove(&format!("sma_{p}")).unwrap());
-        cols.push(feats.remove(&format!("ema_{p}")).unwrap());
-        cols.push(feats.remove(&format!("hma_{p}")).unwrap());
-        cols.push(feats.remove(&format!("kama_{p}")).unwrap());
-        cols.push(feats.remove(&format!("alma_{p}")).unwrap());
+        cols.push(normalize_level_feature(
+            &feats.remove(&format!("sma_{p}")).unwrap(),
+            close,
+            &atr_14,
+        ));
+        cols.push(normalize_level_feature(
+            &feats.remove(&format!("ema_{p}")).unwrap(),
+            close,
+            &atr_14,
+        ));
+        cols.push(normalize_level_feature(
+            &feats.remove(&format!("hma_{p}")).unwrap(),
+            close,
+            &atr_14,
+        ));
+        cols.push(normalize_level_feature(
+            &feats.remove(&format!("kama_{p}")).unwrap(),
+            close,
+            &atr_14,
+        ));
+        cols.push(normalize_level_feature(
+            &feats.remove(&format!("alma_{p}")).unwrap(),
+            close,
+            &atr_14,
+        ));
     }
     for &p in midas_env::features::ATR_PERIODS.iter() {
-        cols.push(feats.remove(&format!("atr_{p}")).unwrap());
+        cols.push(normalize_range_feature(
+            &feats.remove(&format!("atr_{p}")).unwrap(),
+            close,
+        ));
     }
     cols.push(
         feats
@@ -286,7 +349,7 @@ fn ordered_feature_cols(
             .remove(&format!("vwap_dist_{}", midas_env::features::VWAP_PERIOD))
             .unwrap(),
     );
-    cols.push(feats.remove("obv").unwrap());
+    cols.push(obv_impulse);
     cols.push(ret_1);
     cols.push(ret_3);
     cols.push(gap_open);
@@ -309,21 +372,84 @@ fn observation_len(
     volume: Option<&[f64]>,
     feature_cols: &[Vec<f64>],
 ) -> usize {
-    let mut len = 0;
-    len += 3;
-    len += 1;
+    let mut len = 5; // open gap, prev return, equity ratio, unrealized ratio, realized ratio
     if volume.is_some() {
-        len += 1;
+        len += 1; // log-volume delta
     }
-    len += 1;
     len += feature_cols.len();
-    len += 2;
-    len += 1;
-    len += 2;
+    len += 4; // ET hour and weekday sin/cos
+    len += 1; // minutes to close
+    len += 1; // normalized position
+    len += 1; // bars in position
+    len += 1; // flat steps
+    len += 2; // session + margin flags
     if len == 0 || open.is_empty() || close.is_empty() {
         0
     } else {
         len
+    }
+}
+
+fn normalize_level_feature(values: &[f64], close: &[f64], atr: &[f64]) -> Vec<f64> {
+    let len = values.len().min(close.len()).min(atr.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        let value = values[i];
+        let anchor = close[i];
+        let scale = atr[i];
+        if value.is_finite() && anchor.is_finite() && scale.is_finite() && scale.abs() > 1e-8 {
+            out[i] = (value - anchor) / scale;
+        } else if value.is_finite() && anchor.is_finite() && anchor.abs() > 1e-8 {
+            out[i] = (value - anchor) / anchor;
+        }
+    }
+    out
+}
+
+fn normalize_range_feature(values: &[f64], close: &[f64]) -> Vec<f64> {
+    let len = values.len().min(close.len());
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        let value = values[i];
+        let anchor = close[i];
+        if value.is_finite() && anchor.is_finite() && anchor.abs() > 1e-8 {
+            out[i] = value / anchor;
+        }
+    }
+    out
+}
+
+fn normalized_obv_impulse(obv: &[f64], volume: Option<&[f64]>) -> Vec<f64> {
+    let Some(volume) = volume else {
+        return vec![f64::NAN; obv.len()];
+    };
+    let len = obv.len().min(volume.len());
+    let diff = first_difference(obv);
+    let vol_sma = midas_env::features::sma(volume, midas_env::features::RVOL_PERIOD);
+    let mut out = vec![f64::NAN; len];
+    for i in 0..len {
+        let flow = diff[i];
+        let scale = vol_sma[i];
+        if flow.is_finite() && scale.is_finite() && scale.abs() > 1e-8 {
+            out[i] = flow / scale;
+        }
+    }
+    out
+}
+
+fn relative_change(current: f64, previous: f64) -> f64 {
+    if current.is_finite() && previous.is_finite() && previous.abs() > 1e-8 {
+        (current - previous) / previous
+    } else {
+        f64::NAN
+    }
+}
+
+fn log_volume_delta(current: f64, previous: f64) -> f64 {
+    if current.is_finite() && previous.is_finite() && current >= 0.0 && previous >= 0.0 {
+        (current + 1.0).ln() - (previous + 1.0).ln()
+    } else {
+        f64::NAN
     }
 }
 

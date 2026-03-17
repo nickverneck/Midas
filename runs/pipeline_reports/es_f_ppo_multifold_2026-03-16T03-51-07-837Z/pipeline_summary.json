@@ -1,0 +1,609 @@
+{
+  "generatedAt": "2026-03-16T03:52:08.699Z",
+  "host": "http://127.0.0.1:4173",
+  "profile": "release",
+  "dataRoot": "data/train",
+  "symbol": "ES_F.parquet",
+  "window": 700,
+  "step": 128,
+  "epochs": 24,
+  "trainWindows": 24,
+  "ppoEpochs": 4,
+  "evalWindows": 999,
+  "hidden": 64,
+  "layers": 2,
+  "maxPosition": 1,
+  "checkpointMetric": "fitness",
+  "sample": true,
+  "seed": 42,
+  "maxHoldBarsPositive": 15,
+  "maxHoldBarsDrawdown": 15,
+  "holdDurationPenalty": 1,
+  "holdDurationPenaltyGrowth": 0.05,
+  "holdDurationPenaltyPositiveScale": 0.5,
+  "holdDurationPenaltyNegativeScale": 1.5,
+  "minHoldBars": 0,
+  "earlyExitPenalty": 0,
+  "earlyFlipPenalty": 0,
+  "flatHoldPenalty": 2.2,
+  "flatHoldPenaltyGrowth": 0.05,
+  "maxFlatHoldBars": 100,
+  "reportDir": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_f_ppo_multifold_2026-03-16T03-51-07-837Z",
+  "foldCount": 2,
+  "replayAvgPnl": -243.75,
+  "replayAvgMdd": 5612.6000000000395,
+  "results": [
+    {
+      "fold": 1,
+      "trainFolder": "12-29-2025",
+      "valFolder": "01-04-2026",
+      "testFolder": "01-12-2026",
+      "training": {
+        "engine": "rl",
+        "profile": "release",
+        "host": "http://127.0.0.1:4173",
+        "params": {
+          "algorithm": "ppo",
+          "backend": "candle",
+          "device": "cpu",
+          "outdir": "runs_rl/es_f_ppo_fold1_2026-03-16T03-51-07-837Z",
+          "train-parquet": "data/train/12-29-2025/ES_F.parquet",
+          "val-parquet": "data/train/01-04-2026/ES_F.parquet",
+          "test-parquet": "data/train/01-12-2026/ES_F.parquet",
+          "windowed": true,
+          "window": 700,
+          "step": 128,
+          "epochs": 24,
+          "train-windows": 24,
+          "ppo-epochs": 4,
+          "eval-windows": 999,
+          "lr": 0.0003,
+          "gamma": 0.99,
+          "lam": 0.95,
+          "clip": 0.2,
+          "vf-coef": 0.5,
+          "ent-coef": 0.01,
+          "hidden": 64,
+          "layers": 2,
+          "log-interval": 1,
+          "checkpoint-every": 1,
+          "initial-balance": 10000,
+          "max-position": 1,
+          "margin-mode": "per-contract",
+          "margin-per-contract": 500,
+          "contract-multiplier": 50,
+          "auto-close-minutes-before-close": 5,
+          "w-pnl": 1,
+          "w-sortino": 1,
+          "w-mdd": 0.5,
+          "max-hold-bars-positive": 15,
+          "max-hold-bars-drawdown": 15,
+          "hold-duration-penalty": 1,
+          "hold-duration-penalty-growth": 0.05,
+          "hold-duration-penalty-positive-scale": 0.5,
+          "hold-duration-penalty-negative-scale": 1.5,
+          "min-hold-bars": 0,
+          "early-exit-penalty": 0,
+          "early-flip-penalty": 0,
+          "flat-hold-penalty": 2.2,
+          "flat-hold-penalty-growth": 0.05,
+          "max-flat-hold-bars": 100
+        },
+        "runDir": "runs_rl/es_f_ppo_fold1_2026-03-16T03-51-07-837Z",
+        "exitCode": 0,
+        "metricKey": "fitness",
+        "rowCount": 24,
+        "fitnessSummary": [
+          {
+            "gen": 0,
+            "fitness": -370.1484
+          },
+          {
+            "gen": 1,
+            "fitness": -440.9978
+          },
+          {
+            "gen": 2,
+            "fitness": -501.2684
+          },
+          {
+            "gen": 3,
+            "fitness": -222.9289
+          },
+          {
+            "gen": 4,
+            "fitness": -241.645
+          },
+          {
+            "gen": 5,
+            "fitness": -170.193
+          },
+          {
+            "gen": 6,
+            "fitness": -113.7395
+          },
+          {
+            "gen": 7,
+            "fitness": -291.1634
+          },
+          {
+            "gen": 8,
+            "fitness": -285.8462
+          },
+          {
+            "gen": 9,
+            "fitness": -438.4884
+          },
+          {
+            "gen": 10,
+            "fitness": -59.7906
+          },
+          {
+            "gen": 11,
+            "fitness": -88.2021
+          },
+          {
+            "gen": 12,
+            "fitness": 15.194
+          },
+          {
+            "gen": 13,
+            "fitness": -52.6464
+          },
+          {
+            "gen": 14,
+            "fitness": -208.7084
+          },
+          {
+            "gen": 15,
+            "fitness": -285.299
+          },
+          {
+            "gen": 16,
+            "fitness": -26.9619
+          },
+          {
+            "gen": 17,
+            "fitness": -257.7469
+          },
+          {
+            "gen": 18,
+            "fitness": -103.8624
+          },
+          {
+            "gen": 19,
+            "fitness": -342.7483
+          },
+          {
+            "gen": 20,
+            "fitness": -107.2279
+          },
+          {
+            "gen": 21,
+            "fitness": -113.7694
+          },
+          {
+            "gen": 22,
+            "fitness": -43.6792
+          },
+          {
+            "gen": 23,
+            "fitness": -129.5842
+          }
+        ],
+        "finalRow": {
+          "epoch": 23,
+          "train_ret_mean": 0,
+          "train_pnl": 132.8125,
+          "train_sortino": 0.0158,
+          "train_drawdown": 524.825,
+          "eval_ret_mean": 0,
+          "eval_pnl": -8.2386,
+          "eval_sortino": 0.0033,
+          "eval_drawdown": 793.4932,
+          "fitness": -129.5842,
+          "policy_loss": 0.000009,
+          "value_loss": 129637.518789,
+          "entropy": 0.205086,
+          "total_loss": 64818.758021
+        },
+        "bestRow": {
+          "epoch": 12,
+          "train_ret_mean": 0,
+          "train_pnl": 52.0833,
+          "train_sortino": 0.0044,
+          "train_drawdown": 73.7875,
+          "eval_ret_mean": 0,
+          "eval_pnl": -180.6818,
+          "eval_sortino": -0.0002,
+          "eval_drawdown": 590.9693,
+          "fitness": 15.194,
+          "policy_loss": -0.000094,
+          "value_loss": 300007.102641,
+          "entropy": 0.109429,
+          "total_loss": 150003.551097
+        },
+        "bestEvalPnlMetricKey": "eval_pnl",
+        "bestEvalPnlRow": {
+          "epoch": 1,
+          "train_ret_mean": 0,
+          "train_pnl": -92.7083,
+          "train_sortino": -0.002,
+          "train_drawdown": 696.575,
+          "eval_ret_mean": 0,
+          "eval_pnl": 224.4318,
+          "eval_sortino": 0.0196,
+          "eval_drawdown": 811.9307,
+          "fitness": -440.9978,
+          "policy_loss": -0.000205,
+          "value_loss": 71022.816551,
+          "entropy": 0.267495,
+          "total_loss": 35511.405805
+        },
+        "stdoutInsights": {
+          "testLine": "test | ret -0.0000 | pnl -153.8793 | sortino 0.0016 | mdd 1145.9578",
+          "saveLines": [
+            "Saved final PPO checkpoint to runs_rl/es_f_ppo_fold1_2026-03-16T03-51-07-837Z/ppo_final.safetensors"
+          ]
+        },
+        "trainingStack": {
+          "trainer": "rl",
+          "backend": "candle",
+          "requested_runtime": "cpu",
+          "effective_runtime": "cpu",
+          "implementation_status": "implemented",
+          "cargo_feature": "backend-candle",
+          "algorithm": "ppo",
+          "os": "macos",
+          "arch": "aarch64"
+        },
+        "generatedAt": "2026-03-16T03:51:30.798Z"
+      },
+      "trainingTest": {
+        "raw": "test | ret -0.0000 | pnl -153.8793 | sortino 0.0016 | mdd 1145.9578",
+        "pnl": -153.8793,
+        "sortino": 0.0016,
+        "mdd": 1145.9578
+      },
+      "replay": {
+        "generated_at": "2026-03-16T03:51:38.676655+00:00",
+        "run_summary": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_f_ppo_multifold_2026-03-16T03-51-07-837Z/fold_1.summary.json",
+        "checkpoint": "runs_rl/es_f_ppo_fold1_2026-03-16T03-51-07-837Z/checkpoint_epoch12.safetensors",
+        "checkpoint_metric": "fitness",
+        "parquet": "data/train/01-12-2026/ES_F.parquet",
+        "outdir": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_f_ppo_multifold_2026-03-16T03-51-07-837Z/fold_1_test_replay",
+        "full_file": true,
+        "window": 700,
+        "step": 128,
+        "eval_windows": 1,
+        "sample": true,
+        "seed": 42,
+        "metrics": {
+          "fitness": -2134.349366560406,
+          "pnl": -337.5,
+          "sortino": 0.0006334396005647421,
+          "drawdown": 3593.7000000000135,
+          "ret_mean": 0.0000016429786368926723
+        },
+        "behavior": {
+          "rows": 7727,
+          "windows": 1,
+          "requested_buy_steps": 100,
+          "requested_sell_steps": 81,
+          "requested_hold_steps": 7033,
+          "requested_revert_steps": 513,
+          "effective_buy_steps": 102,
+          "effective_sell_steps": 83,
+          "effective_hold_steps": 7225,
+          "effective_revert_steps": 317,
+          "flat_steps": 4215,
+          "long_steps": 1802,
+          "short_steps": 1710,
+          "entries": 60,
+          "exits": 60,
+          "flips": 317,
+          "auto_closes": 4,
+          "session_closed_violations": 0,
+          "margin_call_violations": 0,
+          "position_limit_violations": 65,
+          "winning_exits": 30,
+          "losing_exits": 22,
+          "total_reward": -243035.07000000004,
+          "total_realized_pnl_change": -337.5,
+          "total_pnl_change": -337.5,
+          "total_commission_paid": 603.2000000000043,
+          "total_slippage_paid": 188.5,
+          "avg_bars_per_trade": 59.53333333333333,
+          "max_bars_per_trade": 506,
+          "pct_flat": 0.5454898408179112
+        }
+      }
+    },
+    {
+      "fold": 2,
+      "trainFolder": "01-04-2026",
+      "valFolder": "01-12-2026",
+      "testFolder": "01-20-2026",
+      "training": {
+        "engine": "rl",
+        "profile": "release",
+        "host": "http://127.0.0.1:4173",
+        "params": {
+          "algorithm": "ppo",
+          "backend": "candle",
+          "device": "cpu",
+          "outdir": "runs_rl/es_f_ppo_fold2_2026-03-16T03-51-07-837Z",
+          "train-parquet": "data/train/01-04-2026/ES_F.parquet",
+          "val-parquet": "data/train/01-12-2026/ES_F.parquet",
+          "test-parquet": "data/train/01-20-2026/ES_F.parquet",
+          "windowed": true,
+          "window": 700,
+          "step": 128,
+          "epochs": 24,
+          "train-windows": 24,
+          "ppo-epochs": 4,
+          "eval-windows": 999,
+          "lr": 0.0003,
+          "gamma": 0.99,
+          "lam": 0.95,
+          "clip": 0.2,
+          "vf-coef": 0.5,
+          "ent-coef": 0.01,
+          "hidden": 64,
+          "layers": 2,
+          "log-interval": 1,
+          "checkpoint-every": 1,
+          "initial-balance": 10000,
+          "max-position": 1,
+          "margin-mode": "per-contract",
+          "margin-per-contract": 500,
+          "contract-multiplier": 50,
+          "auto-close-minutes-before-close": 5,
+          "w-pnl": 1,
+          "w-sortino": 1,
+          "w-mdd": 0.5,
+          "max-hold-bars-positive": 15,
+          "max-hold-bars-drawdown": 15,
+          "hold-duration-penalty": 1,
+          "hold-duration-penalty-growth": 0.05,
+          "hold-duration-penalty-positive-scale": 0.5,
+          "hold-duration-penalty-negative-scale": 1.5,
+          "min-hold-bars": 0,
+          "early-exit-penalty": 0,
+          "early-flip-penalty": 0,
+          "flat-hold-penalty": 2.2,
+          "flat-hold-penalty-growth": 0.05,
+          "max-flat-hold-bars": 100
+        },
+        "runDir": "runs_rl/es_f_ppo_fold2_2026-03-16T03-51-07-837Z",
+        "exitCode": 0,
+        "metricKey": "fitness",
+        "rowCount": 24,
+        "fitnessSummary": [
+          {
+            "gen": 0,
+            "fitness": -854.8734
+          },
+          {
+            "gen": 1,
+            "fitness": -45.7245
+          },
+          {
+            "gen": 2,
+            "fitness": -323.4865
+          },
+          {
+            "gen": 3,
+            "fitness": -155.8168
+          },
+          {
+            "gen": 4,
+            "fitness": -314.4395
+          },
+          {
+            "gen": 5,
+            "fitness": -383.8984
+          },
+          {
+            "gen": 6,
+            "fitness": -48.8221
+          },
+          {
+            "gen": 7,
+            "fitness": -330.873
+          },
+          {
+            "gen": 8,
+            "fitness": -355.6723
+          },
+          {
+            "gen": 9,
+            "fitness": -127.7602
+          },
+          {
+            "gen": 10,
+            "fitness": -183.0775
+          },
+          {
+            "gen": 11,
+            "fitness": -280.2005
+          },
+          {
+            "gen": 12,
+            "fitness": -453.7839
+          },
+          {
+            "gen": 13,
+            "fitness": -306.448
+          },
+          {
+            "gen": 14,
+            "fitness": -99.4307
+          },
+          {
+            "gen": 15,
+            "fitness": -277.8784
+          },
+          {
+            "gen": 16,
+            "fitness": -64.5607
+          },
+          {
+            "gen": 17,
+            "fitness": -253.6582
+          },
+          {
+            "gen": 18,
+            "fitness": -40.6571
+          },
+          {
+            "gen": 19,
+            "fitness": 19.1027
+          },
+          {
+            "gen": 20,
+            "fitness": -371.8965
+          },
+          {
+            "gen": 21,
+            "fitness": -61.0024
+          },
+          {
+            "gen": 22,
+            "fitness": -280.0761
+          },
+          {
+            "gen": 23,
+            "fitness": -143.3237
+          }
+        ],
+        "finalRow": {
+          "epoch": 23,
+          "train_ret_mean": 0,
+          "train_pnl": -65.625,
+          "train_sortino": -0.0049,
+          "train_drawdown": 155.3875,
+          "eval_ret_mean": 0,
+          "eval_pnl": -54.0948,
+          "eval_sortino": 0.0006,
+          "eval_drawdown": 715.9293,
+          "fitness": -143.3237,
+          "policy_loss": -0.00008,
+          "value_loss": 288985.037862,
+          "entropy": 0.076037,
+          "total_loss": 144492.51885
+        },
+        "bestRow": {
+          "epoch": 19,
+          "train_ret_mean": 0,
+          "train_pnl": 127.0833,
+          "train_sortino": 0.0225,
+          "train_drawdown": 216.0063,
+          "eval_ret_mean": 0,
+          "eval_pnl": -66.5948,
+          "eval_sortino": 0.0047,
+          "eval_drawdown": 914.544,
+          "fitness": 19.1027,
+          "policy_loss": -0.000252,
+          "value_loss": 167785.40181,
+          "entropy": 0.325256,
+          "total_loss": 83892.698596
+        },
+        "bestEvalPnlMetricKey": "eval_pnl",
+        "bestEvalPnlRow": {
+          "epoch": 6,
+          "train_ret_mean": 0,
+          "train_pnl": 161.9792,
+          "train_sortino": 0.0144,
+          "train_drawdown": 421.6313,
+          "eval_ret_mean": 0,
+          "eval_pnl": 265.7328,
+          "eval_sortino": 0.0213,
+          "eval_drawdown": 769.8793,
+          "fitness": -48.8221,
+          "policy_loss": -0.000128,
+          "value_loss": 156797.335098,
+          "entropy": 0.261093,
+          "total_loss": 78398.666072
+        },
+        "stdoutInsights": {
+          "testLine": "test | ret 0.0000 | pnl 118.9815 | sortino 0.9363 | mdd 1143.1065",
+          "saveLines": [
+            "Saved final PPO checkpoint to runs_rl/es_f_ppo_fold2_2026-03-16T03-51-07-837Z/ppo_final.safetensors"
+          ]
+        },
+        "trainingStack": {
+          "trainer": "rl",
+          "backend": "candle",
+          "requested_runtime": "cpu",
+          "effective_runtime": "cpu",
+          "implementation_status": "implemented",
+          "cargo_feature": "backend-candle",
+          "algorithm": "ppo",
+          "os": "macos",
+          "arch": "aarch64"
+        },
+        "generatedAt": "2026-03-16T03:51:59.970Z"
+      },
+      "trainingTest": {
+        "raw": "test | ret 0.0000 | pnl 118.9815 | sortino 0.9363 | mdd 1143.1065",
+        "pnl": 118.9815,
+        "sortino": 0.9363,
+        "mdd": 1143.1065
+      },
+      "replay": {
+        "generated_at": "2026-03-16T03:52:08.697357+00:00",
+        "run_summary": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_f_ppo_multifold_2026-03-16T03-51-07-837Z/fold_2.summary.json",
+        "checkpoint": "runs_rl/es_f_ppo_fold2_2026-03-16T03-51-07-837Z/checkpoint_epoch19.safetensors",
+        "checkpoint_metric": "fitness",
+        "parquet": "data/train/01-20-2026/ES_F.parquet",
+        "outdir": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_f_ppo_multifold_2026-03-16T03-51-07-837Z/fold_2_test_replay",
+        "full_file": true,
+        "window": 700,
+        "step": 128,
+        "eval_windows": 1,
+        "sample": true,
+        "seed": 42,
+        "metrics": {
+          "fitness": -3965.7423377064324,
+          "pnl": -150,
+          "sortino": 0.007662293600475131,
+          "drawdown": 7631.5000000000655,
+          "ret_mean": 0.00005432683425180799
+        },
+        "behavior": {
+          "rows": 7199,
+          "windows": 1,
+          "requested_buy_steps": 1751,
+          "requested_sell_steps": 915,
+          "requested_hold_steps": 3832,
+          "requested_revert_steps": 701,
+          "effective_buy_steps": 1750,
+          "effective_sell_steps": 921,
+          "effective_hold_steps": 4175,
+          "effective_revert_steps": 353,
+          "flat_steps": 3202,
+          "long_steps": 2374,
+          "short_steps": 1623,
+          "entries": 755,
+          "exits": 754,
+          "flips": 353,
+          "auto_closes": 8,
+          "session_closed_violations": 0,
+          "margin_call_violations": 0,
+          "position_limit_violations": 1162,
+          "winning_exits": 344,
+          "losing_exits": 317,
+          "total_reward": -1246233.4400000486,
+          "total_realized_pnl_change": -112.5,
+          "total_pnl_change": -150,
+          "total_commission_paid": 1771.9999999999388,
+          "total_slippage_paid": 553.75,
+          "avg_bars_per_trade": 5.950928381962865,
+          "max_bars_per_trade": 550,
+          "pct_flat": 0.4447839977774691
+        }
+      }
+    }
+  ]
+}

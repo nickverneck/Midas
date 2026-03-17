@@ -58,7 +58,7 @@
 		window: defaultWindowBars,
 		step: defaultStepBars,
 		"initial-balance": 10000,
-		"max-position": 0,
+		"max-position": 1,
 		"margin-mode": "auto",
 		"contract-multiplier": 1.0,
 		"margin-per-contract": "",
@@ -75,12 +75,18 @@
 		"elite-frac": 0.33,
 		"mutation-sigma": 0.05,
 		"init-sigma": 0.5,
-		hidden: 128,
+		hidden: 64,
 		layers: 2,
 		"eval-windows": 2,
 		"w-pnl": 1.0,
 		"w-sortino": 1.0,
 		"w-mdd": 0.5,
+		"drawdown-penalty": 0.0,
+		"drawdown-penalty-growth": 0.0,
+		"session-close-penalty": 0.0,
+		"flat-hold-penalty": 2.2,
+		"flat-hold-penalty-growth": 0.05,
+		"max-flat-hold-bars": 100,
 		"save-top-n": 5,
 		"save-every": 1,
 		"checkpoint-every": 1
@@ -107,11 +113,11 @@
 		clip: 0.2,
 		"vf-coef": 0.5,
 		"ent-coef": 0.01,
-		hidden: 128,
+		hidden: 64,
 		layers: 2,
 		"eval-windows": 2,
 		"initial-balance": 10000,
-		"max-position": 0,
+		"max-position": 1,
 		"margin-mode": "auto",
 		"contract-multiplier": 1.0,
 		"margin-per-contract": "",
@@ -1063,6 +1069,18 @@
 															<Input id="ga-w-mdd" type="number" step="0.01" bind:value={gaParams["w-mdd"]} />
 														</div>
 														<div class="grid gap-2">
+															<Label for="ga-drawdown-penalty">Drawdown Penalty</Label>
+															<Input id="ga-drawdown-penalty" type="number" step="0.01" min="0" bind:value={gaParams["drawdown-penalty"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="ga-drawdown-penalty-growth">Drawdown Penalty Growth</Label>
+															<Input id="ga-drawdown-penalty-growth" type="number" step="0.01" min="0" bind:value={gaParams["drawdown-penalty-growth"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="ga-session-close-penalty">Session Close Penalty</Label>
+															<Input id="ga-session-close-penalty" type="number" step="0.01" min="0" bind:value={gaParams["session-close-penalty"]} />
+														</div>
+														<div class="grid gap-2">
 															<Label for="ga-selection-train-weight">Selection Weight (Train)</Label>
 															<Input id="ga-selection-train-weight" type="number" step="0.01" min="0" bind:value={gaParams["selection-train-weight"]} />
 														</div>
@@ -1103,6 +1121,18 @@
 														<div class="grid gap-2">
 															<Label for="ga-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
 															<Input id="ga-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-negative-scale"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="ga-flat-hold-penalty">Flat Hold Penalty</Label>
+															<Input id="ga-flat-hold-penalty" type="number" step="0.01" min="0" bind:value={gaParams["flat-hold-penalty"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="ga-flat-hold-penalty-growth">Flat Hold Penalty Growth</Label>
+															<Input id="ga-flat-hold-penalty-growth" type="number" step="0.01" min="0" bind:value={gaParams["flat-hold-penalty-growth"]} />
+														</div>
+														<div class="grid gap-2">
+															<Label for="ga-max-flat-hold-bars">Max Flat Hold Bars</Label>
+															<Input id="ga-max-flat-hold-bars" type="number" min="0" bind:value={gaParams["max-flat-hold-bars"]} />
 														</div>
 													</div>
 												</details>

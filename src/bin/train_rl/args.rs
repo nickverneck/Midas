@@ -110,6 +110,12 @@ pub struct Args {
     pub hold_duration_penalty_positive_scale: f64,
     #[arg(long, default_value_t = 1.5)]
     pub hold_duration_penalty_negative_scale: f64,
+    #[arg(long, default_value_t = 0)]
+    pub min_hold_bars: usize,
+    #[arg(long, default_value_t = 0.0)]
+    pub early_exit_penalty: f64,
+    #[arg(long, default_value_t = 0.0)]
+    pub early_flip_penalty: f64,
     #[arg(long, default_value_t = 7.0)]
     pub invalid_revert_penalty: f64,
     #[arg(long, default_value_t = 0.5)]

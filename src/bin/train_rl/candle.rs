@@ -213,6 +213,9 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         hold_duration_penalty_growth: args.hold_duration_penalty_growth,
         hold_duration_penalty_positive_scale: args.hold_duration_penalty_positive_scale,
         hold_duration_penalty_negative_scale: args.hold_duration_penalty_negative_scale,
+        min_hold_bars: args.min_hold_bars,
+        early_exit_penalty: args.early_exit_penalty,
+        early_flip_penalty: args.early_flip_penalty,
         invalid_revert_penalty: args.invalid_revert_penalty,
         invalid_revert_penalty_growth: args.invalid_revert_penalty_growth,
         flat_hold_penalty: args.flat_hold_penalty,
@@ -513,7 +516,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
     Ok(())
 }
 
-fn build_policy(
+pub(crate) fn build_policy(
     vb: VarBuilder,
     input_dim: usize,
     hidden: usize,
@@ -1199,7 +1202,7 @@ fn explicit_cuda_device() -> Result<Device> {
     }
 }
 
-fn load_checkpoint(varmap: &mut VarMap, path: &Path) -> anyhow::Result<()> {
+pub(crate) fn load_checkpoint(varmap: &mut VarMap, path: &Path) -> anyhow::Result<()> {
     if path.extension().and_then(|ext| ext.to_str()) != Some("safetensors") {
         anyhow::bail!(
             "candle RL checkpoints must be .safetensors files (received {})",

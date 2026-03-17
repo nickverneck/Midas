@@ -1,0 +1,220 @@
+{
+  "generatedAt": "2026-03-16T00:48:56.188Z",
+  "host": "http://127.0.0.1:4173",
+  "profile": "release",
+  "step": 128,
+  "window": 700,
+  "mode": "rl",
+  "reportDir": "/Users/nick/Documents/dev/Midas/runs/pipeline_reports/es_candle_2026-03-16T00-48-31-014Z",
+  "results": [
+    {
+      "engine": "rl",
+      "profile": "release",
+      "host": "http://127.0.0.1:4173",
+      "params": {
+        "algorithm": "ppo",
+        "backend": "candle",
+        "device": "cpu",
+        "outdir": "runs_rl/es_candle_fold2_2026-03-16T00-48-31-014Z",
+        "train-parquet": "data/train/01-04-2026/ES_F.parquet",
+        "val-parquet": "data/train/01-12-2026/ES_F.parquet",
+        "test-parquet": "data/train/01-20-2026/ES_F.parquet",
+        "windowed": true,
+        "window": 700,
+        "step": 128,
+        "epochs": 24,
+        "train-windows": 24,
+        "ppo-epochs": 4,
+        "eval-windows": 999,
+        "lr": 0.0003,
+        "gamma": 0.99,
+        "lam": 0.95,
+        "clip": 0.2,
+        "vf-coef": 0.5,
+        "ent-coef": 0.01,
+        "hidden": 64,
+        "layers": 2,
+        "log-interval": 1,
+        "checkpoint-every": 1,
+        "w-pnl": 1,
+        "w-sortino": 1,
+        "w-mdd": 0.5,
+        "initial-balance": 10000,
+        "max-position": 1,
+        "margin-mode": "per-contract",
+        "margin-per-contract": 500,
+        "contract-multiplier": 50,
+        "auto-close-minutes-before-close": 5
+      },
+      "runDir": "runs_rl/es_candle_fold2_2026-03-16T00-48-31-014Z",
+      "exitCode": 0,
+      "metricKey": "fitness",
+      "rowCount": 24,
+      "fitnessSummary": [
+        {
+          "gen": 0,
+          "fitness": -885.2597
+        },
+        {
+          "gen": 1,
+          "fitness": -340.4535
+        },
+        {
+          "gen": 2,
+          "fitness": -430.3834
+        },
+        {
+          "gen": 3,
+          "fitness": -456.1173
+        },
+        {
+          "gen": 4,
+          "fitness": -372.0996
+        },
+        {
+          "gen": 5,
+          "fitness": -296.5383
+        },
+        {
+          "gen": 6,
+          "fitness": -284.3403
+        },
+        {
+          "gen": 7,
+          "fitness": -590.3167
+        },
+        {
+          "gen": 8,
+          "fitness": 31.5389
+        },
+        {
+          "gen": 9,
+          "fitness": -168.7824
+        },
+        {
+          "gen": 10,
+          "fitness": -20.652
+        },
+        {
+          "gen": 11,
+          "fitness": -5.994
+        },
+        {
+          "gen": 12,
+          "fitness": -208.9089
+        },
+        {
+          "gen": 13,
+          "fitness": -446.3485
+        },
+        {
+          "gen": 14,
+          "fitness": -216.43
+        },
+        {
+          "gen": 15,
+          "fitness": -422.2742
+        },
+        {
+          "gen": 16,
+          "fitness": -433.2049
+        },
+        {
+          "gen": 17,
+          "fitness": -432.7766
+        },
+        {
+          "gen": 18,
+          "fitness": -282.7195
+        },
+        {
+          "gen": 19,
+          "fitness": -85.6412
+        },
+        {
+          "gen": 20,
+          "fitness": -232.61
+        },
+        {
+          "gen": 21,
+          "fitness": -429.239
+        },
+        {
+          "gen": 22,
+          "fitness": -288.8075
+        },
+        {
+          "gen": 23,
+          "fitness": -495.7226
+        }
+      ],
+      "finalRow": {
+        "epoch": 23,
+        "train_ret_mean": 0,
+        "train_pnl": -214.5833,
+        "train_sortino": -0.0049,
+        "train_drawdown": 562.2688,
+        "eval_ret_mean": 0,
+        "eval_pnl": 88.3621,
+        "eval_sortino": 0.0148,
+        "eval_drawdown": 467.7474,
+        "fitness": -495.7226,
+        "policy_loss": -0.000273,
+        "value_loss": 201768.074992,
+        "entropy": 0.228685,
+        "total_loss": 100884.036331
+      },
+      "bestRow": {
+        "epoch": 8,
+        "train_ret_mean": 0,
+        "train_pnl": 284.375,
+        "train_sortino": 0.0118,
+        "train_drawdown": 505.6958,
+        "eval_ret_mean": 0,
+        "eval_pnl": -58.1897,
+        "eval_sortino": 0.8639,
+        "eval_drawdown": 595.0672,
+        "fitness": 31.5389,
+        "policy_loss": -0.000394,
+        "value_loss": 161868.850103,
+        "entropy": 0.210778,
+        "total_loss": 80934.423383
+      },
+      "bestEvalPnlMetricKey": "eval_pnl",
+      "bestEvalPnlRow": {
+        "epoch": 3,
+        "train_ret_mean": 0,
+        "train_pnl": -33.8542,
+        "train_sortino": 0.0025,
+        "train_drawdown": 844.5313,
+        "eval_ret_mean": 0,
+        "eval_pnl": 213.7931,
+        "eval_sortino": 0.0136,
+        "eval_drawdown": 671.7164,
+        "fitness": -456.1173,
+        "policy_loss": -0.000214,
+        "value_loss": 105067.253469,
+        "entropy": 0.094864,
+        "total_loss": 52533.62589
+      },
+      "stdoutInsights": {
+        "testLine": "test | ret 0.0000 | pnl 100.9259 | sortino 0.0081 | mdd 1383.6065",
+        "saveLines": [
+          "Saved final PPO checkpoint to runs_rl/es_candle_fold2_2026-03-16T00-48-31-014Z/ppo_final.safetensors"
+        ]
+      },
+      "trainingStack": {
+        "trainer": "rl",
+        "backend": "candle",
+        "requested_runtime": "cpu",
+        "effective_runtime": "cpu",
+        "implementation_status": "implemented",
+        "cargo_feature": "backend-candle",
+        "algorithm": "ppo",
+        "os": "macos",
+        "arch": "aarch64"
+      },
+      "generatedAt": "2026-03-16T00:48:56.177Z"
+    }
+  ]
+}

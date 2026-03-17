@@ -1,0 +1,178 @@
+{
+  "engine": "ga",
+  "profile": "release",
+  "host": "http://127.0.0.1:4173",
+  "params": {
+    "backend": "candle",
+    "device": "cpu",
+    "outdir": "runs_ga/es_candle_fold1_2026-03-15T08-43-08-762Z",
+    "train-parquet": "data/train/12-29-2025/ES_F.parquet",
+    "val-parquet": "data/train/01-04-2026/ES_F.parquet",
+    "test-parquet": "data/train/01-12-2026/ES_F.parquet",
+    "windowed": true,
+    "window": 700,
+    "step": 128,
+    "generations": 12,
+    "pop-size": 12,
+    "workers": 2,
+    "batch-candidates": 0,
+    "elite-frac": 0.33,
+    "mutation-sigma": 0.05,
+    "init-sigma": 0.5,
+    "hidden": 128,
+    "layers": 2,
+    "eval-windows": 999,
+    "save-top-n": 3,
+    "save-every": 1,
+    "checkpoint-every": 1,
+    "selection-train-weight": 0.3,
+    "selection-eval-weight": 0.7,
+    "selection-gap-penalty": 0.2,
+    "w-pnl": 1,
+    "w-sortino": 1,
+    "w-mdd": 0.5,
+    "initial-balance": 10000,
+    "max-position": 0,
+    "margin-mode": "per-contract",
+    "margin-per-contract": 500,
+    "contract-multiplier": 50,
+    "auto-close-minutes-before-close": 5
+  },
+  "runDir": "runs_ga/es_candle_fold1_2026-03-15T08-43-08-762Z",
+  "exitCode": 0,
+  "metricKey": "selection_fitness",
+  "rowCount": 144,
+  "fitnessSummary": [
+    {
+      "gen": 0,
+      "fitness": -215573.6307
+    },
+    {
+      "gen": 1,
+      "fitness": -26505.6065
+    },
+    {
+      "gen": 2,
+      "fitness": -45115.6824
+    },
+    {
+      "gen": 3,
+      "fitness": -39295.6282
+    },
+    {
+      "gen": 4,
+      "fitness": -26386.1263
+    },
+    {
+      "gen": 5,
+      "fitness": -8379.1267
+    },
+    {
+      "gen": 6,
+      "fitness": -19983.5099
+    },
+    {
+      "gen": 7,
+      "fitness": -9677.7235
+    },
+    {
+      "gen": 8,
+      "fitness": -13773.4192
+    },
+    {
+      "gen": 9,
+      "fitness": -8289.3147
+    },
+    {
+      "gen": 10,
+      "fitness": -7051.2428
+    },
+    {
+      "gen": 11,
+      "fitness": -7445.4297
+    }
+  ],
+  "finalRow": {
+    "gen": 11,
+    "idx": 11,
+    "w_pnl": 1,
+    "w_sortino": 1,
+    "w_mdd": 0.5,
+    "fitness": -387238.1524,
+    "eval_fitness": -314476.5688,
+    "selection_fitness": -387238.1524,
+    "eval_fitness_pnl": -296617.4834,
+    "eval_pnl_realized": -677.5568,
+    "eval_pnl_total": -2493.5091,
+    "eval_sortino": -0.0104,
+    "eval_drawdown": 35718.15,
+    "eval_ret_mean": -0.00053615,
+    "train_fitness_pnl": -369139.0583,
+    "train_pnl_realized": 1272.7273,
+    "train_pnl_total": 734.5121,
+    "train_sortino": 0.0059,
+    "train_drawdown": 36198.2,
+    "train_ret_mean": 0.00019269
+  },
+  "bestRow": {
+    "gen": 10,
+    "idx": 0,
+    "w_pnl": 1,
+    "w_sortino": 1,
+    "w_mdd": 0.5,
+    "fitness": -7051.2428,
+    "eval_fitness": -82834.8898,
+    "selection_fitness": -7051.2428,
+    "eval_fitness_pnl": -71284.3798,
+    "eval_pnl_realized": 2251.7045,
+    "eval_pnl_total": 1276.2091,
+    "eval_sortino": 0.015,
+    "eval_drawdown": 23101.05,
+    "eval_ret_mean": 0.00020413,
+    "train_fitness_pnl": -3973.1752,
+    "train_pnl_realized": 92.0455,
+    "train_pnl_total": 56.4515,
+    "train_sortino": 0.0074,
+    "train_drawdown": 6156.15,
+    "train_ret_mean": 0.00003915
+  },
+  "bestEvalPnlMetricKey": "eval_pnl_total",
+  "bestEvalPnlRow": {
+    "gen": 6,
+    "idx": 7,
+    "w_pnl": 1,
+    "w_sortino": 1,
+    "w_mdd": 0.5,
+    "fitness": -427028.929,
+    "eval_fitness": -423409.3587,
+    "selection_fitness": -427028.929,
+    "eval_fitness_pnl": -407427.8358,
+    "eval_pnl_realized": 7828.4091,
+    "eval_pnl_total": 6590.0239,
+    "eval_sortino": 0.0271,
+    "eval_drawdown": 31963.1,
+    "eval_ret_mean": 0.00067142,
+    "train_fitness_pnl": -416822.0509,
+    "train_pnl_realized": 1604.5455,
+    "train_pnl_total": -1768.3348,
+    "train_sortino": -0.0031,
+    "train_drawdown": 20413.75,
+    "train_ret_mean": -0.00008767
+  },
+  "stdoutInsights": {
+    "testLine": "test | fitness -125138.82 | pnl -106723.69 | sortino -0.00 | mdd 36830.25",
+    "saveLines": []
+  },
+  "trainingStack": {
+    "trainer": "ga",
+    "backend": "candle",
+    "requested_runtime": "cpu",
+    "effective_runtime": "cpu",
+    "implementation_status": "implemented",
+    "cargo_feature": "backend-candle",
+    "algorithm": "ga",
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "generatedAt": "2026-03-15T08:43:42.477Z"
+}

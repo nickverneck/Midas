@@ -31,6 +31,7 @@ pub struct BehaviorRow {
     pub data_idx: usize,
     pub action_idx: i32,
     pub action: String,
+    pub effective_action: String,
     pub position_before: i32,
     pub position_after: i32,
     pub equity_before: f64,

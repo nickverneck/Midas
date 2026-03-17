@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 
+use crate::actions::POLICY_ACTION_DIM;
 use crate::config::{CandidateConfig, ExecutionTarget};
 use crate::types::{BehaviorRow, CandidateResult};
 
@@ -11,7 +12,7 @@ pub fn param_count(input_dim: usize, hidden: usize, layers: usize) -> Result<usi
         count += in_dim * hidden + hidden;
         in_dim = hidden;
     }
-    count += in_dim * 4 + 4;
+    count += in_dim * POLICY_ACTION_DIM + POLICY_ACTION_DIM;
     Ok(count)
 }
 

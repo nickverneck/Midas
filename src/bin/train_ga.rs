@@ -5,6 +5,13 @@ mod args;
     feature = "backend-candle",
     feature = "backend-burn"
 ))]
+#[path = "train_ga/actions.rs"]
+mod actions;
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_ga/backends/mod.rs"]
 mod backends;
 #[cfg(any(
@@ -100,6 +107,7 @@ fn write_behavior_csv(
         "close",
         "volume",
         "action",
+        "effective_action",
         "action_idx",
         "position_before",
         "position_after",
@@ -162,6 +170,7 @@ fn write_behavior_csv(
             close.map(|v| v.to_string()).unwrap_or_default(),
             volume.map(|v| v.to_string()).unwrap_or_default(),
             row.action.clone(),
+            row.effective_action.clone(),
             row.action_idx.to_string(),
             row.position_before.to_string(),
             row.position_after.to_string(),
@@ -471,6 +480,24 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let elite_n = (args.elite_frac * target_pop_size as f64)
+        .round()
+        .clamp(1.0, target_pop_size as f64) as usize;
+    let parent_pool_n = (args.parent_pool_frac * target_pop_size as f64)
+        .round()
+        .clamp(elite_n as f64, target_pop_size as f64) as usize;
+    let immigrant_n = ((args.immigrant_frac * target_pop_size as f64).round() as usize)
+        .min(target_pop_size.saturating_sub(elite_n));
+    if args.immigrant_frac > 0.0 || parent_pool_n > elite_n {
+        println!(
+            "info: reproduction keeps {} elites, breeds from top {} candidates, injects {} immigrants, breeds {} crossover children",
+            elite_n,
+            parent_pool_n,
+            immigrant_n,
+            target_pop_size.saturating_sub(elite_n + immigrant_n)
+        );
+    }
+
     for generation in start_gen..args.generations {
         let gen_start = std::time::Instant::now();
         println!(
@@ -506,6 +533,9 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
             hold_duration_penalty_growth: args.hold_duration_penalty_growth,
             hold_duration_penalty_positive_scale: args.hold_duration_penalty_positive_scale,
             hold_duration_penalty_negative_scale: args.hold_duration_penalty_negative_scale,
+            min_hold_bars: args.min_hold_bars,
+            early_exit_penalty: args.early_exit_penalty,
+            early_flip_penalty: args.early_flip_penalty,
             invalid_revert_penalty: args.invalid_revert_penalty,
             flat_hold_penalty: args.flat_hold_penalty,
             max_flat_hold_bars: args.max_flat_hold_bars,
@@ -822,45 +852,49 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                 );
             }
 
-            let (train_behavior_metrics, train_history) =
-                backends::evaluate_candidate_with_history(
-                    &stack,
-                    genome,
-                    &train,
-                    &windows_train,
-                    &base_cfg,
-                )?;
-            let train_path =
-                behavior_dir.join(format!("train_gen{}_idx{}.csv", generation, *best_idx));
-            write_behavior_csv(
-                &train_path,
-                generation,
-                *best_idx,
-                "train",
-                &train,
-                &train_behavior_metrics,
-                &train_history,
-            )?;
-            if !args.skip_val_eval {
-                let (val_behavior_metrics, val_history) =
+            let capture_behavior =
+                args.behavior_every > 0 && generation % args.behavior_every == 0;
+            if capture_behavior {
+                let (train_behavior_metrics, train_history) =
                     backends::evaluate_candidate_with_history(
                         &stack,
                         genome,
-                        &val,
-                        &windows_val,
+                        &train,
+                        &windows_train,
                         &base_cfg,
                     )?;
-                let val_path =
-                    behavior_dir.join(format!("val_gen{}_idx{}.csv", generation, *best_idx));
+                let train_path =
+                    behavior_dir.join(format!("train_gen{}_idx{}.csv", generation, *best_idx));
                 write_behavior_csv(
-                    &val_path,
+                    &train_path,
                     generation,
                     *best_idx,
-                    "val",
-                    &val,
-                    &val_behavior_metrics,
-                    &val_history,
+                    "train",
+                    &train,
+                    &train_behavior_metrics,
+                    &train_history,
                 )?;
+                if !args.skip_val_eval {
+                    let (val_behavior_metrics, val_history) =
+                        backends::evaluate_candidate_with_history(
+                            &stack,
+                            genome,
+                            &val,
+                            &windows_val,
+                            &base_cfg,
+                        )?;
+                    let val_path =
+                        behavior_dir.join(format!("val_gen{}_idx{}.csv", generation, *best_idx));
+                    write_behavior_csv(
+                        &val_path,
+                        generation,
+                        *best_idx,
+                        "val",
+                        &val,
+                        &val_behavior_metrics,
+                        &val_history,
+                    )?;
+                }
             }
         }
 
@@ -901,18 +935,27 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
             }
         }
 
-        let elite_n = (args.elite_frac * target_pop_size as f64).round().max(1.0) as usize;
         let elites: Vec<Vec<f32>> = scored
             .iter()
             .take(elite_n)
             .map(|(_, _, g, _, _)| g.clone())
             .collect();
+        let parent_pool: Vec<Vec<f32>> = scored
+            .iter()
+            .take(parent_pool_n)
+            .map(|(_, _, g, _, _)| g.clone())
+            .collect();
         let mut new_pop = elites.clone();
+
+        for _ in 0..immigrant_n {
+            let immigrant = (0..genome_len).map(|_| normal.sample(&mut rng)).collect();
+            new_pop.push(immigrant);
+        }
 
         let normal_mut = Normal::<f32>::new(0.0, args.mutation_sigma as f32)?;
         while new_pop.len() < target_pop_size {
-            let parent_a = elites.choose(&mut rng).unwrap();
-            let parent_b = elites.choose(&mut rng).unwrap();
+            let parent_a = parent_pool.choose(&mut rng).unwrap();
+            let parent_b = parent_pool.choose(&mut rng).unwrap();
             let mut child = evolution::crossover(parent_a, parent_b, &mut rng);
             for v in child.iter_mut() {
                 *v += normal_mut.sample(&mut rng);
@@ -956,6 +999,9 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
             hold_duration_penalty_growth: args.hold_duration_penalty_growth,
             hold_duration_penalty_positive_scale: args.hold_duration_penalty_positive_scale,
             hold_duration_penalty_negative_scale: args.hold_duration_penalty_negative_scale,
+            min_hold_bars: args.min_hold_bars,
+            early_exit_penalty: args.early_exit_penalty,
+            early_flip_penalty: args.early_flip_penalty,
             invalid_revert_penalty: args.invalid_revert_penalty,
             flat_hold_penalty: args.flat_hold_penalty,
             max_flat_hold_bars: args.max_flat_hold_bars,

@@ -2,6 +2,8 @@ use anyhow::Result;
 use tch::Tensor;
 use tch::nn;
 
+use crate::actions::POLICY_ACTION_DIM;
+
 pub fn param_count(input_dim: usize, hidden: usize, layers: usize) -> usize {
     let mut count = 0;
     let mut in_dim = input_dim;
@@ -9,7 +11,7 @@ pub fn param_count(input_dim: usize, hidden: usize, layers: usize) -> usize {
         count += in_dim * hidden + hidden;
         in_dim = hidden;
     }
-    count += in_dim * 4 + 4;
+    count += in_dim * POLICY_ACTION_DIM + POLICY_ACTION_DIM;
     count
 }
 
@@ -21,7 +23,7 @@ pub fn build_mlp(p: &nn::Path, input_dim: i64, hidden: i64, layers: usize) -> nn
         seq = seq.add(linear).add_fn(|xs| xs.tanh());
         in_dim = hidden;
     }
-    let out = nn::linear(p / "out", in_dim, 4, Default::default());
+    let out = nn::linear(p / "out", in_dim, POLICY_ACTION_DIM as i64, Default::default());
     seq.add(out)
 }
 
@@ -116,16 +118,16 @@ pub fn build_batched_policy(
             in_dim = hidden;
         }
 
-        let w_len = in_dim * 4;
-        let b_len = 4;
+        let w_len = in_dim * POLICY_ACTION_DIM;
+        let b_len = POLICY_ACTION_DIM;
         let w = Tensor::f_from_slice(&genome[offset..offset + w_len])
             .expect("tensor from genome")
-            .reshape(&[4, in_dim as i64])
+            .reshape(&[POLICY_ACTION_DIM as i64, in_dim as i64])
             .to_device(device);
         offset += w_len;
         let b = Tensor::f_from_slice(&genome[offset..offset + b_len])
             .expect("tensor from genome")
-            .reshape(&[4])
+            .reshape(&[POLICY_ACTION_DIM as i64])
             .to_device(device);
         offset += b_len;
         weight_layers[layers].push(w);

@@ -189,7 +189,7 @@ pub struct ContractSuggestion {
     pub raw: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Bar {
     pub ts_ns: i64,
     pub open: f64,
@@ -300,6 +300,7 @@ pub struct LatencySnapshot {
 
 struct ServiceState {
     client: Client,
+    broker_tx: UnboundedSender<BrokerCommand>,
     session: Option<SessionState>,
     user_task: Option<JoinHandle<()>>,
     market_task: Option<JoinHandle<()>>,
@@ -316,6 +317,7 @@ struct SessionState {
     execution_config: ExecutionStrategyConfig,
     execution_runtime: ExecutionRuntimeState,
     order_latency_tracker: Option<OrderLatencyTracker>,
+    order_submit_in_flight: bool,
     user_store: UserSyncStore,
     selected_account_id: Option<i64>,
     selected_contract: Option<ContractSuggestion>,
@@ -489,7 +491,9 @@ enum InternalEvent {
     },
     RestLatencyMeasured(u64),
     UserSocketStatus(String),
-    Market(MarketSnapshot),
+    Market(MarketUpdate),
+    BrokerOrderAck(BrokerOrderAck),
+    BrokerOrderFailed(BrokerOrderFailure),
     Error(String),
 }
 
@@ -521,6 +525,64 @@ struct LiveSeries {
     forming_bar: Option<Bar>,
 }
 
+#[derive(Debug, Clone)]
+struct MarketUpdate {
+    contract_id: i64,
+    contract_name: String,
+    session_profile: Option<InstrumentSessionProfile>,
+    value_per_point: Option<f64>,
+    tick_size: Option<f64>,
+    history_loaded: usize,
+    live_bars: usize,
+    status: String,
+    bars: MarketBarsUpdate,
+}
+
+#[derive(Debug, Clone)]
+enum MarketBarsUpdate {
+    Snapshot {
+        closed_bars: Vec<Bar>,
+        forming_bar: Option<Bar>,
+    },
+    Forming {
+        forming_bar: Bar,
+    },
+    Closed {
+        closed_bar: Bar,
+        forming_bar: Option<Bar>,
+    },
+}
+
+struct BrokerCommand {
+    request_tx: UnboundedSender<UserSocketCommand>,
+    order: PendingMarketOrder,
+}
+
+struct PendingMarketOrder {
+    cl_ord_id: String,
+    payload: Value,
+    action_label: String,
+    order_action: String,
+    order_qty: i32,
+    contract_name: String,
+    account_name: String,
+    reason_suffix: Option<String>,
+    target_qty: Option<i32>,
+}
+
+struct BrokerOrderAck {
+    cl_ord_id: String,
+    order_id: Option<i64>,
+    submit_rtt_ms: u64,
+    message: String,
+}
+
+struct BrokerOrderFailure {
+    cl_ord_id: String,
+    message: String,
+    target_qty: Option<i32>,
+}
+
 impl LiveSeries {
     fn new() -> Self {
         Self {
@@ -541,14 +603,6 @@ impl LiveSeries {
         }
         self.closed_bars.push(bar.clone());
     }
-
-    fn render_bars(&self) -> Vec<Bar> {
-        let mut out = self.closed_bars.clone();
-        if let Some(forming) = &self.forming_bar {
-            out.push(forming.clone());
-        }
-        out
-    }
 }
 
 fn spawn_user_sync_task(
@@ -566,6 +620,74 @@ fn spawn_user_sync_task(
         internal_tx,
     ));
     (request_tx, task)
+}
+
+fn spawn_broker_gateway_task(
+    request_rx: UnboundedReceiver<BrokerCommand>,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(broker_gateway_worker(request_rx, internal_tx))
+}
+
+async fn broker_gateway_worker(
+    mut request_rx: UnboundedReceiver<BrokerCommand>,
+    internal_tx: UnboundedSender<InternalEvent>,
+) {
+    while let Some(command) = request_rx.recv().await {
+        match submit_market_order_via_gateway(command).await {
+            Ok(ack) => {
+                let _ = internal_tx.send(InternalEvent::BrokerOrderAck(ack));
+            }
+            Err(failure) => {
+                let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+            }
+        }
+    }
+}
+
+async fn submit_market_order_via_gateway(
+    command: BrokerCommand,
+) -> Result<BrokerOrderAck, BrokerOrderFailure> {
+    let started_at = time::Instant::now();
+    let parsed = match request_order_json(
+        &command.request_tx,
+        "order/placeorder",
+        &command.order.payload,
+    )
+    .await
+    {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return Err(BrokerOrderFailure {
+                cl_ord_id: command.order.cl_ord_id,
+                message: err.to_string(),
+                target_qty: command.order.target_qty,
+            });
+        }
+    };
+    let submit_rtt_ms = started_at.elapsed().as_millis() as u64;
+    let order_id = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id"));
+    let mut message = format!(
+        "{} submitted: {} {} {} on {}",
+        command.order.action_label,
+        command.order.order_action,
+        command.order.order_qty,
+        command.order.contract_name,
+        command.order.account_name
+    );
+    if let Some(reason) = command.order.reason_suffix.as_deref() {
+        message.push_str(&format!(" [{reason}]"));
+    }
+    if let Some(order_id) = order_id {
+        message.push_str(&format!(" (order {order_id})"));
+    }
+    message.push_str(&format!(" [clOrdId {}]", command.order.cl_ord_id));
+    Ok(BrokerOrderAck {
+        cl_ord_id: command.order.cl_ord_id,
+        order_id,
+        submit_rtt_ms,
+        message,
+    })
 }
 
 fn spawn_rest_probe_task(
@@ -586,7 +708,10 @@ fn spawn_rest_probe_task(
     })
 }
 
-fn request_snapshot_refresh(state: &mut ServiceState, internal_tx: &UnboundedSender<InternalEvent>) {
+fn request_snapshot_refresh(
+    state: &mut ServiceState,
+    internal_tx: &UnboundedSender<InternalEvent>,
+) {
     let Some(session) = state.session.as_ref() else {
         return;
     };
@@ -606,6 +731,133 @@ fn request_snapshot_refresh(state: &mut ServiceState, internal_tx: &UnboundedSen
     });
 }
 
+fn market_last_closed_ts(market: &MarketSnapshot) -> Option<i64> {
+    let closed_len = market.history_loaded.min(market.bars.len());
+    closed_len
+        .checked_sub(1)
+        .and_then(|idx| market.bars.get(idx))
+        .map(|bar| bar.ts_ns)
+}
+
+fn build_market_update(
+    contract: &ContractSuggestion,
+    market_specs: Option<MarketSpecs>,
+    history_loaded: usize,
+    live_bars: usize,
+    status: String,
+    before_closed_len: usize,
+    before_last_closed: Option<Bar>,
+    before_forming: Option<Bar>,
+    series: &LiveSeries,
+) -> Option<MarketUpdate> {
+    let bars = if before_closed_len == 0 && history_loaded > 0 {
+        Some(MarketBarsUpdate::Snapshot {
+            closed_bars: series.closed_bars.clone(),
+            forming_bar: series.forming_bar.clone(),
+        })
+    } else if history_loaded > before_closed_len + 1 {
+        Some(MarketBarsUpdate::Snapshot {
+            closed_bars: series.closed_bars.clone(),
+            forming_bar: series.forming_bar.clone(),
+        })
+    } else if history_loaded > before_closed_len {
+        series
+            .closed_bars
+            .last()
+            .cloned()
+            .map(|closed_bar| MarketBarsUpdate::Closed {
+                closed_bar,
+                forming_bar: series.forming_bar.clone(),
+            })
+    } else if series.closed_bars.last() != before_last_closed.as_ref() {
+        series
+            .closed_bars
+            .last()
+            .cloned()
+            .map(|closed_bar| MarketBarsUpdate::Closed {
+                closed_bar,
+                forming_bar: series.forming_bar.clone(),
+            })
+    } else if series.forming_bar != before_forming {
+        series
+            .forming_bar
+            .clone()
+            .map(|forming_bar| MarketBarsUpdate::Forming { forming_bar })
+    } else {
+        None
+    }?;
+
+    Some(MarketUpdate {
+        contract_id: contract.id,
+        contract_name: contract.name.clone(),
+        session_profile: market_specs.and_then(|specs| specs.session_profile),
+        value_per_point: market_specs.and_then(|specs| specs.value_per_point),
+        tick_size: market_specs.and_then(|specs| specs.tick_size),
+        history_loaded,
+        live_bars,
+        status,
+        bars,
+    })
+}
+
+fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpdate) -> bool {
+    let prev_last_closed_ts = market_last_closed_ts(market);
+    market.contract_id = Some(update.contract_id);
+    market.contract_name = Some(update.contract_name);
+    market.session_profile = update.session_profile;
+    market.value_per_point = update.value_per_point;
+    market.tick_size = update.tick_size;
+    market.live_bars = update.live_bars;
+    market.status = update.status;
+
+    let closed_bar_advanced = match update.bars {
+        MarketBarsUpdate::Snapshot {
+            closed_bars,
+            forming_bar,
+        } => {
+            let next_last_closed_ts = closed_bars.last().map(|bar| bar.ts_ns);
+            market.history_loaded = update.history_loaded.min(closed_bars.len());
+            market.bars = closed_bars;
+            if let Some(forming_bar) = forming_bar {
+                market.bars.push(forming_bar);
+            }
+            next_last_closed_ts.is_some_and(|ts| prev_last_closed_ts.is_none_or(|prev| ts > prev))
+        }
+        MarketBarsUpdate::Forming { forming_bar } => {
+            let closed_len = update.history_loaded.min(market.bars.len());
+            market.bars.truncate(closed_len);
+            market.history_loaded = closed_len;
+            market.bars.push(forming_bar);
+            false
+        }
+        MarketBarsUpdate::Closed {
+            closed_bar,
+            forming_bar,
+        } => {
+            let closed_len = market.history_loaded.min(market.bars.len());
+            market.bars.truncate(closed_len);
+            match market.bars.last_mut() {
+                Some(last) if last.ts_ns == closed_bar.ts_ns => {
+                    *last = closed_bar.clone();
+                }
+                Some(last) if closed_bar.ts_ns > last.ts_ns => {
+                    market.bars.push(closed_bar.clone());
+                }
+                None => market.bars.push(closed_bar.clone()),
+                _ => {}
+            }
+            market.history_loaded = update.history_loaded.min(market.bars.len());
+            market.bars.truncate(market.history_loaded);
+            if let Some(forming_bar) = forming_bar {
+                market.bars.push(forming_bar);
+            }
+            prev_last_closed_ts.is_none_or(|prev| closed_bar.ts_ns > prev)
+        }
+    };
+
+    closed_bar_advanced
+}
+
 fn execution_state_snapshot(session: &SessionState) -> ExecutionStateSnapshot {
     ExecutionStateSnapshot {
         config: session.execution_config.clone(),
@@ -614,7 +866,9 @@ fn execution_state_snapshot(session: &SessionState) -> ExecutionStateSnapshot {
 }
 
 fn emit_execution_state(event_tx: &UnboundedSender<ServiceEvent>, session: &SessionState) {
-    let _ = event_tx.send(ServiceEvent::ExecutionState(execution_state_snapshot(session)));
+    let _ = event_tx.send(ServiceEvent::ExecutionState(execution_state_snapshot(
+        session,
+    )));
 }
 
 fn closed_bars(session: &SessionState) -> &[Bar] {
@@ -689,12 +943,20 @@ fn active_native_label(session: &SessionState) -> &'static str {
 
 fn active_native_uses_protection(session: &SessionState) -> bool {
     match session.execution_config.native_strategy {
-        NativeStrategyKind::HmaAngle => session.execution_config.native_hma.uses_native_protection(),
-        NativeStrategyKind::EmaCross => session.execution_config.native_ema.uses_native_protection(),
+        NativeStrategyKind::HmaAngle => {
+            session.execution_config.native_hma.uses_native_protection()
+        }
+        NativeStrategyKind::EmaCross => {
+            session.execution_config.native_ema.uses_native_protection()
+        }
     }
 }
 
-fn sync_active_execution_position(session: &mut SessionState, signed_qty: i32, entry_price: Option<f64>) {
+fn sync_active_execution_position(
+    session: &mut SessionState,
+    signed_qty: i32,
+    entry_price: Option<f64>,
+) {
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.sync_position(
             &mut session.execution_runtime.hma_execution,
@@ -732,29 +994,41 @@ fn combined_stop_price(session: &mut SessionState, trailing_bar: Option<&Bar>) -
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => {
             if let Some(bar) = trailing_bar {
-                let _ = session.execution_config.native_hma.desired_trailing_stop_price(
-                    &mut session.execution_runtime.hma_execution,
-                    bar,
-                    session.market.tick_size,
-                );
+                let _ = session
+                    .execution_config
+                    .native_hma
+                    .desired_trailing_stop_price(
+                        &mut session.execution_runtime.hma_execution,
+                        bar,
+                        session.market.tick_size,
+                    );
             }
-            session.execution_config.native_hma.current_effective_stop_price(
-                &session.execution_runtime.hma_execution,
-                session.market.tick_size,
-            )
+            session
+                .execution_config
+                .native_hma
+                .current_effective_stop_price(
+                    &session.execution_runtime.hma_execution,
+                    session.market.tick_size,
+                )
         }
         NativeStrategyKind::EmaCross => {
             if let Some(bar) = trailing_bar {
-                let _ = session.execution_config.native_ema.desired_trailing_stop_price(
-                    &mut session.execution_runtime.ema_execution,
-                    bar,
-                    session.market.tick_size,
-                );
+                let _ = session
+                    .execution_config
+                    .native_ema
+                    .desired_trailing_stop_price(
+                        &mut session.execution_runtime.ema_execution,
+                        bar,
+                        session.market.tick_size,
+                    );
             }
-            session.execution_config.native_ema.current_effective_stop_price(
-                &session.execution_runtime.ema_execution,
-                session.market.tick_size,
-            )
+            session
+                .execution_config
+                .native_ema
+                .current_effective_stop_price(
+                    &session.execution_runtime.ema_execution,
+                    session.market.tick_size,
+                )
         }
     }
 }
@@ -793,14 +1067,8 @@ async fn sync_execution_protection(
         return Ok(());
     };
 
-    if let Some(message) = sync_native_protection(
-        session,
-        signed_qty,
-        take_profit_price,
-        stop_price,
-        &reason,
-    )
-    .await?
+    if let Some(message) =
+        sync_native_protection(session, signed_qty, take_profit_price, stop_price, &reason).await?
     {
         let _ = event_tx.send(ServiceEvent::Status(message));
     }
@@ -903,7 +1171,8 @@ async fn handle_execution_account_sync(
     let mut runtime_changed = false;
     if session.execution_runtime.pending_target_qty == Some(actual_qty) {
         session.execution_runtime.pending_target_qty = None;
-        session.execution_runtime.last_summary = format!("Position confirmed at target {actual_qty}");
+        session.execution_runtime.last_summary =
+            format!("Position confirmed at target {actual_qty}");
         runtime_changed = true;
     }
 
@@ -920,6 +1189,7 @@ async fn handle_execution_account_sync(
 
 async fn maybe_run_execution_strategy(
     session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
     event_tx: &UnboundedSender<ServiceEvent>,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
@@ -937,8 +1207,7 @@ async fn maybe_run_execution_strategy(
         return Ok(());
     }
 
-    let closed_bars = closed_bars(session).to_vec();
-    let Some(last_closed) = closed_bars.last().cloned() else {
+    let Some(last_closed_ts) = latest_closed_bar_ts(session) else {
         session.execution_runtime.last_summary = format!(
             "Native {} armed; waiting for market data.",
             active_native_label(session)
@@ -948,7 +1217,7 @@ async fn maybe_run_execution_strategy(
     };
 
     if session.execution_runtime.last_closed_bar_ts.is_none() {
-        session.execution_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+        session.execution_runtime.last_closed_bar_ts = Some(last_closed_ts);
         session.execution_runtime.last_summary = format!(
             "Native {} anchored to current bar; waiting for next close.",
             active_native_label(session)
@@ -957,10 +1226,21 @@ async fn maybe_run_execution_strategy(
         return Ok(());
     }
 
-    if session.execution_runtime.last_closed_bar_ts == Some(last_closed.ts_ns) {
+    if session.execution_runtime.last_closed_bar_ts == Some(last_closed_ts) {
         return Ok(());
     }
-    session.execution_runtime.last_closed_bar_ts = Some(last_closed.ts_ns);
+    session.execution_runtime.last_closed_bar_ts = Some(last_closed_ts);
+
+    let current_qty = effective_market_position_qty(session);
+    let (last_closed, signal, summary) = {
+        let closed = closed_bars(session);
+        let last_closed = closed
+            .last()
+            .cloned()
+            .context("latest closed bar disappeared during strategy evaluation")?;
+        let (signal, summary) = evaluate_active_execution_strategy(session, closed, current_qty);
+        (last_closed, signal, summary)
+    };
 
     if let Some(window) = session_window_at(session, last_closed.ts_ns) {
         if window.hold_entries {
@@ -998,9 +1278,14 @@ async fn maybe_run_execution_strategy(
                             .unwrap_or("session")
                     )
                 };
-                let outcome = submit_target_position_order(session, 0, true, &reason).await?;
-                let _ = event_tx.send(ServiceEvent::Status(outcome.message));
-                session.execution_runtime.pending_target_qty = Some(0);
+                match dispatch_target_position_order(session, broker_tx, 0, true, &reason).await? {
+                    MarketOrderDispatchOutcome::NoOp { message } => {
+                        let _ = event_tx.send(ServiceEvent::Status(message));
+                    }
+                    MarketOrderDispatchOutcome::Queued { target_qty } => {
+                        session.execution_runtime.pending_target_qty = target_qty;
+                    }
+                }
                 session.execution_runtime.last_summary = if window.session_open {
                     format!(
                         "Session hold active; flattening {} {:.0}m before close.",
@@ -1031,8 +1316,6 @@ async fn maybe_run_execution_strategy(
         }
     }
 
-    let current_qty = effective_market_position_qty(session);
-    let (signal, summary) = evaluate_active_execution_strategy(session, &closed_bars, current_qty);
     session.execution_runtime.last_summary = summary.clone();
 
     let Some(target_qty) =
@@ -1082,9 +1365,14 @@ async fn maybe_run_execution_strategy(
         signal.label(),
         summary
     );
-    let outcome = submit_target_position_order(session, target_qty, true, &reason).await?;
-    let _ = event_tx.send(ServiceEvent::Status(outcome.message));
-    session.execution_runtime.pending_target_qty = Some(target_qty);
+    match dispatch_target_position_order(session, broker_tx, target_qty, true, &reason).await? {
+        MarketOrderDispatchOutcome::NoOp { message } => {
+            let _ = event_tx.send(ServiceEvent::Status(message));
+        }
+        MarketOrderDispatchOutcome::Queued { target_qty } => {
+            session.execution_runtime.pending_target_qty = target_qty;
+        }
+    }
     emit_execution_state(event_tx, session);
     Ok(())
 }
@@ -1094,6 +1382,8 @@ pub async fn service_loop(
     event_tx: UnboundedSender<ServiceEvent>,
 ) {
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _broker_task = spawn_broker_gateway_task(broker_rx, internal_tx.clone());
     let mut state = ServiceState {
         client: Client::builder()
             .tcp_nodelay(true)
@@ -1102,6 +1392,7 @@ pub async fn service_loop(
             .tcp_keepalive(Duration::from_secs(30))
             .build()
             .unwrap(),
+        broker_tx,
         session: None,
         user_task: None,
         market_task: None,
@@ -1199,12 +1490,8 @@ async fn handle_command(
                 .collect::<Vec<_>>();
             let user_cfg = cfg.clone();
             let user_tokens = tokens.clone();
-            let (request_tx, user_task) = spawn_user_sync_task(
-                user_cfg,
-                user_tokens,
-                account_ids,
-                internal_tx.clone(),
-            );
+            let (request_tx, user_task) =
+                spawn_user_sync_task(user_cfg, user_tokens, account_ids, internal_tx.clone());
             let rest_probe_task = spawn_rest_probe_task(
                 state.client.clone(),
                 cfg.clone(),
@@ -1222,6 +1509,7 @@ async fn handle_command(
                 execution_config: ExecutionStrategyConfig::default(),
                 execution_runtime: ExecutionRuntimeState::default(),
                 order_latency_tracker: None,
+                order_submit_in_flight: false,
                 user_store,
                 selected_account_id,
                 selected_contract: None,
@@ -1322,37 +1610,31 @@ async fn handle_command(
             )));
         }
         ServiceCommand::ManualOrder { action } => {
+            let broker_tx = state.broker_tx.clone();
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            let outcome = submit_manual_order(session, action).await?;
-            if let Some(submit_rtt_ms) = outcome.submit_rtt_ms {
-                state.latency.last_order_ack_ms = Some(submit_rtt_ms);
-                state.latency.last_order_seen_ms = None;
-                state.latency.last_exec_report_ms = None;
-                state.latency.last_fill_ms = None;
+            if let MarketOrderDispatchOutcome::NoOp { message } =
+                dispatch_manual_order(session, &broker_tx, action).await?
+            {
+                let _ = event_tx.send(ServiceEvent::Status(message));
             }
-            let _ = event_tx.send(ServiceEvent::Status(outcome.message));
-            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         ServiceCommand::SetTargetPosition {
             target_qty,
             automated,
             reason,
         } => {
+            let broker_tx = state.broker_tx.clone();
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            let outcome =
-                submit_target_position_order(session, target_qty, automated, &reason).await?;
-            if let Some(submit_rtt_ms) = outcome.submit_rtt_ms {
-                state.latency.last_order_ack_ms = Some(submit_rtt_ms);
-                state.latency.last_order_seen_ms = None;
-                state.latency.last_exec_report_ms = None;
-                state.latency.last_fill_ms = None;
+            if let MarketOrderDispatchOutcome::NoOp { message } =
+                dispatch_target_position_order(session, &broker_tx, target_qty, automated, &reason)
+                    .await?
+            {
+                let _ = event_tx.send(ServiceEvent::Status(message));
             }
-            let _ = event_tx.send(ServiceEvent::Status(outcome.message));
-            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         ServiceCommand::SyncNativeProtection {
             signed_qty,
@@ -1461,21 +1743,57 @@ async fn handle_internal(
         InternalEvent::UserSocketStatus(message) => {
             let _ = event_tx.send(ServiceEvent::Status(message));
         }
-        InternalEvent::Market(snapshot) => {
+        InternalEvent::Market(update) => {
             if state.session.is_some() {
-                let snapshot = {
+                let broker_tx = state.broker_tx.clone();
+                let (snapshot, closed_bar_advanced) = {
                     let session = state.session.as_mut().expect("checked session above");
-                    let mut snapshot = snapshot;
-                    snapshot.trade_markers = session.market.trade_markers.clone();
-                    session.market = snapshot.clone();
-                    maybe_run_execution_strategy(session, event_tx).await?;
-                    snapshot
+                    let closed_bar_advanced = apply_market_update(&mut session.market, update);
+                    maybe_run_execution_strategy(session, &broker_tx, event_tx).await?;
+                    (session.market.clone(), closed_bar_advanced)
                 };
-                request_snapshot_refresh(state, &internal_tx);
+                if closed_bar_advanced {
+                    request_snapshot_refresh(state, &internal_tx);
+                }
                 let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
                 return Ok(());
             }
-            let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
+        }
+        InternalEvent::BrokerOrderAck(ack) => {
+            if let Some(session) = state.session.as_mut() {
+                session.order_submit_in_flight = false;
+                if let Some(tracker) = session.order_latency_tracker.as_mut() {
+                    if tracker.cl_ord_id == ack.cl_ord_id {
+                        tracker.order_id = ack.order_id;
+                    }
+                }
+            }
+            state.latency.last_order_ack_ms = Some(ack.submit_rtt_ms);
+            state.latency.last_order_seen_ms = None;
+            state.latency.last_exec_report_ms = None;
+            state.latency.last_fill_ms = None;
+            let _ = event_tx.send(ServiceEvent::Status(ack.message));
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+        }
+        InternalEvent::BrokerOrderFailed(failure) => {
+            if let Some(session) = state.session.as_mut() {
+                session.order_submit_in_flight = false;
+                if session
+                    .order_latency_tracker
+                    .as_ref()
+                    .is_some_and(|tracker| tracker.cl_ord_id == failure.cl_ord_id)
+                {
+                    session.order_latency_tracker = None;
+                }
+                if let Some(target_qty) = failure.target_qty {
+                    if session.execution_runtime.pending_target_qty == Some(target_qty) {
+                        session.execution_runtime.pending_target_qty = None;
+                        session.execution_runtime.last_summary = failure.message.clone();
+                        emit_execution_state(event_tx, session);
+                    }
+                }
+            }
+            let _ = event_tx.send(ServiceEvent::Error(failure.message));
         }
         InternalEvent::Error(message) => {
             let _ = event_tx.send(ServiceEvent::Error(message));
@@ -1592,13 +1910,11 @@ async fn refresh_session_state(
     }
     session.user_store = user_store;
 
-    let snapshots = session
-        .user_store
-        .build_snapshots(
-            &session.accounts,
-            Some(&session.market),
-            &session.managed_protection,
-        );
+    let snapshots = session.user_store.build_snapshots(
+        &session.accounts,
+        Some(&session.market),
+        &session.managed_protection,
+    );
     let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts));
     let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
     Ok(())
@@ -2086,18 +2402,20 @@ async fn search_contracts(
     Ok(out)
 }
 
-struct ManualOrderOutcome {
-    message: String,
-    submit_rtt_ms: Option<u64>,
+enum MarketOrderDispatchOutcome {
+    NoOp { message: String },
+    Queued { target_qty: Option<i32> },
 }
 
-async fn submit_manual_order(
+async fn dispatch_manual_order(
     session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
     action: ManualOrderAction,
-) -> Result<ManualOrderOutcome> {
+) -> Result<MarketOrderDispatchOutcome> {
     let order_ctx = resolve_order_context(session)?;
     let account = order_ctx.account.clone();
     let contract = order_ctx.contract.clone();
+    ensure_no_market_order_submit_in_flight(session)?;
 
     let (order_action, order_qty, action_label, automated, reason_suffix) = match action {
         ManualOrderAction::Buy => ("Buy", session.cfg.order_qty, "Buy", false, None),
@@ -2107,22 +2425,20 @@ async fn submit_manual_order(
                 .user_store
                 .contract_position_qty(account.id, &contract)
             else {
-                return Ok(ManualOrderOutcome {
+                return Ok(MarketOrderDispatchOutcome::NoOp {
                     message: format!(
                         "Close ignored: no open {} position on {}",
                         contract.name, account.name
                     ),
-                    submit_rtt_ms: None,
                 });
             };
             let close_qty = net_qty.abs().round() as i32;
             if close_qty <= 0 {
-                return Ok(ManualOrderOutcome {
+                return Ok(MarketOrderDispatchOutcome::NoOp {
                     message: format!(
                         "Close ignored: no open {} position on {}",
                         contract.name, account.name
                     ),
-                    submit_rtt_ms: None,
                 });
             }
             let close_action = if net_qty > 0.0 { "Sell" } else { "Buy" };
@@ -2132,7 +2448,7 @@ async fn submit_manual_order(
 
     cancel_strategy_protection_for_selected(session).await?;
 
-    place_market_order(
+    let order = build_market_order_request(
         session,
         &account,
         &contract,
@@ -2141,19 +2457,23 @@ async fn submit_manual_order(
         action_label,
         automated,
         reason_suffix,
-    )
-    .await
+        None,
+    );
+    enqueue_market_order(session, broker_tx, order)?;
+    Ok(MarketOrderDispatchOutcome::Queued { target_qty: None })
 }
 
-async fn submit_target_position_order(
+async fn dispatch_target_position_order(
     session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
     target_qty: i32,
     automated: bool,
     reason: &str,
-) -> Result<ManualOrderOutcome> {
+) -> Result<MarketOrderDispatchOutcome> {
     let order_ctx = resolve_order_context(session)?;
     let account = order_ctx.account.clone();
     let contract = order_ctx.contract.clone();
+    ensure_no_market_order_submit_in_flight(session)?;
     let current_qty = session
         .user_store
         .contract_position_qty(account.id, &contract)
@@ -2161,12 +2481,11 @@ async fn submit_target_position_order(
         .round() as i32;
     let delta = target_qty.saturating_sub(current_qty);
     if delta == 0 {
-        return Ok(ManualOrderOutcome {
+        return Ok(MarketOrderDispatchOutcome::NoOp {
             message: format!(
                 "Strategy target already satisfied: {} at {} on {} ({reason})",
                 target_qty, contract.name, account.name
             ),
-            submit_rtt_ms: None,
         });
     }
 
@@ -2180,7 +2499,7 @@ async fn submit_target_position_order(
         current_qty, target_qty
     ));
 
-    place_market_order(
+    let order = build_market_order_request(
         session,
         &account,
         &contract,
@@ -2189,8 +2508,12 @@ async fn submit_target_position_order(
         action_label,
         automated,
         reason_suffix.as_deref(),
-    )
-    .await
+        Some(target_qty),
+    );
+    enqueue_market_order(session, broker_tx, order)?;
+    Ok(MarketOrderDispatchOutcome::Queued {
+        target_qty: Some(target_qty),
+    })
 }
 
 struct OrderContext<'a> {
@@ -2352,7 +2675,14 @@ async fn sync_native_protection(
     )))
 }
 
-async fn place_market_order(
+fn ensure_no_market_order_submit_in_flight(session: &SessionState) -> Result<()> {
+    if session.order_submit_in_flight {
+        bail!("order submission already in flight");
+    }
+    Ok(())
+}
+
+fn build_market_order_request(
     session: &mut SessionState,
     account: &AccountInfo,
     contract: &ContractSuggestion,
@@ -2361,77 +2691,60 @@ async fn place_market_order(
     action_label: &str,
     automated: bool,
     reason_suffix: Option<&str>,
-) -> Result<ManualOrderOutcome> {
+    target_qty: Option<i32>,
+) -> PendingMarketOrder {
     let cl_ord_id = next_strategy_cl_ord_id(session, "entry");
+    let payload = with_cl_ord_id(
+        json!({
+            "accountSpec": account.name,
+            "accountId": account.id,
+            "action": order_action,
+            "symbol": contract.name,
+            "orderQty": order_qty,
+            "orderType": "Market",
+            "timeInForce": session.cfg.time_in_force,
+            "isAutomated": automated
+        }),
+        Some(cl_ord_id.as_str()),
+    );
+
+    PendingMarketOrder {
+        cl_ord_id,
+        payload,
+        action_label: action_label.to_string(),
+        order_action: order_action.to_string(),
+        order_qty,
+        contract_name: contract.name.clone(),
+        account_name: account.name.clone(),
+        reason_suffix: reason_suffix.map(ToString::to_string),
+        target_qty,
+    }
+}
+
+fn enqueue_market_order(
+    session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    order: PendingMarketOrder,
+) -> Result<()> {
+    session.order_submit_in_flight = true;
     session.order_latency_tracker = Some(OrderLatencyTracker {
         started_at: time::Instant::now(),
-        cl_ord_id: cl_ord_id.clone(),
+        cl_ord_id: order.cl_ord_id.clone(),
         order_id: None,
         seen_recorded: false,
         exec_report_recorded: false,
         fill_recorded: false,
     });
-    let payload = with_cl_ord_id(json!({
-        "accountSpec": account.name,
-        "accountId": account.id,
-        "action": order_action,
-        "symbol": contract.name,
-        "orderQty": order_qty,
-        "orderType": "Market",
-        "timeInForce": session.cfg.time_in_force,
-        "isAutomated": automated
-    }), Some(cl_ord_id.as_str()));
-
-    let parsed = match request_order_json(session, "order/placeorder", &payload).await {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            session.order_latency_tracker = None;
-            return Err(err);
-        }
-    };
-    let submit_rtt_ms = session
-        .order_latency_tracker
-        .as_ref()
-        .map(|tracker| tracker.started_at.elapsed().as_millis() as u64);
-    let response_order_id = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id"));
-    if let Some(tracker) = session.order_latency_tracker.as_mut() {
-        if tracker.cl_ord_id == cl_ord_id {
-            tracker.order_id = response_order_id;
-        }
+    let request_tx = session.request_tx.clone();
+    if broker_tx.send(BrokerCommand { request_tx, order }).is_err() {
+        session.order_submit_in_flight = false;
+        session.order_latency_tracker = None;
+        bail!("broker gateway is closed");
     }
-    if let Some(failure) = parsed.get("failureReason").and_then(Value::as_str) {
-        if !failure.trim().is_empty() {
-            session.order_latency_tracker = None;
-            bail!("placeorder rejected: {failure}");
-        }
-    }
-    if let Some(err_text) = parsed.get("errorText").and_then(Value::as_str) {
-        if !err_text.trim().is_empty() {
-            session.order_latency_tracker = None;
-            bail!("placeorder errorText: {err_text}");
-        }
-    }
-
-    let mut message = format!(
-        "{action_label} submitted: {order_action} {order_qty} {} on {}",
-        contract.name, account.name
-    );
-    if let Some(reason) = reason_suffix {
-        message.push_str(&format!(" [{reason}]"));
-    }
-    if let Some(order_id) = response_order_id {
-        message.push_str(&format!(" (order {order_id})"));
-    }
-    message.push_str(&format!(" [clOrdId {cl_ord_id}]"));
-    Ok(ManualOrderOutcome {
-        message,
-        submit_rtt_ms,
-    })
+    Ok(())
 }
 
-async fn cancel_strategy_protection_for_selected(
-    session: &mut SessionState,
-) -> Result<bool> {
+async fn cancel_strategy_protection_for_selected(session: &mut SessionState) -> Result<bool> {
     let order_ctx = resolve_order_context(session)?;
     let account = order_ctx.account.clone();
     let contract = order_ctx.contract.clone();
@@ -2519,7 +2832,7 @@ async fn place_native_limit_order(
         }),
         cl_ord_id,
     );
-    let parsed = request_order_json(session, "order/placeorder", &payload).await?;
+    let parsed = request_order_json(&session.request_tx, "order/placeorder", &payload).await?;
     Ok(first_known_order_id(&parsed))
 }
 
@@ -2546,7 +2859,7 @@ async fn place_native_stop_order(
         }),
         cl_ord_id,
     );
-    let parsed = request_order_json(session, "order/placeorder", &payload).await?;
+    let parsed = request_order_json(&session.request_tx, "order/placeorder", &payload).await?;
     Ok(first_known_order_id(&parsed))
 }
 
@@ -2591,7 +2904,7 @@ async fn place_native_oco_orders(
             other.insert("clOrdId".to_string(), Value::String(cl_ord_id.to_string()));
         }
     }
-    let parsed = request_order_json(session, "order/placeOCO", &payload).await?;
+    let parsed = request_order_json(&session.request_tx, "order/placeOCO", &payload).await?;
     Ok((
         first_known_order_id(&parsed),
         known_order_id(&parsed, &["otherId", "stopOrderId"]),
@@ -2612,7 +2925,7 @@ async fn modify_native_stop_order(
         "timeInForce": session.cfg.time_in_force,
         "isAutomated": true,
     });
-    let _ = request_order_json(session, "order/modifyorder", &payload).await?;
+    let _ = request_order_json(&session.request_tx, "order/modifyorder", &payload).await?;
     Ok(())
 }
 
@@ -2633,7 +2946,7 @@ async fn cancel_order_if_active(
         "orderId": order_id,
         "isAutomated": true,
     });
-    match request_order_json(session, "order/cancelorder", &payload).await {
+    match request_order_json(&session.request_tx, "order/cancelorder", &payload).await {
         Ok(_) => Ok(true),
         Err(err) => {
             let msg = err.to_string();
@@ -2647,11 +2960,10 @@ async fn cancel_order_if_active(
 }
 
 async fn request_order_json(
-    session: &SessionState,
+    request_tx: &UnboundedSender<UserSocketCommand>,
     endpoint: &str,
     payload: &Value,
 ) -> Result<Value> {
-    let request_tx = session.request_tx.clone();
     let (response_tx, response_rx) = oneshot::channel();
     request_tx
         .send(UserSocketCommand {
@@ -2779,7 +3091,10 @@ fn trade_marker_from_fill(session: &SessionState, fill: &Value) -> Option<TradeM
     let ts_ns = json_timestamp_ns(fill, &["timestamp", "fillTime", "createdTime"])
         .or_else(|| session.market.bars.last().map(|bar| bar.ts_ns))?;
     let contract_id = json_i64(fill, "contractId")
-        .or_else(|| fill.get("contract").and_then(|contract| json_i64(contract, "id")))
+        .or_else(|| {
+            fill.get("contract")
+                .and_then(|contract| json_i64(contract, "id"))
+        })
         .or_else(|| order.and_then(order_contract_id));
     let contract_name = fill
         .get("symbol")
@@ -2824,7 +3139,11 @@ fn trade_side_from_text(value: &str) -> Option<TradeMarkerSide> {
 }
 
 fn order_contract_id(order: &Value) -> Option<i64> {
-    json_i64(order, "contractId").or_else(|| order.get("contract").and_then(|contract| json_i64(contract, "id")))
+    json_i64(order, "contractId").or_else(|| {
+        order
+            .get("contract")
+            .and_then(|contract| json_i64(contract, "id"))
+    })
 }
 
 fn order_symbol(order: &Value) -> Option<&str> {
@@ -3039,13 +3358,9 @@ async fn connect_low_latency_ws(
         }
     }
 
-    let (ws, resp) = tokio_tungstenite::client_async_tls_with_config(
-        request,
-        tcp_stream,
-        Some(ws_config),
-        None,
-    )
-    .await?;
+    let (ws, resp) =
+        tokio_tungstenite::client_async_tls_with_config(request, tcp_stream, Some(ws_config), None)
+            .await?;
     Ok((ws, resp))
 }
 
@@ -3300,6 +3615,9 @@ async fn market_data_worker_inner(
                 let Some(Value::Array(items)) = payload else {
                     continue;
                 };
+                let before_closed_len = series.closed_bars.len();
+                let before_last_closed = series.closed_bars.last().cloned();
+                let before_forming = series.forming_bar.clone();
 
                 for item in items {
                     let status = parse_status_code(&item);
@@ -3384,19 +3702,20 @@ async fn market_data_worker_inner(
                             }
                         }
                     }
+                }
 
-                    let _ = internal_tx.send(InternalEvent::Market(MarketSnapshot {
-                        contract_id: Some(contract.id),
-                        contract_name: Some(contract.name.clone()),
-                        bars: series.render_bars(),
-                        trade_markers: Vec::new(),
-                        session_profile: market_specs.and_then(|specs| specs.session_profile),
-                        value_per_point: market_specs.and_then(|specs| specs.value_per_point),
-                        tick_size: market_specs.and_then(|specs| specs.tick_size),
-                        history_loaded: series.closed_bars.len(),
-                        live_bars,
-                        status: format!("Subscribed to 1m bars for {}", contract.name),
-                    }));
+                if let Some(update) = build_market_update(
+                    &contract,
+                    market_specs,
+                    series.closed_bars.len(),
+                    live_bars,
+                    format!("Subscribed to {} bars for {}", bar_type.label(), contract.name),
+                    before_closed_len,
+                    before_last_closed,
+                    before_forming,
+                    &series,
+                ) {
+                    let _ = internal_tx.send(InternalEvent::Market(update));
                 }
             }
         }
@@ -4233,6 +4552,148 @@ mod tests {
     }
 
     #[test]
+    fn build_market_update_emits_snapshot_then_forming_delta() {
+        let contract = ContractSuggestion {
+            id: 3570918,
+            name: "ESH6".to_string(),
+            description: "ES Jun 2026".to_string(),
+            raw: json!({ "id": 3570918 }),
+        };
+        let closed_bar = Bar {
+            ts_ns: 1,
+            open: 5000.0,
+            high: 5001.0,
+            low: 4999.0,
+            close: 5000.5,
+        };
+        let forming_bar = Bar {
+            ts_ns: 2,
+            open: 5000.5,
+            high: 5002.0,
+            low: 5000.25,
+            close: 5001.5,
+        };
+        let mut series = LiveSeries::new();
+        series.closed_bars.push(closed_bar.clone());
+
+        let initial = build_market_update(
+            &contract,
+            None,
+            series.closed_bars.len(),
+            0,
+            "status".to_string(),
+            0,
+            None,
+            None,
+            &series,
+        )
+        .expect("initial snapshot should be emitted");
+        assert!(matches!(
+            initial.bars,
+            MarketBarsUpdate::Snapshot {
+                ref closed_bars,
+                forming_bar: None
+            } if closed_bars == &vec![closed_bar.clone()]
+        ));
+
+        let before_last_closed = series.closed_bars.last().cloned();
+        series.forming_bar = Some(forming_bar.clone());
+        let update = build_market_update(
+            &contract,
+            None,
+            series.closed_bars.len(),
+            0,
+            "status".to_string(),
+            series.closed_bars.len(),
+            before_last_closed,
+            None,
+            &series,
+        )
+        .expect("forming update should be emitted");
+        assert!(matches!(
+            update.bars,
+            MarketBarsUpdate::Forming { forming_bar: ref bar } if bar == &forming_bar
+        ));
+    }
+
+    #[test]
+    fn apply_market_update_keeps_bars_incremental() {
+        let closed_bar = Bar {
+            ts_ns: 1,
+            open: 5000.0,
+            high: 5001.0,
+            low: 4999.0,
+            close: 5000.5,
+        };
+        let forming_bar = Bar {
+            ts_ns: 2,
+            open: 5000.5,
+            high: 5002.0,
+            low: 5000.25,
+            close: 5001.5,
+        };
+        let next_forming_bar = Bar {
+            ts_ns: 3,
+            open: 5001.5,
+            high: 5003.0,
+            low: 5001.0,
+            close: 5002.5,
+        };
+        let marker = TradeMarker {
+            fill_id: Some(7),
+            account_id: Some(42),
+            contract_id: Some(3570918),
+            contract_name: Some("ESH6".to_string()),
+            ts_ns: 1,
+            price: 5000.5,
+            qty: 1,
+            side: TradeMarkerSide::Buy,
+        };
+        let mut market = MarketSnapshot {
+            trade_markers: vec![marker],
+            ..MarketSnapshot::default()
+        };
+
+        let initial = MarketUpdate {
+            contract_id: 3570918,
+            contract_name: "ESH6".to_string(),
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 1,
+            live_bars: 0,
+            status: "initial".to_string(),
+            bars: MarketBarsUpdate::Snapshot {
+                closed_bars: vec![closed_bar.clone()],
+                forming_bar: Some(forming_bar.clone()),
+            },
+        };
+        assert!(apply_market_update(&mut market, initial));
+        assert_eq!(market.history_loaded, 1);
+        assert_eq!(market.bars, vec![closed_bar.clone(), forming_bar.clone()]);
+        assert_eq!(market.trade_markers.len(), 1);
+
+        let next = MarketUpdate {
+            contract_id: 3570918,
+            contract_name: "ESH6".to_string(),
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 2,
+            live_bars: 1,
+            status: "realtime".to_string(),
+            bars: MarketBarsUpdate::Closed {
+                closed_bar: forming_bar.clone(),
+                forming_bar: Some(next_forming_bar.clone()),
+            },
+        };
+        assert!(apply_market_update(&mut market, next));
+        assert_eq!(market.history_loaded, 2);
+        assert_eq!(market.bars, vec![closed_bar, forming_bar, next_forming_bar]);
+        assert_eq!(market.trade_markers.len(), 1);
+    }
+
+    #[test]
     fn jwt_expiration_time_reads_exp_claim() {
         let token = "eyJhbGciOiJub25lIn0.eyJleHAiOjE4OTM0NTYwMDB9.sig";
         let expires_at = jwt_expiration_time(token).expect("jwt exp should parse");
@@ -4336,9 +4797,11 @@ mod tests {
                 exec_report_recorded: false,
                 fill_recorded: false,
             }),
+            order_submit_in_flight: false,
             user_store: UserSyncStore::default(),
             selected_account_id: None,
             selected_contract: None,
+            bar_type: BarType::default(),
             market: MarketSnapshot::default(),
             managed_protection: BTreeMap::new(),
             next_strategy_order_nonce: 1,
@@ -4361,13 +4824,21 @@ mod tests {
             entity: json!({ "orderId": 42, "price": 5000.25, "qty": 1 }),
         };
 
-        assert!(update_latency_from_envelope(&mut session, &mut latency, &order));
+        assert!(update_latency_from_envelope(
+            &mut session,
+            &mut latency,
+            &order
+        ));
         assert!(update_latency_from_envelope(
             &mut session,
             &mut latency,
             &exec_report
         ));
-        assert!(update_latency_from_envelope(&mut session, &mut latency, &fill));
+        assert!(update_latency_from_envelope(
+            &mut session,
+            &mut latency,
+            &fill
+        ));
         assert!(latency.last_order_seen_ms.is_some());
         assert!(latency.last_exec_report_ms.is_some());
         assert!(latency.last_fill_ms.is_some());
@@ -4404,9 +4875,11 @@ mod tests {
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
             order_latency_tracker: None,
+            order_submit_in_flight: false,
             user_store,
             selected_account_id: Some(42),
             selected_contract: None,
+            bar_type: BarType::default(),
             market: MarketSnapshot::default(),
             managed_protection: BTreeMap::new(),
             next_strategy_order_nonce: 1,
@@ -4448,9 +4921,11 @@ mod tests {
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
             order_latency_tracker: None,
+            order_submit_in_flight: false,
             user_store: UserSyncStore::default(),
             selected_account_id: Some(42),
             selected_contract: None,
+            bar_type: BarType::default(),
             market: MarketSnapshot::default(),
             managed_protection: BTreeMap::new(),
             next_strategy_order_nonce: 1,

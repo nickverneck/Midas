@@ -1,0 +1,221 @@
+{
+  "engine": "rl",
+  "profile": "release",
+  "host": "http://127.0.0.1:4173",
+  "params": {
+    "algorithm": "ppo",
+    "backend": "candle",
+    "device": "cpu",
+    "outdir": "runs_rl/es_f_ppo_fold2_2026-03-16T03-53-05-078Z",
+    "train-parquet": "data/train/01-04-2026/ES_F.parquet",
+    "val-parquet": "data/train/01-12-2026/ES_F.parquet",
+    "test-parquet": "data/train/01-20-2026/ES_F.parquet",
+    "windowed": true,
+    "window": 700,
+    "step": 128,
+    "epochs": 24,
+    "train-windows": 24,
+    "ppo-epochs": 4,
+    "eval-windows": 999,
+    "lr": 0.0003,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "clip": 0.2,
+    "vf-coef": 0.5,
+    "ent-coef": 0.01,
+    "hidden": 64,
+    "layers": 2,
+    "log-interval": 1,
+    "checkpoint-every": 1,
+    "initial-balance": 10000,
+    "max-position": 1,
+    "margin-mode": "per-contract",
+    "margin-per-contract": 500,
+    "contract-multiplier": 50,
+    "auto-close-minutes-before-close": 5,
+    "w-pnl": 1,
+    "w-sortino": 1,
+    "w-mdd": 0.5,
+    "max-hold-bars-positive": 100,
+    "max-hold-bars-drawdown": 50,
+    "hold-duration-penalty": 0.1,
+    "hold-duration-penalty-growth": 0,
+    "hold-duration-penalty-positive-scale": 0.5,
+    "hold-duration-penalty-negative-scale": 1.5,
+    "min-hold-bars": 25,
+    "early-exit-penalty": 1,
+    "early-flip-penalty": 2,
+    "flat-hold-penalty": 0.25,
+    "flat-hold-penalty-growth": 0,
+    "max-flat-hold-bars": 200
+  },
+  "runDir": "runs_rl/es_f_ppo_fold2_2026-03-16T03-53-05-078Z",
+  "exitCode": 0,
+  "metricKey": "fitness",
+  "rowCount": 24,
+  "fitnessSummary": [
+    {
+      "gen": 0,
+      "fitness": -815.6829
+    },
+    {
+      "gen": 1,
+      "fitness": -520.164
+    },
+    {
+      "gen": 2,
+      "fitness": -184.1976
+    },
+    {
+      "gen": 3,
+      "fitness": 65.9747
+    },
+    {
+      "gen": 4,
+      "fitness": 31.3862
+    },
+    {
+      "gen": 5,
+      "fitness": -19.9702
+    },
+    {
+      "gen": 6,
+      "fitness": -33.5909
+    },
+    {
+      "gen": 7,
+      "fitness": -68.5108
+    },
+    {
+      "gen": 8,
+      "fitness": 0
+    },
+    {
+      "gen": 9,
+      "fitness": -88.0221
+    },
+    {
+      "gen": 10,
+      "fitness": -33.0936
+    },
+    {
+      "gen": 11,
+      "fitness": 11.7196
+    },
+    {
+      "gen": 12,
+      "fitness": 9.3781
+    },
+    {
+      "gen": 13,
+      "fitness": -88.6518
+    },
+    {
+      "gen": 14,
+      "fitness": -113.8479
+    },
+    {
+      "gen": 15,
+      "fitness": 42.4088
+    },
+    {
+      "gen": 16,
+      "fitness": -144.6033
+    },
+    {
+      "gen": 17,
+      "fitness": -248.9622
+    },
+    {
+      "gen": 18,
+      "fitness": -41.7551
+    },
+    {
+      "gen": 19,
+      "fitness": 0
+    },
+    {
+      "gen": 20,
+      "fitness": -0.2806
+    },
+    {
+      "gen": 21,
+      "fitness": 5.4705
+    },
+    {
+      "gen": 22,
+      "fitness": 0
+    },
+    {
+      "gen": 23,
+      "fitness": -48.4397
+    }
+  ],
+  "finalRow": {
+    "epoch": 23,
+    "train_ret_mean": 0,
+    "train_pnl": -20.8333,
+    "train_sortino": -0.0022,
+    "train_drawdown": 55.2083,
+    "eval_ret_mean": 0,
+    "eval_pnl": -126.0776,
+    "eval_sortino": -0.0074,
+    "eval_drawdown": 488.506,
+    "fitness": -48.4397,
+    "policy_loss": -0.000001,
+    "value_loss": 239.817761,
+    "entropy": 0.000697,
+    "total_loss": 119.908874
+  },
+  "bestRow": {
+    "epoch": 3,
+    "train_ret_mean": 0,
+    "train_pnl": 166.1458,
+    "train_sortino": 0.006,
+    "train_drawdown": 200.3542,
+    "eval_ret_mean": 0,
+    "eval_pnl": -76.9397,
+    "eval_sortino": 0.0006,
+    "eval_drawdown": 612.1914,
+    "fitness": 65.9747,
+    "policy_loss": -0.000088,
+    "value_loss": 6164.447857,
+    "entropy": 0.047216,
+    "total_loss": 3082.223447
+  },
+  "bestEvalPnlMetricKey": "eval_pnl",
+  "bestEvalPnlRow": {
+    "epoch": 17,
+    "train_ret_mean": 0,
+    "train_pnl": -144.2708,
+    "train_sortino": -0.0039,
+    "train_drawdown": 209.375,
+    "eval_ret_mean": 0,
+    "eval_pnl": -1.5086,
+    "eval_sortino": 0.0002,
+    "eval_drawdown": 420.3276,
+    "fitness": -248.9622,
+    "policy_loss": -0.000004,
+    "value_loss": 3207.576172,
+    "entropy": 0.002416,
+    "total_loss": 1603.788075
+  },
+  "stdoutInsights": {
+    "testLine": "test | ret 0.0001 | pnl 391.8981 | sortino 0.0225 | mdd 817.1454",
+    "saveLines": [
+      "Saved final PPO checkpoint to runs_rl/es_f_ppo_fold2_2026-03-16T03-53-05-078Z/ppo_final.safetensors"
+    ]
+  },
+  "trainingStack": {
+    "trainer": "rl",
+    "backend": "candle",
+    "requested_runtime": "cpu",
+    "effective_runtime": "cpu",
+    "implementation_status": "implemented",
+    "cargo_feature": "backend-candle",
+    "algorithm": "ppo",
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "generatedAt": "2026-03-16T03:53:58.814Z"
+}

@@ -1,0 +1,170 @@
+{
+  "engine": "ga",
+  "profile": "release",
+  "host": "http://127.0.0.1:4173",
+  "params": {
+    "backend": "candle",
+    "device": "cpu",
+    "outdir": "runs_ga/es_candle_fold1_2026-03-15T09-43-00-275Z",
+    "train-parquet": "data/train/12-29-2025/ES_F.parquet",
+    "val-parquet": "data/train/01-04-2026/ES_F.parquet",
+    "test-parquet": "data/train/01-12-2026/ES_F.parquet",
+    "windowed": true,
+    "window": 700,
+    "step": 128,
+    "generations": 50,
+    "pop-size": 12,
+    "workers": 2,
+    "batch-candidates": 0,
+    "elite-frac": 0.17,
+    "parent-pool-frac": 0.33,
+    "immigrant-frac": 0.17,
+    "mutation-sigma": 0.1,
+    "init-sigma": 0.5,
+    "hidden": 128,
+    "layers": 2,
+    "eval-windows": 999,
+    "save-top-n": 3,
+    "save-every": 1,
+    "checkpoint-every": 1,
+    "selection-train-weight": 0.15,
+    "selection-eval-weight": 0.85,
+    "selection-gap-penalty": 0.25,
+    "w-pnl": 1,
+    "w-sortino": 1,
+    "w-mdd": 0.5,
+    "initial-balance": 10000,
+    "max-position": 0,
+    "margin-mode": "per-contract",
+    "margin-per-contract": 500,
+    "contract-multiplier": 50,
+    "auto-close-minutes-before-close": 5,
+    "seed": 42,
+    "selection-use-eval": true
+  },
+  "runDir": "runs_ga/es_candle_fold1_2026-03-15T09-43-00-275Z",
+  "exitCode": 1,
+  "metricKey": "selection_fitness",
+  "rowCount": 108,
+  "fitnessSummary": [
+    {
+      "gen": 0,
+      "fitness": -306645.3467
+    },
+    {
+      "gen": 1,
+      "fitness": -21667.1976
+    },
+    {
+      "gen": 2,
+      "fitness": -21667.1976
+    },
+    {
+      "gen": 3,
+      "fitness": -20391.3665
+    },
+    {
+      "gen": 4,
+      "fitness": -20391.3665
+    },
+    {
+      "gen": 5,
+      "fitness": -20391.3665
+    },
+    {
+      "gen": 6,
+      "fitness": -20355.3339
+    },
+    {
+      "gen": 7,
+      "fitness": -25035.694
+    },
+    {
+      "gen": 8,
+      "fitness": -20209.9248
+    }
+  ],
+  "finalRow": {
+    "gen": 8,
+    "idx": 11,
+    "w_pnl": 1,
+    "w_sortino": 1,
+    "w_mdd": 0.5,
+    "fitness": -92031.0336,
+    "eval_fitness": -272917.0893,
+    "selection_fitness": -291005.6949,
+    "eval_fitness_pnl": -267450.0763,
+    "eval_pnl_realized": -580.1136,
+    "eval_pnl_total": -1050.2955,
+    "eval_sortino": -0.0131,
+    "eval_drawdown": 10934,
+    "eval_ret_mean": -0.00012576,
+    "train_fitness_pnl": -89892.327,
+    "train_pnl_realized": -56.8182,
+    "train_pnl_total": -275.0273,
+    "train_sortino": -0.0067,
+    "train_drawdown": 4277.4,
+    "train_ret_mean": -0.00000844
+  },
+  "bestRow": {
+    "gen": 6,
+    "idx": 6,
+    "w_pnl": 1,
+    "w_sortino": 1,
+    "w_mdd": 0.5,
+    "fitness": -25035.694,
+    "eval_fitness": -18036.261,
+    "selection_fitness": -19086.1759,
+    "eval_fitness_pnl": -17911.2724,
+    "eval_pnl_realized": 19.8864,
+    "eval_pnl_total": 19.4091,
+    "eval_sortino": 0.0114,
+    "eval_drawdown": 250,
+    "eval_ret_mean": 0.00000297,
+    "train_fitness_pnl": -24966.9344,
+    "train_pnl_realized": -16.2879,
+    "train_pnl_total": -24.0742,
+    "train_sortino": -0.0096,
+    "train_drawdown": 137.5,
+    "train_ret_mean": -0.00000251
+  },
+  "bestEvalPnlMetricKey": "eval_pnl_total",
+  "bestEvalPnlRow": {
+    "gen": 1,
+    "idx": 10,
+    "w_pnl": 1,
+    "w_sortino": 1,
+    "w_mdd": 0.5,
+    "fitness": -570499.6799,
+    "eval_fitness": -582134.8233,
+    "selection_fitness": -583298.3377,
+    "eval_fitness_pnl": -562124.7152,
+    "eval_pnl_realized": 9614.2045,
+    "eval_pnl_total": 6119.1591,
+    "eval_sortino": 0.0169,
+    "eval_drawdown": 40020.25,
+    "eval_ret_mean": 0.00045642,
+    "train_fitness_pnl": -555001.1745,
+    "train_pnl_realized": 4685.9848,
+    "train_pnl_total": 2435.0136,
+    "train_sortino": 0.0197,
+    "train_drawdown": 30997.05,
+    "train_ret_mean": 0.00058015
+  },
+  "stdoutInsights": {
+    "testLine": null,
+    "saveLines": []
+  },
+  "trainingStack": {
+    "trainer": "ga",
+    "backend": "candle",
+    "requested_runtime": "cpu",
+    "effective_runtime": "cpu",
+    "implementation_status": "implemented",
+    "cargo_feature": "backend-candle",
+    "algorithm": "ga",
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "generatedAt": "2026-03-15T09:43:40.276Z"
+}
