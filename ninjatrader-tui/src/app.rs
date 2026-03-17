@@ -1,4 +1,3 @@
-use crate::automation::{StrategyDescriptor, default_strategy_catalog};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
@@ -36,7 +35,6 @@ pub struct App {
     selected_contract: usize,
     market: MarketSnapshot,
     logs: VecDeque<String>,
-    strategy_catalog: Vec<StrategyDescriptor>,
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
     latency: LatencySnapshot,
@@ -144,7 +142,6 @@ impl App {
             selected_contract: 0,
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
-            strategy_catalog: default_strategy_catalog(),
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,
             latency: LatencySnapshot::default(),
@@ -1174,9 +1171,8 @@ impl App {
         let left = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(11),
+                Constraint::Min(11),
                 Constraint::Length(12),
-                Constraint::Min(8),
             ])
             .split(columns[0]);
 
@@ -1197,25 +1193,6 @@ impl App {
             )
             .wrap(Wrap { trim: true });
         frame.render_widget(stats, left[1]);
-
-        let strategy_lines = self
-            .strategy_catalog
-            .iter()
-            .map(|item| {
-                Line::from(format!(
-                    "{} [{}] {} - {}",
-                    item.name, item.priority, item.status, item.note
-                ))
-            })
-            .collect::<Vec<_>>();
-        let automation = Paragraph::new(strategy_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Automation Roadmap"),
-            )
-            .wrap(Wrap { trim: true });
-        frame.render_widget(automation, left[2]);
 
         self.render_chart(frame, columns[1]);
 

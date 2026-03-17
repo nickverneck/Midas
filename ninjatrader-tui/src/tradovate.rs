@@ -1169,11 +1169,24 @@ async fn handle_execution_account_sync(
     sync_active_execution_position(session, actual_qty, actual_entry);
 
     let mut runtime_changed = false;
-    if session.execution_runtime.pending_target_qty == Some(actual_qty) {
-        session.execution_runtime.pending_target_qty = None;
-        session.execution_runtime.last_summary =
-            format!("Position confirmed at target {actual_qty}");
-        runtime_changed = true;
+    if let Some(pending) = session.execution_runtime.pending_target_qty {
+        let reached = pending == actual_qty;
+        // Position overshot past target — entry filled, then something else
+        // (e.g. orphaned orders) pushed position further.  Release pending
+        // so the strategy can correct on the next bar.
+        let overshot = (pending > 0 && actual_qty > pending)
+            || (pending < 0 && actual_qty < pending);
+        if reached || overshot {
+            session.execution_runtime.pending_target_qty = None;
+            session.execution_runtime.last_summary = if reached {
+                format!("Position confirmed at target {actual_qty}")
+            } else {
+                format!(
+                    "Position at {actual_qty} (target was {pending}); re-evaluating on next bar"
+                )
+            };
+            runtime_changed = true;
+        }
     }
 
     if session.execution_runtime.armed && session.execution_config.kind == StrategyKind::Native {
@@ -2762,24 +2775,54 @@ async fn cancel_strategy_protection_by_key(
     _contract: &ContractSuggestion,
 ) -> Result<bool> {
     refresh_managed_protection_order_ids(session, key);
-    let Some(existing) = session.managed_protection.remove(&key) else {
-        return Ok(false);
-    };
+    let existing = session.managed_protection.remove(&key);
 
     let session = &*session;
-    match (existing.stop_order_id, existing.take_profit_order_id) {
-        (Some(stop_order_id), Some(take_profit_order_id)) => {
-            let (stop_cancelled, take_profit_cancelled) = tokio::try_join!(
-                cancel_order_if_active(session, key.account_id, stop_order_id),
-                cancel_order_if_active(session, key.account_id, take_profit_order_id),
-            )?;
-            Ok(stop_cancelled || take_profit_cancelled)
+
+    // Collect ALL active strategy orders for this contract from the user store.
+    // This catches orphaned orders whose IDs we never captured from the OCO
+    // placement response (the stop leg ID often arrives later via WebSocket).
+    let orphan_ids: Vec<i64> = session
+        .user_store
+        .orders
+        .get(&key.account_id)
+        .into_iter()
+        .flat_map(|orders| orders.iter())
+        .filter(|(_, order)| {
+            order_is_active(order)
+                && order_contract_id(order) == Some(key.contract_id)
+                && order
+                    .get("clOrdId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("midas-"))
+        })
+        .filter_map(|(id, _)| Some(*id))
+        .collect();
+
+    let mut cancelled = false;
+    for order_id in &orphan_ids {
+        if cancel_order_if_active(session, key.account_id, *order_id).await? {
+            cancelled = true;
         }
-        (Some(order_id), None) | (None, Some(order_id)) => {
-            cancel_order_if_active(session, key.account_id, order_id).await
-        }
-        (None, None) => Ok(false),
     }
+
+    // Also cancel by tracked order IDs in case they haven't propagated to
+    // user_store.orders yet (covers the window between placement and the
+    // first WebSocket entity sync).
+    if let Some(existing) = existing {
+        let tracked_ids: Vec<i64> = [existing.stop_order_id, existing.take_profit_order_id]
+            .into_iter()
+            .flatten()
+            .filter(|id| !orphan_ids.contains(id))
+            .collect();
+        for order_id in tracked_ids {
+            if cancel_order_if_active(session, key.account_id, order_id).await? {
+                cancelled = true;
+            }
+        }
+    }
+
+    Ok(cancelled)
 }
 
 fn refresh_managed_protection_order_ids(session: &mut SessionState, key: StrategyProtectionKey) {

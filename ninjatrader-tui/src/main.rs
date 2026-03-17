@@ -1,5 +1,4 @@
 mod app;
-mod automation;
 mod config;
 mod ipc;
 mod strategies;
