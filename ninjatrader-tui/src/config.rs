@@ -93,6 +93,7 @@ pub struct AppConfig {
     pub app_version: String,
     pub cid: String,
     pub secret: String,
+    pub custom_tag50: String,
     pub token_path: PathBuf,
     pub session_cache_path: PathBuf,
     pub history_bars: usize,
@@ -115,6 +116,7 @@ impl Default for AppConfig {
             app_version: "0.1.0".to_string(),
             cid: String::new(),
             secret: String::new(),
+            custom_tag50: String::new(),
             token_path: PathBuf::from(".auth/bearer-token.json"),
             session_cache_path: PathBuf::from(".auth/ninjatrader-tui-session.json"),
             history_bars: 500,
@@ -174,6 +176,9 @@ impl AppConfig {
         }
         if let Some(raw) = env_string("MIDAS_TUI_SECRET") {
             self.secret = raw;
+        }
+        if let Some(raw) = env_string("MIDAS_TUI_CUSTOM_TAG50") {
+            self.custom_tag50 = raw;
         }
         if let Some(raw) = env_string("MIDAS_TUI_TOKEN_PATH") {
             self.token_path = PathBuf::from(raw);

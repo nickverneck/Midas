@@ -75,3 +75,7 @@ Suggested config flow:
 2. Switch to credentials mode if you want the TUI to request and cache access tokens directly.
 3. Select the account and instrument you want to watch or trade.
 4. Pick the strategy backend and, for Lua, either load a file or type it directly in the editor.
+
+Live-order note:
+- Strategy orders do not send `customTag50` by default.
+- If your broker setup requires a registered Tag 50 value, set `custom_tag50` in config or `MIDAS_TUI_CUSTOM_TAG50` in the environment.

@@ -551,7 +551,7 @@ fn build_order_strategy_request(
         account_id: account.id,
         contract_id: contract.id,
     };
-    let payload = json!({
+    let mut payload = json!({
         "accountSpec": account.name,
         "accountId": account.id,
         "symbol": contract.name,
@@ -559,8 +559,15 @@ fn build_order_strategy_request(
         "orderStrategyTypeId": 2,
         "params": params.to_string(),
         "uuid": uuid,
-        "customTag50": format!("midas-{}", active_native_slug(session)),
     });
+    if let Some(custom_tag50) = empty_as_none(&session.cfg.custom_tag50) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "customTag50".to_string(),
+                Value::String(custom_tag50.to_string()),
+            );
+        }
+    }
 
     Ok(PendingOrderStrategyTransition {
         uuid,

@@ -8,6 +8,7 @@ app_id = "Midas TUI"
 app_version = "0.1.0"
 cid = ""
 secret = ""
+custom_tag50 = ""
 
 token_path = ".auth/bearer-token.json"
 session_cache_path = ".auth/ninjatrader-tui-session.json"
