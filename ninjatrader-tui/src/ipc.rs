@@ -57,7 +57,10 @@ pub async fn run_engine_server(socket_path: &Path) -> Result<()> {
 
 pub async fn connect_client(
     socket_path: &Path,
-) -> Result<(UnboundedSender<ServiceCommand>, UnboundedReceiver<ServiceEvent>)> {
+) -> Result<(
+    UnboundedSender<ServiceCommand>,
+    UnboundedReceiver<ServiceEvent>,
+)> {
     let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect engine socket {}", socket_path.display()))?;
@@ -92,8 +95,9 @@ pub async fn connect_client(
                     break;
                 }
                 Err(err) => {
-                    let _ = reader_event_tx
-                        .send(ServiceEvent::Error(format!("Engine IPC read failed: {err}")));
+                    let _ = reader_event_tx.send(ServiceEvent::Error(format!(
+                        "Engine IPC read failed: {err}"
+                    )));
                     break;
                 }
             };
@@ -107,8 +111,9 @@ pub async fn connect_client(
                     }
                 }
                 Err(err) => {
-                    let _ = reader_event_tx
-                        .send(ServiceEvent::Error(format!("Engine IPC decode failed: {err}")));
+                    let _ = reader_event_tx.send(ServiceEvent::Error(format!(
+                        "Engine IPC decode failed: {err}"
+                    )));
                 }
             }
         }

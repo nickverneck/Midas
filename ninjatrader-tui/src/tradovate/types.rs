@@ -1,0 +1,467 @@
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServiceCommand {
+    Connect(AppConfig),
+    ReplayState,
+    SelectAccount {
+        account_id: i64,
+    },
+    SearchContracts {
+        query: String,
+        limit: usize,
+    },
+    SubscribeBars {
+        contract: ContractSuggestion,
+        bar_type: BarType,
+    },
+    ManualOrder {
+        action: ManualOrderAction,
+    },
+    SetTargetPosition {
+        target_qty: i32,
+        automated: bool,
+        reason: String,
+    },
+    SyncNativeProtection {
+        signed_qty: i32,
+        take_profit_price: Option<f64>,
+        stop_price: Option<f64>,
+        reason: String,
+    },
+    SetExecutionStrategyConfig(ExecutionStrategyConfig),
+    ArmExecutionStrategy,
+    DisarmExecutionStrategy {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ManualOrderAction {
+    Buy,
+    Sell,
+    Close,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServiceEvent {
+    Status(String),
+    Error(String),
+    Connected {
+        env: TradingEnvironment,
+        user_name: Option<String>,
+        auth_mode: AuthMode,
+    },
+    Disconnected,
+    AccountsLoaded(Vec<AccountInfo>),
+    AccountSnapshotsLoaded(Vec<AccountSnapshot>),
+    ContractSearchResults {
+        query: String,
+        results: Vec<ContractSuggestion>,
+    },
+    MarketSnapshot(MarketSnapshot),
+    TradeMarkersUpdated(Vec<TradeMarker>),
+    Latency(LatencySnapshot),
+    ExecutionState(ExecutionStateSnapshot),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessTokenResponse {
+    error_text: Option<String>,
+    access_token: Option<String>,
+    md_access_token: Option<String>,
+    expiration_time: Option<String>,
+    user_id: Option<i64>,
+    name: Option<String>,
+    has_live: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TokenCacheFile {
+    token: String,
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+    #[serde(rename = "mdAccessToken")]
+    md_access_token: Option<String>,
+    #[serde(rename = "expirationTime")]
+    expiration_time: Option<String>,
+    #[serde(rename = "userId")]
+    user_id: Option<i64>,
+    name: Option<String>,
+    #[serde(rename = "hasLive")]
+    has_live: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct TokenBundle {
+    access_token: String,
+    md_access_token: String,
+    expiration_time: Option<String>,
+    user_id: Option<i64>,
+    user_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountInfo {
+    pub id: i64,
+    pub name: String,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BarType {
+    Minute1,
+    Range1,
+}
+
+impl BarType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Minute1 => "1 Min",
+            Self::Range1 => "1 Range",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Minute1 => Self::Range1,
+            Self::Range1 => Self::Minute1,
+        }
+    }
+
+    pub fn chart_description(self) -> Value {
+        match self {
+            Self::Minute1 => json!({
+                "underlyingType": "MinuteBar",
+                "elementSize": 1,
+                "elementSizeUnit": "UnderlyingUnits",
+                "withHistogram": false
+            }),
+            Self::Range1 => json!({
+                "underlyingType": "Tick",
+                "elementSize": 1,
+                "elementSizeUnit": "Range",
+                "withHistogram": false
+            }),
+        }
+    }
+}
+
+impl Default for BarType {
+    fn default() -> Self {
+        Self::Minute1
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractSuggestion {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Bar {
+    pub ts_ns: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InstrumentSessionProfile {
+    FuturesGlobex,
+    EquityRth,
+}
+
+impl InstrumentSessionProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FuturesGlobex => "Globex",
+            Self::EquityRth => "RTH",
+        }
+    }
+
+    pub fn evaluate(self, ts_ns: i64) -> InstrumentSessionWindow {
+        if ts_ns <= 0 {
+            return InstrumentSessionWindow {
+                session_open: true,
+                minutes_to_close: None,
+                hold_entries: false,
+            };
+        }
+
+        let dt_et = DateTime::<Utc>::from_timestamp_nanos(ts_ns).with_timezone(&New_York);
+        match self {
+            Self::FuturesGlobex => futures_globex_window(dt_et),
+            Self::EquityRth => equity_rth_window(dt_et),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InstrumentSessionWindow {
+    pub session_open: bool,
+    pub minutes_to_close: Option<f64>,
+    pub hold_entries: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketSnapshot {
+    pub contract_id: Option<i64>,
+    pub contract_name: Option<String>,
+    pub bars: Vec<Bar>,
+    pub trade_markers: Vec<TradeMarker>,
+    pub session_profile: Option<InstrumentSessionProfile>,
+    pub value_per_point: Option<f64>,
+    pub tick_size: Option<f64>,
+    pub history_loaded: usize,
+    pub live_bars: usize,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TradeMarkerSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeMarker {
+    pub fill_id: Option<i64>,
+    pub account_id: Option<i64>,
+    pub contract_id: Option<i64>,
+    pub contract_name: Option<String>,
+    pub ts_ns: i64,
+    pub price: f64,
+    pub qty: i32,
+    pub side: TradeMarkerSide,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSnapshot {
+    pub account_id: i64,
+    pub account_name: String,
+    pub balance: Option<f64>,
+    pub cash_balance: Option<f64>,
+    pub net_liq: Option<f64>,
+    pub realized_pnl: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+    pub intraday_margin: Option<f64>,
+    pub open_position_qty: Option<f64>,
+    pub market_position_qty: Option<f64>,
+    pub market_entry_price: Option<f64>,
+    pub selected_contract_take_profit_price: Option<f64>,
+    pub selected_contract_stop_price: Option<f64>,
+    pub raw_account: Option<Value>,
+    pub raw_risk: Option<Value>,
+    pub raw_cash: Option<Value>,
+    pub raw_positions: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LatencySnapshot {
+    pub rest_rtt_ms: Option<u64>,
+    pub last_order_ack_ms: Option<u64>,
+    pub last_order_seen_ms: Option<u64>,
+    pub last_exec_report_ms: Option<u64>,
+    pub last_fill_ms: Option<u64>,
+}
+
+struct ServiceState {
+    client: Client,
+    broker_tx: UnboundedSender<BrokerCommand>,
+    session: Option<SessionState>,
+    user_task: Option<JoinHandle<()>>,
+    market_task: Option<JoinHandle<()>>,
+    rest_probe_task: Option<JoinHandle<()>>,
+    latency: LatencySnapshot,
+    snapshot_revision: u64,
+}
+
+struct SessionState {
+    cfg: AppConfig,
+    tokens: TokenBundle,
+    accounts: Vec<AccountInfo>,
+    request_tx: UnboundedSender<UserSocketCommand>,
+    execution_config: ExecutionStrategyConfig,
+    execution_runtime: ExecutionRuntimeState,
+    order_latency_tracker: Option<OrderLatencyTracker>,
+    order_submit_in_flight: bool,
+    protection_sync_in_flight: bool,
+    pending_protection_sync: Option<DesiredNativeProtection>,
+    user_store: UserSyncStore,
+    selected_account_id: Option<i64>,
+    selected_contract: Option<ContractSuggestion>,
+    bar_type: BarType,
+    market: MarketSnapshot,
+    managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
+    active_order_strategy: Option<TrackedOrderStrategy>,
+    next_strategy_order_nonce: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExecutionRuntimeState {
+    armed: bool,
+    last_closed_bar_ts: Option<i64>,
+    pending_target_qty: Option<i32>,
+    last_summary: String,
+    hma_execution: HmaAngleExecutionState,
+    ema_execution: EmaCrossExecutionState,
+}
+
+impl ExecutionRuntimeState {
+    fn snapshot(&self) -> ExecutionRuntimeSnapshot {
+        ExecutionRuntimeSnapshot {
+            armed: self.armed,
+            last_closed_bar_ts: self.last_closed_bar_ts,
+            pending_target_qty: self.pending_target_qty,
+            last_summary: self.last_summary.clone(),
+        }
+    }
+
+    fn reset_execution(&mut self) {
+        self.hma_execution = HmaAngleExecutionState::default();
+        self.ema_execution = EmaCrossExecutionState::default();
+    }
+}
+
+#[derive(Clone, Default)]
+struct UserSyncStore {
+    accounts: BTreeMap<i64, Value>,
+    risk: BTreeMap<i64, Value>,
+    cash: BTreeMap<i64, Value>,
+    positions: BTreeMap<i64, BTreeMap<i64, Value>>,
+    orders: BTreeMap<i64, BTreeMap<i64, Value>>,
+    fills: BTreeMap<i64, BTreeMap<i64, Value>>,
+    order_strategies: BTreeMap<i64, Value>,
+    order_strategy_links: BTreeMap<i64, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct StrategyProtectionKey {
+    account_id: i64,
+    contract_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedProtectionOrders {
+    signed_qty: i32,
+    take_profit_price: Option<f64>,
+    stop_price: Option<f64>,
+    take_profit_cl_ord_id: Option<String>,
+    stop_cl_ord_id: Option<String>,
+    take_profit_order_id: Option<i64>,
+    stop_order_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct TrackedOrderStrategy {
+    key: StrategyProtectionKey,
+    order_strategy_id: i64,
+    target_qty: i32,
+}
+
+const TOKEN_REFRESH_LEAD_SECS: i64 = 300;
+const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
+pub const AUTO_CLOSE_MINUTES_BEFORE_SESSION_END: f64 = 15.0;
+
+fn infer_session_profile(product: &Value) -> InstrumentSessionProfile {
+    match product
+        .get("productType")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "futures" => InstrumentSessionProfile::FuturesGlobex,
+        _ => InstrumentSessionProfile::EquityRth,
+    }
+}
+
+fn futures_globex_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWindow {
+    let hour = fractional_hour(&dt_et);
+    let session_open = match dt_et.weekday() {
+        Weekday::Sun => hour >= 18.0,
+        Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu => hour < 17.0 || hour >= 18.0,
+        Weekday::Fri => hour < 17.0,
+        Weekday::Sat => false,
+    };
+
+    if !session_open {
+        return InstrumentSessionWindow {
+            session_open: false,
+            minutes_to_close: None,
+            hold_entries: true,
+        };
+    }
+
+    let close_date = if dt_et.weekday() == Weekday::Sun || hour >= 18.0 {
+        dt_et
+            .date_naive()
+            .succ_opt()
+            .unwrap_or_else(|| dt_et.date_naive())
+    } else {
+        dt_et.date_naive()
+    };
+    let close_at = new_york_close(close_date, 17, 0, 0);
+    let minutes_to_close = close_at.map(|close| minutes_until(dt_et, close));
+    let hold_entries = minutes_to_close
+        .map(|minutes| minutes <= AUTO_CLOSE_MINUTES_BEFORE_SESSION_END)
+        .unwrap_or(false);
+
+    InstrumentSessionWindow {
+        session_open: true,
+        minutes_to_close,
+        hold_entries,
+    }
+}
+
+fn equity_rth_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWindow {
+    let hour = fractional_hour(&dt_et);
+    let session_open = matches!(
+        dt_et.weekday(),
+        Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri
+    ) && hour >= 9.5
+        && hour < 16.0;
+
+    if !session_open {
+        return InstrumentSessionWindow {
+            session_open: false,
+            minutes_to_close: None,
+            hold_entries: true,
+        };
+    }
+
+    let close_at = new_york_close(dt_et.date_naive(), 16, 0, 0);
+    let minutes_to_close = close_at.map(|close| minutes_until(dt_et, close));
+    let hold_entries = minutes_to_close
+        .map(|minutes| minutes <= AUTO_CLOSE_MINUTES_BEFORE_SESSION_END)
+        .unwrap_or(false);
+
+    InstrumentSessionWindow {
+        session_open: true,
+        minutes_to_close,
+        hold_entries,
+    }
+}
+
+fn fractional_hour(dt_et: &DateTime<chrono_tz::Tz>) -> f64 {
+    dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0 + dt_et.second() as f64 / 3600.0
+}
+
+fn new_york_close(
+    date: chrono::NaiveDate,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<DateTime<chrono_tz::Tz>> {
+    let naive = date.and_hms_opt(hour, minute, second)?;
+    New_York.from_local_datetime(&naive).single()
+}
+
+fn minutes_until(start: DateTime<chrono_tz::Tz>, end: DateTime<chrono_tz::Tz>) -> f64 {
+    ((end - start).num_seconds() as f64 / 60.0).max(0.0)
+}
