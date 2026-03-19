@@ -394,6 +394,12 @@ pub struct ExecutionRuntimeSnapshot {
 pub struct ExecutionStateSnapshot {
     pub config: ExecutionStrategyConfig,
     pub runtime: ExecutionRuntimeSnapshot,
+    #[serde(default)]
+    pub selected_account_id: Option<i64>,
+    #[serde(default)]
+    pub selected_contract_name: Option<String>,
+    #[serde(default)]
+    pub market_position_qty: i32,
 }
 
 impl Default for ExecutionStateSnapshot {
@@ -401,6 +407,9 @@ impl Default for ExecutionStateSnapshot {
         Self {
             config: ExecutionStrategyConfig::default(),
             runtime: ExecutionRuntimeSnapshot::default(),
+            selected_account_id: None,
+            selected_contract_name: None,
+            market_position_qty: 0,
         }
     }
 }

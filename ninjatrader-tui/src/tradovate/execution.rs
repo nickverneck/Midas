@@ -2,6 +2,9 @@ fn execution_state_snapshot(session: &SessionState) -> ExecutionStateSnapshot {
     ExecutionStateSnapshot {
         config: session.execution_config.clone(),
         runtime: session.execution_runtime.snapshot(),
+        selected_account_id: session.selected_account_id,
+        selected_contract_name: session.selected_contract.as_ref().map(|contract| contract.name.clone()),
+        market_position_qty: selected_market_position_qty(session),
     }
 }
 

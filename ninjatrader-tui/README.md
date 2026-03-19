@@ -22,6 +22,39 @@ Run from the repo root:
 cargo run --manifest-path ninjatrader-tui/Cargo.toml -- --config ninjatrader-tui/config.example.toml
 ```
 
+Engine management on Linux:
+
+```sh
+# List running engine processes and their sockets.
+ninjatrader-tui list
+
+# Attach a full TUI session to a running engine by ID from `list`.
+ninjatrader-tui attach 1455
+
+# Kill one engine immediately.
+ninjatrader-tui kill 1455
+
+# Disarm, close the selected market, then kill one engine.
+ninjatrader-tui kill 1455 -c
+
+# Kill every running engine immediately.
+ninjatrader-tui killall
+
+# Disarm, close the selected market on each engine, then kill them.
+ninjatrader-tui killall -c
+
+# Show the generated clap help, including all engine commands.
+ninjatrader-tui --help
+ninjatrader-tui kill --help
+ninjatrader-tui killall --help
+```
+
+Notes:
+- `list`, `attach`, `kill`, and `killall` are Linux-only because they inspect `/proc` and signal Linux PIDs directly.
+- `attach` reuses the existing engine socket and does not spawn a new engine.
+- The attached TUI remains fully interactive, including strategy changes and other controls.
+- `kill -c` and `killall -c` disarm the selected strategy, send a close on the selected market, wait for that selected market to go flat, and only then kill the engine process.
+
 Key controls:
 - `F1`: login screen
 - `F2`: selection screen
