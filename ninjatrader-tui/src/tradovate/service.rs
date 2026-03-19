@@ -112,7 +112,7 @@ async fn handle_command(
             let user_cfg = cfg.clone();
             let user_tokens = tokens.clone();
             let (request_tx, user_task) =
-                spawn_user_sync_task(user_cfg, user_tokens, account_ids, internal_tx.clone());
+                spawn_user_sync_task(user_cfg, user_tokens, account_ids, internal_tx.clone())?;
             let rest_probe_task = spawn_rest_probe_task(
                 state.client.clone(),
                 cfg.clone(),
@@ -204,7 +204,7 @@ async fn handle_command(
                 bail!("connect first");
             };
             if let Some(task) = state.market_task.take() {
-                task.abort();
+                task.shutdown();
             }
             session.market = MarketSnapshot::default();
             let market_specs = fetch_contract_specs(
@@ -226,14 +226,14 @@ async fn handle_command(
             emit_execution_state(event_tx, session);
             let cfg = session.cfg.clone();
             let token = session.tokens.md_access_token.clone();
-            state.market_task = Some(tokio::spawn(market_data_worker(
+            state.market_task = Some(spawn_market_data_task(
                 cfg,
                 token,
                 contract,
                 market_specs,
                 bar_type,
-                internal_tx,
-            )));
+                internal_tx.clone(),
+            )?);
         }
         ServiceCommand::ManualOrder { action } => {
             let broker_tx = state.broker_tx.clone();
@@ -537,10 +537,10 @@ async fn maintain_session(
                 save_token_cache(&session.cfg.session_cache_path, &session.tokens)?;
                 refresh_session_state(&state.client, session, event_tx).await?;
                 if let Some(task) = state.user_task.take() {
-                    task.abort();
+                    task.shutdown();
                 }
                 if let Some(task) = state.market_task.take() {
-                    task.abort();
+                    task.shutdown();
                 }
                 if let Some(task) = state.rest_probe_task.take() {
                     task.abort();

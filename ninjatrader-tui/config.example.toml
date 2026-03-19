@@ -18,3 +18,6 @@ contract_suggest_limit = 12
 time_in_force = "Day"
 order_qty = 1
 autoconnect = false
+websocket_idle_park_us = 0
+user_socket_cpu_core = 0
+market_socket_cpu_core = 1

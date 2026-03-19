@@ -101,6 +101,9 @@ pub struct AppConfig {
     pub time_in_force: String,
     pub order_qty: i32,
     pub autoconnect: bool,
+    pub websocket_idle_park_us: u64,
+    pub user_socket_cpu_core: Option<usize>,
+    pub market_socket_cpu_core: Option<usize>,
 }
 
 impl Default for AppConfig {
@@ -123,6 +126,9 @@ impl Default for AppConfig {
             time_in_force: "Day".to_string(),
             order_qty: 1,
             autoconnect: false,
+            websocket_idle_park_us: 0,
+            user_socket_cpu_core: None,
+            market_socket_cpu_core: None,
         }
     }
 }
@@ -198,6 +204,15 @@ impl AppConfig {
         }
         if let Some(raw) = env_bool("MIDAS_TUI_AUTOCONNECT")? {
             self.autoconnect = raw;
+        }
+        if let Some(raw) = env_parse::<u64>("MIDAS_TUI_WEBSOCKET_IDLE_PARK_US")? {
+            self.websocket_idle_park_us = raw;
+        }
+        if let Some(raw) = env_parse::<usize>("MIDAS_TUI_USER_SOCKET_CPU_CORE")? {
+            self.user_socket_cpu_core = Some(raw);
+        }
+        if let Some(raw) = env_parse::<usize>("MIDAS_TUI_MARKET_SOCKET_CPU_CORE")? {
+            self.market_socket_cpu_core = Some(raw);
         }
         Ok(())
     }

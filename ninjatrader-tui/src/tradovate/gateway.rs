@@ -218,21 +218,128 @@ impl LiveSeries {
     }
 }
 
+fn spawn_socket_worker<F, Fut>(
+    thread_name: &str,
+    worker_label: &str,
+    cpu_core: Option<usize>,
+    internal_tx: UnboundedSender<InternalEvent>,
+    worker: F,
+) -> Result<SocketWorkerHandle>
+where
+    F: FnOnce(Arc<AtomicBool>, UnboundedSender<InternalEvent>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let finished_thread = finished.clone();
+    let internal_tx_thread = internal_tx.clone();
+    let thread_name_owned = thread_name.to_string();
+    let worker_label_owned = worker_label.to_string();
+
+    let join = thread::Builder::new()
+        .name(thread_name_owned.clone())
+        .spawn(move || {
+            if let Some(core) = cpu_core {
+                if let Err(err) = set_current_thread_affinity(core) {
+                    let _ = internal_tx_thread.send(InternalEvent::Error(format!(
+                        "{worker_label_owned} affinity to CPU core {core} failed: {err}"
+                    )));
+                }
+            }
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+
+            match runtime {
+                Ok(runtime) => runtime.block_on(worker(stop_thread, internal_tx_thread)),
+                Err(err) => {
+                    let _ = internal_tx_thread.send(InternalEvent::Error(format!(
+                        "{worker_label_owned} runtime init failed: {err}"
+                    )));
+                }
+            }
+
+            finished_thread.store(true, Ordering::Release);
+        })
+        .with_context(|| format!("spawn {thread_name}"))?;
+
+    Ok(SocketWorkerHandle {
+        stop,
+        finished,
+        join: Some(join),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn set_current_thread_affinity(core: usize) -> Result<()> {
+    unsafe {
+        let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut cpu_set);
+        libc::CPU_SET(core, &mut cpu_set);
+        if libc::sched_setaffinity(
+            0,
+            std::mem::size_of::<libc::cpu_set_t>(),
+            &cpu_set as *const libc::cpu_set_t,
+        ) != 0
+        {
+            bail!("{}", std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_current_thread_affinity(core: usize) -> Result<()> {
+    let _ = core;
+    Ok(())
+}
+
 fn spawn_user_sync_task(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
     internal_tx: UnboundedSender<InternalEvent>,
-) -> (UnboundedSender<UserSocketCommand>, JoinHandle<()>) {
+) -> Result<(UnboundedSender<UserSocketCommand>, SocketWorkerHandle)> {
     let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(user_sync_worker(
-        cfg,
-        tokens,
-        account_ids,
-        request_rx,
+    let cpu_core = cfg.user_socket_cpu_core;
+    let task = spawn_socket_worker(
+        "midas-user-ws",
+        "user websocket worker",
+        cpu_core,
         internal_tx,
-    ));
-    (request_tx, task)
+        move |stop, internal_tx| user_sync_worker(cfg, tokens, account_ids, request_rx, internal_tx, stop),
+    )?;
+    Ok((request_tx, task))
+}
+
+fn spawn_market_data_task(
+    cfg: AppConfig,
+    access_token: String,
+    contract: ContractSuggestion,
+    market_specs: Option<MarketSpecs>,
+    bar_type: BarType,
+    internal_tx: UnboundedSender<InternalEvent>,
+) -> Result<SocketWorkerHandle> {
+    let cpu_core = cfg.market_socket_cpu_core;
+    spawn_socket_worker(
+        "midas-market-ws",
+        "market websocket worker",
+        cpu_core,
+        internal_tx,
+        move |stop, internal_tx| {
+            market_data_worker(
+                cfg,
+                access_token,
+                contract,
+                market_specs,
+                bar_type,
+                internal_tx,
+                stop,
+            )
+        },
+    )
 }
 
 fn spawn_broker_gateway_task(

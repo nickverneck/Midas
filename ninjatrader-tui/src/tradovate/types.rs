@@ -269,12 +269,31 @@ pub struct LatencySnapshot {
     pub last_fill_ms: Option<u64>,
 }
 
+struct SocketWorkerHandle {
+    stop: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl SocketWorkerHandle {
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    fn shutdown(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 struct ServiceState {
     client: Client,
     broker_tx: UnboundedSender<BrokerCommand>,
     session: Option<SessionState>,
-    user_task: Option<JoinHandle<()>>,
-    market_task: Option<JoinHandle<()>>,
+    user_task: Option<SocketWorkerHandle>,
+    market_task: Option<SocketWorkerHandle>,
     rest_probe_task: Option<JoinHandle<()>>,
     latency: LatencySnapshot,
     snapshot_revision: u64,

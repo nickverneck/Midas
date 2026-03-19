@@ -109,12 +109,12 @@ async fn ensure_background_tasks(
     let user_needed = state
         .user_task
         .as_ref()
-        .is_none_or(tokio::task::JoinHandle::is_finished);
+        .is_none_or(SocketWorkerHandle::is_finished);
     let market_needed = session.selected_contract.is_some()
         && state
             .market_task
             .as_ref()
-            .is_none_or(tokio::task::JoinHandle::is_finished);
+            .is_none_or(SocketWorkerHandle::is_finished);
     let rest_probe_needed = state
         .rest_probe_task
         .as_ref()
@@ -157,11 +157,11 @@ async fn ensure_background_tasks(
 
     if user_needed {
         if let Some(task) = state.user_task.take() {
-            task.abort();
+            task.shutdown();
         }
         if let Some((cfg, tokens, account_ids)) = user_spawn {
             let (request_tx, user_task) =
-                spawn_user_sync_task(cfg, tokens, account_ids, internal_tx.clone());
+                spawn_user_sync_task(cfg, tokens, account_ids, internal_tx.clone())?;
             if let Some(session) = state.session.as_mut() {
                 session.request_tx = request_tx;
             }
@@ -171,7 +171,7 @@ async fn ensure_background_tasks(
 
     if market_needed {
         if let Some(task) = state.market_task.take() {
-            task.abort();
+            task.shutdown();
         }
         if let Some((cfg, access_token, md_access_token, contract)) = market_spawn {
             let market_specs =
@@ -183,14 +183,14 @@ async fn ensure_background_tasks(
                 .as_ref()
                 .map(|s| s.bar_type)
                 .unwrap_or_default();
-            state.market_task = Some(tokio::spawn(market_data_worker(
+            state.market_task = Some(spawn_market_data_task(
                 cfg,
                 md_access_token,
                 contract,
                 market_specs,
                 bar_type,
                 internal_tx.clone(),
-            )));
+            )?);
         }
     }
 
@@ -223,10 +223,10 @@ fn shutdown_state(state: &mut ServiceState, event_tx: &UnboundedSender<ServiceEv
 
 fn shutdown_tasks(state: &mut ServiceState) {
     if let Some(task) = state.user_task.take() {
-        task.abort();
+        task.shutdown();
     }
     if let Some(task) = state.market_task.take() {
-        task.abort();
+        task.shutdown();
     }
     if let Some(task) = state.rest_probe_task.take() {
         task.abort();
