@@ -74,18 +74,6 @@ pub struct HmaManagedPosition {
     pub trailing_active: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct HmaProtectiveExit {
-    pub reason: &'static str,
-    pub trigger_price: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct HmaBrokerProtection {
-    pub take_profit_offset: Option<f64>,
-    pub stop_loss_offset: Option<f64>,
-}
-
 impl HmaAngleConfig {
     pub fn uses_native_protection(&self) -> bool {
         self.take_profit_ticks > 0.0 || self.stop_loss_ticks > 0.0 || self.use_trailing_stop
@@ -226,32 +214,12 @@ impl HmaAngleConfig {
         }
     }
 
-    pub fn broker_protection(&self, tick_size: Option<f64>) -> Option<HmaBrokerProtection> {
-        let take_profit_offset = self.take_profit_offset(tick_size);
-        let stop_loss_offset = self.stop_loss_offset(tick_size);
-        if take_profit_offset.is_none() && stop_loss_offset.is_none() {
-            return None;
-        }
-        Some(HmaBrokerProtection {
-            take_profit_offset,
-            stop_loss_offset,
-        })
-    }
-
     pub fn take_profit_offset(&self, tick_size: Option<f64>) -> Option<f64> {
         let tick_size = tick_size.filter(|tick| tick.is_finite() && *tick > 0.0)?;
         if self.take_profit_ticks <= 0.0 {
             return None;
         }
         Some(self.take_profit_ticks * tick_size)
-    }
-
-    pub fn stop_loss_offset(&self, tick_size: Option<f64>) -> Option<f64> {
-        let tick_size = tick_size.filter(|tick| tick.is_finite() && *tick > 0.0)?;
-        if self.stop_loss_ticks <= 0.0 {
-            return None;
-        }
-        Some(self.stop_loss_ticks * tick_size)
     }
 
     pub fn desired_trailing_stop_price(
@@ -325,110 +293,6 @@ impl HmaAngleConfig {
         let tick_size = tick_size.filter(|tick| tick.is_finite() && *tick > 0.0)?;
         let position = runtime.position.as_ref()?;
         self.effective_stop_price(position, tick_size).0
-    }
-
-    pub fn evaluate_protective_exit(
-        &self,
-        runtime: &mut HmaAngleExecutionState,
-        bar: &Bar,
-        tick_size: Option<f64>,
-    ) -> Option<HmaProtectiveExit> {
-        let tick_size = tick_size.filter(|tick| tick.is_finite() && *tick > 0.0)?;
-        let position = runtime.position.as_mut()?;
-
-        let favorable_price = match position.side {
-            PositionSide::Long => bar.high,
-            PositionSide::Short => bar.low,
-        };
-        if favorable_price.is_finite() {
-            match position.side {
-                PositionSide::Long => {
-                    if favorable_price > position.best_price {
-                        position.best_price = favorable_price;
-                    }
-                }
-                PositionSide::Short => {
-                    if favorable_price < position.best_price {
-                        position.best_price = favorable_price;
-                    }
-                }
-            }
-        }
-
-        let current_pnl_ticks = match position.side {
-            PositionSide::Long => (bar.close - position.entry_price) / tick_size,
-            PositionSide::Short => (position.entry_price - bar.close) / tick_size,
-        };
-        let mut trailing_changed = false;
-
-        if self.use_trailing_stop
-            && self.trail_trigger_ticks > 0.0
-            && self.trail_offset_ticks >= 0.0
-        {
-            let favorable_ticks = match position.side {
-                PositionSide::Long => (position.best_price - position.entry_price) / tick_size,
-                PositionSide::Short => (position.entry_price - position.best_price) / tick_size,
-            };
-            if favorable_ticks >= self.trail_trigger_ticks {
-                position.trailing_active = true;
-                let candidate = match position.side {
-                    PositionSide::Long => position.best_price - self.trail_offset_ticks * tick_size,
-                    PositionSide::Short => {
-                        position.best_price + self.trail_offset_ticks * tick_size
-                    }
-                };
-                let next_stop = match (position.side, position.current_stop_price) {
-                    (PositionSide::Long, Some(current)) => Some(current.max(candidate)),
-                    (PositionSide::Short, Some(current)) => Some(current.min(candidate)),
-                    (_, None) => Some(candidate),
-                };
-                trailing_changed = next_stop != position.current_stop_price;
-                position.current_stop_price = next_stop;
-            } else if current_pnl_ticks < 0.0 {
-                position.best_price = position.entry_price;
-            }
-        }
-
-        let take_profit_price = self.take_profit_price(position, tick_size);
-        let (stop_price, stop_reason) = self.effective_stop_price(position, tick_size);
-
-        let stop_hit = match (position.side, stop_price, stop_reason) {
-            (_, Some(_), Some("trail_stop")) if trailing_changed => false,
-            (PositionSide::Long, Some(price), _) if bar.low.is_finite() => bar.low <= price,
-            (PositionSide::Short, Some(price), _) if bar.high.is_finite() => bar.high >= price,
-            _ => false,
-        };
-        let take_profit_hit = match (position.side, take_profit_price) {
-            (PositionSide::Long, Some(price)) if bar.high.is_finite() => bar.high >= price,
-            (PositionSide::Short, Some(price)) if bar.low.is_finite() => bar.low <= price,
-            _ => false,
-        };
-
-        if stop_hit {
-            return stop_price.map(|price| HmaProtectiveExit {
-                reason: stop_reason.unwrap_or("stop_loss"),
-                trigger_price: price,
-            });
-        }
-
-        if take_profit_hit {
-            return take_profit_price.map(|price| HmaProtectiveExit {
-                reason: "take_profit",
-                trigger_price: price,
-            });
-        }
-
-        None
-    }
-
-    fn take_profit_price(&self, position: &HmaManagedPosition, tick_size: f64) -> Option<f64> {
-        if self.take_profit_ticks <= 0.0 {
-            return None;
-        }
-        Some(match position.side {
-            PositionSide::Long => position.entry_price + self.take_profit_ticks * tick_size,
-            PositionSide::Short => position.entry_price - self.take_profit_ticks * tick_size,
-        })
     }
 
     fn stop_loss_price(&self, position: &HmaManagedPosition, tick_size: f64) -> Option<f64> {
@@ -633,43 +497,28 @@ mod tests {
     }
 
     #[test]
-    fn broker_protection_offsets_follow_tick_size() {
+    fn take_profit_offset_follows_tick_size() {
         let config = HmaAngleConfig {
             take_profit_ticks: 8.0,
-            stop_loss_ticks: 6.0,
             ..HmaAngleConfig::default()
         };
 
-        let protection = config.broker_protection(Some(0.25)).expect("protection");
-        assert_eq!(protection.take_profit_offset, Some(2.0));
-        assert_eq!(protection.stop_loss_offset, Some(1.5));
+        assert_eq!(config.take_profit_offset(Some(0.25)), Some(2.0));
     }
 
     #[test]
-    fn protective_exit_hits_take_profit_for_long_position() {
+    fn current_effective_stop_price_uses_fixed_stop_for_long_position() {
         let config = HmaAngleConfig {
-            take_profit_ticks: 4.0,
+            stop_loss_ticks: 6.0,
             ..HmaAngleConfig::default()
         };
         let mut runtime = HmaAngleExecutionState::default();
         config.sync_position(&mut runtime, 1, Some(100.0));
 
-        let exit = config
-            .evaluate_protective_exit(
-                &mut runtime,
-                &Bar {
-                    ts_ns: 0,
-                    open: 100.0,
-                    high: 101.25,
-                    low: 99.75,
-                    close: 101.0,
-                },
-                Some(0.25),
-            )
-            .expect("take profit should trigger");
-
-        assert_eq!(exit.reason, "take_profit");
-        assert_eq!(exit.trigger_price, 101.0);
+        assert_eq!(
+            config.current_effective_stop_price(&runtime, Some(0.25)),
+            Some(98.5)
+        );
     }
 
     #[test]
@@ -702,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn protective_exit_trails_long_position_by_ticks() {
+    fn current_effective_stop_price_uses_trailing_stop_after_activation() {
         let config = HmaAngleConfig {
             use_trailing_stop: true,
             trail_trigger_ticks: 4.0,
@@ -712,7 +561,7 @@ mod tests {
         let mut runtime = HmaAngleExecutionState::default();
         config.sync_position(&mut runtime, 1, Some(100.0));
 
-        let no_exit = config.evaluate_protective_exit(
+        let _ = config.desired_trailing_stop_price(
             &mut runtime,
             &Bar {
                 ts_ns: 1,
@@ -723,28 +572,10 @@ mod tests {
             },
             Some(0.25),
         );
-        assert!(no_exit.is_none());
-        let stop = runtime
-            .position
-            .as_ref()
-            .and_then(|position| position.current_stop_price);
-        assert_eq!(stop, Some(100.75));
 
-        let exit = config
-            .evaluate_protective_exit(
-                &mut runtime,
-                &Bar {
-                    ts_ns: 2,
-                    open: 101.0,
-                    high: 101.0,
-                    low: 100.70,
-                    close: 100.80,
-                },
-                Some(0.25),
-            )
-            .expect("trailing stop should trigger");
-
-        assert_eq!(exit.reason, "trail_stop");
-        assert_eq!(exit.trigger_price, 100.75);
+        assert_eq!(
+            config.current_effective_stop_price(&runtime, Some(0.25)),
+            Some(100.75)
+        );
     }
 }
