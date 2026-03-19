@@ -363,10 +363,7 @@ impl UserSyncStore {
                         .get("status")
                         .and_then(Value::as_str)
                         .is_some_and(|status| status.eq_ignore_ascii_case("ActiveStrategy"))
-                    && strategy
-                        .get("customTag50")
-                        .and_then(Value::as_str)
-                        .is_some_and(|tag| tag.starts_with("midas-"))
+                    && strategy_is_owned_by_midas(strategy)
             })
             .max_by_key(|strategy| extract_entity_id(strategy).unwrap_or_default())
     }
@@ -382,6 +379,17 @@ impl UserSyncStore {
             .filter_map(|order_id| orders.get(&order_id))
             .collect()
     }
+}
+
+fn strategy_is_owned_by_midas(strategy: &Value) -> bool {
+    strategy
+        .get("customTag50")
+        .and_then(Value::as_str)
+        .is_some_and(|tag| tag.starts_with("midas-"))
+        || strategy
+            .get("uuid")
+            .and_then(Value::as_str)
+            .is_some_and(|uuid| uuid.starts_with("midas-"))
 }
 
 fn pick_number(value: &Value, keys: &[&str]) -> Option<f64> {

@@ -732,7 +732,7 @@ mod tests {
                 "accountId": 42,
                 "contractId": 3570918,
                 "status": "ActiveStrategy",
-                "customTag50": "midas-hma_angle"
+                "uuid": "midas-1710546400000-1-strategy"
             }),
         );
         store.orders.insert(
