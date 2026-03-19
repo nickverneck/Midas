@@ -493,10 +493,45 @@ fn current_native_fixed_take_profit_ticks(session: &SessionState) -> f64 {
     }
 }
 
+fn current_native_fixed_take_profit_offset(session: &SessionState) -> Option<f64> {
+    price_offset_from_ticks(
+        current_native_fixed_take_profit_ticks(session),
+        session.market.tick_size,
+    )
+}
+
 fn current_native_fixed_stop_ticks(session: &SessionState) -> f64 {
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.stop_loss_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.stop_loss_ticks,
+    }
+}
+
+fn current_native_fixed_stop_offset(session: &SessionState) -> Option<f64> {
+    price_offset_from_ticks(current_native_fixed_stop_ticks(session), session.market.tick_size)
+}
+
+fn price_offset_from_ticks(ticks: f64, tick_size: Option<f64>) -> Option<f64> {
+    let tick_size = tick_size.filter(|tick| tick.is_finite() && *tick > 0.0)?;
+    if ticks <= 0.0 {
+        return None;
+    }
+    Some(ticks * tick_size)
+}
+
+fn signed_profit_target_offset(order_action: &str, offset: f64) -> f64 {
+    if order_action.eq_ignore_ascii_case("Buy") {
+        offset
+    } else {
+        -offset
+    }
+}
+
+fn signed_stop_loss_offset(order_action: &str, offset: f64) -> f64 {
+    if order_action.eq_ignore_ascii_case("Buy") {
+        -offset
+    } else {
+        offset
     }
 }
 
@@ -522,27 +557,30 @@ fn build_order_strategy_request(
     if take_profit_ticks <= 0.0 && stop_loss_ticks <= 0.0 {
         bail!("order-strategy entry requires a fixed take-profit or stop-loss");
     }
+    let take_profit_offset = current_native_fixed_take_profit_offset(session);
+    let stop_loss_offset = current_native_fixed_stop_offset(session);
+    if (take_profit_ticks > 0.0 && take_profit_offset.is_none())
+        || (stop_loss_ticks > 0.0 && stop_loss_offset.is_none())
+    {
+        bail!("order-strategy entry requires a valid market tick size for TP/SL offsets");
+    }
     let bracket_qty = target_qty.abs().max(1);
     let mut bracket = json!({
         "qty": bracket_qty,
         "trailingStop": false,
     });
-    if take_profit_ticks > 0.0 {
-        let signed_target = if order_action.eq_ignore_ascii_case("Buy") {
-            take_profit_ticks
-        } else {
-            -take_profit_ticks
-        };
-        bracket["profitTarget"] = json!(signed_target);
+    if let Some(offset) = take_profit_offset {
+        bracket["profitTarget"] = json!(signed_profit_target_offset(order_action, offset));
     }
-    if stop_loss_ticks > 0.0 {
-        bracket["stopLoss"] = json!(stop_loss_ticks);
+    if let Some(offset) = stop_loss_offset {
+        bracket["stopLoss"] = json!(signed_stop_loss_offset(order_action, offset));
     }
 
     let params = json!({
         "entryVersion": {
             "orderQty": entry_order_qty,
             "orderType": "Market",
+            "timeInForce": session.cfg.time_in_force,
         },
         "brackets": [bracket],
     });
@@ -962,4 +1000,24 @@ async fn request_order_json(
         }
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::{price_offset_from_ticks, signed_profit_target_offset, signed_stop_loss_offset};
+
+    #[test]
+    fn price_offset_from_ticks_uses_tick_size() {
+        assert_eq!(price_offset_from_ticks(8.0, Some(0.25)), Some(2.0));
+        assert_eq!(price_offset_from_ticks(0.0, Some(0.25)), None);
+        assert_eq!(price_offset_from_ticks(8.0, Some(0.0)), None);
+    }
+
+    #[test]
+    fn signed_bracket_offsets_match_order_side() {
+        assert_eq!(signed_profit_target_offset("Buy", 2.0), 2.0);
+        assert_eq!(signed_profit_target_offset("Sell", 2.0), -2.0);
+        assert_eq!(signed_stop_loss_offset("Buy", 2.0), -2.0);
+        assert_eq!(signed_stop_loss_offset("Sell", 2.0), 2.0);
+    }
 }
