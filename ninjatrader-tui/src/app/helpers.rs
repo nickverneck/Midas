@@ -378,13 +378,3 @@ fn parse_float_input(value: Option<&str>) -> Option<f64> {
     }
     raw.parse::<f64>().ok()
 }
-
-fn json_preview(snapshot: &AccountSnapshot) -> String {
-    let raw = serde_json::json!({
-        "account": snapshot.raw_account,
-        "risk": snapshot.raw_risk,
-        "cash": snapshot.raw_cash,
-        "positions": snapshot.raw_positions,
-    });
-    serde_json::to_string_pretty(&raw).unwrap_or_else(|_| "{}".to_string())
-}

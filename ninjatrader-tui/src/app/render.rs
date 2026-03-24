@@ -597,16 +597,16 @@ impl App {
         };
         let help = match self.screen {
             Screen::Login => {
-                "F2 selection | Up/Down focus | Left/Right toggle | Enter connect | q quit"
+                "F2 selection | Up/Down focus | Left/Right toggle | Enter connect | F5/Ctrl+S save logs | q quit"
             }
             Screen::Selection => {
-                "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select"
+                "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
             }
             Screen::Strategy => {
-                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | Lua editor supported"
+                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | F5/Ctrl+S save logs"
             }
             Screen::Dashboard => {
-                "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | q quit"
+                "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | F5/Ctrl+S save logs | q quit"
             }
         };
         let titles = ["Login", "Selection", "Strategy", "Dashboard"]
@@ -797,14 +797,16 @@ impl App {
 
         let search = Paragraph::new(vec![
             styled_line(
-                format!("Query: {}", self.instrument_query),
-                self.focus == Focus::InstrumentQuery,
-            ),
-            styled_line(
                 format!("Bar Type: {}", self.bar_type.label()),
                 self.focus == Focus::BarTypeToggle,
             ),
-            Line::from("Choose bar type first with Left/Right, then Enter or Down to query/search. Enter on a result subscribes."),
+            styled_line(
+                format!("Query: {}", self.instrument_query),
+                self.focus == Focus::InstrumentQuery,
+            ),
+            Line::from(
+                "Choose bar type first with Left/Right, then Enter or Down to move into Query. Enter on Query searches. Enter on a result subscribes.",
+            ),
         ])
         .block(
             Block::default()
@@ -846,26 +848,19 @@ impl App {
     fn render_dashboard(&self, frame: &mut Frame<'_>, area: Rect) {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(28),
-                Constraint::Percentage(42),
-                Constraint::Percentage(30),
-            ])
+            .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
             .split(area);
 
         let left = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(11),
-                Constraint::Length(12),
-            ])
+            .constraints([Constraint::Length(16), Constraint::Min(12)])
             .split(columns[0]);
 
-        let session = Paragraph::new(self.session_summary_lines())
+        let session = Paragraph::new(self.dashboard_summary_lines())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Session Summary"),
+                    .title("Session + Selection"),
             )
             .wrap(Wrap { trim: true });
         frame.render_widget(session, left[0]);
@@ -880,25 +875,6 @@ impl App {
         frame.render_widget(stats, left[1]);
 
         self.render_chart(frame, columns[1]);
-
-        let right = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(10)])
-            .split(columns[2]);
-
-        let preview = Paragraph::new(self.selection_preview_lines())
-            .block(Block::default().borders(Borders::ALL).title("Selection"))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(preview, right[0]);
-
-        let debug = Paragraph::new(self.debug_lines())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Selected Account Raw View"),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(debug, right[1]);
     }
 
     fn render_chart(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1121,7 +1097,11 @@ impl App {
             .map(Line::from)
             .collect::<Vec<_>>();
         let logs = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Log"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Log [F5/Ctrl+S saves to .run/]"),
+            )
             .wrap(Wrap { trim: true });
         frame.render_widget(logs, area);
     }

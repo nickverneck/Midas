@@ -86,14 +86,25 @@ impl App {
         ]
     }
 
-    fn session_summary_lines(&self) -> Vec<Line<'static>> {
+    fn dashboard_summary_lines(&self) -> Vec<Line<'static>> {
         vec![
-            Line::from(format!("Env: {}", self.form.env.label())),
+            Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!(
                 "Strategy Status: {}",
                 self.strategy_runtime_summary()
             )),
+            Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
+            Line::from(match self.accounts.get(self.selected_account) {
+                Some(account) => format!("Selected account: {}", account.name),
+                None => "Selected account: none".to_string(),
+            }),
+            Line::from(match &self.market.contract_name {
+                Some(name) => format!("Selected contract: {name}"),
+                None => "Selected contract: none".to_string(),
+            }),
+            Line::from(format!("Bar Type: {}", self.bar_type.label())),
+            Line::from(format!("Session Gate: {}", self.session_gate_summary())),
             Line::from(format!(
                 "REST RTT: {}",
                 format_latency_ms(self.latency.rest_rtt_ms)
@@ -118,24 +129,6 @@ impl App {
                 "Market Update Age: {}",
                 format_age_ms(self.market_update_age_ms())
             )),
-            Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
-            Line::from(format!(
-                "Token Override: {}",
-                if self.form.token_override.trim().is_empty() {
-                    "no"
-                } else {
-                    "yes"
-                }
-            )),
-            Line::from(format!("Accounts: {}", self.accounts.len())),
-            Line::from(format!(
-                "Selected Contract: {}",
-                self.market
-                    .contract_name
-                    .clone()
-                    .unwrap_or_else(|| "none".to_string())
-            )),
-            Line::from(format!("Session Gate: {}", self.session_gate_summary())),
         ]
     }
 
@@ -606,8 +599,8 @@ impl App {
         let mut lines = vec![
             Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
-            Line::from(format!("Query: {}", self.instrument_query)),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
+            Line::from(format!("Query: {}", self.instrument_query)),
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),
                 None => "Selected account: none".to_string(),
@@ -678,17 +671,6 @@ impl App {
             )),
             Line::from("Hotkeys: b buy | s sell | c close"),
         ]
-    }
-
-    fn debug_lines(&self) -> Vec<Line<'static>> {
-        let Some(snapshot) = self.selected_snapshot() else {
-            return vec![Line::from("No raw payload yet.")];
-        };
-        let raw = json_preview(snapshot);
-        raw.lines()
-            .take(20)
-            .map(|line| Line::from(line.to_string()))
-            .collect()
     }
 
 }

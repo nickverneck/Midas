@@ -175,6 +175,66 @@ impl App {
         self.logs.push_back(message);
     }
 
+    fn save_logs_to_file(&mut self) {
+        match self.persist_logs_to_file() {
+            Ok(path) => {
+                let message = format!("Saved logs to {}", path.display());
+                self.status = message.clone();
+                self.push_log(message);
+            }
+            Err(err) => {
+                let message = format!("ERROR: failed to save logs: {err}");
+                self.status = message.clone();
+                self.push_log(message);
+            }
+        }
+    }
+
+    fn persist_logs_to_file(&self) -> std::io::Result<std::path::PathBuf> {
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let dir = std::path::PathBuf::from(".run").join("ninjatrader-tui-logs");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("session-{timestamp}.txt"));
+
+        let screen = match self.screen {
+            Screen::Login => "Login",
+            Screen::Selection => "Selection",
+            Screen::Strategy => "Strategy",
+            Screen::Dashboard => "Dashboard",
+        };
+        let selected_account = self
+            .accounts
+            .get(self.selected_account)
+            .map(|account| account.name.as_str())
+            .unwrap_or("none");
+        let selected_contract = self
+            .contract_results
+            .get(self.selected_contract)
+            .map(|contract| contract.name.as_str())
+            .or(self.market.contract_name.as_deref())
+            .unwrap_or("none");
+
+        let mut body = String::new();
+        body.push_str(&format!("saved_at_utc: {timestamp}\n"));
+        body.push_str(&format!("screen: {screen}\n"));
+        body.push_str(&format!("status: {}\n", self.status));
+        body.push_str(&format!("env: {}\n", self.form.env.label()));
+        body.push_str(&format!("auth_mode: {}\n", self.form.auth_mode.label()));
+        body.push_str(&format!("strategy: {}\n", self.strategy.summary_label()));
+        body.push_str(&format!("selected_account: {selected_account}\n"));
+        body.push_str(&format!("selected_contract: {selected_contract}\n"));
+        body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
+        body.push('\n');
+
+        for line in &self.logs {
+            body.push_str(line);
+            body.push('\n');
+        }
+
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
     fn clear_strategy_numeric_input(&mut self) {
         self.strategy_numeric_input = None;
     }

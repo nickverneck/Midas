@@ -9,6 +9,14 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::F(5)
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('s'))
+        {
+            self.save_logs_to_file();
+            return;
+        }
+
         match key.code {
             KeyCode::F(1) => {
                 self.screen = Screen::Login;
