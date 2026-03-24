@@ -78,6 +78,10 @@ enum BrokerCommand {
         request_tx: UnboundedSender<UserSocketCommand>,
         order: PendingMarketOrder,
     },
+    LiquidatePosition {
+        request_tx: UnboundedSender<UserSocketCommand>,
+        liquidation: PendingLiquidation,
+    },
     OrderStrategy {
         request_tx: UnboundedSender<UserSocketCommand>,
         strategy: PendingOrderStrategyTransition,
@@ -99,6 +103,14 @@ struct PendingMarketOrder {
     contract_name: String,
     account_name: String,
     reason_suffix: Option<String>,
+    target_qty: Option<i32>,
+}
+
+struct PendingLiquidation {
+    request_id: String,
+    payload: Value,
+    account_name: String,
+    contract_name: String,
     target_qty: Option<i32>,
 }
 
@@ -258,6 +270,17 @@ async fn broker_gateway_worker(
                     }
                 }
             }
+            BrokerCommand::LiquidatePosition {
+                request_tx,
+                liquidation,
+            } => match submit_liquidation_via_gateway(&request_tx, liquidation).await {
+                Ok(ack) => {
+                    let _ = internal_tx.send(InternalEvent::BrokerOrderAck(ack));
+                }
+                Err(failure) => {
+                    let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+                }
+            },
             BrokerCommand::OrderStrategy {
                 request_tx,
                 strategy,
@@ -337,6 +360,38 @@ async fn submit_market_order_via_gateway(
     message.push_str(&format!(" [clOrdId {}]", order.cl_ord_id));
     Ok(BrokerOrderAck {
         cl_ord_id: order.cl_ord_id,
+        order_id,
+        submit_rtt_ms,
+        message,
+    })
+}
+
+async fn submit_liquidation_via_gateway(
+    request_tx: &UnboundedSender<UserSocketCommand>,
+    liquidation: PendingLiquidation,
+) -> Result<BrokerOrderAck, BrokerOrderFailure> {
+    let started_at = time::Instant::now();
+    let parsed = match request_order_json(request_tx, "order/liquidateposition", &liquidation.payload).await {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return Err(BrokerOrderFailure {
+                cl_ord_id: liquidation.request_id,
+                message: err.to_string(),
+                target_qty: liquidation.target_qty,
+            });
+        }
+    };
+    let submit_rtt_ms = started_at.elapsed().as_millis() as u64;
+    let order_id = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id"));
+    let mut message = format!(
+        "Close submitted: liquidatePosition {} on {}",
+        liquidation.contract_name, liquidation.account_name
+    );
+    if let Some(order_id) = order_id {
+        message.push_str(&format!(" (order {order_id})"));
+    }
+    Ok(BrokerOrderAck {
+        cl_ord_id: liquidation.request_id,
         order_id,
         submit_rtt_ms,
         message,

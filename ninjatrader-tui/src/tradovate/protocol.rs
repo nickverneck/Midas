@@ -335,6 +335,33 @@ mod tests {
     }
 
     #[test]
+    fn contract_position_qty_uses_position_side_when_netpos_missing() {
+        let mut store = UserSyncStore::default();
+        store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "qty": 1,
+                    "side": "Short"
+                }),
+            )]),
+        );
+
+        let contract = ContractSuggestion {
+            id: 3570918,
+            name: "ESM6".to_string(),
+            description: String::new(),
+            raw: json!({ "contractMaturityId": 53951 }),
+        };
+
+        assert_eq!(store.contract_position_qty(42, &contract), Some(-1.0));
+    }
+
+    #[test]
     fn fallback_unrealized_pnl_uses_latest_close_and_value_per_point() {
         let market = MarketSnapshot {
             contract_id: Some(3570918),
@@ -788,6 +815,85 @@ mod tests {
         assert_eq!(linked.len(), 2);
         assert_eq!(linked[0].get("id").and_then(Value::as_i64), Some(101));
         assert_eq!(linked[1].get("id").and_then(Value::as_i64), Some(102));
+    }
+
+    #[test]
+    fn user_store_treats_nonterminal_midas_order_strategy_status_as_active() {
+        let mut store = UserSyncStore::default();
+        store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": "Working",
+                "uuid": "midas-1710546400000-1-strategy"
+            }),
+        );
+
+        let strategy = store
+            .find_active_order_strategy(42, 3570918)
+            .expect("working strategy should be tracked");
+
+        assert_eq!(extract_entity_id(strategy), Some(77));
+    }
+
+    #[test]
+    fn user_store_recovers_midas_strategy_from_linked_active_orders() {
+        let mut store = UserSyncStore::default();
+        store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "status": "Working",
+                "uuid": "midas-1710546400000-1-strategy"
+            }),
+        );
+        store.orders.insert(
+            42,
+            BTreeMap::from([(
+                101,
+                json!({
+                    "id": 101,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "orderType": "Stop",
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 101,
+                "label": "sl"
+            }),
+        );
+
+        let strategy = store
+            .find_active_order_strategy(42, 3570918)
+            .expect("linked active order should recover the strategy");
+
+        assert_eq!(extract_entity_id(strategy), Some(77));
+    }
+
+    #[test]
+    fn user_store_ignores_terminal_midas_order_strategy_status() {
+        let mut store = UserSyncStore::default();
+        store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": "InterruptedStrategy",
+                "uuid": "midas-1710546400000-1-strategy"
+            }),
+        );
+
+        assert!(store.find_active_order_strategy(42, 3570918).is_none());
     }
 
     #[test]

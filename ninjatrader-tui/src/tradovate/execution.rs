@@ -124,12 +124,20 @@ fn reconcile_selected_active_order_strategy(session: &mut SessionState) {
 
     if let Some(selected) = selected {
         session.active_order_strategy = Some(selected);
-    } else if session
+    } else if let Some(tracked) = session
         .active_order_strategy
         .as_ref()
-        .is_some_and(|tracked| tracked.key == key)
+        .filter(|tracked| tracked.key == key)
+        .cloned()
     {
-        session.active_order_strategy = None;
+        let has_open_position = selected_market_position_qty(session) != 0;
+        let has_linked_orders = !session
+            .user_store
+            .linked_strategy_orders(key.account_id, tracked.order_strategy_id)
+            .is_empty();
+        if !has_open_position && !has_linked_orders {
+            session.active_order_strategy = None;
+        }
     }
 }
 
@@ -207,11 +215,17 @@ fn should_wait_for_strategy_owned_protection(session: &SessionState) -> bool {
     if !native_order_strategy_enabled(session) || selected_market_position_qty(session) == 0 {
         return false;
     }
-    let Some(key) = selected_strategy_key(session).ok() else {
+    let Some(tracked) = active_order_strategy_matches_selected(session) else {
         return false;
     };
-    active_order_strategy_matches_selected(session).is_some()
-        && !session.managed_protection.contains_key(&key)
+    let has_linked_orders = session
+        .user_store
+        .linked_strategy_orders(tracked.key.account_id, tracked.order_strategy_id)
+        .into_iter()
+        .any(|order| {
+            order_is_active(order) && order_contract_id(order) == Some(tracked.key.contract_id)
+        });
+    has_linked_orders && !session.managed_protection.contains_key(&tracked.key)
 }
 
 fn sync_active_execution_position(
@@ -304,6 +318,9 @@ fn sync_execution_protection(
         return Ok(());
     }
     if !active_native_uses_protection(session) {
+        return Ok(());
+    }
+    if session.execution_runtime.pending_target_qty.is_some() {
         return Ok(());
     }
     if should_wait_for_strategy_owned_protection(session) {
@@ -677,4 +694,167 @@ fn maybe_run_execution_strategy(
     }
     emit_execution_state(event_tx, session);
     Ok(())
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_session() -> SessionState {
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionState {
+            cfg: AppConfig::default(),
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            accounts: vec![AccountInfo {
+                id: 42,
+                name: "SIM".to_string(),
+                raw: json!({}),
+            }],
+            request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
+            order_latency_tracker: None,
+            order_submit_in_flight: false,
+            protection_sync_in_flight: false,
+            pending_protection_sync: None,
+            user_store: UserSyncStore::default(),
+            selected_account_id: Some(42),
+            selected_contract: Some(ContractSuggestion {
+                id: 3570918,
+                name: "ESH6".to_string(),
+                description: "E-mini S&P".to_string(),
+                raw: json!({}),
+            }),
+            bar_type: BarType::default(),
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            active_order_strategy: None,
+            next_strategy_order_nonce: 1,
+        }
+    }
+
+    #[test]
+    fn reconcile_keeps_known_strategy_id_while_position_is_open() {
+        let mut session = test_session();
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: -1,
+        });
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1
+                }),
+            )]),
+        );
+
+        reconcile_selected_active_order_strategy(&mut session);
+
+        assert_eq!(
+            session
+                .active_order_strategy
+                .as_ref()
+                .map(|tracked| tracked.order_strategy_id),
+            Some(77)
+        );
+    }
+
+    #[test]
+    fn does_not_wait_for_strategy_owned_protection_without_linked_orders() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: -1,
+        });
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1
+                }),
+            )]),
+        );
+
+        assert!(!should_wait_for_strategy_owned_protection(&session));
+    }
+
+    #[test]
+    fn waits_for_strategy_owned_protection_when_linked_orders_exist() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: -1,
+        });
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1
+                }),
+            )]),
+        );
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+
+        assert!(should_wait_for_strategy_owned_protection(&session));
+    }
 }

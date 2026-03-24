@@ -22,7 +22,7 @@ Run from the repo root:
 cargo run --manifest-path ninjatrader-tui/Cargo.toml -- --config ninjatrader-tui/config.example.toml
 ```
 
-Engine management on Linux:
+Engine management on Linux and macOS:
 
 ```sh
 # List running engine processes and their sockets.
@@ -50,7 +50,7 @@ ninjatrader-tui killall --help
 ```
 
 Notes:
-- `list`, `attach`, `kill`, and `killall` are Linux-only because they inspect `/proc` and signal Linux PIDs directly.
+- `list`, `attach`, `kill`, and `killall` work on Linux and macOS. Other platforms are not supported yet.
 - `attach` reuses the existing engine socket and does not spawn a new engine.
 - The attached TUI remains fully interactive, including strategy changes and other controls.
 - `kill -c` and `killall -c` disarm the selected strategy, send a close on the selected market, wait for that selected market to go flat, and only then kill the engine process.
@@ -61,7 +61,7 @@ Key controls:
 - `F3`: strategy screen
 - `F4`: dashboard
 - `Up` / `Down`: move between login fields or through account/contract lists
-- `Left` / `Right`: change login toggles like environment and auth mode
+- `Left` / `Right`: change login toggles like environment/auth mode and switch the selection screen bar type between `1 Min` and `1 Range`
 - `Tab` / `Shift+Tab`: cycle strategy/selection focus
 - `Enter`: trigger focused action
 - `q`: quit

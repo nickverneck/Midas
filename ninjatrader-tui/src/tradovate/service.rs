@@ -240,10 +240,18 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            if let MarketOrderDispatchOutcome::NoOp { message } =
-                dispatch_manual_order(session, &broker_tx, action)?
-            {
-                let _ = event_tx.send(ServiceEvent::Status(message));
+            match dispatch_manual_order(session, &broker_tx, action)? {
+                MarketOrderDispatchOutcome::NoOp { message } => {
+                    let _ = event_tx.send(ServiceEvent::Status(message));
+                }
+                MarketOrderDispatchOutcome::Queued { target_qty } => {
+                    if let Some(target_qty) = target_qty {
+                        session.execution_runtime.pending_target_qty = Some(target_qty);
+                        session.execution_runtime.last_summary =
+                            "Manual close requested; waiting for flat position.".to_string();
+                        emit_execution_state(event_tx, session);
+                    }
+                }
             }
         }
         ServiceCommand::SetTargetPosition {

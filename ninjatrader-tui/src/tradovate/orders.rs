@@ -12,6 +12,11 @@ fn dispatch_manual_order(
     let account = order_ctx.account.clone();
     let contract = order_ctx.contract.clone();
     ensure_no_market_order_submit_in_flight(session)?;
+    let current_qty = session
+        .user_store
+        .contract_position_qty(account.id, &contract)
+        .unwrap_or(0.0)
+        .round() as i32;
 
     let (order_action, order_qty, action_label, automated, reason_suffix) = match action {
         ManualOrderAction::Buy => ("Buy", session.cfg.order_qty, "Buy", false, None),
@@ -28,8 +33,7 @@ fn dispatch_manual_order(
                     ),
                 });
             };
-            let close_qty = net_qty.abs().round() as i32;
-            if close_qty <= 0 {
+            if net_qty.abs().round() as i32 <= 0 {
                 return Ok(MarketOrderDispatchOutcome::NoOp {
                     message: format!(
                         "Close ignored: no open {} position on {}",
@@ -37,12 +41,20 @@ fn dispatch_manual_order(
                     ),
                 });
             }
-            let close_action = if net_qty > 0.0 { "Sell" } else { "Buy" };
-            (close_action, close_qty, "Close", false, None)
+            let liquidation =
+                build_liquidation_request(session, &account, &contract, false, Some(0));
+            enqueue_liquidation(session, broker_tx, liquidation)?;
+            return Ok(MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(0),
+            });
         }
     };
 
-    let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session)
+    } else {
+        None
+    };
     let detached = if interrupt_order_strategy_id.is_some() {
         DetachedStrategyProtection {
             cancel_order_ids: Vec::new(),
@@ -99,7 +111,11 @@ fn dispatch_native_order_strategy_target(
         });
     }
 
-    let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session)
+    } else {
+        None
+    };
     if current_qty != 0 && interrupt_order_strategy_id.is_none() {
         bail!("active order strategy id is unknown; refusing automated reversal/flatten");
     }
@@ -174,7 +190,11 @@ fn dispatch_target_position_order(
         });
     }
 
-    let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session)
+    } else {
+        None
+    };
     let detached = if interrupt_order_strategy_id.is_some() {
         DetachedStrategyProtection {
             cancel_order_ids: Vec::new(),
@@ -475,15 +495,25 @@ fn selected_strategy_key(session: &SessionState) -> Result<StrategyProtectionKey
 
 fn selected_active_order_strategy_id(session: &SessionState) -> Option<i64> {
     let key = selected_strategy_key(session).ok()?;
-    if let Some(tracked) = session.active_order_strategy.as_ref() {
-        if tracked.key == key {
-            return Some(tracked.order_strategy_id);
-        }
-    }
-    session
+    if let Some(order_strategy_id) = session
         .user_store
         .find_active_order_strategy(key.account_id, key.contract_id)
         .and_then(extract_entity_id)
+    {
+        return Some(order_strategy_id);
+    }
+    session
+        .active_order_strategy
+        .as_ref()
+        .filter(|tracked| tracked.key == key)
+        .filter(|tracked| {
+            session
+                .user_store
+                .linked_strategy_orders(key.account_id, tracked.order_strategy_id)
+                .into_iter()
+                .any(|order| order_is_active(order) && order_contract_id(order) == Some(key.contract_id))
+        })
+        .map(|tracked| tracked.order_strategy_id)
 }
 
 fn current_native_fixed_take_profit_ticks(session: &SessionState) -> f64 {
@@ -664,6 +694,27 @@ fn build_market_order_request(
     }
 }
 
+fn build_liquidation_request(
+    session: &mut SessionState,
+    account: &AccountInfo,
+    contract: &ContractSuggestion,
+    automated: bool,
+    target_qty: Option<i32>,
+) -> PendingLiquidation {
+    PendingLiquidation {
+        request_id: next_strategy_cl_ord_id(session, "liquidate"),
+        payload: json!({
+            "accountId": account.id,
+            "contractId": contract.id,
+            "admin": false,
+            "isAutomated": automated,
+        }),
+        account_name: account.name.clone(),
+        contract_name: contract.name.clone(),
+        target_qty,
+    }
+}
+
 fn enqueue_market_order(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
@@ -686,6 +737,27 @@ fn enqueue_market_order(
     {
         session.order_submit_in_flight = false;
         session.order_latency_tracker = None;
+        bail!("broker gateway is closed");
+    }
+    Ok(())
+}
+
+fn enqueue_liquidation(
+    session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    liquidation: PendingLiquidation,
+) -> Result<()> {
+    session.order_submit_in_flight = true;
+    session.order_latency_tracker = None;
+    let request_tx = session.request_tx.clone();
+    if broker_tx
+        .send(BrokerCommand::LiquidatePosition {
+            request_tx,
+            liquidation,
+        })
+        .is_err()
+    {
+        session.order_submit_in_flight = false;
         bail!("broker gateway is closed");
     }
     Ok(())
@@ -1004,7 +1076,49 @@ async fn request_order_json(
 
 #[cfg(test)]
 mod order_tests {
-    use super::{price_offset_from_ticks, signed_profit_target_offset, signed_stop_loss_offset};
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn test_session() -> SessionState {
+        let (request_tx, _request_rx) = unbounded_channel();
+        SessionState {
+            cfg: AppConfig::default(),
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            accounts: vec![AccountInfo {
+                id: 42,
+                name: "SIM".to_string(),
+                raw: json!({}),
+            }],
+            request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
+            order_latency_tracker: None,
+            order_submit_in_flight: false,
+            protection_sync_in_flight: false,
+            pending_protection_sync: None,
+            user_store: UserSyncStore::default(),
+            selected_account_id: Some(42),
+            selected_contract: Some(ContractSuggestion {
+                id: 3570918,
+                name: "ESM6".to_string(),
+                description: "E-mini S&P".to_string(),
+                raw: json!({}),
+            }),
+            bar_type: BarType::default(),
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            active_order_strategy: None,
+            next_strategy_order_nonce: 1,
+        }
+    }
 
     #[test]
     fn price_offset_from_ticks_uses_tick_size() {
@@ -1019,5 +1133,169 @@ mod order_tests {
         assert_eq!(signed_profit_target_offset("Sell", 2.0), -2.0);
         assert_eq!(signed_stop_loss_offset("Buy", 2.0), -2.0);
         assert_eq!(signed_stop_loss_offset("Sell", 2.0), 2.0);
+    }
+
+    #[test]
+    fn manual_close_uses_liquidate_position() {
+        let mut session = test_session();
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1
+                }),
+            )]),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_manual_order(&mut session, &broker_tx, ManualOrderAction::Close)
+            .expect("close should queue liquidation");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(0)
+            }
+        ));
+        assert!(session.order_submit_in_flight);
+        assert!(session.order_latency_tracker.is_none());
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::LiquidatePosition { liquidation, .. } => {
+                assert_eq!(liquidation.target_qty, Some(0));
+                assert_eq!(liquidation.payload.get("accountId").and_then(Value::as_i64), Some(42));
+                assert_eq!(
+                    liquidation.payload.get("contractId").and_then(Value::as_i64),
+                    Some(3570918)
+                );
+                assert_eq!(
+                    liquidation.payload.get("admin").and_then(Value::as_bool),
+                    Some(false)
+                );
+            }
+            _ => panic!("expected liquidation command"),
+        }
+    }
+
+    #[test]
+    fn manual_buy_from_flat_ignores_stale_active_order_strategy() {
+        let mut session = test_session();
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key: StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            order_strategy_id: 429017060108,
+            target_qty: -1,
+        });
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_manual_order(&mut session, &broker_tx, ManualOrderAction::Buy)
+            .expect("manual buy should queue market order");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued { target_qty: None }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, None);
+                assert_eq!(
+                    order.payload.get("action").and_then(Value::as_str),
+                    Some("Buy")
+                );
+            }
+            _ => panic!("expected market order command"),
+        }
+    }
+
+    #[test]
+    fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key: StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            order_strategy_id: 429017060108,
+            target_qty: -1,
+        });
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_native_order_strategy_target(
+            &mut session,
+            &broker_tx,
+            1,
+            "ema_cross signal",
+        )
+        .expect("flat-to-long entry should queue order strategy");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(1)
+            }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::OrderStrategy { strategy, .. } => {
+                assert_eq!(strategy.interrupt_order_strategy_id, None);
+                assert_eq!(strategy.target_qty, 1);
+                assert_eq!(strategy.entry_order_qty, 1);
+                assert_eq!(
+                    strategy.payload.get("accountId").and_then(Value::as_i64),
+                    Some(42)
+                );
+            }
+            _ => panic!("expected order strategy command"),
+        }
+    }
+
+    #[test]
+    fn automated_native_target_uses_order_strategy_with_target_qty() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_target_position_order(
+            &mut session,
+            &broker_tx,
+            1,
+            true,
+            "ema_cross signal",
+        )
+        .expect("automated target should queue order strategy");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(1)
+            }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::OrderStrategy { strategy, .. } => {
+                assert_eq!(strategy.interrupt_order_strategy_id, None);
+                assert_eq!(strategy.target_qty, 1);
+                assert_eq!(strategy.entry_order_qty, 1);
+                assert_eq!(
+                    strategy.payload.get("action").and_then(Value::as_str),
+                    Some("Buy")
+                );
+            }
+            _ => panic!("expected order strategy command"),
+        }
     }
 }

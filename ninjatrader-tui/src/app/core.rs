@@ -24,7 +24,7 @@ impl App {
             last_market_update_at: None,
         };
         app.push_log(
-            "Phase 1 enabled: auth, account selection, contract search, 1m history/live."
+            "Phase 1 enabled: auth, account selection, contract search, 1m or 1 range history/live."
                 .to_string(),
         );
         app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close.".to_string());
@@ -125,6 +125,15 @@ impl App {
                 self.strategy_runtime.last_closed_bar_ts = snapshot.runtime.last_closed_bar_ts;
                 self.strategy_runtime.pending_target_qty = snapshot.runtime.pending_target_qty;
                 self.strategy_runtime.last_summary = snapshot.runtime.last_summary;
+                if let Some(selected_account_id) = snapshot.selected_account_id {
+                    if let Some(index) = self
+                        .accounts
+                        .iter()
+                        .position(|account| account.id == selected_account_id)
+                    {
+                        self.selected_account = index;
+                    }
+                }
             }
         }
     }

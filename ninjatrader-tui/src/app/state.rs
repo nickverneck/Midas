@@ -1,4 +1,12 @@
 impl App {
+    fn sync_selected_account(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        if let Some(account) = self.accounts.get(self.selected_account) {
+            let _ = cmd_tx.send(ServiceCommand::SelectAccount {
+                account_id: account.id,
+            });
+        }
+    }
+
     fn selected_snapshot(&self) -> Option<&AccountSnapshot> {
         let account = self.accounts.get(self.selected_account)?;
         self.snapshot_for_account(account.id)
@@ -68,6 +76,7 @@ impl App {
     fn selection_focus_order(&self) -> Vec<Focus> {
         vec![
             Focus::AccountList,
+            Focus::BarTypeToggle,
             Focus::InstrumentQuery,
             Focus::ContractList,
         ]

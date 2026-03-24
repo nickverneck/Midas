@@ -357,13 +357,13 @@ impl UserSyncStore {
         self.order_strategies
             .values()
             .filter(|strategy| {
-                extract_account_id("orderStrategy", strategy) == Some(account_id)
-                    && strategy_contract_id(strategy) == Some(contract_id)
-                    && strategy
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .is_some_and(|status| status.eq_ignore_ascii_case("ActiveStrategy"))
-                    && strategy_is_owned_by_midas(strategy)
+                strategy_is_owned_by_midas(strategy)
+                    && order_strategy_is_active(strategy)
+                    && self.order_strategy_matches_selected_contract(
+                        strategy,
+                        account_id,
+                        contract_id,
+                    )
             })
             .max_by_key(|strategy| extract_entity_id(strategy).unwrap_or_default())
     }
@@ -379,6 +379,26 @@ impl UserSyncStore {
             .filter_map(|order_id| orders.get(&order_id))
             .collect()
     }
+
+    fn order_strategy_matches_selected_contract(
+        &self,
+        strategy: &Value,
+        account_id: i64,
+        contract_id: i64,
+    ) -> bool {
+        if strategy_account_id(strategy) == Some(account_id)
+            && strategy_contract_id(strategy) == Some(contract_id)
+        {
+            return true;
+        }
+
+        let Some(order_strategy_id) = extract_entity_id(strategy) else {
+            return false;
+        };
+        self.linked_strategy_orders(account_id, order_strategy_id)
+            .into_iter()
+            .any(|order| order_is_active(order) && order_contract_id(order) == Some(contract_id))
+    }
 }
 
 fn strategy_is_owned_by_midas(strategy: &Value) -> bool {
@@ -390,6 +410,49 @@ fn strategy_is_owned_by_midas(strategy: &Value) -> bool {
             .get("uuid")
             .and_then(Value::as_str)
             .is_some_and(|uuid| uuid.starts_with("midas-"))
+}
+
+fn strategy_account_id(strategy: &Value) -> Option<i64> {
+    json_i64(strategy, "accountId")
+        .or_else(|| {
+            strategy
+                .get("account")
+                .and_then(|account| json_i64(account, "id"))
+        })
+        .or_else(|| strategy.get("account").and_then(Value::as_i64))
+}
+
+fn order_strategy_is_active(strategy: &Value) -> bool {
+    let Some(status) = strategy
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| strategy.get("strategyStatus").and_then(Value::as_str))
+    else {
+        return true;
+    };
+
+    let status = status.trim().to_ascii_lowercase();
+    if status.is_empty() {
+        return true;
+    }
+
+    !matches!(
+        status.as_str(),
+        "closed"
+            | "closedstrategy"
+            | "completed"
+            | "completedstrategy"
+            | "finished"
+            | "finishedstrategy"
+            | "inactive"
+            | "inactivestrategy"
+            | "interrupted"
+            | "interruptedstrategy"
+            | "rejected"
+            | "rejectedstrategy"
+            | "stopped"
+            | "stoppedstrategy"
+    )
 }
 
 fn pick_number(value: &Value, keys: &[&str]) -> Option<f64> {
@@ -475,10 +538,19 @@ fn position_matches_market(position: &Value, market: &MarketSnapshot) -> bool {
 }
 
 fn position_qty(position: &Value) -> Option<f64> {
-    pick_number(
-        position,
-        &["netPos", "netPosition", "qty", "quantity", "netQty"],
-    )
+    if let Some(net_qty) = pick_number(position, &["netPos", "netPosition", "netQty"]) {
+        return Some(net_qty);
+    }
+
+    let raw_qty = pick_number(position, &["qty", "quantity"])?;
+    let sign = position_side_sign(position).unwrap_or_else(|| {
+        if raw_qty < 0.0 {
+            -1.0
+        } else {
+            1.0
+        }
+    });
+    Some(raw_qty.abs() * sign)
 }
 
 fn position_contract_id(position: &Value) -> Option<i64> {
@@ -509,4 +581,25 @@ fn position_symbol(position: &Value) -> Option<&str> {
                 .and_then(|contract| contract.get("name"))
                 .and_then(Value::as_str)
         })
+}
+
+fn position_side_sign(position: &Value) -> Option<f64> {
+    if let Some(value) = ["buySell", "side", "action", "positionSide"]
+        .iter()
+        .find_map(|key| position.get(*key).and_then(Value::as_str))
+    {
+        return match value.trim().to_ascii_lowercase().as_str() {
+            "buy" | "bot" | "b" | "long" => Some(1.0),
+            "sell" | "sld" | "s" | "short" => Some(-1.0),
+            _ => None,
+        };
+    }
+
+    position.get("isShort").and_then(Value::as_bool).map(|is_short| {
+        if is_short {
+            -1.0
+        } else {
+            1.0
+        }
+    })
 }

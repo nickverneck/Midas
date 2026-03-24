@@ -367,6 +367,7 @@ impl App {
                 if key.code == KeyCode::Enter {
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
+                    self.sync_selected_account(cmd_tx);
                     self.arm_native_strategy(cmd_tx);
                     self.push_log(format!(
                         "Strategy selected: {}",
@@ -418,11 +419,7 @@ impl App {
                     return;
                 }
                 KeyCode::Enter => {
-                    if let Some(account) = self.accounts.get(self.selected_account) {
-                        let _ = cmd_tx.send(ServiceCommand::SelectAccount {
-                            account_id: account.id,
-                        });
-                    }
+                    self.sync_selected_account(cmd_tx);
                     return;
                 }
                 KeyCode::Left => {
@@ -430,7 +427,7 @@ impl App {
                     return;
                 }
                 KeyCode::Right => {
-                    self.focus = Focus::InstrumentQuery;
+                    self.focus = Focus::BarTypeToggle;
                     return;
                 }
                 _ => {}
@@ -453,6 +450,7 @@ impl App {
                     if let Some(contract) =
                         self.contract_results.get(self.selected_contract).cloned()
                     {
+                        self.sync_selected_account(cmd_tx);
                         let _ = cmd_tx.send(ServiceCommand::SubscribeBars { contract, bar_type: self.bar_type });
                         self.screen = Screen::Strategy;
                         self.focus = Focus::StrategyKind;
@@ -460,7 +458,7 @@ impl App {
                     return;
                 }
                 KeyCode::Left => {
-                    self.focus = Focus::InstrumentQuery;
+                    self.focus = Focus::BarTypeToggle;
                     return;
                 }
                 KeyCode::Right => {
@@ -475,19 +473,19 @@ impl App {
             Focus::InstrumentQuery => {
                 match key.code {
                     KeyCode::Up => {
-                        self.focus = Focus::AccountList;
+                        self.focus = Focus::BarTypeToggle;
                         return;
                     }
                     KeyCode::Down => {
-                        self.focus = Focus::BarTypeToggle;
+                        self.focus = Focus::ContractList;
                         return;
                     }
                     KeyCode::Left => {
-                        self.focus = Focus::AccountList;
+                        self.focus = Focus::BarTypeToggle;
                         return;
                     }
                     KeyCode::Right => {
-                        self.focus = Focus::BarTypeToggle;
+                        self.focus = Focus::ContractList;
                         return;
                     }
                     _ => {}
@@ -505,24 +503,20 @@ impl App {
             }
             Focus::BarTypeToggle => {
                 match key.code {
-                    KeyCode::Enter | KeyCode::Char(' ') => {
+                    KeyCode::Left | KeyCode::Right => {
                         self.bar_type = self.bar_type.toggle();
                         return;
                     }
                     KeyCode::Up => {
-                        self.focus = Focus::InstrumentQuery;
+                        self.focus = Focus::AccountList;
                         return;
                     }
                     KeyCode::Down => {
-                        self.focus = Focus::ContractList;
-                        return;
-                    }
-                    KeyCode::Left => {
                         self.focus = Focus::InstrumentQuery;
                         return;
                     }
-                    KeyCode::Right => {
-                        self.focus = Focus::ContractList;
+                    KeyCode::Enter => {
+                        self.focus = Focus::InstrumentQuery;
                         return;
                     }
                     _ => {}
@@ -584,6 +578,7 @@ impl App {
         };
 
         if let Some(action) = action {
+            self.sync_selected_account(cmd_tx);
             let _ = cmd_tx.send(ServiceCommand::ManualOrder { action });
         }
     }
@@ -605,7 +600,7 @@ impl App {
                 "F2 selection | Up/Down focus | Left/Right toggle | Enter connect | q quit"
             }
             Screen::Selection => {
-                "F1 login | F3 strategy | F4 dashboard | Tab focus | Up/Down lists | Enter select/search"
+                "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select"
             }
             Screen::Strategy => {
                 "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | Lua editor supported"
@@ -809,9 +804,7 @@ impl App {
                 format!("Bar Type: {}", self.bar_type.label()),
                 self.focus == Focus::BarTypeToggle,
             ),
-            Line::from(
-                "Enter to search / toggle bar type. Enter on a result subscribes.",
-            ),
+            Line::from("Choose bar type first with Left/Right, then Enter or Down to query/search. Enter on a result subscribes."),
         ])
         .block(
             Block::default()
@@ -1133,4 +1126,190 @@ impl App {
         frame.render_widget(logs, area);
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::strategy::ExecutionStateSnapshot;
+    use crate::tradovate::{AccountInfo, ContractSuggestion, ManualOrderAction, ServiceEvent};
+    use serde_json::json;
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn account(id: i64, name: &str) -> AccountInfo {
+        AccountInfo {
+            id,
+            name: name.to_string(),
+            raw: json!({}),
+        }
+    }
+
+    fn contract(id: i64, name: &str) -> ContractSuggestion {
+        ContractSuggestion {
+            id,
+            name: name.to_string(),
+            description: "test contract".to_string(),
+            raw: json!({}),
+        }
+    }
+
+    fn expect_select_account(rx: &mut UnboundedReceiver<ServiceCommand>, account_id: i64) {
+        match rx.try_recv().expect("expected select-account command") {
+            ServiceCommand::SelectAccount { account_id: actual } => {
+                assert_eq!(actual, account_id);
+            }
+            _ => panic!("expected select-account command"),
+        }
+    }
+
+    #[test]
+    fn selection_tab_order_reaches_bar_type_toggle() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.focus = Focus::AccountList;
+
+        app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+        assert_eq!(app.focus, Focus::BarTypeToggle);
+
+        app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+        assert_eq!(app.focus, Focus::InstrumentQuery);
+
+        app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+        assert_eq!(app.focus, Focus::ContractList);
+    }
+
+    #[test]
+    fn bar_type_toggle_uses_arrow_keys_not_enter() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.focus = Focus::BarTypeToggle;
+
+        assert_eq!(app.bar_type, BarType::Minute1);
+
+        app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(app.bar_type, BarType::Range1);
+        assert_eq!(app.focus, Focus::BarTypeToggle);
+
+        app.handle_selection_key(key(KeyCode::Left), &cmd_tx);
+        assert_eq!(app.bar_type, BarType::Minute1);
+        assert_eq!(app.focus, Focus::BarTypeToggle);
+
+        app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+        assert_eq!(app.bar_type, BarType::Minute1);
+    }
+
+    #[test]
+    fn execution_state_syncs_selected_account_index_from_engine() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.handle_service_event(
+            ServiceEvent::AccountsLoaded(vec![
+                account(1, "DEMO4769136"),
+                account(2, "CHMMMLE422"),
+            ]),
+            &cmd_tx,
+        );
+
+        let snapshot = ExecutionStateSnapshot {
+            selected_account_id: Some(2),
+            ..ExecutionStateSnapshot::default()
+        };
+        app.handle_service_event(ServiceEvent::ExecutionState(snapshot), &cmd_tx);
+
+        assert_eq!(app.selected_account, 1);
+    }
+
+    #[test]
+    fn dashboard_manual_orders_sync_selected_account_first() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, mut cmd_rx) = unbounded_channel();
+        app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
+        app.selected_account = 1;
+
+        app.handle_dashboard_key(key(KeyCode::Char('b')), &cmd_tx);
+
+        expect_select_account(&mut cmd_rx, 2);
+        match cmd_rx.try_recv().expect("expected manual-order command") {
+            ServiceCommand::ManualOrder {
+                action: ManualOrderAction::Buy,
+            } => {}
+            _ => panic!("expected buy manual-order command"),
+        }
+    }
+
+    #[test]
+    fn contract_selection_syncs_selected_account_before_subscribe() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, mut cmd_rx) = unbounded_channel();
+        app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
+        app.selected_account = 1;
+        app.contract_results = vec![contract(123, "ESM6")];
+        app.focus = Focus::ContractList;
+
+        app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+        expect_select_account(&mut cmd_rx, 2);
+        match cmd_rx.try_recv().expect("expected subscribe-bars command") {
+            ServiceCommand::SubscribeBars { contract, bar_type } => {
+                assert_eq!(contract.id, 123);
+                assert_eq!(contract.name, "ESM6");
+                assert_eq!(bar_type, BarType::Minute1);
+            }
+            _ => panic!("expected subscribe-bars command"),
+        }
+    }
+
+    #[test]
+    fn strategy_continue_syncs_selected_account_before_arming() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, mut cmd_rx) = unbounded_channel();
+        app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
+        app.selected_account = 1;
+        app.focus = Focus::StrategyContinue;
+
+        app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+        expect_select_account(&mut cmd_rx, 2);
+        match cmd_rx.try_recv().expect("expected config command") {
+            ServiceCommand::SetExecutionStrategyConfig(_) => {}
+            _ => panic!("expected execution-config command"),
+        }
+        match cmd_rx.try_recv().expect("expected arm command") {
+            ServiceCommand::ArmExecutionStrategy => {}
+            _ => panic!("expected arm-execution command"),
+        }
+    }
+
+    #[test]
+    fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.focus = Focus::AccountList;
+
+        app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(app.focus, Focus::BarTypeToggle);
+
+        app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+        assert_eq!(app.focus, Focus::InstrumentQuery);
+
+        app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+        assert_eq!(app.focus, Focus::ContractList);
+    }
+
+    #[test]
+    fn bar_type_enter_advances_to_query_without_toggling() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.focus = Focus::BarTypeToggle;
+
+        app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+        assert_eq!(app.bar_type, BarType::Minute1);
+        assert_eq!(app.focus, Focus::InstrumentQuery);
+    }
 }

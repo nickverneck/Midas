@@ -8,7 +8,7 @@ pub async fn kill_engine_process(id: u32) -> Result<()> {
     imp::kill_engine_process(id).await
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     use crate::engine_registry::resolve_engine;
     use crate::ipc::connect_client;
@@ -167,7 +167,12 @@ mod imp {
     }
 
     fn process_exists(id: u32) -> bool {
-        Path::new(&format!("/proc/{id}")).exists()
+        let rc = unsafe { libc::kill(id as i32, 0) };
+        if rc == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        err.raw_os_error() != Some(libc::ESRCH)
     }
 
     fn cleanup_socket(socket_path: &Path) -> Result<()> {
@@ -182,15 +187,15 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod imp {
     use anyhow::{Result, bail};
 
     pub async fn close_and_kill_engine(_id: u32) -> Result<()> {
-        bail!("`ninjatrader-tui kill -c` is currently only supported on Linux");
+        bail!("`ninjatrader-tui kill -c` is currently only supported on Linux and macOS");
     }
 
     pub async fn kill_engine_process(_id: u32) -> Result<()> {
-        bail!("`ninjatrader-tui kill` is currently only supported on Linux");
+        bail!("`ninjatrader-tui kill` is currently only supported on Linux and macOS");
     }
 }

@@ -51,7 +51,7 @@ struct Cli {
 enum Mode {
     /// Run the background engine server.
     Engine,
-    /// List running engine processes on this Linux host.
+    /// List running engine processes on this host.
     List,
     /// Attach a full TUI session to a running engine by ID from `list`.
     Attach {
