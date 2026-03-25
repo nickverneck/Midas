@@ -18,6 +18,7 @@ impl App {
             selected_contract: 0,
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
+            dashboard_visuals_enabled: false,
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,
             latency: LatencySnapshot::default(),
@@ -27,7 +28,7 @@ impl App {
             "Phase 1 enabled: auth, account selection, contract search, 1m or 1 range history/live."
                 .to_string(),
         );
-        app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close.".to_string());
+        app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close, v visuals.".to_string());
         app.push_log(
             "Native HMA Angle and EMA Crossover strategies can auto-trade closed 1m bars once armed from Strategy."
                 .to_string(),

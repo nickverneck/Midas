@@ -568,6 +568,18 @@ impl App {
         let action = match key.code {
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match ch.to_ascii_lowercase() {
+                    'v' => {
+                        self.dashboard_visuals_enabled = !self.dashboard_visuals_enabled;
+                        self.push_log(format!(
+                            "Dashboard visuals {}",
+                            if self.dashboard_visuals_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        ));
+                        return;
+                    }
                     'b' => Some(ManualOrderAction::Buy),
                     's' => Some(ManualOrderAction::Sell),
                     'c' => Some(ManualOrderAction::Close),
@@ -606,7 +618,7 @@ impl App {
                 "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | F5/Ctrl+S save logs"
             }
             Screen::Dashboard => {
-                "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | F5/Ctrl+S save logs | q quit"
+                "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
             }
         };
         let titles = ["Login", "Selection", "Strategy", "Dashboard"]
@@ -973,6 +985,13 @@ impl App {
                 TradeMarkerSide::Sell => sell_marker_points.push(point),
             }
         }
+        let overlay = self
+            .dashboard_visuals_enabled
+            .then(|| self.build_dashboard_visual_overlay(&bars, &buy_marker_points, &sell_marker_points));
+        if let Some(overlay) = overlay.as_ref() {
+            title.push_str(" | Visuals ");
+            title.push_str(&overlay.label.to_uppercase());
+        }
         let (min_close, max_close) = chart_prices.iter().copied().fold(
             (f64::INFINITY, f64::NEG_INFINITY),
             |(min_v, max_v), price| (min_v.min(price), max_v.max(price)),
@@ -1059,7 +1078,7 @@ impl App {
                     .data(line),
             );
         }
-        if !buy_marker_points.is_empty() {
+        if !self.dashboard_visuals_enabled && !buy_marker_points.is_empty() {
             datasets.push(
                 Dataset::default()
                     .marker(symbols::Marker::Dot)
@@ -1068,7 +1087,7 @@ impl App {
                     .data(&buy_marker_points),
             );
         }
-        if !sell_marker_points.is_empty() {
+        if !self.dashboard_visuals_enabled && !sell_marker_points.is_empty() {
             datasets.push(
                 Dataset::default()
                     .marker(symbols::Marker::Block)
@@ -1077,11 +1096,77 @@ impl App {
                     .data(&sell_marker_points),
             );
         }
+        let chart_block = Block::default().borders(Borders::ALL).title(title);
+        let plot_area = chart_block.inner(area);
+        let x_bounds = [0.0, points.len().max(1) as f64];
         let chart = Chart::new(datasets)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .x_axis(Axis::default().bounds([0.0, points.len().max(1) as f64]))
+            .block(chart_block)
+            .x_axis(Axis::default().bounds(x_bounds))
             .y_axis(Axis::default().bounds(y_bounds));
         frame.render_widget(chart, area);
+        if let Some(overlay) = overlay.as_ref() {
+            self.render_dashboard_canvas_overlay(frame, plot_area, x_bounds, y_bounds, overlay);
+        }
+    }
+
+    fn render_dashboard_canvas_overlay(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        x_bounds: [f64; 2],
+        y_bounds: [f64; 2],
+        overlay: &DashboardVisualOverlay,
+    ) {
+        if area.is_empty() {
+            return;
+        }
+
+        if !overlay.indicator_segments.is_empty() {
+            let indicator_canvas = Canvas::default()
+                .marker(symbols::Marker::Braille)
+                .x_bounds(x_bounds)
+                .y_bounds(y_bounds)
+                .paint(|ctx| {
+                    for segment in &overlay.indicator_segments {
+                        ctx.draw(&CanvasLine {
+                            x1: segment.start.0,
+                            y1: segment.start.1,
+                            x2: segment.end.0,
+                            y2: segment.end.1,
+                            color: segment.color,
+                        });
+                    }
+                });
+            frame.render_widget(indicator_canvas, area);
+        }
+
+        if overlay.glyphs.is_empty() {
+            return;
+        }
+
+        let x_span = (x_bounds[1] - x_bounds[0]).abs().max(1.0);
+        let y_span = (y_bounds[1] - y_bounds[0]).abs().max(0.0001);
+        let dx = (x_span / 70.0).clamp(0.65, 2.5);
+        let dy = (y_span / 35.0)
+            .max(
+                self.market
+                    .tick_size
+                    .filter(|tick| tick.is_finite() && *tick > 0.0)
+                    .map(|tick| tick * 1.5)
+                    .unwrap_or(y_span / 90.0),
+            )
+            .min(y_span / 8.0)
+            .max(y_span / 150.0);
+        let glyph_canvas = Canvas::default()
+            .marker(symbols::Marker::HalfBlock)
+            .x_bounds(x_bounds)
+            .y_bounds(y_bounds)
+            .paint(|ctx| {
+                for glyph in overlay.glyphs.iter().copied() {
+                    self.draw_overlay_glyph(ctx, glyph, dx, dy);
+                }
+            });
+        frame.render_widget(glyph_canvas, area);
     }
 
     fn render_logs(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1220,6 +1305,21 @@ mod tests {
             } => {}
             _ => panic!("expected buy manual-order command"),
         }
+    }
+
+    #[test]
+    fn dashboard_visual_toggle_updates_state_without_sending_commands() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, mut cmd_rx) = unbounded_channel();
+
+        assert!(!app.dashboard_visuals_enabled);
+        app.handle_dashboard_key(key(KeyCode::Char('v')), &cmd_tx);
+        assert!(app.dashboard_visuals_enabled);
+        assert!(cmd_rx.try_recv().is_err());
+
+        app.handle_dashboard_key(key(KeyCode::Char('v')), &cmd_tx);
+        assert!(!app.dashboard_visuals_enabled);
+        assert!(cmd_rx.try_recv().is_err());
     }
 
     #[test]

@@ -1,4 +1,6 @@
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
+use crate::strategies::ema_cross::ema_series;
+use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
 use crate::tradovate::{
     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
@@ -13,6 +15,7 @@ use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs, Wrap,
+    canvas::{Canvas, Line as CanvasLine},
 };
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -35,6 +38,7 @@ pub struct App {
     selected_contract: usize,
     market: MarketSnapshot,
     logs: VecDeque<String>,
+    dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
     latency: LatencySnapshot,

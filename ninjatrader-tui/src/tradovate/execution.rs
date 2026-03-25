@@ -1,10 +1,14 @@
 fn execution_state_snapshot(session: &SessionState) -> ExecutionStateSnapshot {
+    let (take_profit_price, stop_price) = selected_protection_prices(session);
     ExecutionStateSnapshot {
         config: session.execution_config.clone(),
         runtime: session.execution_runtime.snapshot(),
         selected_account_id: session.selected_account_id,
         selected_contract_name: session.selected_contract.as_ref().map(|contract| contract.name.clone()),
         market_position_qty: selected_market_position_qty(session),
+        market_entry_price: selected_market_entry_price(session),
+        selected_contract_take_profit_price: take_profit_price,
+        selected_contract_stop_price: stop_price,
     }
 }
 
@@ -74,6 +78,24 @@ fn selected_market_entry_price(session: &SessionState) -> Option<f64> {
     } else {
         Some(weighted_sum / total_qty)
     }
+}
+
+fn selected_protection_prices(session: &SessionState) -> (Option<f64>, Option<f64>) {
+    let Some(account_id) = session.selected_account_id else {
+        return (None, None);
+    };
+    let Some(contract_id) = session.market.contract_id else {
+        return (None, None);
+    };
+
+    session
+        .managed_protection
+        .get(&StrategyProtectionKey {
+            account_id,
+            contract_id,
+        })
+        .map(|orders| (orders.take_profit_price, orders.stop_price))
+        .unwrap_or((None, None))
 }
 
 fn active_native_slug(session: &SessionState) -> &'static str {
@@ -209,6 +231,49 @@ fn hydrate_selected_order_strategy_protection(session: &mut SessionState) {
             stop_order_id,
         },
     );
+}
+
+fn clear_selected_order_strategy_state(session: &mut SessionState) {
+    let Some(key) = selected_strategy_key(session).ok() else {
+        session.active_order_strategy = None;
+        return;
+    };
+
+    let mut stale_ids = Vec::new();
+    if let Some(strategy_id) = session
+        .user_store
+        .find_active_order_strategy(key.account_id, key.contract_id)
+        .and_then(extract_entity_id)
+    {
+        stale_ids.push(strategy_id);
+    }
+    if let Some(strategy_id) = session
+        .active_order_strategy
+        .as_ref()
+        .filter(|tracked| tracked.key == key)
+        .map(|tracked| tracked.order_strategy_id)
+    {
+        if !stale_ids.contains(&strategy_id) {
+            stale_ids.push(strategy_id);
+        }
+    }
+
+    for strategy_id in stale_ids {
+        session.user_store.order_strategies.remove(&strategy_id);
+        session
+            .user_store
+            .order_strategy_links
+            .retain(|_, link| json_i64(link, "orderStrategyId") != Some(strategy_id));
+    }
+
+    if session
+        .active_order_strategy
+        .as_ref()
+        .is_some_and(|tracked| tracked.key == key)
+    {
+        session.active_order_strategy = None;
+    }
+    session.managed_protection.remove(&key);
 }
 
 fn should_wait_for_strategy_owned_protection(session: &SessionState) -> bool {
@@ -856,5 +921,45 @@ mod execution_tests {
         );
 
         assert!(should_wait_for_strategy_owned_protection(&session));
+    }
+
+    #[test]
+    fn execution_state_snapshot_includes_selected_protection_prices() {
+        let mut session = test_session();
+        session.market.contract_id = Some(3570918);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1,
+                    "avgPrice": 6659.75
+                }),
+            )]),
+        );
+        session.managed_protection.insert(
+            StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            ManagedProtectionOrders {
+                signed_qty: 1,
+                take_profit_price: Some(6662.5),
+                stop_price: Some(6659.0),
+                take_profit_cl_ord_id: None,
+                stop_cl_ord_id: None,
+                take_profit_order_id: None,
+                stop_order_id: None,
+            },
+        );
+
+        let snapshot = execution_state_snapshot(&session);
+
+        assert_eq!(snapshot.market_entry_price, Some(6659.75));
+        assert_eq!(snapshot.selected_contract_take_profit_price, Some(6662.5));
+        assert_eq!(snapshot.selected_contract_stop_price, Some(6659.0));
     }
 }

@@ -106,6 +106,10 @@ impl App {
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
             Line::from(format!("Session Gate: {}", self.session_gate_summary())),
             Line::from(format!(
+                "Chart Overlay: {}",
+                self.dashboard_visual_overlay_label()
+            )),
+            Line::from(format!(
                 "REST RTT: {}",
                 format_latency_ms(self.latency.rest_rtt_ms)
             )),
@@ -669,7 +673,7 @@ impl App {
                 "Order Qty: {}  TIF: {}",
                 self.base_config.order_qty, self.base_config.time_in_force
             )),
-            Line::from("Hotkeys: b buy | s sell | c close"),
+            Line::from("Hotkeys: b buy | s sell | c close | v visuals"),
         ]
     }
 

@@ -307,6 +307,10 @@ fn ema(values: &[f64], period: usize) -> Vec<f64> {
     out
 }
 
+pub(crate) fn ema_series(values: &[f64], period: usize) -> Vec<f64> {
+    ema(values, period)
+}
+
 fn signed_qty_to_side(signed_qty: i32) -> Option<PositionSide> {
     if signed_qty > 0 {
         Some(PositionSide::Long)

@@ -117,7 +117,12 @@ fn dispatch_native_order_strategy_target(
         None
     };
     if current_qty != 0 && interrupt_order_strategy_id.is_none() {
-        bail!("active order strategy id is unknown; refusing automated reversal/flatten");
+        return Ok(MarketOrderDispatchOutcome::NoOp {
+            message: format!(
+                "Waiting for broker order-strategy state to reconcile before automated transition {} -> {} on {} ({reason})",
+                current_qty, target_qty, contract.name
+            ),
+        });
     }
 
     if target_qty == 0 {
@@ -1258,6 +1263,44 @@ mod order_tests {
             }
             _ => panic!("expected order strategy command"),
         }
+    }
+
+    #[test]
+    fn automated_reversal_waits_when_position_is_nonflat_but_strategy_id_is_stale() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_native_order_strategy_target(
+            &mut session,
+            &broker_tx,
+            -1,
+            "ema_cross signal",
+        )
+        .expect("stale non-flat reversal should wait instead of failing");
+
+        match outcome {
+            MarketOrderDispatchOutcome::NoOp { message } => {
+                assert!(message.contains("Waiting for broker order-strategy state"));
+            }
+            _ => panic!("expected no-op while broker strategy state reconciles"),
+        }
+        assert!(broker_rx.try_recv().is_err());
     }
 
     #[test]

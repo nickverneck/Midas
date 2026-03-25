@@ -400,6 +400,12 @@ pub struct ExecutionStateSnapshot {
     pub selected_contract_name: Option<String>,
     #[serde(default)]
     pub market_position_qty: i32,
+    #[serde(default)]
+    pub market_entry_price: Option<f64>,
+    #[serde(default)]
+    pub selected_contract_take_profit_price: Option<f64>,
+    #[serde(default)]
+    pub selected_contract_stop_price: Option<f64>,
 }
 
 impl Default for ExecutionStateSnapshot {
@@ -410,6 +416,9 @@ impl Default for ExecutionStateSnapshot {
             selected_account_id: None,
             selected_contract_name: None,
             market_position_qty: 0,
+            market_entry_price: None,
+            selected_contract_take_profit_price: None,
+            selected_contract_stop_price: None,
         }
     }
 }

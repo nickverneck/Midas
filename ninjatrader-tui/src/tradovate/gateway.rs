@@ -153,6 +153,7 @@ struct BrokerOrderStrategyFailure {
     uuid: String,
     message: String,
     target_qty: i32,
+    stale_interrupt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,10 +405,18 @@ async fn submit_order_strategy_via_gateway(
 ) -> Result<BrokerOrderStrategyAck, BrokerOrderStrategyFailure> {
     if let Some(order_strategy_id) = strategy.interrupt_order_strategy_id {
         if let Err(err) = interrupt_order_strategy_by_id(request_tx, order_strategy_id).await {
+            let stale_interrupt = interrupt_error_is_stale(&err);
             return Err(BrokerOrderStrategyFailure {
                 uuid: strategy.uuid,
-                message: format!("failed to interrupt strategy {order_strategy_id}: {err}"),
+                message: if stale_interrupt {
+                    format!(
+                        "strategy {order_strategy_id} was already inactive; waiting for broker sync before retrying the reversal"
+                    )
+                } else {
+                    format!("failed to interrupt strategy {order_strategy_id}: {err}")
+                },
                 target_qty: strategy.target_qty,
+                stale_interrupt,
             });
         }
     }
@@ -420,6 +429,7 @@ async fn submit_order_strategy_via_gateway(
                 uuid: strategy.uuid,
                 message: err.to_string(),
                 target_qty: strategy.target_qty,
+                stale_interrupt: false,
             });
         }
     };
@@ -454,6 +464,12 @@ async fn submit_order_strategy_via_gateway(
         target_qty: strategy.target_qty,
         key: strategy.key,
     })
+}
+
+fn interrupt_error_is_stale(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("no active order strategy")
 }
 
 async fn submit_native_protection_via_gateway(

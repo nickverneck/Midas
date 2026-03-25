@@ -455,6 +455,7 @@ async fn handle_internal(
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         InternalEvent::OrderStrategyFailed(failure) => {
+            let mut stale_interrupt_recovered = false;
             if let Some(session) = state.session.as_mut() {
                 session.order_submit_in_flight = false;
                 if session
@@ -466,11 +467,29 @@ async fn handle_internal(
                 }
                 if session.execution_runtime.pending_target_qty == Some(failure.target_qty) {
                     session.execution_runtime.pending_target_qty = None;
+                }
+                if failure.stale_interrupt {
+                    clear_selected_order_strategy_state(session);
+                    session.execution_runtime.last_summary =
+                        "Previous strategy was already inactive; retrying current signal after broker sync."
+                            .to_string();
+                    if let Some(last_closed_ts) = latest_closed_bar_ts(session) {
+                        session.execution_runtime.last_closed_bar_ts =
+                            Some(last_closed_ts.saturating_sub(1));
+                    }
+                    stale_interrupt_recovered = true;
+                    emit_execution_state(event_tx, session);
+                } else if session.execution_runtime.pending_target_qty.is_none() {
                     session.execution_runtime.last_summary = failure.message.clone();
                     emit_execution_state(event_tx, session);
                 }
             }
-            let _ = event_tx.send(ServiceEvent::Error(failure.message));
+            if stale_interrupt_recovered {
+                request_snapshot_refresh(state, &internal_tx);
+                let _ = event_tx.send(ServiceEvent::Status(failure.message));
+            } else {
+                let _ = event_tx.send(ServiceEvent::Error(failure.message));
+            }
         }
         InternalEvent::ProtectionSyncApplied(ack) => {
             let broker_tx = state.broker_tx.clone();

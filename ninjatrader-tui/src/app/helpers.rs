@@ -79,6 +79,35 @@ fn format_age_ms(value: Option<u64>) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OverlaySegment {
+    start: (f64, f64),
+    end: (f64, f64),
+    color: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OverlayGlyphKind {
+    BuyMarker,
+    SellMarker,
+    BullishCross,
+    BearishCross,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OverlayGlyph {
+    center: (f64, f64),
+    color: Color,
+    kind: OverlayGlyphKind,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DashboardVisualOverlay {
+    label: String,
+    indicator_segments: Vec<OverlaySegment>,
+    glyphs: Vec<OverlayGlyph>,
+}
+
 fn trade_marker_matches_selection(
     marker: &TradeMarker,
     selected_account_id: Option<i64>,
@@ -115,6 +144,38 @@ fn trade_marker_matches_selection(
 
 fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
+}
+
+fn append_overlay_series_segments(
+    values: &[f64],
+    color: Color,
+    segments: &mut Vec<OverlaySegment>,
+) {
+    let mut previous = None;
+    for (idx, value) in values.iter().copied().enumerate() {
+        if !value.is_finite() {
+            previous = None;
+            continue;
+        }
+
+        let current = (idx as f64, value);
+        if let Some(start) = previous {
+            segments.push(OverlaySegment {
+                start,
+                end: current,
+                color,
+            });
+        }
+        previous = Some(current);
+    }
+}
+
+fn crossed_above(prev_a: f64, prev_b: f64, curr_a: f64, curr_b: f64) -> bool {
+    prev_a <= prev_b && curr_a > curr_b
+}
+
+fn crossed_below(prev_a: f64, prev_b: f64, curr_a: f64, curr_b: f64) -> bool {
+    prev_a >= prev_b && curr_a < curr_b
 }
 
 fn mask(value: &str) -> String {
@@ -377,4 +438,212 @@ fn parse_float_input(value: Option<&str>) -> Option<f64> {
         return Some(0.0);
     }
     raw.parse::<f64>().ok()
+}
+
+impl App {
+    fn dashboard_visual_overlay_label(&self) -> String {
+        if !self.dashboard_visuals_enabled {
+            return "off [v toggles]".to_string();
+        }
+
+        match self.strategy.kind {
+            StrategyKind::Native => match self.strategy.native_strategy {
+                NativeStrategyKind::EmaCross => "on | EMA fast/slow + fills".to_string(),
+                NativeStrategyKind::HmaAngle => "on | HMA cross map + fills".to_string(),
+            },
+            _ => "on | fills only".to_string(),
+        }
+    }
+
+    fn build_dashboard_visual_overlay(
+        &self,
+        bars: &[crate::tradovate::Bar],
+        buy_marker_points: &[(f64, f64)],
+        sell_marker_points: &[(f64, f64)],
+    ) -> DashboardVisualOverlay {
+        let mut overlay = DashboardVisualOverlay::default();
+        overlay
+            .glyphs
+            .extend(buy_marker_points.iter().copied().map(|center| OverlayGlyph {
+                center,
+                color: Color::Cyan,
+                kind: OverlayGlyphKind::BuyMarker,
+            }));
+        overlay
+            .glyphs
+            .extend(sell_marker_points.iter().copied().map(|center| OverlayGlyph {
+                center,
+                color: Color::Magenta,
+                kind: OverlayGlyphKind::SellMarker,
+            }));
+
+        if self.strategy.kind != StrategyKind::Native || bars.len() < 2 {
+            overlay.label = "fills".to_string();
+            return overlay;
+        }
+
+        let close = bars.iter().map(|bar| bar.close).collect::<Vec<_>>();
+        match self.strategy.native_strategy {
+            NativeStrategyKind::EmaCross => {
+                let fast = ema_series(&close, self.strategy.native_ema.fast_length.max(1));
+                let slow = ema_series(&close, self.strategy.native_ema.slow_length.max(1));
+                append_overlay_series_segments(
+                    &fast,
+                    Color::Cyan,
+                    &mut overlay.indicator_segments,
+                );
+                append_overlay_series_segments(
+                    &slow,
+                    Color::Yellow,
+                    &mut overlay.indicator_segments,
+                );
+
+                for idx in 1..close.len() {
+                    let prev_fast = fast[idx - 1];
+                    let curr_fast = fast[idx];
+                    let prev_slow = slow[idx - 1];
+                    let curr_slow = slow[idx];
+                    if !prev_fast.is_finite()
+                        || !curr_fast.is_finite()
+                        || !prev_slow.is_finite()
+                        || !curr_slow.is_finite()
+                    {
+                        continue;
+                    }
+
+                    let center = (idx as f64, (curr_fast + curr_slow) / 2.0);
+                    if crossed_above(prev_fast, prev_slow, curr_fast, curr_slow) {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Green,
+                            kind: OverlayGlyphKind::BullishCross,
+                        });
+                    } else if crossed_below(prev_fast, prev_slow, curr_fast, curr_slow) {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Red,
+                            kind: OverlayGlyphKind::BearishCross,
+                        });
+                    }
+                }
+
+                overlay.label = "ema".to_string();
+            }
+            NativeStrategyKind::HmaAngle => {
+                let hma = zero_lag_hma_series(&close, self.strategy.native_hma.hma_length.max(1));
+                append_overlay_series_segments(
+                    &hma,
+                    Color::Yellow,
+                    &mut overlay.indicator_segments,
+                );
+
+                for idx in 1..close.len() {
+                    let prev_close = close[idx - 1];
+                    let curr_close = close[idx];
+                    let prev_hma = hma[idx - 1];
+                    let curr_hma = hma[idx];
+                    if !prev_close.is_finite()
+                        || !curr_close.is_finite()
+                        || !prev_hma.is_finite()
+                        || !curr_hma.is_finite()
+                    {
+                        continue;
+                    }
+
+                    let center = (idx as f64, (curr_close + curr_hma) / 2.0);
+                    if crossed_above(prev_close, prev_hma, curr_close, curr_hma) {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Green,
+                            kind: OverlayGlyphKind::BullishCross,
+                        });
+                    } else if crossed_below(prev_close, prev_hma, curr_close, curr_hma) {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Red,
+                            kind: OverlayGlyphKind::BearishCross,
+                        });
+                    }
+                }
+
+                overlay.label = "hma".to_string();
+            }
+        }
+
+        overlay
+    }
+
+    fn draw_overlay_glyph(
+        &self,
+        ctx: &mut ratatui::widgets::canvas::Context<'_>,
+        glyph: OverlayGlyph,
+        dx: f64,
+        dy: f64,
+    ) {
+        let (x, y) = glyph.center;
+        match glyph.kind {
+            OverlayGlyphKind::BuyMarker => {
+                ctx.draw(&CanvasLine {
+                    x1: x - dx,
+                    y1: y - dy,
+                    x2: x,
+                    y2: y,
+                    color: glyph.color,
+                });
+                ctx.draw(&CanvasLine {
+                    x1: x + dx,
+                    y1: y - dy,
+                    x2: x,
+                    y2: y,
+                    color: glyph.color,
+                });
+                ctx.draw(&CanvasLine {
+                    x1: x,
+                    y1: y,
+                    x2: x,
+                    y2: y + dy * 0.7,
+                    color: glyph.color,
+                });
+            }
+            OverlayGlyphKind::SellMarker => {
+                ctx.draw(&CanvasLine {
+                    x1: x - dx,
+                    y1: y + dy,
+                    x2: x,
+                    y2: y,
+                    color: glyph.color,
+                });
+                ctx.draw(&CanvasLine {
+                    x1: x + dx,
+                    y1: y + dy,
+                    x2: x,
+                    y2: y,
+                    color: glyph.color,
+                });
+                ctx.draw(&CanvasLine {
+                    x1: x,
+                    y1: y,
+                    x2: x,
+                    y2: y - dy * 0.7,
+                    color: glyph.color,
+                });
+            }
+            OverlayGlyphKind::BullishCross | OverlayGlyphKind::BearishCross => {
+                ctx.draw(&CanvasLine {
+                    x1: x - dx,
+                    y1: y - dy,
+                    x2: x + dx,
+                    y2: y + dy,
+                    color: glyph.color,
+                });
+                ctx.draw(&CanvasLine {
+                    x1: x - dx,
+                    y1: y + dy,
+                    x2: x + dx,
+                    y2: y - dy,
+                    color: glyph.color,
+                });
+            }
+        }
+    }
 }

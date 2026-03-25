@@ -415,6 +415,10 @@ fn compute_zero_lag_hma(close: &[f64], hma_length: usize) -> Vec<f64> {
     out
 }
 
+pub(crate) fn zero_lag_hma_series(close: &[f64], hma_length: usize) -> Vec<f64> {
+    compute_zero_lag_hma(close, hma_length)
+}
+
 fn wma(prices: &[f64], period: usize) -> Vec<f64> {
     let mut res = vec![f64::NAN; prices.len()];
     if period == 0 || prices.len() < period {
