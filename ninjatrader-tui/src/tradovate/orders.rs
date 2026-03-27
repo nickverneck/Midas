@@ -111,12 +111,15 @@ fn dispatch_native_order_strategy_target(
         });
     }
 
-    let interrupt_order_strategy_id = if current_qty != 0 {
+    let is_reversal = current_qty != 0
+        && target_qty != 0
+        && current_qty.signum() != target_qty.signum();
+    let interrupt_order_strategy_id = if current_qty != 0 && !is_reversal {
         selected_active_order_strategy_id(session)
     } else {
         None
     };
-    if current_qty != 0 && interrupt_order_strategy_id.is_none() {
+    if current_qty != 0 && !is_reversal && interrupt_order_strategy_id.is_none() {
         return Ok(MarketOrderDispatchOutcome::NoOp {
             message: format!(
                 "Waiting for broker order-strategy state to reconcile before automated transition {} -> {} on {} ({reason})",
@@ -1266,7 +1269,7 @@ mod order_tests {
     }
 
     #[test]
-    fn automated_reversal_waits_when_position_is_nonflat_but_strategy_id_is_stale() {
+    fn automated_reversal_uses_single_strategy_call_without_interrupt() {
         let mut session = test_session();
         session.execution_config.kind = StrategyKind::Native;
         session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -1292,15 +1295,27 @@ mod order_tests {
             -1,
             "ema_cross signal",
         )
-        .expect("stale non-flat reversal should wait instead of failing");
+        .expect("non-flat reversal should queue a single order-strategy call");
 
         match outcome {
-            MarketOrderDispatchOutcome::NoOp { message } => {
-                assert!(message.contains("Waiting for broker order-strategy state"));
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(-1),
+            } => {
+                match broker_rx.try_recv().expect("broker command queued") {
+                    BrokerCommand::OrderStrategy { strategy, .. } => {
+                        assert_eq!(strategy.interrupt_order_strategy_id, None);
+                        assert_eq!(strategy.target_qty, -1);
+                        assert_eq!(strategy.entry_order_qty, 2);
+                        assert_eq!(
+                            strategy.payload.get("action").and_then(Value::as_str),
+                            Some("Sell")
+                        );
+                    }
+                    _ => panic!("expected order strategy command"),
+                }
             }
-            _ => panic!("expected no-op while broker strategy state reconciles"),
+            _ => panic!("expected queued order-strategy reversal"),
         }
-        assert!(broker_rx.try_recv().is_err());
     }
 
     #[test]
