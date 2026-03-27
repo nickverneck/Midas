@@ -9,6 +9,10 @@ impl App {
                 format!("Auth Mode: {}", self.form.auth_mode.label()),
                 self.focus == Focus::AuthMode,
             ),
+            styled_line(
+                format!("Log Mode: {}", self.form.log_mode.label()),
+                self.focus == Focus::LogMode,
+            ),
             Line::from(""),
             Line::from("Token Sources"),
             styled_line(
@@ -61,9 +65,10 @@ impl App {
             Line::from("1. Token Override is used first when non-empty."),
             Line::from("2. Token File mode reads token_path, then session cache."),
             Line::from("3. Credentials mode requests a fresh access token."),
+            Line::from("4. Debug log mode adds submit/seen/ack/fill lifecycle lines."),
             Line::from(""),
             Line::from("Use Up/Down to move between fields."),
-            Line::from("Use Left/Right on Env or Auth Mode."),
+            Line::from("Use Left/Right on Env, Auth Mode, or Log Mode."),
             Line::from("Paste a token directly into Token Override when needed."),
         ]
     }
@@ -72,6 +77,7 @@ impl App {
         vec![
             Line::from(format!("Current status: {}", self.status)),
             Line::from(format!("Environment REST: {}", self.form.env.rest_url())),
+            Line::from(format!("Log Mode: {}", self.form.log_mode.label())),
             Line::from(format!("User WebSocket: {}", self.form.env.user_ws_url())),
             Line::from(format!(
                 "Market WebSocket: {}",
@@ -95,6 +101,7 @@ impl App {
                 self.strategy_runtime_summary()
             )),
             Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
+            Line::from(format!("Log Mode: {}", self.form.log_mode.label())),
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),
                 None => "Selected account: none".to_string(),
@@ -114,20 +121,22 @@ impl App {
                 format_latency_ms(self.latency.rest_rtt_ms)
             )),
             Line::from(format!(
-                "Order Submit RTT: {}",
-                format_latency_ms(self.latency.last_order_ack_ms)
+                "Order RTT: {}",
+                format_latency_group(
+                    self.latency.last_order_ack_ms,
+                    self.latency.last_order_seen_ms,
+                    self.latency.last_exec_report_ms,
+                    self.latency.last_fill_ms,
+                )
             )),
             Line::from(format!(
-                "Order Seen: {}",
-                format_latency_ms(self.latency.last_order_seen_ms)
-            )),
-            Line::from(format!(
-                "Exec Ack: {}",
-                format_latency_ms(self.latency.last_exec_report_ms)
-            )),
-            Line::from(format!(
-                "First Fill: {}",
-                format_latency_ms(self.latency.last_fill_ms)
+                "Signal RTT: {}",
+                format_latency_group(
+                    self.latency.last_signal_submit_ms,
+                    self.latency.last_signal_seen_ms,
+                    self.latency.last_signal_ack_ms,
+                    self.latency.last_signal_fill_ms,
+                )
             )),
             Line::from(format!(
                 "Market Update Age: {}",

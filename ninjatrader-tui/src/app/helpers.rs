@@ -79,6 +79,21 @@ fn format_age_ms(value: Option<u64>) -> String {
     }
 }
 
+fn format_latency_group(
+    submit: Option<u64>,
+    seen: Option<u64>,
+    ack: Option<u64>,
+    fill: Option<u64>,
+) -> String {
+    format!(
+        "sub {} | seen {} | ack {} | fill {}",
+        format_latency_ms(submit),
+        format_latency_ms(seen),
+        format_latency_ms(ack),
+        format_latency_ms(fill),
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct OverlaySegment {
     start: (f64, f64),

@@ -22,6 +22,7 @@ impl App {
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,
             latency: LatencySnapshot::default(),
+            last_log_at: None,
             last_market_update_at: None,
         };
         app.push_log(
@@ -39,6 +40,7 @@ impl App {
         let mut cfg = self.base_config.clone();
         cfg.env = self.form.env;
         cfg.auth_mode = self.form.auth_mode;
+        cfg.log_mode = self.form.log_mode;
         cfg.token_override = self.form.token_override.clone();
         cfg.username = self.form.username.clone();
         cfg.password = self.form.password.clone();
@@ -59,6 +61,11 @@ impl App {
             ServiceEvent::Status(message) => {
                 self.status = message.clone();
                 self.push_log(message);
+            }
+            ServiceEvent::DebugLog(message) => {
+                if self.form.log_mode == LogMode::Debug {
+                    self.push_log(format!("DEBUG: {message}"));
+                }
             }
             ServiceEvent::Error(message) => {
                 self.status = format!("Error: {message}");

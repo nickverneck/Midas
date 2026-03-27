@@ -3,6 +3,13 @@ enum MarketOrderDispatchOutcome {
     Queued { target_qty: Option<i32> },
 }
 
+#[derive(Clone)]
+struct LiveProtectionOrder {
+    order_id: i64,
+    cl_ord_id: Option<String>,
+    price: Option<f64>,
+}
+
 fn dispatch_manual_order(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
@@ -367,6 +374,8 @@ fn plan_native_protection_sync(
         let same_position = existing.signed_qty == signed_qty;
         let same_take_profit = prices_match(existing.take_profit_price, take_profit_price);
         let same_stop = prices_match(existing.stop_price, stop_price);
+        let same_protection_shape =
+            existing.take_profit_price.is_some() == take_profit_price.is_some();
         if same_position && same_take_profit && same_stop {
             return Ok(None);
         }
@@ -374,10 +383,14 @@ fn plan_native_protection_sync(
         if same_position
             && same_take_profit
             && stop_price.is_some()
-            && existing.stop_order_id.is_some()
-            && existing.take_profit_price.is_some() == take_profit_price.is_some()
+            && same_protection_shape
         {
-            let stop_order_id = existing.stop_order_id.expect("checked is_some");
+            let Some(stop_order_id) = existing.stop_order_id else {
+                // Do not cancel and recreate a healthy bracket just because the live stop ID has
+                // not been observed yet. That path can exceed broker working-order limits on
+                // constrained accounts and leave the position unprotected.
+                return Ok(None);
+            };
             let next_stop_price = stop_price.expect("checked is_some");
             let mut next_state = existing;
             next_state.stop_price = Some(next_stop_price);
@@ -728,9 +741,12 @@ fn enqueue_market_order(
     broker_tx: &UnboundedSender<BrokerCommand>,
     order: PendingMarketOrder,
 ) -> Result<()> {
+    let pending_signal = session.pending_signal_context.take();
     session.order_submit_in_flight = true;
     session.order_latency_tracker = Some(OrderLatencyTracker {
         started_at: time::Instant::now(),
+        signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
+        signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: order.cl_ord_id.clone(),
         order_id: None,
         order_strategy_id: None,
@@ -776,9 +792,12 @@ fn enqueue_order_strategy(
     broker_tx: &UnboundedSender<BrokerCommand>,
     strategy: PendingOrderStrategyTransition,
 ) -> Result<()> {
+    let pending_signal = session.pending_signal_context.take();
     session.order_submit_in_flight = true;
     session.order_latency_tracker = Some(OrderLatencyTracker {
         started_at: time::Instant::now(),
+        signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
+        signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: strategy.uuid.clone(),
         order_id: None,
         order_strategy_id: None,
@@ -854,7 +873,94 @@ fn detach_strategy_protection_by_key(
     DetachedStrategyProtection { cancel_order_ids }
 }
 
+fn collect_live_protection_orders(
+    session: &SessionState,
+    key: StrategyProtectionKey,
+) -> (Vec<LiveProtectionOrder>, Vec<LiveProtectionOrder>) {
+    let mut take_profit_orders: Vec<LiveProtectionOrder> = Vec::new();
+    let mut stop_orders: Vec<LiveProtectionOrder> = Vec::new();
+
+    let mut classify = |order: &Value| {
+        if !order_is_active(order) || order_contract_id(order) != Some(key.contract_id) {
+            return;
+        }
+        let Some(order_id) = extract_entity_id(order) else {
+            return;
+        };
+        let candidate = LiveProtectionOrder {
+            order_id,
+            cl_ord_id: order
+                .get("clOrdId")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            price: match order_type(order).as_deref().unwrap_or_default() {
+                "limit" | "mit" => pick_number(order, &["price"]),
+                "stop" | "stoplimit" | "trailingstop" | "trailingstoplimit" => {
+                    pick_number(order, &["stopPrice", "price"])
+                }
+                _ => None,
+            },
+        };
+        match order_type(order).as_deref().unwrap_or_default() {
+            "limit" | "mit" => {
+                if !take_profit_orders
+                    .iter()
+                    .any(|existing| existing.order_id == order_id)
+                {
+                    take_profit_orders.push(candidate);
+                }
+            }
+            "stop" | "stoplimit" | "trailingstop" | "trailingstoplimit" => {
+                if !stop_orders.iter().any(|existing| existing.order_id == order_id) {
+                    stop_orders.push(candidate);
+                }
+            }
+            _ => {}
+        }
+    };
+
+    if selected_strategy_key(session).ok() == Some(key) {
+        if let Some(order_strategy_id) = selected_active_order_strategy_id(session) {
+            for order in session
+                .user_store
+                .linked_strategy_orders(key.account_id, order_strategy_id)
+            {
+                classify(order);
+            }
+        }
+    }
+
+    if let Some(orders) = session.user_store.orders.get(&key.account_id) {
+        for order in orders.values() {
+            if !order
+                .get("clOrdId")
+                .and_then(Value::as_str)
+                .is_some_and(|cl_ord_id| cl_ord_id.starts_with("midas-"))
+            {
+                continue;
+            }
+            classify(order);
+        }
+    }
+
+    (take_profit_orders, stop_orders)
+}
+
+fn recover_live_protection_order(
+    expected_cl_ord_id: Option<&str>,
+    candidates: &[LiveProtectionOrder],
+) -> Option<LiveProtectionOrder> {
+    if let Some(cl_ord_id) = expected_cl_ord_id {
+        return candidates
+            .iter()
+            .find(|candidate| candidate.cl_ord_id.as_deref() == Some(cl_ord_id))
+            .cloned();
+    }
+    (candidates.len() == 1).then(|| candidates[0].clone())
+}
+
 fn refresh_managed_protection_order_ids(session: &mut SessionState, key: StrategyProtectionKey) {
+    let (take_profit_candidates, stop_candidates) = collect_live_protection_orders(session, key);
     let Some(state) = session.managed_protection.get_mut(&key) else {
         return;
     };
@@ -865,11 +971,38 @@ fn refresh_managed_protection_order_ids(session: &mut SessionState, key: Strateg
                 .order_id_by_client_id(key.account_id, cl_ord_id);
         }
     }
+    if state.take_profit_order_id.is_none() {
+        if let Some(candidate) = recover_live_protection_order(
+            state.take_profit_cl_ord_id.as_deref(),
+            &take_profit_candidates,
+        ) {
+            state.take_profit_order_id = Some(candidate.order_id);
+            if state.take_profit_cl_ord_id.is_none() {
+                state.take_profit_cl_ord_id = candidate.cl_ord_id;
+            }
+            if state.take_profit_price.is_none() {
+                state.take_profit_price = candidate.price;
+            }
+        }
+    }
     if state.stop_order_id.is_none() {
         if let Some(cl_ord_id) = state.stop_cl_ord_id.as_deref() {
             state.stop_order_id = session
                 .user_store
                 .order_id_by_client_id(key.account_id, cl_ord_id);
+        }
+    }
+    if state.stop_order_id.is_none() {
+        if let Some(candidate) =
+            recover_live_protection_order(state.stop_cl_ord_id.as_deref(), &stop_candidates)
+        {
+            state.stop_order_id = Some(candidate.order_id);
+            if state.stop_cl_ord_id.is_none() {
+                state.stop_cl_ord_id = candidate.cl_ord_id;
+            }
+            if state.stop_price.is_none() {
+                state.stop_price = candidate.price;
+            }
         }
     }
 }
@@ -1108,6 +1241,7 @@ mod order_tests {
             request_tx,
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
             order_latency_tracker: None,
             order_submit_in_flight: false,
             protection_sync_in_flight: false,
@@ -1141,6 +1275,135 @@ mod order_tests {
         assert_eq!(signed_profit_target_offset("Sell", 2.0), -2.0);
         assert_eq!(signed_stop_loss_offset("Buy", 2.0), -2.0);
         assert_eq!(signed_stop_loss_offset("Sell", 2.0), 2.0);
+    }
+
+    #[test]
+    fn trailing_stop_update_recovers_live_stop_order_id() {
+        let mut session = test_session();
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.managed_protection.insert(
+            key,
+            ManagedProtectionOrders {
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.25),
+                take_profit_cl_ord_id: None,
+                stop_cl_ord_id: None,
+                take_profit_order_id: Some(1001),
+                stop_order_id: None,
+            },
+        );
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([
+                (
+                    1001,
+                    json!({
+                        "id": 1001,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "orderType": "Limit",
+                        "price": 6639.0,
+                        "ordStatus": "Working"
+                    }),
+                ),
+                (
+                    1002,
+                    json!({
+                        "id": 1002,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "orderType": "Stop",
+                        "stopPrice": 6644.25,
+                        "ordStatus": "Working"
+                    }),
+                ),
+            ]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        session.user_store.order_strategy_links.insert(
+            2,
+            json!({
+                "id": 2,
+                "orderStrategyId": 77,
+                "orderId": 1002
+            }),
+        );
+
+        let sync = plan_native_protection_sync(
+            &mut session,
+            DesiredNativeProtection {
+                key,
+                account_name: "SIM".to_string(),
+                contract_name: "ESM6".to_string(),
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.5),
+                reason: "ema_cross bar sync".to_string(),
+            },
+        )
+        .expect("planner should succeed")
+        .expect("stop update should queue a modify request");
+
+        match sync.operation {
+            ProtectionSyncOperation::ModifyStop { payload } => {
+                assert_eq!(payload.get("orderId").and_then(Value::as_i64), Some(1002));
+                assert_eq!(payload.get("stopPrice").and_then(Value::as_f64), Some(6644.5));
+            }
+            _ => panic!("expected stop modification"),
+        }
+    }
+
+    #[test]
+    fn trailing_stop_update_waits_for_live_stop_order_id() {
+        let mut session = test_session();
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.managed_protection.insert(
+            key,
+            ManagedProtectionOrders {
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.25),
+                take_profit_cl_ord_id: None,
+                stop_cl_ord_id: None,
+                take_profit_order_id: Some(1001),
+                stop_order_id: None,
+            },
+        );
+
+        let sync = plan_native_protection_sync(
+            &mut session,
+            DesiredNativeProtection {
+                key,
+                account_name: "SIM".to_string(),
+                contract_name: "ESM6".to_string(),
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.5),
+                reason: "ema_cross bar sync".to_string(),
+            },
+        )
+        .expect("planner should succeed");
+
+        assert!(sync.is_none(), "planner should preserve the existing bracket");
     }
 
     #[test]

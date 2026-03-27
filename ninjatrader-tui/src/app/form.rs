@@ -3,6 +3,7 @@ impl FormState {
         Self {
             env: config.env,
             auth_mode: config.auth_mode,
+            log_mode: config.log_mode,
             token_override: config.token_override.clone(),
             username: config.username.clone(),
             password: config.password.clone(),

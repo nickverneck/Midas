@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, AuthMode, TradingEnvironment};
+use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
@@ -37,11 +37,12 @@ pub struct App {
     contract_results: Vec<ContractSuggestion>,
     selected_contract: usize,
     market: MarketSnapshot,
-    logs: VecDeque<String>,
+    logs: VecDeque<LogEntry>,
     dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
     latency: LatencySnapshot,
+    last_log_at: Option<Instant>,
     last_market_update_at: Option<Instant>,
 }
 
@@ -49,6 +50,7 @@ pub struct App {
 struct FormState {
     env: TradingEnvironment,
     auth_mode: AuthMode,
+    log_mode: LogMode,
     token_override: String,
     username: String,
     password: String,
@@ -63,6 +65,7 @@ struct FormState {
 enum Focus {
     Env,
     AuthMode,
+    LogMode,
     TokenOverride,
     Username,
     Password,
@@ -118,6 +121,13 @@ struct StrategyRuntimeState {
     last_closed_bar_ts: Option<i64>,
     pending_target_qty: Option<i32>,
     last_summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct LogEntry {
+    timestamp: chrono::DateTime<chrono::Local>,
+    elapsed_since_previous: Option<std::time::Duration>,
+    message: String,
 }
 
 #[derive(Debug, Clone)]

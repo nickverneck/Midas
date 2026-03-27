@@ -25,6 +25,8 @@ struct UserSocketCommand {
 
 struct OrderLatencyTracker {
     started_at: time::Instant,
+    signal_started_at: Option<time::Instant>,
+    signal_context: Option<String>,
     cl_ord_id: String,
     order_id: Option<i64>,
     order_strategy_id: Option<i64>,

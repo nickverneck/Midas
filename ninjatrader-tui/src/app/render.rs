@@ -44,6 +44,12 @@ impl App {
                 }
                 _ => {}
             },
+            Focus::LogMode => match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.form.log_mode = self.form.log_mode.toggle();
+                }
+                _ => {}
+            },
             Focus::Connect => {
                 if key.code == KeyCode::Enter {
                     let cfg = self.current_config();
@@ -377,6 +383,7 @@ impl App {
             }
             Focus::Env
             | Focus::AuthMode
+            | Focus::LogMode
             | Focus::TokenOverride
             | Focus::Username
             | Focus::Password
@@ -526,6 +533,7 @@ impl App {
             | Focus::ContractList
             | Focus::Env
             | Focus::AuthMode
+            | Focus::LogMode
             | Focus::TokenOverride
             | Focus::Username
             | Focus::Password
@@ -609,7 +617,7 @@ impl App {
         };
         let help = match self.screen {
             Screen::Login => {
-                "F2 selection | Up/Down focus | Left/Right toggle | Enter connect | F5/Ctrl+S save logs | q quit"
+                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect | F5/Ctrl+S save logs | q quit"
             }
             Screen::Selection => {
                 "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
@@ -651,6 +659,8 @@ impl App {
                 Span::raw(format!("Env: {}", self.form.env.label())),
                 Span::raw("  "),
                 Span::raw(format!("Auth: {}", self.form.auth_mode.label())),
+                Span::raw("  "),
+                Span::raw(format!("Logs: {}", self.form.log_mode.label())),
             ]),
             Line::from(vec![
                 Span::raw("Focus: "),
@@ -1175,7 +1185,7 @@ impl App {
             .iter()
             .rev()
             .take(6)
-            .cloned()
+            .map(LogEntry::render_line)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -1196,7 +1206,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, LogMode};
     use crate::strategy::ExecutionStateSnapshot;
     use crate::tradovate::{AccountInfo, ContractSuggestion, ManualOrderAction, ServiceEvent};
     use serde_json::json;
@@ -1266,6 +1276,21 @@ mod tests {
 
         app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
         assert_eq!(app.bar_type, BarType::Minute1);
+    }
+
+    #[test]
+    fn login_log_mode_toggle_uses_arrow_keys() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.focus = Focus::LogMode;
+
+        assert_eq!(app.form.log_mode, LogMode::Default);
+
+        app.handle_login_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(app.form.log_mode, LogMode::Debug);
+
+        app.handle_login_key(key(KeyCode::Left), &cmd_tx);
+        assert_eq!(app.form.log_mode, LogMode::Default);
     }
 
     #[test]
@@ -1391,5 +1416,40 @@ mod tests {
 
         assert_eq!(app.bar_type, BarType::Minute1);
         assert_eq!(app.focus, Focus::InstrumentQuery);
+    }
+
+    #[test]
+    fn push_log_records_wall_time_and_elapsed_delta() {
+        let mut app = App::new(AppConfig::default());
+        app.logs.clear();
+        app.last_log_at = None;
+
+        app.push_log("first event".to_string());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.push_log("second event".to_string());
+
+        assert_eq!(app.logs.len(), 2);
+        assert_eq!(app.logs[0].elapsed_since_previous, None);
+        assert!(app.logs[1].elapsed_since_previous.is_some());
+        assert!(app.logs[0].render_line().contains("first event"));
+        assert!(app.logs[0].render_line().contains("+0ms"));
+        assert!(app.logs[1].render_line().contains("second event"));
+        assert!(app.logs[1].render_line().starts_with('['));
+    }
+
+    #[test]
+    fn debug_log_events_are_filtered_by_log_mode() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.logs.clear();
+
+        app.handle_service_event(ServiceEvent::DebugLog("submit 42ms | order".to_string()), &cmd_tx);
+        assert!(app.logs.is_empty());
+
+        app.form.log_mode = LogMode::Debug;
+        app.handle_service_event(ServiceEvent::DebugLog("submit 42ms | order".to_string()), &cmd_tx);
+
+        assert_eq!(app.logs.len(), 1);
+        assert_eq!(app.logs[0].message, "DEBUG: submit 42ms | order");
     }
 }

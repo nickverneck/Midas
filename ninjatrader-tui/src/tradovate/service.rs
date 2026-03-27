@@ -129,6 +129,7 @@ async fn handle_command(
                 request_tx,
                 execution_config: ExecutionStrategyConfig::default(),
                 execution_runtime: ExecutionRuntimeState::default(),
+                pending_signal_context: None,
                 order_latency_tracker: None,
                 order_submit_in_flight: false,
                 protection_sync_in_flight: false,
@@ -340,8 +341,15 @@ async fn handle_internal(
                     return Ok(());
                 };
                 for envelope in &entities {
+                    let previous_latency = state.latency;
                     latency_changed |=
                         update_latency_from_envelope(session, &mut state.latency, &envelope);
+                    emit_debug_logs_from_latency_delta(
+                        event_tx,
+                        session,
+                        previous_latency,
+                        state.latency,
+                    );
                     session.user_store.apply(envelope.clone());
                 }
                 for envelope in &entities {
@@ -396,11 +404,17 @@ async fn handle_internal(
             }
         }
         InternalEvent::BrokerOrderAck(ack) => {
+            let mut signal_submit_ms = None;
+            let mut signal_context = None;
             if let Some(session) = state.session.as_mut() {
                 session.order_submit_in_flight = false;
                 if let Some(tracker) = session.order_latency_tracker.as_mut() {
                     if tracker.cl_ord_id == ack.cl_ord_id {
                         tracker.order_id = ack.order_id;
+                        signal_submit_ms = tracker
+                            .signal_started_at
+                            .map(|started_at| started_at.elapsed().as_millis() as u64);
+                        signal_context = tracker.signal_context.clone();
                     }
                 }
             }
@@ -408,7 +422,18 @@ async fn handle_internal(
             state.latency.last_order_seen_ms = None;
             state.latency.last_exec_report_ms = None;
             state.latency.last_fill_ms = None;
+            state.latency.last_signal_submit_ms = signal_submit_ms;
+            state.latency.last_signal_seen_ms = None;
+            state.latency.last_signal_ack_ms = None;
+            state.latency.last_signal_fill_ms = None;
+            let debug_message = format!(
+                "submit {}{} | {}",
+                format_debug_latency_ms(ack.submit_rtt_ms),
+                debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+                ack.message
+            );
             let _ = event_tx.send(ServiceEvent::Status(ack.message));
+            let _ = event_tx.send(ServiceEvent::DebugLog(debug_message));
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         InternalEvent::BrokerOrderFailed(failure) => {
@@ -429,14 +454,24 @@ async fn handle_internal(
                     }
                 }
             }
+            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                "submit failed | {}",
+                failure.message
+            )));
             let _ = event_tx.send(ServiceEvent::Error(failure.message));
         }
         InternalEvent::OrderStrategyAck(ack) => {
+            let mut signal_submit_ms = None;
+            let mut signal_context = None;
             if let Some(session) = state.session.as_mut() {
                 session.order_submit_in_flight = false;
                 if let Some(tracker) = session.order_latency_tracker.as_mut() {
                     if tracker.cl_ord_id == ack.uuid {
                         tracker.order_strategy_id = ack.order_strategy_id;
+                        signal_submit_ms = tracker
+                            .signal_started_at
+                            .map(|started_at| started_at.elapsed().as_millis() as u64);
+                        signal_context = tracker.signal_context.clone();
                     }
                 }
                 if let Some(order_strategy_id) = ack.order_strategy_id {
@@ -451,7 +486,18 @@ async fn handle_internal(
             state.latency.last_order_seen_ms = None;
             state.latency.last_exec_report_ms = None;
             state.latency.last_fill_ms = None;
+            state.latency.last_signal_submit_ms = signal_submit_ms;
+            state.latency.last_signal_seen_ms = None;
+            state.latency.last_signal_ack_ms = None;
+            state.latency.last_signal_fill_ms = None;
+            let debug_message = format!(
+                "submit {}{} | {}",
+                format_debug_latency_ms(ack.submit_rtt_ms),
+                debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+                ack.message
+            );
             let _ = event_tx.send(ServiceEvent::Status(ack.message));
+            let _ = event_tx.send(ServiceEvent::DebugLog(debug_message));
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
         InternalEvent::OrderStrategyFailed(failure) => {
@@ -486,8 +532,16 @@ async fn handle_internal(
             }
             if stale_interrupt_recovered {
                 request_snapshot_refresh(state, &internal_tx);
+                let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                    "submit stale | {}",
+                    failure.message
+                )));
                 let _ = event_tx.send(ServiceEvent::Status(failure.message));
             } else {
+                let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                    "submit failed | {}",
+                    failure.message
+                )));
                 let _ = event_tx.send(ServiceEvent::Error(failure.message));
             }
         }
@@ -535,6 +589,118 @@ async fn handle_internal(
         }
     }
     Ok(())
+}
+
+fn emit_debug_logs_from_latency_delta(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: &SessionState,
+    previous: LatencySnapshot,
+    current: LatencySnapshot,
+) {
+    emit_debug_latency_stage(
+        event_tx,
+        session,
+        "seen",
+        previous.last_order_seen_ms,
+        current.last_order_seen_ms,
+    );
+    emit_debug_latency_stage(
+        event_tx,
+        session,
+        "ack",
+        previous.last_exec_report_ms,
+        current.last_exec_report_ms,
+    );
+    emit_debug_latency_stage(
+        event_tx,
+        session,
+        "fill",
+        previous.last_fill_ms,
+        current.last_fill_ms,
+    );
+}
+
+fn emit_debug_latency_stage(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: &SessionState,
+    stage: &str,
+    previous: Option<u64>,
+    current: Option<u64>,
+) {
+    if current.is_none() || previous == current {
+        return;
+    }
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "{stage} {}{} | {}",
+        format_debug_latency_ms(current.unwrap_or_default()),
+        debug_signal_latency_suffix(
+            session
+                .order_latency_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.signal_started_at)
+                .map(|started_at| started_at.elapsed().as_millis() as u64),
+            session
+                .order_latency_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.signal_context.as_deref()),
+        ),
+        debug_tracker_context(session.order_latency_tracker.as_ref(), session)
+    )));
+}
+
+fn format_debug_latency_ms(value: u64) -> String {
+    if value >= 60_000 {
+        format!("{:.1}m", value as f64 / 60_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}s", value as f64 / 1_000.0)
+    } else {
+        format!("{value}ms")
+    }
+}
+
+fn debug_signal_latency_suffix(signal_latency_ms: Option<u64>, signal_context: Option<&str>) -> String {
+    let Some(signal_latency_ms) = signal_latency_ms else {
+        return String::new();
+    };
+    let mut suffix = format!(" | signal {}", format_debug_latency_ms(signal_latency_ms));
+    if let Some(signal_context) = signal_context {
+        suffix.push_str(&format!(" [{signal_context}]"));
+    }
+    suffix
+}
+
+fn debug_tracker_context(
+    tracker: Option<&OrderLatencyTracker>,
+    session: &SessionState,
+) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(contract) = session.selected_contract.as_ref() {
+        parts.push(contract.name.clone());
+    }
+    if let Some(account_name) = session
+        .selected_account_id
+        .and_then(|selected_id| session.accounts.iter().find(|account| account.id == selected_id))
+        .map(|account| account.name.clone())
+    {
+        parts.push(format!("on {account_name}"));
+    }
+
+    if let Some(tracker) = tracker {
+        parts.push(format!("[request {}]", tracker.cl_ord_id));
+        if let Some(order_id) = tracker.order_id {
+            parts.push(format!("(order {order_id})"));
+        }
+        if let Some(order_strategy_id) = tracker.order_strategy_id {
+            parts.push(format!("(strategy {order_strategy_id})"));
+        }
+    }
+
+    if parts.is_empty() {
+        "selected market".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 async fn maintain_session(

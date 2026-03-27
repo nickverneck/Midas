@@ -81,11 +81,41 @@ impl Default for AuthMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogMode {
+    Default,
+    Debug,
+}
+
+impl LogMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Debug => "Debug",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Default => Self::Debug,
+            Self::Debug => Self::Default,
+        }
+    }
+}
+
+impl Default for LogMode {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub env: TradingEnvironment,
     pub auth_mode: AuthMode,
+    pub log_mode: LogMode,
     pub token_override: String,
     pub username: String,
     pub password: String,
@@ -109,6 +139,7 @@ impl Default for AppConfig {
         Self {
             env: TradingEnvironment::Sim,
             auth_mode: AuthMode::TokenFile,
+            log_mode: LogMode::Default,
             token_override: String::new(),
             username: String::new(),
             password: String::new(),
@@ -155,6 +186,9 @@ impl AppConfig {
         }
         if let Some(raw) = env_string("MIDAS_TUI_AUTH_MODE") {
             self.auth_mode = parse_auth_mode(&raw)?;
+        }
+        if let Some(raw) = env_string("MIDAS_TUI_LOG_MODE") {
+            self.log_mode = parse_log_mode(&raw)?;
         }
         if let Some(raw) = env_string("MIDAS_TUI_TOKEN_OVERRIDE") {
             self.token_override = raw;
@@ -246,6 +280,14 @@ fn parse_auth_mode(raw: &str) -> Result<AuthMode> {
         "token_file" | "token" => Ok(AuthMode::TokenFile),
         "credentials" | "creds" => Ok(AuthMode::Credentials),
         other => bail!("invalid auth mode `{other}`"),
+    }
+}
+
+fn parse_log_mode(raw: &str) -> Result<LogMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "default" | "normal" => Ok(LogMode::Default),
+        "debug" | "verbose" => Ok(LogMode::Debug),
+        other => bail!("invalid log mode `{other}`"),
     }
 }
 

@@ -1,3 +1,23 @@
+impl LogEntry {
+    fn render_line(&self) -> String {
+        format!(
+            "[{} | {}] {}",
+            self.timestamp.format("%H:%M:%S%.3f"),
+            format_log_elapsed(self.elapsed_since_previous),
+            self.message
+        )
+    }
+}
+
+fn format_log_elapsed(duration: Option<std::time::Duration>) -> String {
+    match duration.map(|value| value.as_millis()) {
+        Some(value) if value >= 60_000 => format!("+{:.1}m", value as f64 / 60_000.0),
+        Some(value) if value >= 1_000 => format!("+{:.1}s", value as f64 / 1_000.0),
+        Some(value) => format!("+{value}ms"),
+        None => "+0ms".to_string(),
+    }
+}
+
 impl App {
     fn sync_selected_account(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if let Some(account) = self.accounts.get(self.selected_account) {
@@ -21,6 +41,7 @@ impl App {
         vec![
             Focus::Env,
             Focus::AuthMode,
+            Focus::LogMode,
             Focus::TokenPath,
             Focus::TokenOverride,
             Focus::Username,
@@ -169,10 +190,16 @@ impl App {
     }
 
     fn push_log(&mut self, message: String) {
+        let now = std::time::Instant::now();
         while self.logs.len() >= 200 {
             self.logs.pop_front();
         }
-        self.logs.push_back(message);
+        self.logs.push_back(LogEntry {
+            timestamp: chrono::Local::now(),
+            elapsed_since_previous: self.last_log_at.map(|last| now.duration_since(last)),
+            message,
+        });
+        self.last_log_at = Some(now);
     }
 
     fn save_logs_to_file(&mut self) {
@@ -220,14 +247,16 @@ impl App {
         body.push_str(&format!("status: {}\n", self.status));
         body.push_str(&format!("env: {}\n", self.form.env.label()));
         body.push_str(&format!("auth_mode: {}\n", self.form.auth_mode.label()));
+        body.push_str(&format!("log_mode: {}\n", self.form.log_mode.label()));
         body.push_str(&format!("strategy: {}\n", self.strategy.summary_label()));
         body.push_str(&format!("selected_account: {selected_account}\n"));
         body.push_str(&format!("selected_contract: {selected_contract}\n"));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
+        body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
 
-        for line in &self.logs {
-            body.push_str(line);
+        for entry in &self.logs {
+            body.push_str(&entry.render_line());
             body.push('\n');
         }
 

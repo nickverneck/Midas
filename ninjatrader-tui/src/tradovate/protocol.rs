@@ -599,6 +599,8 @@ mod tests {
     fn tracker_matches_entity_binds_order_id_from_cl_ord_id() {
         let mut tracker = OrderLatencyTracker {
             started_at: time::Instant::now(),
+            signal_started_at: None,
+            signal_context: None,
             cl_ord_id: "midas-1-entry".to_string(),
             order_id: None,
             order_strategy_id: None,
@@ -631,8 +633,11 @@ mod tests {
             request_tx,
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
             order_latency_tracker: Some(OrderLatencyTracker {
                 started_at: time::Instant::now(),
+                signal_started_at: None,
+                signal_context: None,
                 cl_ord_id: "midas-1-strategy".to_string(),
                 order_id: None,
                 order_strategy_id: Some(77),
@@ -690,8 +695,11 @@ mod tests {
             request_tx,
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
             order_latency_tracker: Some(OrderLatencyTracker {
                 started_at: time::Instant::now(),
+                signal_started_at: Some(time::Instant::now()),
+                signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
                 cl_ord_id: "midas-1-entry".to_string(),
                 order_id: Some(42),
                 order_strategy_id: None,
@@ -747,6 +755,9 @@ mod tests {
         assert!(latency.last_order_seen_ms.is_some());
         assert!(latency.last_exec_report_ms.is_some());
         assert!(latency.last_fill_ms.is_some());
+        assert!(latency.last_signal_seen_ms.is_some());
+        assert!(latency.last_signal_ack_ms.is_some());
+        assert!(latency.last_signal_fill_ms.is_some());
     }
 
     #[test]
@@ -926,6 +937,7 @@ mod tests {
             request_tx,
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
             order_latency_tracker: None,
             order_submit_in_flight: false,
             protection_sync_in_flight: false,
@@ -975,6 +987,7 @@ mod tests {
             request_tx,
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
             order_latency_tracker: None,
             order_submit_in_flight: false,
             protection_sync_in_flight: false,

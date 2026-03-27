@@ -431,6 +431,76 @@ fn effective_market_position_qty(session: &SessionState) -> i32 {
         .unwrap_or_else(|| selected_market_position_qty(session))
 }
 
+fn pending_target_has_live_broker_path(session: &SessionState) -> bool {
+    if session.order_submit_in_flight {
+        return true;
+    }
+
+    let Some(tracker) = session.order_latency_tracker.as_ref() else {
+        return false;
+    };
+    let Some(account_id) = session.selected_account_id else {
+        return false;
+    };
+
+    if let Some(order_id) = tracker
+        .order_id
+        .or_else(|| session.user_store.order_id_by_client_id(account_id, &tracker.cl_ord_id))
+    {
+        if session
+            .user_store
+            .find_order(account_id, order_id)
+            .is_some_and(order_is_active)
+        {
+            return true;
+        }
+    }
+
+    let Some(key) = selected_strategy_key(session).ok() else {
+        return false;
+    };
+    let Some(order_strategy_id) = tracker.order_strategy_id else {
+        return false;
+    };
+
+    if session
+        .user_store
+        .find_active_order_strategy(key.account_id, key.contract_id)
+        .and_then(extract_entity_id)
+        == Some(order_strategy_id)
+    {
+        return true;
+    }
+
+    session
+        .user_store
+        .linked_strategy_orders(key.account_id, order_strategy_id)
+        .into_iter()
+        .any(|order| order_is_active(order) && order_contract_id(order) == Some(key.contract_id))
+}
+
+fn clear_stale_pending_target(
+    session: &mut SessionState,
+    pending: i32,
+    actual_qty: i32,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) {
+    session.execution_runtime.pending_target_qty = None;
+    session.pending_signal_context = None;
+    session.order_latency_tracker = None;
+    session.execution_runtime.last_summary = format!(
+        "Pending target {pending} cleared: broker has no active order path and position is still {actual_qty}; re-evaluating."
+    );
+    session.execution_runtime.last_closed_bar_ts = latest_closed_bar_ts(session)
+        .map(|last_closed_ts| last_closed_ts.saturating_sub(1));
+    let _ = event_tx.send(ServiceEvent::Status(format!(
+        "Pending target {pending} cleared: broker has no active order path; re-evaluating."
+    )));
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "pending target cleared | target {pending} | actual {actual_qty} | broker has no active order path"
+    )));
+}
+
 fn evaluate_active_execution_strategy(
     session: &SessionState,
     bars: &[Bar],
@@ -550,6 +620,9 @@ fn handle_execution_account_sync(
                 )
             };
             runtime_changed = true;
+        } else if pending != 0 && !pending_target_has_live_broker_path(session) {
+            clear_stale_pending_target(session, pending, actual_qty, event_tx);
+            runtime_changed = true;
         }
     }
 
@@ -588,9 +661,10 @@ fn maybe_run_execution_strategy(
         return Ok(());
     }
 
-    if session.execution_runtime.pending_target_qty.is_some() {
-        session.execution_runtime.last_summary =
-            "Waiting for prior automated order to settle.".to_string();
+    if let Some(pending_target_qty) = session.execution_runtime.pending_target_qty {
+        session.execution_runtime.last_summary = format!(
+            "Waiting for prior automated order to settle (actual {actual_market_qty}, pending target {pending_target_qty})."
+        );
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -749,8 +823,32 @@ fn maybe_run_execution_strategy(
         signal.label(),
         summary
     );
-    match dispatch_target_position_order(session, broker_tx, target_qty, true, &reason)? {
+    let signal_context = PendingSignalLatencyContext {
+        started_at: time::Instant::now(),
+        description: format!(
+            "{} {} (qty {} -> {})",
+            active_native_slug(session),
+            signal.label(),
+            current_qty,
+            target_qty
+        ),
+    };
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "signal | {} | {}",
+        signal_context.description, summary
+    )));
+    session.pending_signal_context = Some(signal_context);
+    let dispatch_outcome =
+        match dispatch_target_position_order(session, broker_tx, target_qty, true, &reason) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                session.pending_signal_context = None;
+                return Err(err);
+            }
+        };
+    match dispatch_outcome {
         MarketOrderDispatchOutcome::NoOp { message } => {
+            session.pending_signal_context = None;
             let _ = event_tx.send(ServiceEvent::Status(message));
         }
         MarketOrderDispatchOutcome::Queued { target_qty } => {
@@ -785,6 +883,7 @@ mod execution_tests {
             request_tx,
             execution_config: ExecutionStrategyConfig::default(),
             execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
             order_latency_tracker: None,
             order_submit_in_flight: false,
             protection_sync_in_flight: false,
@@ -870,6 +969,55 @@ mod execution_tests {
         );
 
         assert!(!should_wait_for_strategy_owned_protection(&session));
+    }
+
+    #[test]
+    fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
+        let mut session = test_session();
+        let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_runtime.armed = true;
+        session.execution_runtime.pending_target_qty = Some(1);
+        session.execution_runtime.last_closed_bar_ts = Some(100);
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
+            cl_ord_id: "midas-stale-entry".to_string(),
+            order_id: Some(77),
+            order_strategy_id: None,
+            seen_recorded: true,
+            exec_report_recorded: false,
+            fill_recorded: false,
+        });
+        session.market.bars = vec![Bar {
+            ts_ns: 100,
+            open: 5000.0,
+            high: 5001.0,
+            low: 4999.0,
+            close: 5000.5,
+        }];
+        session.market.history_loaded = 1;
+
+        handle_execution_account_sync(&mut session, &broker_tx, &event_tx)
+            .expect("stale pending target should reconcile");
+
+        assert_eq!(session.execution_runtime.pending_target_qty, None);
+        assert!(session.order_latency_tracker.is_none());
+        assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(99));
+        assert!(session
+            .execution_runtime
+            .last_summary
+            .contains("Pending target 1 cleared"));
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.into_iter().any(|event| matches!(
+            event,
+            ServiceEvent::Status(message)
+                if message.contains("Pending target 1 cleared")
+        )));
     }
 
     #[test]

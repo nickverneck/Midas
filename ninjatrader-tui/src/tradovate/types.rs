@@ -44,6 +44,7 @@ pub enum ManualOrderAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceEvent {
     Status(String),
+    DebugLog(String),
     Error(String),
     Connected {
         env: TradingEnvironment,
@@ -267,6 +268,10 @@ pub struct LatencySnapshot {
     pub last_order_seen_ms: Option<u64>,
     pub last_exec_report_ms: Option<u64>,
     pub last_fill_ms: Option<u64>,
+    pub last_signal_submit_ms: Option<u64>,
+    pub last_signal_seen_ms: Option<u64>,
+    pub last_signal_ack_ms: Option<u64>,
+    pub last_signal_fill_ms: Option<u64>,
 }
 
 struct ServiceState {
@@ -287,6 +292,7 @@ struct SessionState {
     request_tx: UnboundedSender<UserSocketCommand>,
     execution_config: ExecutionStrategyConfig,
     execution_runtime: ExecutionRuntimeState,
+    pending_signal_context: Option<PendingSignalLatencyContext>,
     order_latency_tracker: Option<OrderLatencyTracker>,
     order_submit_in_flight: bool,
     protection_sync_in_flight: bool,
@@ -299,6 +305,12 @@ struct SessionState {
     managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     active_order_strategy: Option<TrackedOrderStrategy>,
     next_strategy_order_nonce: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSignalLatencyContext {
+    started_at: time::Instant,
+    description: String,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -27,6 +27,10 @@ fn update_latency_from_envelope(
             }
             tracker.seen_recorded = true;
             latency.last_order_seen_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            if let Some(signal_started_at) = tracker.signal_started_at {
+                latency.last_signal_seen_ms =
+                    Some(signal_started_at.elapsed().as_millis() as u64);
+            }
             true
         }
         "executionreport" => {
@@ -35,6 +39,10 @@ fn update_latency_from_envelope(
             }
             tracker.exec_report_recorded = true;
             latency.last_exec_report_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            if let Some(signal_started_at) = tracker.signal_started_at {
+                latency.last_signal_ack_ms =
+                    Some(signal_started_at.elapsed().as_millis() as u64);
+            }
             true
         }
         "fill" => {
@@ -43,6 +51,10 @@ fn update_latency_from_envelope(
             }
             tracker.fill_recorded = true;
             latency.last_fill_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            if let Some(signal_started_at) = tracker.signal_started_at {
+                latency.last_signal_fill_ms =
+                    Some(signal_started_at.elapsed().as_millis() as u64);
+            }
             true
         }
         _ => false,
