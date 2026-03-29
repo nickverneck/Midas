@@ -1,6 +1,10 @@
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceCommand {
     Connect(AppConfig),
+    EnterReplayMode {
+        config: AppConfig,
+        bar_type: BarType,
+    },
     ReplayState,
     SelectAccount {
         account_id: i64,
@@ -12,6 +16,9 @@ pub enum ServiceCommand {
     SubscribeBars {
         contract: ContractSuggestion,
         bar_type: BarType,
+    },
+    SetReplaySpeed {
+        speed: ReplaySpeed,
     },
     ManualOrder {
         action: ManualOrderAction,
@@ -50,6 +57,7 @@ pub enum ServiceEvent {
         env: TradingEnvironment,
         user_name: Option<String>,
         auth_mode: AuthMode,
+        session_kind: SessionKind,
     },
     Disconnected,
     AccountsLoaded(Vec<AccountInfo>),
@@ -62,6 +70,22 @@ pub enum ServiceEvent {
     TradeMarkersUpdated(Vec<TradeMarker>),
     Latency(LatencySnapshot),
     ExecutionState(ExecutionStateSnapshot),
+    ReplaySpeedUpdated(ReplaySpeed),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionKind {
+    Live,
+    Replay,
+}
+
+impl SessionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Live => "Live",
+            Self::Replay => "Replay",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +174,64 @@ impl BarType {
 impl Default for BarType {
     fn default() -> Self {
         Self::Minute1
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplaySpeed {
+    Realtime,
+    X2,
+    X5,
+    X10,
+    X25,
+}
+
+impl ReplaySpeed {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Realtime => "Realtime",
+            Self::X2 => "2x",
+            Self::X5 => "5x",
+            Self::X10 => "10x",
+            Self::X25 => "25x",
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    pub fn multiplier(self) -> f64 {
+        match self {
+            Self::Realtime => 1.0,
+            Self::X2 => 2.0,
+            Self::X5 => 5.0,
+            Self::X10 => 10.0,
+            Self::X25 => 25.0,
+        }
+    }
+
+    pub fn faster(self) -> Self {
+        match self {
+            Self::Realtime => Self::X2,
+            Self::X2 => Self::X5,
+            Self::X5 => Self::X10,
+            Self::X10 => Self::X25,
+            Self::X25 => Self::X25,
+        }
+    }
+
+    pub fn slower(self) -> Self {
+        match self {
+            Self::Realtime => Self::Realtime,
+            Self::X2 => Self::Realtime,
+            Self::X5 => Self::X2,
+            Self::X10 => Self::X5,
+            Self::X25 => Self::X10,
+        }
+    }
+}
+
+impl Default for ReplaySpeed {
+    fn default() -> Self {
+        Self::Realtime
     }
 }
 
@@ -277,7 +359,10 @@ pub struct LatencySnapshot {
 struct ServiceState {
     client: Client,
     broker_tx: UnboundedSender<BrokerCommand>,
+    replay_speed_tx: tokio::sync::watch::Sender<ReplaySpeed>,
+    replay_speed: ReplaySpeed,
     session: Option<SessionState>,
+    replay: Option<replay::ReplayState>,
     user_task: Option<JoinHandle<()>>,
     market_task: Option<JoinHandle<()>>,
     rest_probe_task: Option<JoinHandle<()>>,
@@ -287,6 +372,8 @@ struct ServiceState {
 
 struct SessionState {
     cfg: AppConfig,
+    session_kind: SessionKind,
+    replay_enabled: bool,
     tokens: TokenBundle,
     accounts: Vec<AccountInfo>,
     request_tx: UnboundedSender<UserSocketCommand>,
@@ -351,7 +438,7 @@ struct UserSyncStore {
     order_strategy_links: BTreeMap<i64, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct StrategyProtectionKey {
     account_id: i64,
     contract_id: i64,
@@ -378,6 +465,8 @@ struct TrackedOrderStrategy {
 const TOKEN_REFRESH_LEAD_SECS: i64 = 300;
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 pub const AUTO_CLOSE_MINUTES_BEFORE_SESSION_END: f64 = 15.0;
+const ENGINE_MARKET_BAR_LIMIT: usize = 4_096;
+const UI_MARKET_BAR_LIMIT: usize = 256;
 
 fn infer_session_profile(product: &Value) -> InstrumentSessionProfile {
     match product

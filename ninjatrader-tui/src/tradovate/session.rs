@@ -105,6 +105,10 @@ async fn ensure_background_tasks(
     let Some(session) = state.session.as_ref() else {
         return Ok(TaskRestartState::default());
     };
+    if session.replay_enabled {
+        let _ = internal_tx;
+        return Ok(TaskRestartState::default());
+    }
 
     let user_needed = state
         .user_task
@@ -231,4 +235,5 @@ fn shutdown_tasks(state: &mut ServiceState) {
     if let Some(task) = state.rest_probe_task.take() {
         task.abort();
     }
+    state.replay = None;
 }

@@ -5,7 +5,10 @@ use std::fs;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    watch,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 enum ClientWireMessage {
@@ -31,7 +34,8 @@ pub async fn run_engine_server(socket_path: &Path) -> Result<()> {
         .with_context(|| format!("bind engine socket {}", socket_path.display()))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    tokio::spawn(service_loop(cmd_rx, event_tx));
+    let (market_tx, _) = watch::channel(crate::tradovate::MarketSnapshot::default());
+    tokio::spawn(service_loop(cmd_rx, event_tx, market_tx.clone()));
 
     let mut clients = Vec::<UnboundedSender<ServiceEvent>>::new();
     loop {
@@ -39,7 +43,7 @@ pub async fn run_engine_server(socket_path: &Path) -> Result<()> {
             accept = listener.accept() => {
                 let (stream, _) = accept
                     .with_context(|| format!("accept engine socket {}", socket_path.display()))?;
-                let client_tx = spawn_server_client(stream, cmd_tx.clone());
+                let client_tx = spawn_server_client(stream, cmd_tx.clone(), market_tx.subscribe());
                 clients.push(client_tx);
                 let _ = cmd_tx.send(ServiceCommand::ReplayState);
             }
@@ -125,12 +129,41 @@ pub async fn connect_client(
 fn spawn_server_client(
     stream: UnixStream,
     cmd_tx: UnboundedSender<ServiceCommand>,
+    mut market_rx: watch::Receiver<crate::tradovate::MarketSnapshot>,
 ) -> UnboundedSender<ServiceEvent> {
     let (read_half, mut write_half) = stream.into_split();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServiceEvent>();
 
     tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
+        let initial_snapshot = market_rx.borrow().clone();
+        let Ok(message) = serde_json::to_string(&ServerWireMessage::Event(
+            ServiceEvent::MarketSnapshot(initial_snapshot),
+        )) else {
+            return;
+        };
+        if write_half.write_all(message.as_bytes()).await.is_err() {
+            return;
+        }
+        if write_half.write_all(b"\n").await.is_err() {
+            return;
+        }
+
+        loop {
+            let next = tokio::select! {
+                maybe_event = event_rx.recv() => maybe_event,
+                changed = market_rx.changed() => {
+                    if changed.is_err() {
+                        None
+                    } else {
+                        Some(ServiceEvent::MarketSnapshot(market_rx.borrow().clone()))
+                    }
+                }
+            };
+
+            let Some(event) = next else {
+                break;
+            };
+
             let Ok(message) = serde_json::to_string(&ServerWireMessage::Event(event)) else {
                 continue;
             };

@@ -19,6 +19,18 @@ fn format_log_elapsed(duration: Option<std::time::Duration>) -> String {
 }
 
 impl App {
+    fn set_replay_speed(
+        &mut self,
+        cmd_tx: &UnboundedSender<ServiceCommand>,
+        speed: ReplaySpeed,
+    ) {
+        if self.session_kind != SessionKind::Replay || self.replay_speed == speed {
+            return;
+        }
+        self.replay_speed = speed;
+        let _ = cmd_tx.send(ServiceCommand::SetReplaySpeed { speed });
+    }
+
     fn sync_selected_account(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if let Some(account) = self.accounts.get(self.selected_account) {
             let _ = cmd_tx.send(ServiceCommand::SelectAccount {
@@ -51,6 +63,7 @@ impl App {
             Focus::Cid,
             Focus::Secret,
             Focus::Connect,
+            Focus::ReplayMode,
         ]
     }
 

@@ -17,6 +17,19 @@ impl App {
             return;
         }
 
+        if self.screen == Screen::Login
+            && !self.is_text_focus()
+            && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
+        {
+            self.bar_type = BarType::Range1;
+            let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
+                config: self.current_config(),
+                bar_type: self.bar_type,
+            });
+            self.push_log("Replay mode requested".to_string());
+            return;
+        }
+
         match key.code {
             KeyCode::F(1) => {
                 self.screen = Screen::Login;

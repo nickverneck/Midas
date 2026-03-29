@@ -84,7 +84,6 @@ async fn seed_user_store(
         "order",
         "orderStrategy",
         "orderStrategyLink",
-        "fill",
     ] {
         let Ok(items) = fetch_entity_list(client, env, token, entity).await else {
             continue;
@@ -482,7 +481,7 @@ async fn market_data_worker_inner(
                                 chart_id.is_some() && realtime_id.is_some() && chart_id == realtime_id;
 
                             if is_historical || (historical_id.is_none() && realtime_id.is_none()) {
-                                series.push_closed_bar(&bar);
+                                series.push_closed_bar_capped(&bar, ENGINE_MARKET_BAR_LIMIT);
                                 continue;
                             }
 
@@ -497,7 +496,10 @@ async fn market_data_worker_inner(
                                     } else if bar.ts_ns > current_ts {
                                         let closed =
                                             series.forming_bar.take().expect("forming bar exists");
-                                        series.push_closed_bar(&closed);
+                                        series.push_closed_bar_capped(
+                                            &closed,
+                                            ENGINE_MARKET_BAR_LIMIT,
+                                        );
                                         series.forming_bar = Some(bar);
                                         live_bars = live_bars.saturating_add(1);
                                     }

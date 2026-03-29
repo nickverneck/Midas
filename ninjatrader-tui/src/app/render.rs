@@ -57,6 +57,17 @@ impl App {
                     self.push_log("Connect requested".to_string());
                 }
             }
+            Focus::ReplayMode => {
+                if key.code == KeyCode::Enter {
+                    self.bar_type = BarType::Range1;
+                    let cfg = self.current_config();
+                    let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
+                        config: cfg,
+                        bar_type: self.bar_type,
+                    });
+                    self.push_log("Replay mode requested".to_string());
+                }
+            }
             Focus::TokenOverride => edit_string(&mut self.form.token_override, key),
             Focus::Username => edit_string(&mut self.form.username, key),
             Focus::Password => edit_string(&mut self.form.password, key),
@@ -393,6 +404,7 @@ impl App {
             | Focus::Secret
             | Focus::TokenPath
             | Focus::Connect
+            | Focus::ReplayMode
             | Focus::AccountList
             | Focus::InstrumentQuery
             | Focus::BarTypeToggle
@@ -568,12 +580,21 @@ impl App {
             | Focus::LuaFilePath
             | Focus::LuaEditor
             | Focus::StrategyContinue
+            | Focus::ReplayMode
             | Focus::Connect => {}
         }
     }
 
     fn handle_dashboard_key(&mut self, key: KeyEvent, cmd_tx: &UnboundedSender<ServiceCommand>) {
         let action = match key.code {
+            KeyCode::Char('[') if self.session_kind == SessionKind::Replay => {
+                self.set_replay_speed(cmd_tx, self.replay_speed.slower());
+                return;
+            }
+            KeyCode::Char(']') if self.session_kind == SessionKind::Replay => {
+                self.set_replay_speed(cmd_tx, self.replay_speed.faster());
+                return;
+            }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match ch.to_ascii_lowercase() {
                     'v' => {
@@ -586,6 +607,10 @@ impl App {
                                 "disabled"
                             }
                         ));
+                        return;
+                    }
+                    '0' if self.session_kind == SessionKind::Replay => {
+                        self.set_replay_speed(cmd_tx, ReplaySpeed::Realtime);
                         return;
                     }
                     'b' => Some(ManualOrderAction::Buy),
@@ -617,7 +642,7 @@ impl App {
         };
         let help = match self.screen {
             Screen::Login => {
-                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect | F5/Ctrl+S save logs | q quit"
+                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | F5/Ctrl+S save logs | q quit"
             }
             Screen::Selection => {
                 "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
@@ -626,7 +651,11 @@ impl App {
                 "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | F5/Ctrl+S save logs"
             }
             Screen::Dashboard => {
-                "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
+                if self.session_kind == SessionKind::Replay {
+                    "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | v visuals | [/] replay speed | 0 realtime | F5/Ctrl+S save logs | q quit"
+                } else {
+                    "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
+                }
             }
         };
         let titles = ["Login", "Selection", "Strategy", "Dashboard"]
@@ -645,6 +674,11 @@ impl App {
             .divider("|");
         frame.render_widget(tabs, rows[0]);
 
+        let auth_label = if self.session_kind == SessionKind::Replay {
+            "Replay"
+        } else {
+            self.form.auth_mode.label()
+        };
         let header = Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
@@ -658,9 +692,11 @@ impl App {
                 Span::raw("  "),
                 Span::raw(format!("Env: {}", self.form.env.label())),
                 Span::raw("  "),
-                Span::raw(format!("Auth: {}", self.form.auth_mode.label())),
+                Span::raw(format!("Auth: {auth_label}")),
                 Span::raw("  "),
                 Span::raw(format!("Logs: {}", self.form.log_mode.label())),
+                Span::raw("  "),
+                Span::raw(format!("Mode: {}", self.session_kind.label())),
             ]),
             Line::from(vec![
                 Span::raw("Focus: "),
@@ -1345,6 +1381,33 @@ mod tests {
         app.handle_dashboard_key(key(KeyCode::Char('v')), &cmd_tx);
         assert!(!app.dashboard_visuals_enabled);
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn replay_speed_hotkeys_send_replay_only_commands() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, mut cmd_rx) = unbounded_channel();
+        app.session_kind = SessionKind::Replay;
+
+        app.handle_dashboard_key(key(KeyCode::Char(']')), &cmd_tx);
+
+        match cmd_rx.try_recv().expect("expected replay-speed command") {
+            ServiceCommand::SetReplaySpeed {
+                speed: ReplaySpeed::X2,
+            } => {}
+            _ => panic!("expected replay-speed command"),
+        }
+        assert_eq!(app.replay_speed, ReplaySpeed::X2);
+
+        app.handle_dashboard_key(key(KeyCode::Char('0')), &cmd_tx);
+
+        match cmd_rx.try_recv().expect("expected realtime-speed command") {
+            ServiceCommand::SetReplaySpeed {
+                speed: ReplaySpeed::Realtime,
+            } => {}
+            _ => panic!("expected realtime-speed command"),
+        }
+        assert_eq!(app.replay_speed, ReplaySpeed::Realtime);
     }
 
     #[test]

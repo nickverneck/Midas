@@ -27,6 +27,8 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+mod replay;
+
 include!("types.rs");
 include!("gateway.rs");
 include!("execution.rs");

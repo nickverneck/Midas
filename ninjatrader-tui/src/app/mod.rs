@@ -5,7 +5,8 @@ use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyS
 use crate::tradovate::{
     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
     ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
-    MarketSnapshot, ServiceCommand, ServiceEvent, TradeMarker, TradeMarkerSide,
+    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
+    TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -42,6 +43,8 @@ pub struct App {
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
     latency: LatencySnapshot,
+    session_kind: SessionKind,
+    replay_speed: ReplaySpeed,
     last_log_at: Option<Instant>,
     last_market_update_at: Option<Instant>,
 }
@@ -75,6 +78,7 @@ enum Focus {
     Secret,
     TokenPath,
     Connect,
+    ReplayMode,
     StrategyKind,
     OrderQty,
     NativeStrategy,

@@ -535,6 +535,68 @@ mod tests {
     }
 
     #[test]
+    fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
+        let bar = |ts_ns| Bar {
+            ts_ns,
+            open: 5000.0 + ts_ns as f64,
+            high: 5001.0 + ts_ns as f64,
+            low: 4999.0 + ts_ns as f64,
+            close: 5000.5 + ts_ns as f64,
+        };
+
+        let mut market = MarketSnapshot {
+            bars: vec![bar(1), bar(2)],
+            history_loaded: 2,
+            ..MarketSnapshot::default()
+        };
+        let update = MarketUpdate {
+            contract_id: 3570918,
+            contract_name: "ESH6".to_string(),
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 2,
+            live_bars: 1,
+            status: "realtime".to_string(),
+            bars: MarketBarsUpdate::Closed {
+                closed_bar: bar(3),
+                forming_bar: None,
+            },
+        };
+
+        assert!(apply_market_update(&mut market, update));
+        assert_eq!(market.history_loaded, 2);
+        assert_eq!(market.bars, vec![bar(2), bar(3)]);
+    }
+
+    #[test]
+    fn display_market_snapshot_trims_to_recent_closed_bars_and_keeps_forming_bar() {
+        let bar = |ts_ns| Bar {
+            ts_ns,
+            open: 5000.0 + ts_ns as f64,
+            high: 5001.0 + ts_ns as f64,
+            low: 4999.0 + ts_ns as f64,
+            close: 5000.5 + ts_ns as f64,
+        };
+
+        let mut bars = (1..=300).map(bar).collect::<Vec<_>>();
+        bars.push(bar(301));
+        let market = MarketSnapshot {
+            bars,
+            history_loaded: 300,
+            status: "streaming".to_string(),
+            ..MarketSnapshot::default()
+        };
+
+        let snapshot = display_market_snapshot(&market);
+        assert_eq!(snapshot.history_loaded, UI_MARKET_BAR_LIMIT);
+        assert_eq!(snapshot.bars.len(), UI_MARKET_BAR_LIMIT + 1);
+        assert_eq!(snapshot.bars.first().map(|bar| bar.ts_ns), Some(45));
+        assert_eq!(snapshot.bars.last().map(|bar| bar.ts_ns), Some(301));
+        assert_eq!(snapshot.status, "streaming");
+    }
+
+    #[test]
     fn jwt_expiration_time_reads_exp_claim() {
         let token = "eyJhbGciOiJub25lIn0.eyJleHAiOjE4OTM0NTYwMDB9.sig";
         let expires_at = jwt_expiration_time(token).expect("jwt exp should parse");
@@ -622,6 +684,8 @@ mod tests {
         let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut session = SessionState {
             cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
             tokens: TokenBundle {
                 access_token: "access".to_string(),
                 md_access_token: "md".to_string(),
@@ -684,6 +748,8 @@ mod tests {
         let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut session = SessionState {
             cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
             tokens: TokenBundle {
                 access_token: "access".to_string(),
                 md_access_token: "md".to_string(),
@@ -926,6 +992,8 @@ mod tests {
         );
         let session = SessionState {
             cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
             tokens: TokenBundle {
                 access_token: "access".to_string(),
                 md_access_token: "md".to_string(),
@@ -976,6 +1044,8 @@ mod tests {
         let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut session = SessionState {
             cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
             tokens: TokenBundle {
                 access_token: "access".to_string(),
                 md_access_token: "md".to_string(),
@@ -1015,6 +1085,41 @@ mod tests {
         assert!(record_trade_marker(&mut session, marker.clone()));
         assert!(!record_trade_marker(&mut session, marker));
         assert_eq!(session.market.trade_markers.len(), 1);
+    }
+
+    #[test]
+    fn user_store_skips_live_fills_but_keeps_replay_fills() {
+        let mut store = UserSyncStore::default();
+        store.apply(EntityEnvelope {
+            entity_type: "fill".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": 11,
+                "accountId": 42,
+                "contractId": 3570918,
+                "buySell": "Buy",
+                "price": 5000.0,
+                "qty": 1,
+                "timestamp": 1
+            }),
+        });
+        assert!(store.fills.get(&42).is_none());
+
+        store.apply(EntityEnvelope {
+            entity_type: "fill".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": 12,
+                "accountId": 42,
+                "contractId": 3570918,
+                "source": "replay",
+                "buySell": "Buy",
+                "price": 5000.0,
+                "qty": 1,
+                "timestamp": 2
+            }),
+        });
+        assert_eq!(store.fills.get(&42).map(BTreeMap::len), Some(1));
     }
 
     #[test]
@@ -1087,6 +1192,263 @@ mod tests {
         assert_eq!(snapshot.market_entry_price, Some(5000.0));
         assert_eq!(snapshot.selected_contract_take_profit_price, Some(5004.0));
         assert_eq!(snapshot.selected_contract_stop_price, Some(4998.0));
+    }
+
+    #[test]
+    fn replay_snapshots_mark_to_market_open_positions() {
+        let mut store = UserSyncStore::default();
+        store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1,
+                    "avgPrice": 5000.0
+                }),
+            )]),
+        );
+        store.fills.insert(
+            42,
+            BTreeMap::from([(
+                11,
+                json!({
+                    "id": 11,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "buySell": "Buy",
+                    "price": 5000.0,
+                    "qty": 1,
+                    "timestamp": 1
+                }),
+            )]),
+        );
+        let accounts = vec![AccountInfo {
+            id: 42,
+            name: "REPLAY".to_string(),
+            raw: json!({
+                "id": 42,
+                "name": "REPLAY",
+                "source": "replay",
+                "startingBalance": 100000.0
+            }),
+        }];
+        let market = MarketSnapshot {
+            contract_id: Some(3570918),
+            contract_name: Some("ESH6".to_string()),
+            bars: vec![Bar {
+                ts_ns: 0,
+                open: 5000.0,
+                high: 5001.5,
+                low: 4999.5,
+                close: 5001.0,
+            }],
+            trade_markers: Vec::new(),
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 1,
+            live_bars: 0,
+            status: String::new(),
+        };
+
+        let snapshots = store.build_snapshots(&accounts, Some(&market), &BTreeMap::new());
+        let snapshot = snapshots.first().expect("snapshot should exist");
+
+        assert_eq!(snapshot.realized_pnl, Some(0.0));
+        assert_eq!(snapshot.unrealized_pnl, Some(50.0));
+        assert_eq!(snapshot.balance, Some(100000.0));
+        assert_eq!(snapshot.cash_balance, Some(100000.0));
+        assert_eq!(snapshot.net_liq, Some(100050.0));
+    }
+
+    #[test]
+    fn replay_snapshots_roll_realized_pnl_into_balance() {
+        let mut store = UserSyncStore::default();
+        store.fills.insert(
+            42,
+            BTreeMap::from([
+                (
+                    11,
+                    json!({
+                        "id": 11,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "buySell": "Buy",
+                        "price": 5000.0,
+                        "qty": 1,
+                        "timestamp": 1
+                    }),
+                ),
+                (
+                    12,
+                    json!({
+                        "id": 12,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "buySell": "Sell",
+                        "price": 5002.0,
+                        "qty": 1,
+                        "timestamp": 2
+                    }),
+                ),
+            ]),
+        );
+        let accounts = vec![AccountInfo {
+            id: 42,
+            name: "REPLAY".to_string(),
+            raw: json!({
+                "id": 42,
+                "name": "REPLAY",
+                "source": "replay",
+                "startingBalance": 100000.0
+            }),
+        }];
+        let market = MarketSnapshot {
+            contract_id: Some(3570918),
+            contract_name: Some("ESH6".to_string()),
+            bars: vec![Bar {
+                ts_ns: 0,
+                open: 5002.0,
+                high: 5002.0,
+                low: 5002.0,
+                close: 5002.0,
+            }],
+            trade_markers: Vec::new(),
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 1,
+            live_bars: 0,
+            status: String::new(),
+        };
+
+        let snapshots = store.build_snapshots(&accounts, Some(&market), &BTreeMap::new());
+        let snapshot = snapshots.first().expect("snapshot should exist");
+
+        assert_eq!(snapshot.realized_pnl, Some(100.0));
+        assert_eq!(snapshot.unrealized_pnl, Some(0.0));
+        assert_eq!(snapshot.balance, Some(100100.0));
+        assert_eq!(snapshot.cash_balance, Some(100100.0));
+        assert_eq!(snapshot.net_liq, Some(100100.0));
+    }
+
+    #[test]
+    fn replay_bar_fills_take_profit_and_clears_sibling_strategy_orders() {
+        let mut broker = ReplayBrokerState::default();
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        broker.positions.insert(
+            key,
+            SimPosition {
+                position_id: 30_001,
+                qty: 1,
+                avg_price: 6600.0,
+                symbol: "ES 06-26".to_string(),
+            },
+        );
+
+        let strategy_id = 40_001;
+        broker.order_strategies.insert(
+            strategy_id,
+            SimOrderStrategyState {
+                entity: json!({
+                    "id": strategy_id,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "symbol": "ES 06-26",
+                    "status": "Active",
+                }),
+                order_ids: vec![1001, 1002],
+                link_ids: vec![5001, 5002],
+            },
+        );
+        broker.active_orders.insert(
+            1001,
+            SimActiveOrder {
+                order: json!({
+                    "id": 1001,
+                    "orderId": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "symbol": "ES 06-26",
+                    "action": "Sell",
+                    "orderQty": 1,
+                    "orderType": "Limit",
+                    "price": 6604.0,
+                    "ordStatus": "Working",
+                    "clOrdId": "midas-tp",
+                    "orderStrategyId": strategy_id,
+                }),
+                link_id: Some(5001),
+                strategy_id: Some(strategy_id),
+            },
+        );
+        broker.active_orders.insert(
+            1002,
+            SimActiveOrder {
+                order: json!({
+                    "id": 1002,
+                    "orderId": 1002,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "symbol": "ES 06-26",
+                    "action": "Sell",
+                    "orderQty": 1,
+                    "orderType": "Stop",
+                    "stopPrice": 6592.0,
+                    "ordStatus": "Working",
+                    "clOrdId": "midas-sl",
+                    "orderStrategyId": strategy_id,
+                }),
+                link_id: Some(5002),
+                strategy_id: Some(strategy_id),
+            },
+        );
+
+        let events = broker.simulate_replay_bar(&Bar {
+            ts_ns: 123,
+            open: 6601.0,
+            high: 6604.5,
+            low: 6599.5,
+            close: 6604.0,
+        });
+
+        assert_eq!(events.len(), 1);
+        let envelopes = match &events[0] {
+            InternalEvent::UserEntities(envelopes) => envelopes,
+            _ => panic!("expected replay bar to emit user entities"),
+        };
+
+        assert!(envelopes.iter().any(|envelope| {
+            envelope.entity_type == "fill" && json_i64(&envelope.entity, "orderId") == Some(1001)
+        }));
+        assert!(envelopes.iter().any(|envelope| {
+            envelope.entity_type == "order"
+                && !envelope.deleted
+                && json_i64(&envelope.entity, "orderId") == Some(1001)
+                && envelope.entity.get("ordStatus").and_then(Value::as_str) == Some("Filled")
+        }));
+        assert!(envelopes.iter().any(|envelope| {
+            envelope.entity_type == "order"
+                && envelope.deleted
+                && json_i64(&envelope.entity, "orderId") == Some(1002)
+        }));
+        assert!(envelopes.iter().any(|envelope| {
+            envelope.entity_type == "orderStrategy"
+                && envelope.deleted
+                && json_i64(&envelope.entity, "id") == Some(strategy_id)
+        }));
+        assert!(envelopes
+            .iter()
+            .any(|envelope| envelope.entity_type == "position" && envelope.deleted));
+        assert!(broker.active_orders.is_empty());
+        assert!(broker.order_strategies.is_empty());
+        assert!(!broker.positions.contains_key(&key));
     }
 
     #[test]

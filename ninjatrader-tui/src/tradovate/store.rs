@@ -74,11 +74,21 @@ impl UserSyncStore {
                 let Some(account_id) = extract_account_id("fill", &envelope.entity) else {
                     return;
                 };
-                let bucket = self.fills.entry(account_id).or_default();
                 if envelope.deleted {
-                    bucket.remove(&entity_id);
-                } else {
-                    bucket.insert(entity_id, envelope.entity);
+                    let remove_bucket = if let Some(bucket) = self.fills.get_mut(&account_id) {
+                        bucket.remove(&entity_id);
+                        bucket.is_empty()
+                    } else {
+                        false
+                    };
+                    if remove_bucket {
+                        self.fills.remove(&account_id);
+                    }
+                } else if is_replay_entity(&envelope.entity) {
+                    self.fills
+                        .entry(account_id)
+                        .or_default()
+                        .insert(entity_id, envelope.entity);
                 }
             }
             _ => {}
@@ -106,8 +116,16 @@ impl UserSyncStore {
                     .get(&account.id)
                     .map(|items| items.values().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
+                let raw_fills = self
+                    .fills
+                    .get(&account.id)
+                    .map(|items| items.values().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let replay_account = raw_account.as_ref().is_some_and(is_replay_entity)
+                    || raw_risk.as_ref().is_some_and(is_replay_entity)
+                    || raw_cash.as_ref().is_some_and(is_replay_entity);
 
-                let balance = raw_risk
+                let mut balance = raw_risk
                     .as_ref()
                     .and_then(|value| {
                         pick_number(
@@ -131,13 +149,13 @@ impl UserSyncStore {
                             .as_ref()
                             .and_then(|value| pick_number(value, &["balance", "netLiq"]))
                     });
-                let cash_balance = raw_cash.as_ref().and_then(|value| {
+                let mut cash_balance = raw_cash.as_ref().and_then(|value| {
                     pick_number(
                         value,
                         &["cashBalance", "totalCashValue", "amount", "balance"],
                     )
                 });
-                let net_liq = raw_risk.as_ref().and_then(|value| {
+                let mut net_liq = raw_risk.as_ref().and_then(|value| {
                     pick_number(
                         value,
                         &[
@@ -149,7 +167,7 @@ impl UserSyncStore {
                         ],
                     )
                 });
-                let realized_pnl = raw_risk
+                let mut realized_pnl = raw_risk
                     .as_ref()
                     .and_then(|value| {
                         pick_number(
@@ -244,7 +262,7 @@ impl UserSyncStore {
                             )
                         })
                     });
-                let unrealized_pnl = sum_position_metric(
+                let mut unrealized_pnl = sum_position_metric(
                     &raw_positions,
                     &[
                         "unrealizedPnL",
@@ -258,13 +276,31 @@ impl UserSyncStore {
                         "openPnl",
                     ],
                 );
-                let unrealized_pnl = unrealized_pnl.or_else(|| {
+                unrealized_pnl = unrealized_pnl.or_else(|| {
                     market.and_then(|market| fallback_unrealized_pnl(&raw_positions, market))
                 });
-                let net_liq = net_liq.or_else(|| match (balance, unrealized_pnl) {
+                net_liq = net_liq.or_else(|| match (balance, unrealized_pnl) {
                     (Some(balance), Some(unrealized)) => Some(balance + unrealized),
                     _ => None,
                 });
+                if replay_account {
+                    let starting_balance = raw_account
+                        .as_ref()
+                        .and_then(replay_starting_balance)
+                        .or_else(|| raw_risk.as_ref().and_then(replay_starting_balance))
+                        .or_else(|| raw_cash.as_ref().and_then(replay_starting_balance))
+                        .or(balance)
+                        .or(cash_balance)
+                        .or(net_liq)
+                        .unwrap_or_default();
+                    realized_pnl =
+                        Some(replay_session_realized_pnl(&raw_fills, market).unwrap_or_default());
+                    unrealized_pnl = Some(unrealized_pnl.unwrap_or_default());
+                    balance = Some(starting_balance + realized_pnl.unwrap_or_default());
+                    cash_balance = balance;
+                    net_liq =
+                        Some(balance.unwrap_or_default() + unrealized_pnl.unwrap_or_default());
+                }
                 let open_position_qty = sum_position_metric(
                     &raw_positions,
                     &["netPos", "netPosition", "qty", "quantity", "netQty"],
@@ -468,6 +504,112 @@ fn sum_position_metric(positions: &[Value], keys: &[&str]) -> Option<f64> {
         None
     } else {
         Some(values.iter().sum())
+    }
+}
+
+fn is_replay_entity(value: &Value) -> bool {
+    value.get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("replay"))
+}
+
+fn replay_starting_balance(value: &Value) -> Option<f64> {
+    pick_number(
+        value,
+        &[
+            "startingBalance",
+            "initialBalance",
+            "starting_balance",
+            "balance",
+            "cashBalance",
+        ],
+    )
+}
+
+fn replay_session_realized_pnl(fills: &[Value], market: Option<&MarketSnapshot>) -> Option<f64> {
+    let market = market?;
+    let value_per_point = market.value_per_point?;
+    let mut ordered = fills
+        .iter()
+        .filter(|fill| fill_matches_market(fill, market))
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|fill| {
+        (
+            json_i64(fill, "timestamp").unwrap_or_default(),
+            extract_entity_id(fill).unwrap_or_default(),
+        )
+    });
+
+    let mut position_qty = 0.0_f64;
+    let mut avg_price = 0.0_f64;
+    let mut realized = 0.0_f64;
+    for fill in ordered {
+        let Some(fill_qty) = replay_fill_signed_qty(&fill) else {
+            continue;
+        };
+        let Some(fill_price) = pick_number(&fill, &["price"]) else {
+            continue;
+        };
+
+        if position_qty.abs() <= f64::EPSILON || position_qty.signum() == fill_qty.signum() {
+            let next_abs = position_qty.abs() + fill_qty.abs();
+            avg_price = if position_qty.abs() <= f64::EPSILON {
+                fill_price
+            } else {
+                ((avg_price * position_qty.abs()) + (fill_price * fill_qty.abs()))
+                    / next_abs.max(1.0)
+            };
+            position_qty += fill_qty;
+            continue;
+        }
+
+        let close_qty = position_qty.abs().min(fill_qty.abs());
+        realized += match position_qty.signum() as i32 {
+            1 => (fill_price - avg_price) * close_qty * value_per_point,
+            -1 => (avg_price - fill_price) * close_qty * value_per_point,
+            _ => 0.0,
+        };
+
+        let prior_abs = position_qty.abs();
+        position_qty += fill_qty;
+        if position_qty.abs() <= f64::EPSILON {
+            position_qty = 0.0;
+            avg_price = 0.0;
+        } else if fill_qty.abs() > prior_abs {
+            avg_price = fill_price;
+        }
+    }
+
+    Some(realized)
+}
+
+fn fill_matches_market(fill: &Value, market: &MarketSnapshot) -> bool {
+    let contract_id_match = market
+        .contract_id
+        .is_some_and(|contract_id| json_i64(fill, "contractId") == Some(contract_id));
+    let symbol_match = market
+        .contract_name
+        .as_deref()
+        .zip(
+            fill.get("symbol")
+                .and_then(Value::as_str)
+                .or_else(|| fill.get("contractName").and_then(Value::as_str)),
+        )
+        .is_some_and(|(expected, actual)| actual.eq_ignore_ascii_case(expected));
+    contract_id_match || symbol_match
+}
+
+fn replay_fill_signed_qty(fill: &Value) -> Option<f64> {
+    let qty = pick_number(fill, &["qty", "quantity"])?.abs();
+    let side = fill
+        .get("buySell")
+        .and_then(Value::as_str)
+        .or_else(|| fill.get("action").and_then(Value::as_str))?;
+    match side.to_ascii_lowercase().as_str() {
+        "buy" => Some(qty),
+        "sell" => Some(-qty),
+        _ => None,
     }
 }
 

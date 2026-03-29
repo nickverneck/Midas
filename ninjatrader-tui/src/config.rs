@@ -132,6 +132,8 @@ pub struct AppConfig {
     pub time_in_force: String,
     pub order_qty: i32,
     pub autoconnect: bool,
+    pub replay_file_path: PathBuf,
+    pub replay_bar_interval_ms: u64,
 }
 
 impl Default for AppConfig {
@@ -156,6 +158,8 @@ impl Default for AppConfig {
             time_in_force: "Day".to_string(),
             order_qty: 1,
             autoconnect: false,
+            replay_file_path: PathBuf::from("ninjatrader-tui/market replay/ES 06-26.Last.txt"),
+            replay_bar_interval_ms: 5,
         }
     }
 }
@@ -238,6 +242,12 @@ impl AppConfig {
         if let Some(raw) = env_bool("MIDAS_TUI_AUTOCONNECT")? {
             self.autoconnect = raw;
         }
+        if let Some(raw) = env_string("MIDAS_TUI_REPLAY_FILE_PATH") {
+            self.replay_file_path = PathBuf::from(raw);
+        }
+        if let Some(raw) = env_parse::<u64>("MIDAS_TUI_REPLAY_BAR_INTERVAL_MS")? {
+            self.replay_bar_interval_ms = raw;
+        }
         Ok(())
     }
 
@@ -253,6 +263,9 @@ impl AppConfig {
         }
         if self.order_qty <= 0 {
             bail!("order_qty must be > 0");
+        }
+        if self.replay_bar_interval_ms == 0 {
+            bail!("replay_bar_interval_ms must be > 0");
         }
         if self.token_override.trim().is_empty() && matches!(self.auth_mode, AuthMode::Credentials)
         {

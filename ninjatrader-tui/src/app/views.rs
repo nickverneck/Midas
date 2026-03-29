@@ -58,6 +58,14 @@ impl App {
             "[Enter] Connect / Refresh Session".to_string(),
             self.focus == Focus::Connect,
         ));
+        lines.push(styled_line(
+            if cfg!(feature = "replay") {
+                "[Enter] Replay Mode (local file, skips login)".to_string()
+            } else {
+                "[Enter] Replay Mode unavailable in this build".to_string()
+            },
+            self.focus == Focus::ReplayMode,
+        ));
         lines
     }
     fn login_notes_lines(&self) -> Vec<Line<'static>> {
@@ -70,12 +78,18 @@ impl App {
             Line::from("Use Up/Down to move between fields."),
             Line::from("Use Left/Right on Env, Auth Mode, or Log Mode."),
             Line::from("Paste a token directly into Token Override when needed."),
+            Line::from(if cfg!(feature = "replay") {
+                "Replay Mode loads the local tick file and starts on 1 Range bars by default."
+            } else {
+                "Replay Mode requires a build with `--features replay`."
+            }),
         ]
     }
 
     fn login_status_lines(&self) -> Vec<Line<'static>> {
         vec![
             Line::from(format!("Current status: {}", self.status)),
+            Line::from(format!("Session Mode: {}", self.session_kind.label())),
             Line::from(format!("Environment REST: {}", self.form.env.rest_url())),
             Line::from(format!("Log Mode: {}", self.form.log_mode.label())),
             Line::from(format!("User WebSocket: {}", self.form.env.user_ws_url())),
@@ -96,6 +110,12 @@ impl App {
         vec![
             Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
+            Line::from(format!("Mode: {}", self.session_kind.label())),
+            Line::from(if self.session_kind == SessionKind::Replay {
+                format!("Replay Speed: {}", self.replay_speed.label())
+            } else {
+                "Replay Speed: inactive".to_string()
+            }),
             Line::from(format!(
                 "Strategy Status: {}",
                 self.strategy_runtime_summary()
@@ -682,7 +702,14 @@ impl App {
                 "Order Qty: {}  TIF: {}",
                 self.base_config.order_qty, self.base_config.time_in_force
             )),
-            Line::from("Hotkeys: b buy | s sell | c close | v visuals"),
+            Line::from(if self.session_kind == SessionKind::Replay {
+                format!(
+                    "Hotkeys: b buy | s sell | c close | v visuals | [ slower | ] faster | 0 realtime ({})",
+                    self.replay_speed.label()
+                )
+            } else {
+                "Hotkeys: b buy | s sell | c close | v visuals".to_string()
+            }),
         ]
     }
 

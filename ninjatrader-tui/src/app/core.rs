@@ -22,6 +22,8 @@ impl App {
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,
             latency: LatencySnapshot::default(),
+            session_kind: SessionKind::Live,
+            replay_speed: ReplaySpeed::default(),
             last_log_at: None,
             last_market_update_at: None,
         };
@@ -33,6 +35,14 @@ impl App {
         app.push_log(
             "Native HMA Angle and EMA Crossover strategies can auto-trade closed 1m bars once armed from Strategy."
                 .to_string(),
+        );
+        app.push_log(
+            if cfg!(feature = "replay") {
+                "Replay mode available from Login: local ES tick data can stream 1 Range or 1 Min bars."
+            } else {
+                "Replay mode disabled in this build; rebuild with `--features replay` to use local market replay."
+            }
+            .to_string(),
         );
         app
     }
@@ -75,11 +85,19 @@ impl App {
                 env,
                 user_name,
                 auth_mode,
+                session_kind,
             } => {
                 self.form.env = env;
                 self.form.auth_mode = auth_mode;
-                self.screen = Screen::Selection;
-                self.focus = Focus::AccountList;
+                self.session_kind = session_kind;
+                self.replay_speed = ReplaySpeed::default();
+                if session_kind == SessionKind::Replay {
+                    self.screen = Screen::Strategy;
+                    self.focus = Focus::StrategyKind;
+                } else {
+                    self.screen = Screen::Selection;
+                    self.focus = Focus::AccountList;
+                }
                 self.status = match user_name {
                     Some(name) => format!("Connected to {} as {}", env.label(), name),
                     None => format!("Connected to {}", env.label()),
@@ -89,12 +107,14 @@ impl App {
             ServiceEvent::Disconnected => {
                 self.screen = Screen::Login;
                 self.focus = Focus::Env;
+                self.session_kind = SessionKind::Live;
                 self.accounts.clear();
                 self.account_snapshots.clear();
                 self.contract_results.clear();
                 self.market = MarketSnapshot::default();
                 self.strategy_runtime = StrategyRuntimeState::default();
                 self.latency = LatencySnapshot::default();
+                self.replay_speed = ReplaySpeed::default();
                 self.last_market_update_at = None;
                 self.status = "Disconnected".to_string();
                 self.push_log("Disconnected".to_string());
@@ -142,6 +162,9 @@ impl App {
                         self.selected_account = index;
                     }
                 }
+            }
+            ServiceEvent::ReplaySpeedUpdated(speed) => {
+                self.replay_speed = speed;
             }
         }
     }

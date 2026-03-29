@@ -352,6 +352,7 @@ fn plan_native_protection_sync(
             return Ok(None);
         }
         return Ok(Some(PendingProtectionSync {
+            simulate: session.replay_enabled,
             key,
             account_name: account_name.clone(),
             contract_name: contract_name.clone(),
@@ -395,6 +396,7 @@ fn plan_native_protection_sync(
             let mut next_state = existing;
             next_state.stop_price = Some(next_stop_price);
             return Ok(Some(PendingProtectionSync {
+                simulate: session.replay_enabled,
                 key,
                 account_name: account_name.clone(),
                 contract_name: contract_name.clone(),
@@ -482,6 +484,7 @@ fn plan_native_protection_sync(
     };
 
     Ok(Some(PendingProtectionSync {
+        simulate: session.replay_enabled,
         key,
         account_name: account_name.clone(),
         contract_name: contract_name.clone(),
@@ -657,8 +660,16 @@ fn build_order_strategy_request(
             );
         }
     }
+    let reference_price = session.market.bars.last().map(|bar| bar.close);
+    let take_profit_price = reference_price.and_then(|price| {
+        take_profit_offset.map(|offset| price + signed_profit_target_offset(order_action, offset))
+    });
+    let stop_price = reference_price.and_then(|price| {
+        stop_loss_offset.map(|offset| price + signed_stop_loss_offset(order_action, offset))
+    });
 
     Ok(PendingOrderStrategyTransition {
+        simulate: session.replay_enabled,
         uuid,
         payload,
         interrupt_order_strategy_id,
@@ -667,6 +678,10 @@ fn build_order_strategy_request(
         target_qty,
         contract_name: contract.name.clone(),
         account_name: account.name.clone(),
+        reference_ts_ns: session.market.bars.last().map(|bar| bar.ts_ns),
+        reference_price,
+        take_profit_price,
+        stop_price,
         reason_suffix: reason_suffix.map(ToString::to_string),
         key,
     })
@@ -686,6 +701,19 @@ fn build_market_order_request(
     cancel_order_ids: Vec<i64>,
 ) -> PendingMarketOrder {
     let cl_ord_id = next_strategy_cl_ord_id(session, "entry");
+    let current_qty = session
+        .user_store
+        .contract_position_qty(account.id, contract)
+        .unwrap_or(0.0)
+        .round() as i32;
+    let simulated_next_qty = target_qty.unwrap_or_else(|| {
+        current_qty
+            + if order_action.eq_ignore_ascii_case("Buy") {
+                order_qty
+            } else {
+                -order_qty
+            }
+    });
     let payload = with_cl_ord_id(
         json!({
             "accountSpec": account.name,
@@ -701,8 +729,11 @@ fn build_market_order_request(
     );
 
     PendingMarketOrder {
+        simulate: session.replay_enabled,
         cl_ord_id,
         payload,
+        account_id: account.id,
+        contract_id: contract.id,
         interrupt_order_strategy_id,
         cancel_order_ids,
         action_label: action_label.to_string(),
@@ -710,6 +741,9 @@ fn build_market_order_request(
         order_qty,
         contract_name: contract.name.clone(),
         account_name: account.name.clone(),
+        reference_ts_ns: session.market.bars.last().map(|bar| bar.ts_ns),
+        reference_price: session.market.bars.last().map(|bar| bar.close),
+        simulated_next_qty,
         reason_suffix: reason_suffix.map(ToString::to_string),
         target_qty,
     }
@@ -723,6 +757,7 @@ fn build_liquidation_request(
     target_qty: Option<i32>,
 ) -> PendingLiquidation {
     PendingLiquidation {
+        simulate: session.replay_enabled,
         request_id: next_strategy_cl_ord_id(session, "liquidate"),
         payload: json!({
             "accountId": account.id,
@@ -730,8 +765,12 @@ fn build_liquidation_request(
             "admin": false,
             "isAutomated": automated,
         }),
+        account_id: account.id,
+        contract_id: contract.id,
         account_name: account.name.clone(),
         contract_name: contract.name.clone(),
+        reference_ts_ns: session.market.bars.last().map(|bar| bar.ts_ns),
+        reference_price: session.market.bars.last().map(|bar| bar.close),
         target_qty,
     }
 }
@@ -1226,6 +1265,8 @@ mod order_tests {
         let (request_tx, _request_rx) = unbounded_channel();
         SessionState {
             cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
             tokens: TokenBundle {
                 access_token: "access".to_string(),
                 md_access_token: "md".to_string(),

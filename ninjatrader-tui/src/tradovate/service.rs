@@ -1,9 +1,12 @@
 pub async fn service_loop(
     mut cmd_rx: UnboundedReceiver<ServiceCommand>,
     event_tx: UnboundedSender<ServiceEvent>,
+    market_tx: tokio::sync::watch::Sender<MarketSnapshot>,
 ) {
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
     let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (replay_speed_tx, _replay_speed_rx) =
+        tokio::sync::watch::channel(ReplaySpeed::default());
     let _broker_task = spawn_broker_gateway_task(broker_rx, internal_tx.clone());
     let mut state = ServiceState {
         client: Client::builder()
@@ -14,7 +17,10 @@ pub async fn service_loop(
             .build()
             .unwrap(),
         broker_tx,
+        replay_speed_tx,
+        replay_speed: ReplaySpeed::default(),
         session: None,
+        replay: None,
         user_task: None,
         market_task: None,
         rest_probe_task: None,
@@ -33,15 +39,27 @@ pub async fn service_loop(
     } {
         match next {
             Either::Command(cmd) => {
-                if let Err(err) =
-                    handle_command(cmd, &mut state, &event_tx, internal_tx.clone()).await
+                if let Err(err) = handle_command(
+                    cmd,
+                    &mut state,
+                    &event_tx,
+                    &market_tx,
+                    internal_tx.clone(),
+                )
+                .await
                 {
                     let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
                 }
             }
             Either::Internal(internal) => {
-                if let Err(err) =
-                    handle_internal(internal, &mut state, &event_tx, internal_tx.clone()).await
+                if let Err(err) = handle_internal(
+                    internal,
+                    &mut state,
+                    &event_tx,
+                    &market_tx,
+                    internal_tx.clone(),
+                )
+                .await
                 {
                     let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
                 }
@@ -68,12 +86,16 @@ async fn handle_command(
     cmd: ServiceCommand,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
+    market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     match cmd {
         ServiceCommand::Connect(cfg) => {
             shutdown_tasks(state);
             state.latency = LatencySnapshot::default();
+            state.replay_speed = ReplaySpeed::default();
+            let _ = state.replay_speed_tx.send(state.replay_speed);
+            let _ = market_tx.send(MarketSnapshot::default());
             let _ = event_tx.send(ServiceEvent::Status(format!(
                 "Authenticating against {}...",
                 cfg.env.label()
@@ -86,6 +108,7 @@ async fn handle_command(
                 env: cfg.env,
                 user_name: tokens.user_name.clone(),
                 auth_mode: cfg.auth_mode,
+                session_kind: SessionKind::Live,
             });
 
             let accounts = list_accounts(&state.client, &cfg.env, &tokens.access_token).await?;
@@ -124,6 +147,8 @@ async fn handle_command(
 
             state.session = Some(SessionState {
                 cfg,
+                session_kind: SessionKind::Live,
+                replay_enabled: false,
                 tokens,
                 accounts,
                 request_tx,
@@ -147,6 +172,83 @@ async fn handle_command(
                 emit_execution_state(event_tx, session);
             }
         }
+        ServiceCommand::EnterReplayMode { config: cfg, bar_type } => {
+            shutdown_tasks(state);
+            state.latency = LatencySnapshot::default();
+            state.replay_speed = ReplaySpeed::default();
+            let _ = state.replay_speed_tx.send(state.replay_speed);
+            let _ = market_tx.send(MarketSnapshot::default());
+            let _ = event_tx.send(ServiceEvent::Status(format!(
+                "Loading replay dataset from {}...",
+                cfg.replay_file_path.display()
+            )));
+
+            let replay = replay::load_replay_state(&cfg).await?;
+            let accounts = replay::replay_accounts(&replay);
+            let contract = replay::replay_contract(&replay);
+            let selected_account_id = accounts.first().map(|account| account.id);
+            let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut user_store = UserSyncStore::default();
+            seed_replay_user_store(&accounts, &mut user_store);
+
+            state.replay = Some(replay.clone());
+            state.session = Some(SessionState {
+                cfg: cfg.clone(),
+                session_kind: SessionKind::Replay,
+                replay_enabled: true,
+                tokens: TokenBundle {
+                    access_token: String::new(),
+                    md_access_token: String::new(),
+                    expiration_time: None,
+                    user_id: None,
+                    user_name: Some("Replay".to_string()),
+                },
+                accounts: accounts.clone(),
+                request_tx,
+                execution_config: ExecutionStrategyConfig::default(),
+                execution_runtime: ExecutionRuntimeState::default(),
+                pending_signal_context: None,
+                order_latency_tracker: None,
+                order_submit_in_flight: false,
+                protection_sync_in_flight: false,
+                pending_protection_sync: None,
+                user_store,
+                selected_account_id,
+                selected_contract: Some(contract.clone()),
+                bar_type,
+                market: MarketSnapshot::default(),
+                managed_protection: BTreeMap::new(),
+                active_order_strategy: None,
+                next_strategy_order_nonce: 1,
+            });
+
+            let _ = event_tx.send(ServiceEvent::Connected {
+                env: cfg.env,
+                user_name: Some("Replay".to_string()),
+                auth_mode: cfg.auth_mode,
+                session_kind: SessionKind::Replay,
+            });
+            let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts.clone()));
+            let _ = event_tx.send(ServiceEvent::ContractSearchResults {
+                query: "replay".to_string(),
+                results: vec![contract.clone()],
+            });
+            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
+            if let Some(session) = state.session.as_ref() {
+                emit_execution_state(event_tx, session);
+            }
+            request_snapshot_refresh(state, &internal_tx);
+            state.market_task = Some(replay::spawn_replay_market_task(
+                replay,
+                cfg,
+                contract,
+                bar_type,
+                state.broker_tx.clone(),
+                state.replay_speed_tx.subscribe(),
+                internal_tx,
+            ));
+        }
         ServiceCommand::ReplayState => {
             let Some(session) = state.session.as_ref() else {
                 let _ = event_tx.send(ServiceEvent::Disconnected);
@@ -156,6 +258,7 @@ async fn handle_command(
                 env: session.cfg.env,
                 user_name: session.tokens.user_name.clone(),
                 auth_mode: session.cfg.auth_mode,
+                session_kind: session.session_kind,
             });
             let _ = event_tx.send(ServiceEvent::AccountsLoaded(session.accounts.clone()));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(
@@ -165,14 +268,10 @@ async fn handle_command(
                     &session.managed_protection,
                 ),
             ));
-            if session.market.contract_id.is_some()
-                || session.market.contract_name.is_some()
-                || !session.market.bars.is_empty()
-                || !session.market.status.is_empty()
-            {
-                let _ = event_tx.send(ServiceEvent::MarketSnapshot(session.market.clone()));
-            }
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            if session.replay_enabled {
+                let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
+            }
             emit_execution_state(event_tx, session);
         }
         ServiceCommand::SelectAccount { account_id } => {
@@ -190,6 +289,15 @@ async fn handle_command(
             let Some(session) = state.session.as_ref() else {
                 bail!("connect first");
             };
+            if session.replay_enabled {
+                let results = state
+                    .replay
+                    .as_ref()
+                    .map(|replay| replay::search_replay_contracts(replay, &query, limit))
+                    .unwrap_or_default();
+                let _ = event_tx.send(ServiceEvent::ContractSearchResults { query, results });
+                return Ok(());
+            }
             let results = search_contracts(
                 &state.client,
                 &session.cfg.env,
@@ -208,14 +316,7 @@ async fn handle_command(
                 task.abort();
             }
             session.market = MarketSnapshot::default();
-            let market_specs = fetch_contract_specs(
-                &state.client,
-                &session.cfg.env,
-                &session.tokens.access_token,
-                &contract,
-            )
-            .await
-            .ok();
+            let _ = market_tx.send(MarketSnapshot::default());
             session.selected_contract = Some(contract.clone());
             session.active_order_strategy = None;
             session.bar_type = bar_type;
@@ -225,15 +326,58 @@ async fn handle_command(
             session.execution_runtime.last_summary =
                 "Selected contract changed; waiting for market data.".to_string();
             emit_execution_state(event_tx, session);
-            let cfg = session.cfg.clone();
-            let token = session.tokens.md_access_token.clone();
-            state.market_task = Some(tokio::spawn(market_data_worker(
-                cfg,
-                token,
-                contract,
-                market_specs,
-                bar_type,
-                internal_tx,
+            if session.replay_enabled {
+                let replay = state
+                    .replay
+                    .clone()
+                    .context("replay dataset is unavailable")?;
+                let cfg = session.cfg.clone();
+                state.market_task = Some(replay::spawn_replay_market_task(
+                    replay,
+                    cfg,
+                    contract,
+                    bar_type,
+                    state.broker_tx.clone(),
+                    state.replay_speed_tx.subscribe(),
+                    internal_tx,
+                ));
+            } else {
+                let market_specs = fetch_contract_specs(
+                    &state.client,
+                    &session.cfg.env,
+                    &session.tokens.access_token,
+                    &contract,
+                )
+                .await
+                .ok();
+                let cfg = session.cfg.clone();
+                let token = session.tokens.md_access_token.clone();
+                state.market_task = Some(tokio::spawn(market_data_worker(
+                    cfg,
+                    token,
+                    contract,
+                    market_specs,
+                    bar_type,
+                    internal_tx,
+                )));
+            }
+        }
+        ServiceCommand::SetReplaySpeed { speed } => {
+            let Some(session) = state.session.as_ref() else {
+                return Ok(());
+            };
+            if !session.replay_enabled || state.replay_speed == speed {
+                if session.replay_enabled {
+                    let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
+                }
+                return Ok(());
+            }
+            state.replay_speed = speed;
+            let _ = state.replay_speed_tx.send(speed);
+            let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(speed));
+            let _ = event_tx.send(ServiceEvent::Status(format!(
+                "Replay speed set to {}",
+                speed.label()
             )));
         }
         ServiceCommand::ManualOrder { action } => {
@@ -329,6 +473,7 @@ async fn handle_internal(
     internal: InternalEvent,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
+    market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     match internal {
@@ -390,16 +535,16 @@ async fn handle_internal(
         InternalEvent::Market(update) => {
             if state.session.is_some() {
                 let broker_tx = state.broker_tx.clone();
-                let (snapshot, closed_bar_advanced) = {
+                let (display_snapshot, closed_bar_advanced) = {
                     let session = state.session.as_mut().expect("checked session above");
                     let closed_bar_advanced = apply_market_update(&mut session.market, update);
                     maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
-                    (session.market.clone(), closed_bar_advanced)
+                    (display_market_snapshot(&session.market), closed_bar_advanced)
                 };
                 if closed_bar_advanced {
                     request_snapshot_refresh(state, &internal_tx);
                 }
-                let _ = event_tx.send(ServiceEvent::MarketSnapshot(snapshot));
+                let _ = market_tx.send(display_snapshot);
                 return Ok(());
             }
         }
@@ -711,6 +856,9 @@ async fn maintain_session(
     let Some(session) = state.session.as_ref() else {
         return Ok(());
     };
+    if session.replay_enabled {
+        return Ok(());
+    }
 
     let refresh_action = next_token_maintenance_action(&session.cfg, &session.tokens)?;
     let mut forced_restart = false;
@@ -819,4 +967,47 @@ async fn refresh_session_state(
     let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts));
     let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
     Ok(())
+}
+
+fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
+    for account in accounts {
+        store.apply(EntityEnvelope {
+            entity_type: "account".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": account.id,
+                "source": "replay",
+                "name": account.name,
+                "startingBalance": 100000.0,
+                "balance": 100000.0,
+                "netLiq": 100000.0
+            }),
+        });
+        store.apply(EntityEnvelope {
+            entity_type: "accountRiskStatus".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": account.id,
+                "accountId": account.id,
+                "source": "replay",
+                "startingBalance": 100000.0,
+                "balance": 100000.0,
+                "netLiq": 100000.0,
+                "cashBalance": 100000.0,
+                "realizedPnL": 0.0
+            }),
+        });
+        store.apply(EntityEnvelope {
+            entity_type: "cashBalance".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": account.id,
+                "accountId": account.id,
+                "source": "replay",
+                "startingBalance": 100000.0,
+                "cashBalance": 100000.0,
+                "realizedPnL": 0.0
+            }),
+        });
+    }
 }
