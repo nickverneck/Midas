@@ -27,13 +27,6 @@ fn styled_line(text: String, focused: bool) -> Line<'static> {
     }
 }
 
-fn pnl_line(label: &str, value: Option<f64>) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(format!("{label}: ")),
-        Span::styled(format_signed_money(value), pnl_style(value)),
-    ])
-}
-
 fn pnl_style(value: Option<f64>) -> Style {
     match value {
         Some(value) if value > 0.0 => Style::default().fg(Color::Green),

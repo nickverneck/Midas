@@ -663,53 +663,60 @@ impl App {
                 Line::from("Connect and wait for account sync."),
             ];
         };
+        let hotkeys = if self.session_kind == SessionKind::Replay {
+            format!(
+                "Order {} {} | Keys b/s/c/v [/] 0 ({})",
+                self.base_config.order_qty,
+                self.base_config.time_in_force,
+                self.replay_speed.label(),
+            )
+        } else {
+            format!(
+                "Order {} {} | Keys b/s/c/v",
+                self.base_config.order_qty, self.base_config.time_in_force
+            )
+        };
+
         vec![
-            Line::from(format!("Account: {}", snapshot.account_name)),
-            Line::from(format!("Balance: {}", format_money(snapshot.balance))),
-            Line::from(format!("Cash: {}", format_money(snapshot.cash_balance))),
-            Line::from(format!("NetLiq: {}", format_money(snapshot.net_liq))),
-            pnl_line("Session Realized PnL", snapshot.realized_pnl),
-            pnl_line("Unrealized PnL", snapshot.unrealized_pnl),
+            Line::from(format!("Acct: {}", snapshot.account_name)),
             Line::from(format!(
-                "Intraday Margin: {}",
-                format_money(snapshot.intraday_margin)
+                "Bal: {}  Cash: {}",
+                format_money(snapshot.balance),
+                format_money(snapshot.cash_balance),
             )),
             Line::from(format!(
-                "Open Position Qty: {}",
-                format_quantity(snapshot.open_position_qty)
+                "NetLiq: {}  Mgn: {}",
+                format_money(snapshot.net_liq),
+                format_money(snapshot.intraday_margin),
+            )),
+            Line::from(vec![
+                Span::raw("Session: "),
+                Span::styled(
+                    format_signed_money(snapshot.realized_pnl),
+                    pnl_style(snapshot.realized_pnl),
+                ),
+                Span::raw("  Unreal: "),
+                Span::styled(
+                    format_signed_money(snapshot.unrealized_pnl),
+                    pnl_style(snapshot.unrealized_pnl),
+                ),
+            ]),
+            Line::from(format!(
+                "Open: {}  Sel: {}",
+                format_quantity(snapshot.open_position_qty),
+                format_quantity(snapshot.market_position_qty),
             )),
             Line::from(format!(
-                "Selected Contract Qty: {}",
-                format_quantity(snapshot.market_position_qty)
-            )),
-            Line::from(format!(
-                "Entry Price: {}",
-                format_money(snapshot.market_entry_price)
-            )),
-            Line::from(format!(
-                "Take Profit: {}",
-                format_money(snapshot.selected_contract_take_profit_price)
-            )),
-            Line::from(format!(
-                "Stop Loss: {}",
-                format_money(snapshot.selected_contract_stop_price)
+                "Entry: {}  TP: {}  SL: {}",
+                format_money(snapshot.market_entry_price),
+                format_money(snapshot.selected_contract_take_profit_price),
+                format_money(snapshot.selected_contract_stop_price),
             )),
             Line::from(match &self.market.contract_name {
-                Some(name) => format!("Active Contract: {name}"),
-                None => "Active Contract: none".to_string(),
+                Some(name) => format!("Contract: {name}"),
+                None => "Contract: none".to_string(),
             }),
-            Line::from(format!(
-                "Order Qty: {}  TIF: {}",
-                self.base_config.order_qty, self.base_config.time_in_force
-            )),
-            Line::from(if self.session_kind == SessionKind::Replay {
-                format!(
-                    "Hotkeys: b buy | s sell | c close | v visuals | [ slower | ] faster | 0 realtime ({})",
-                    self.replay_speed.label()
-                )
-            } else {
-                "Hotkeys: b buy | s sell | c close | v visuals".to_string()
-            }),
+            Line::from(hotkeys),
         ]
     }
 

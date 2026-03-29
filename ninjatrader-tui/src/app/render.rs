@@ -909,12 +909,17 @@ impl App {
             .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
             .split(area);
 
+        let session_lines = self.dashboard_summary_lines();
+        let stats_lines = self.stats_lines();
         let left = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(16), Constraint::Min(12)])
+            .constraints([
+                Constraint::Min(12),
+                Constraint::Length(stats_lines.len().saturating_add(2) as u16),
+            ])
             .split(columns[0]);
 
-        let session = Paragraph::new(self.dashboard_summary_lines())
+        let session = Paragraph::new(session_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -923,7 +928,7 @@ impl App {
             .wrap(Wrap { trim: true });
         frame.render_widget(session, left[0]);
 
-        let stats = Paragraph::new(self.stats_lines())
+        let stats = Paragraph::new(stats_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
