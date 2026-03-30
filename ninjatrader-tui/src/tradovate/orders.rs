@@ -121,6 +121,48 @@ fn dispatch_native_order_strategy_target(
     let is_reversal = current_qty != 0
         && target_qty != 0
         && current_qty.signum() != target_qty.signum();
+    if is_reversal
+        && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenConfirmEnter
+    {
+        let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
+        if interrupt_order_strategy_id.is_none() {
+            return Ok(MarketOrderDispatchOutcome::NoOp {
+                message: format!(
+                    "Waiting for broker order-strategy state to reconcile before staged reversal {} -> {} on {} ({reason})",
+                    current_qty, target_qty, contract.name
+                ),
+            });
+        }
+
+        let order_action = if current_qty > 0 { "Sell" } else { "Buy" };
+        let order_qty = current_qty.abs();
+        let flatten_reason = format!(
+            "{reason} | staged reversal flatten {} -> 0 before {}",
+            current_qty, target_qty
+        );
+        let order = build_market_order_request(
+            session,
+            &account,
+            &contract,
+            order_action,
+            order_qty,
+            "Strategy",
+            true,
+            Some(&flatten_reason),
+            Some(0),
+            interrupt_order_strategy_id,
+            Vec::new(),
+        );
+        enqueue_market_order(session, broker_tx, order)?;
+        session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
+            target_qty,
+            reason: reason.to_string(),
+        });
+        return Ok(MarketOrderDispatchOutcome::Queued {
+            target_qty: Some(0),
+        });
+    }
+
     let interrupt_order_strategy_id = if current_qty != 0 && !is_reversal {
         selected_active_order_strategy_id(session)
     } else {
@@ -372,19 +414,30 @@ fn plan_native_protection_sync(
 
     refresh_managed_protection_order_ids(session, key);
     if let Some(existing) = session.managed_protection.get(&key).cloned() {
+        let missing_live_leg =
+            (take_profit_price.is_some() && existing.take_profit_order_id.is_none())
+                || (stop_price.is_some() && existing.stop_order_id.is_none());
         let same_position = existing.signed_qty == signed_qty;
         let same_take_profit = prices_match(existing.take_profit_price, take_profit_price);
         let same_stop = prices_match(existing.stop_price, stop_price);
-        let same_protection_shape =
-            existing.take_profit_price.is_some() == take_profit_price.is_some();
-        if same_position && same_take_profit && same_stop {
+        let same_requested_take_profit = prices_match(
+            existing.last_requested_take_profit_price,
+            take_profit_price,
+        );
+        let same_requested_stop = prices_match(existing.last_requested_stop_price, stop_price);
+        if same_position
+            && same_take_profit
+            && same_stop
+            && same_requested_take_profit
+            && same_requested_stop
+        {
             return Ok(None);
         }
 
         if same_position
             && same_take_profit
             && stop_price.is_some()
-            && same_protection_shape
+            && !missing_live_leg
         {
             let Some(stop_order_id) = existing.stop_order_id else {
                 // Do not cancel and recreate a healthy bracket just because the live stop ID has
@@ -395,6 +448,8 @@ fn plan_native_protection_sync(
             let next_stop_price = stop_price.expect("checked is_some");
             let mut next_state = existing;
             next_state.stop_price = Some(next_stop_price);
+            next_state.last_requested_take_profit_price = take_profit_price;
+            next_state.last_requested_stop_price = Some(next_stop_price);
             return Ok(Some(PendingProtectionSync {
                 simulate: session.replay_enabled,
                 key,
@@ -477,6 +532,8 @@ fn plan_native_protection_sync(
         signed_qty,
         take_profit_price,
         stop_price,
+        last_requested_take_profit_price: take_profit_price,
+        last_requested_stop_price: stop_price,
         take_profit_cl_ord_id: tp_cl_ord_id,
         stop_cl_ord_id,
         take_profit_order_id: None,
@@ -517,6 +574,27 @@ fn selected_strategy_key(session: &SessionState) -> Result<StrategyProtectionKey
     })
 }
 
+const ORDER_STRATEGY_INTERRUPT_GRACE_MS: u128 = 1_500;
+
+fn strategy_has_live_linked_orders(
+    session: &SessionState,
+    key: StrategyProtectionKey,
+    order_strategy_id: i64,
+) -> bool {
+    session
+        .user_store
+        .linked_strategy_orders(key.account_id, order_strategy_id)
+        .into_iter()
+        .any(|order| order_is_active(order) && order_contract_id(order) == Some(key.contract_id))
+}
+
+fn strategy_within_interrupt_grace(session: &SessionState, order_strategy_id: i64) -> bool {
+    session.order_latency_tracker.as_ref().is_some_and(|tracker| {
+        tracker.order_strategy_id == Some(order_strategy_id)
+            && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_INTERRUPT_GRACE_MS
+    })
+}
+
 fn selected_active_order_strategy_id(session: &SessionState) -> Option<i64> {
     let key = selected_strategy_key(session).ok()?;
     if let Some(order_strategy_id) = session
@@ -524,18 +602,19 @@ fn selected_active_order_strategy_id(session: &SessionState) -> Option<i64> {
         .find_active_order_strategy(key.account_id, key.contract_id)
         .and_then(extract_entity_id)
     {
-        return Some(order_strategy_id);
+        if strategy_has_live_linked_orders(session, key, order_strategy_id)
+            || strategy_within_interrupt_grace(session, order_strategy_id)
+        {
+            return Some(order_strategy_id);
+        }
     }
     session
         .active_order_strategy
         .as_ref()
         .filter(|tracked| tracked.key == key)
         .filter(|tracked| {
-            session
-                .user_store
-                .linked_strategy_orders(key.account_id, tracked.order_strategy_id)
-                .into_iter()
-                .any(|order| order_is_active(order) && order_contract_id(order) == Some(key.contract_id))
+            strategy_has_live_linked_orders(session, key, tracked.order_strategy_id)
+                || strategy_within_interrupt_grace(session, tracked.order_strategy_id)
         })
         .map(|tracked| tracked.order_strategy_id)
 }
@@ -1336,6 +1415,8 @@ mod order_tests {
                 signed_qty: 1,
                 take_profit_price: Some(6639.0),
                 stop_price: Some(6644.25),
+                last_requested_take_profit_price: Some(6639.0),
+                last_requested_stop_price: Some(6644.25),
                 take_profit_cl_ord_id: None,
                 stop_cl_ord_id: None,
                 take_profit_order_id: Some(1001),
@@ -1411,7 +1492,7 @@ mod order_tests {
     }
 
     #[test]
-    fn trailing_stop_update_waits_for_live_stop_order_id() {
+    fn trailing_stop_update_resyncs_when_live_stop_order_id_is_missing() {
         let mut session = test_session();
         let key = StrategyProtectionKey {
             account_id: 42,
@@ -1423,6 +1504,8 @@ mod order_tests {
                 signed_qty: 1,
                 take_profit_price: Some(6639.0),
                 stop_price: Some(6644.25),
+                last_requested_take_profit_price: Some(6639.0),
+                last_requested_stop_price: Some(6644.25),
                 take_profit_cl_ord_id: None,
                 stop_cl_ord_id: None,
                 take_profit_order_id: Some(1001),
@@ -1444,7 +1527,94 @@ mod order_tests {
         )
         .expect("planner should succeed");
 
-        assert!(sync.is_none(), "planner should preserve the existing bracket");
+        assert!(matches!(
+            sync,
+            Some(PendingProtectionSync {
+                operation: ProtectionSyncOperation::Replace { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn protection_update_does_not_resubmit_when_live_take_profit_order_id_is_missing() {
+        let mut session = test_session();
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.managed_protection.insert(
+            key,
+            ManagedProtectionOrders {
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.25),
+                last_requested_take_profit_price: Some(6639.0),
+                last_requested_stop_price: Some(6644.25),
+                take_profit_cl_ord_id: None,
+                stop_cl_ord_id: None,
+                take_profit_order_id: None,
+                stop_order_id: Some(1002),
+            },
+        );
+
+        let sync = plan_native_protection_sync(
+            &mut session,
+            DesiredNativeProtection {
+                key,
+                account_name: "SIM".to_string(),
+                contract_name: "ESM6".to_string(),
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.25),
+                reason: "ema_cross bar sync".to_string(),
+            },
+        )
+        .expect("planner should succeed");
+
+        assert!(
+            sync.is_none(),
+            "unchanged protection should not resubmit just because the live TP id is missing"
+        );
+    }
+
+    #[test]
+    fn unchanged_native_protection_does_not_resubmit_when_ids_are_missing() {
+        let mut session = test_session();
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.managed_protection.insert(
+            key,
+            ManagedProtectionOrders {
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.25),
+                last_requested_take_profit_price: Some(6639.0),
+                last_requested_stop_price: Some(6644.25),
+                take_profit_cl_ord_id: None,
+                stop_cl_ord_id: None,
+                take_profit_order_id: None,
+                stop_order_id: None,
+            },
+        );
+
+        let sync = plan_native_protection_sync(
+            &mut session,
+            DesiredNativeProtection {
+                key,
+                account_name: "SIM".to_string(),
+                contract_name: "ESM6".to_string(),
+                signed_qty: 1,
+                take_profit_price: Some(6639.0),
+                stop_price: Some(6644.25),
+                reason: "ema_cross position sync".to_string(),
+            },
+        )
+        .expect("planner should succeed");
+
+        assert!(sync.is_none(), "unchanged protection should not resubmit");
     }
 
     #[test]
@@ -1623,6 +1793,91 @@ mod order_tests {
     }
 
     #[test]
+    fn automated_reversal_flatten_mode_queues_flatten_before_entry() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_native_order_strategy_target(
+            &mut session,
+            &broker_tx,
+            -1,
+            "ema_cross signal",
+        )
+        .expect("staged reversal should queue a flatten first");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(0)
+            }
+        ));
+        assert_eq!(
+            session
+                .execution_runtime
+                .pending_reversal_entry
+                .as_ref()
+                .map(|entry| entry.target_qty),
+            Some(-1)
+        );
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, Some(77));
+                assert_eq!(order.target_qty, Some(0));
+                assert_eq!(order.order_qty, 1);
+                assert_eq!(order.order_action, "Sell");
+            }
+            _ => panic!("expected staged flatten market order"),
+        }
+    }
+
+    #[test]
     fn automated_native_target_uses_order_strategy_with_target_qty() {
         let mut session = test_session();
         session.execution_config.kind = StrategyKind::Native;
@@ -1658,6 +1913,62 @@ mod order_tests {
                 );
             }
             _ => panic!("expected order strategy command"),
+        }
+    }
+
+    #[test]
+    fn automated_market_reversal_ignores_stale_bare_order_strategy() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        session.user_store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": "Working",
+                "uuid": "midas-stale-strategy"
+            }),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_target_position_order(
+            &mut session,
+            &broker_tx,
+            -1,
+            true,
+            "ema_cross signal",
+        )
+        .expect("stale bare strategy should not block market reversal fallback");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(-1)
+            }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, None);
+                assert_eq!(order.target_qty, Some(-1));
+                assert_eq!(order.order_action, "Sell");
+                assert_eq!(order.order_qty, 2);
+            }
+            _ => panic!("expected market order command"),
         }
     }
 }

@@ -228,6 +228,8 @@ async fn run_tui(cli: &Cli, config: AppConfig) -> Result<()> {
             maybe_service = event_rx.recv() => {
                 if let Some(event) = maybe_service {
                     app.handle_service_event(event, &cmd_tx);
+                } else {
+                    break;
                 }
             }
         }

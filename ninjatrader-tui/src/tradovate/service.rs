@@ -76,6 +76,8 @@ pub async fn service_loop(
     shutdown_state(&mut state, &event_tx);
 }
 
+const PENDING_TARGET_WATCHDOG_DELAY_SECS: u64 = 2;
+
 enum Either {
     Command(ServiceCommand),
     Internal(InternalEvent),
@@ -580,8 +582,10 @@ async fn handle_internal(
             let _ = event_tx.send(ServiceEvent::Status(ack.message));
             let _ = event_tx.send(ServiceEvent::DebugLog(debug_message));
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            schedule_pending_target_watchdog(internal_tx.clone());
         }
         InternalEvent::BrokerOrderFailed(failure) => {
+            let mut stale_interrupt_recovered = false;
             if let Some(session) = state.session.as_mut() {
                 session.order_submit_in_flight = false;
                 if session
@@ -594,16 +598,38 @@ async fn handle_internal(
                 if let Some(target_qty) = failure.target_qty {
                     if session.execution_runtime.pending_target_qty == Some(target_qty) {
                         session.execution_runtime.pending_target_qty = None;
-                        session.execution_runtime.last_summary = failure.message.clone();
-                        emit_execution_state(event_tx, session);
+                        if failure.stale_interrupt {
+                            clear_selected_order_strategy_state(session);
+                            session.execution_runtime.last_summary =
+                                "Previous strategy was already inactive; retrying current signal after broker sync."
+                                    .to_string();
+                            if let Some(last_closed_ts) = latest_strategy_bar_ts(session) {
+                                session.execution_runtime.last_closed_bar_ts =
+                                    Some(last_closed_ts.saturating_sub(1));
+                            }
+                            stale_interrupt_recovered = true;
+                            emit_execution_state(event_tx, session);
+                        } else {
+                            session.execution_runtime.last_summary = failure.message.clone();
+                            emit_execution_state(event_tx, session);
+                        }
                     }
                 }
             }
-            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-                "submit failed | {}",
-                failure.message
-            )));
-            let _ = event_tx.send(ServiceEvent::Error(failure.message));
+            if stale_interrupt_recovered {
+                request_snapshot_refresh(state, &internal_tx);
+                let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                    "submit stale | {}",
+                    failure.message
+                )));
+                let _ = event_tx.send(ServiceEvent::Status(failure.message));
+            } else {
+                let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                    "submit failed | {}",
+                    failure.message
+                )));
+                let _ = event_tx.send(ServiceEvent::Error(failure.message));
+            }
         }
         InternalEvent::OrderStrategyAck(ack) => {
             let mut signal_submit_ms = None;
@@ -644,6 +670,7 @@ async fn handle_internal(
             let _ = event_tx.send(ServiceEvent::Status(ack.message));
             let _ = event_tx.send(ServiceEvent::DebugLog(debug_message));
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            schedule_pending_target_watchdog(internal_tx.clone());
         }
         InternalEvent::OrderStrategyFailed(failure) => {
             let mut stale_interrupt_recovered = false;
@@ -664,7 +691,7 @@ async fn handle_internal(
                     session.execution_runtime.last_summary =
                         "Previous strategy was already inactive; retrying current signal after broker sync."
                             .to_string();
-                    if let Some(last_closed_ts) = latest_closed_bar_ts(session) {
+                    if let Some(last_closed_ts) = latest_strategy_bar_ts(session) {
                         session.execution_runtime.last_closed_bar_ts =
                             Some(last_closed_ts.saturating_sub(1));
                     }
@@ -729,11 +756,33 @@ async fn handle_internal(
             request_snapshot_refresh(state, &internal_tx);
             let _ = event_tx.send(ServiceEvent::Error(failure.message));
         }
+        InternalEvent::PendingTargetWatchdog => {
+            let Some(session) = state.session.as_mut() else {
+                return Ok(());
+            };
+            let Some(pending) = session.execution_runtime.pending_target_qty else {
+                return Ok(());
+            };
+            if pending == 0 || selected_contract_has_live_broker_path(session) {
+                return Ok(());
+            }
+
+            let actual_qty = selected_market_position_qty(session);
+            clear_stale_pending_target(session, pending, actual_qty, event_tx);
+            emit_execution_state(event_tx, session);
+        }
         InternalEvent::Error(message) => {
             let _ = event_tx.send(ServiceEvent::Error(message));
         }
     }
     Ok(())
+}
+
+fn schedule_pending_target_watchdog(internal_tx: UnboundedSender<InternalEvent>) {
+    tokio::spawn(async move {
+        time::sleep(Duration::from_secs(PENDING_TARGET_WATCHDOG_DELAY_SECS)).await;
+        let _ = internal_tx.send(InternalEvent::PendingTargetWatchdog);
+    });
 }
 
 fn emit_debug_logs_from_latency_delta(
@@ -1009,5 +1058,168 @@ fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
                 "realizedPnL": 0.0
             }),
         });
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_session() -> SessionState {
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionState {
+            cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            accounts: vec![AccountInfo {
+                id: 42,
+                name: "SIM".to_string(),
+                raw: json!({}),
+            }],
+            request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
+            order_latency_tracker: None,
+            order_submit_in_flight: false,
+            protection_sync_in_flight: false,
+            pending_protection_sync: None,
+            user_store: UserSyncStore::default(),
+            selected_account_id: Some(42),
+            selected_contract: Some(ContractSuggestion {
+                id: 3570918,
+                name: "ESM6".to_string(),
+                description: "E-mini S&P".to_string(),
+                raw: json!({}),
+            }),
+            bar_type: BarType::default(),
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            active_order_strategy: None,
+            next_strategy_order_nonce: 1,
+        }
+    }
+
+    fn test_state(session: SessionState) -> ServiceState {
+        let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (replay_speed_tx, _replay_speed_rx) =
+            tokio::sync::watch::channel(ReplaySpeed::default());
+        ServiceState {
+            client: Client::builder().build().expect("client"),
+            broker_tx,
+            replay_speed_tx,
+            replay_speed: ReplaySpeed::default(),
+            session: Some(session),
+            replay: None,
+            user_task: None,
+            market_task: None,
+            rest_probe_task: None,
+            latency: LatencySnapshot::default(),
+            snapshot_revision: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
+        let stale_strategy_id = 453147950116_i64;
+        let mut session = test_session();
+        session.execution_runtime.armed = true;
+        session.execution_runtime.pending_target_qty = Some(-1);
+        session.execution_runtime.last_closed_bar_ts = Some(200);
+        session.market.history_loaded = 1;
+        session.market.bars = vec![Bar {
+            ts_ns: 200,
+            open: 6400.0,
+            high: 6401.0,
+            low: 6399.0,
+            close: 6400.5,
+        }];
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: stale_strategy_id,
+            target_qty: 1,
+        });
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
+            cl_ord_id: "midas-stale-direct-reversal".to_string(),
+            order_id: Some(77),
+            order_strategy_id: Some(stale_strategy_id),
+            seen_recorded: false,
+            exec_report_recorded: false,
+            fill_recorded: false,
+        });
+        session.user_store.order_strategies.insert(
+            stale_strategy_id,
+            json!({
+                "id": stale_strategy_id,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": "Working"
+            }),
+        );
+
+        let mut state = test_state(session);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+        let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        handle_internal(
+            InternalEvent::BrokerOrderFailed(BrokerOrderFailure {
+                cl_ord_id: "midas-stale-direct-reversal".to_string(),
+                message: format!(
+                    "strategy {stale_strategy_id} was already inactive; waiting for broker sync before retrying the reversal"
+                ),
+                target_qty: Some(-1),
+                stale_interrupt: true,
+            }),
+            &mut state,
+            &event_tx,
+            &market_tx,
+            internal_tx,
+        )
+        .await
+        .expect("stale market interrupt should recover");
+
+        let session = state.session.expect("session should persist");
+        assert!(session.order_latency_tracker.is_none());
+        assert_eq!(session.execution_runtime.pending_target_qty, None);
+        assert!(session.active_order_strategy.is_none());
+        assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(199));
+        assert_eq!(
+            session.execution_runtime.last_summary,
+            "Previous strategy was already inactive; retrying current signal after broker sync."
+        );
+        assert!(!session
+            .user_store
+            .order_strategies
+            .contains_key(&stale_strategy_id));
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServiceEvent::DebugLog(message)
+                if message.contains("submit stale")
+                    && message.contains("already inactive")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServiceEvent::Status(message)
+                if message.contains("already inactive")
+        )));
+        assert!(!events.iter().any(|event| matches!(event, ServiceEvent::Error(_))));
     }
 }

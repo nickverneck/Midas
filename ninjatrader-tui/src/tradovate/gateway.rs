@@ -11,6 +11,7 @@ enum InternalEvent {
     BrokerOrderFailed(BrokerOrderFailure),
     OrderStrategyAck(BrokerOrderStrategyAck),
     OrderStrategyFailed(BrokerOrderStrategyFailure),
+    PendingTargetWatchdog,
     ProtectionSyncApplied(ProtectionSyncAck),
     ProtectionSyncFailed(ProtectionSyncFailure),
     Error(String),
@@ -161,6 +162,7 @@ struct BrokerOrderFailure {
     cl_ord_id: String,
     message: String,
     target_qty: Option<i32>,
+    stale_interrupt: bool,
 }
 
 struct BrokerOrderStrategyAck {
@@ -318,6 +320,7 @@ impl ReplayBrokerState {
                 order.contract_name
             ),
             target_qty: order.target_qty,
+            stale_interrupt: false,
         })?;
         let ts_ns = synthetic_ts_ns(order.reference_ts_ns);
         let key = StrategyProtectionKey {
@@ -425,6 +428,7 @@ impl ReplayBrokerState {
                     liquidation.contract_name
                 ),
                 target_qty: liquidation.target_qty,
+                stale_interrupt: false,
             })?;
         let ts_ns = synthetic_ts_ns(liquidation.reference_ts_ns);
         let key = StrategyProtectionKey {
@@ -1531,10 +1535,18 @@ async fn submit_market_order_via_gateway(
 ) -> Result<BrokerOrderAck, BrokerOrderFailure> {
     if let Some(order_strategy_id) = order.interrupt_order_strategy_id {
         if let Err(err) = interrupt_order_strategy_by_id(request_tx, order_strategy_id).await {
+            let stale_interrupt = interrupt_error_is_stale(&err);
             return Err(BrokerOrderFailure {
                 cl_ord_id: order.cl_ord_id,
-                message: format!("failed to interrupt strategy {order_strategy_id}: {err}"),
+                message: if stale_interrupt {
+                    format!(
+                        "strategy {order_strategy_id} was already inactive; waiting for broker sync before retrying the reversal"
+                    )
+                } else {
+                    format!("failed to interrupt strategy {order_strategy_id}: {err}")
+                },
                 target_qty: order.target_qty,
+                stale_interrupt,
             });
         }
     }
@@ -1545,6 +1557,7 @@ async fn submit_market_order_via_gateway(
                 cl_ord_id: order.cl_ord_id,
                 message: format!("failed to clear strategy protection: {err}"),
                 target_qty: order.target_qty,
+                stale_interrupt: false,
             });
         }
     }
@@ -1557,6 +1570,7 @@ async fn submit_market_order_via_gateway(
                 cl_ord_id: order.cl_ord_id,
                 message: err.to_string(),
                 target_qty: order.target_qty,
+                stale_interrupt: false,
             });
         }
     };
@@ -1597,6 +1611,7 @@ async fn submit_liquidation_via_gateway(
                 cl_ord_id: liquidation.request_id,
                 message: err.to_string(),
                 target_qty: liquidation.target_qty,
+                stale_interrupt: false,
             });
         }
     };

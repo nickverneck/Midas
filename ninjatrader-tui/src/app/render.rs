@@ -79,6 +79,8 @@ impl App {
             Focus::StrategyKind
             | Focus::OrderQty
             | Focus::NativeStrategy
+            | Focus::NativeSignalTiming
+            | Focus::NativeReversalMode
             | Focus::HmaLength
             | Focus::HmaMinAngle
             | Focus::HmaAngleLookback
@@ -143,6 +145,22 @@ impl App {
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_strategy = self.strategy.native_strategy.next();
+                    self.disarm_native_strategy(cmd_tx);
+                }
+                _ => {}
+            },
+            Focus::NativeSignalTiming => match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.strategy.native_signal_timing =
+                        self.strategy.native_signal_timing.toggle();
+                    self.disarm_native_strategy(cmd_tx);
+                }
+                _ => {}
+            },
+            Focus::NativeReversalMode => match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.strategy.native_reversal_mode =
+                        self.strategy.native_reversal_mode.toggle();
                     self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
@@ -563,6 +581,8 @@ impl App {
             | Focus::HmaBarsRequired
             | Focus::HmaLongsOnly
             | Focus::HmaInverted
+            | Focus::NativeSignalTiming
+            | Focus::NativeReversalMode
             | Focus::HmaTakeProfitTicks
             | Focus::HmaStopLossTicks
             | Focus::HmaTrailingStop
@@ -648,13 +668,13 @@ impl App {
                 "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
             }
             Screen::Strategy => {
-                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit HMA | F5/Ctrl+S save logs"
+                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit native strategy settings | F5/Ctrl+S save logs"
             }
             Screen::Dashboard => {
                 if self.session_kind == SessionKind::Replay {
-                    "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | v visuals | [/] replay speed | 0 realtime | F5/Ctrl+S save logs | q quit"
+                    "F1 login | F2 selection | F3 strategy | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | [/] replay speed | 0 realtime | F5/Ctrl+S save logs | q quit"
                 } else {
-                    "F1 login | F2 selection | F3 strategy | native HMA auto-runs on closed bars | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
+                    "F1 login | F2 selection | F3 strategy | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
                 }
             }
         };
@@ -955,9 +975,15 @@ impl App {
             return;
         }
 
-        let bars = self
-            .market
-            .bars
+        let closed_len = self.market.history_loaded.min(self.market.bars.len());
+        let source_bars = if self.strategy.kind == StrategyKind::Native
+            && self.strategy.native_signal_timing == NativeSignalTiming::ClosedBar
+        {
+            &self.market.bars[..closed_len]
+        } else {
+            &self.market.bars[..]
+        };
+        let bars = source_bars
             .iter()
             .rev()
             .take(180)
@@ -965,7 +991,7 @@ impl App {
             .collect::<Vec<_>>();
         let mut bars = bars.into_iter().rev().collect::<Vec<_>>();
         if bars.is_empty() {
-            bars = self.market.bars.clone();
+            bars = source_bars.to_vec();
         }
 
         let points = bars

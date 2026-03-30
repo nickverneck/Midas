@@ -400,11 +400,18 @@ struct PendingSignalLatencyContext {
     description: String,
 }
 
+#[derive(Debug, Clone)]
+struct PendingNativeReversalEntry {
+    target_qty: i32,
+    reason: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ExecutionRuntimeState {
     armed: bool,
     last_closed_bar_ts: Option<i64>,
     pending_target_qty: Option<i32>,
+    pending_reversal_entry: Option<PendingNativeReversalEntry>,
     last_summary: String,
     hma_execution: HmaAngleExecutionState,
     ema_execution: EmaCrossExecutionState,
@@ -421,6 +428,7 @@ impl ExecutionRuntimeState {
     }
 
     fn reset_execution(&mut self) {
+        self.pending_reversal_entry = None;
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
     }
@@ -449,6 +457,8 @@ struct ManagedProtectionOrders {
     signed_qty: i32,
     take_profit_price: Option<f64>,
     stop_price: Option<f64>,
+    last_requested_take_profit_price: Option<f64>,
+    last_requested_stop_price: Option<f64>,
     take_profit_cl_ord_id: Option<String>,
     stop_cl_ord_id: Option<String>,
     take_profit_order_id: Option<i64>,

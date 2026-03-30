@@ -71,6 +71,8 @@ impl App {
         let mut order = vec![Focus::StrategyKind, Focus::OrderQty];
         if self.strategy.kind == StrategyKind::Native {
             order.push(Focus::NativeStrategy);
+            order.push(Focus::NativeSignalTiming);
+            order.push(Focus::NativeReversalMode);
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => order.extend([
                     Focus::HmaLength,

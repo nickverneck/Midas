@@ -187,6 +187,20 @@ impl App {
                 format!("Native Strategy: {}", self.strategy.native_strategy.label()),
                 self.focus == Focus::NativeStrategy,
             ));
+            lines.push(styled_line(
+                format!(
+                    "Signal Timing: {}",
+                    self.strategy.native_signal_timing.label()
+                ),
+                self.focus == Focus::NativeSignalTiming,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Reversal Mode: {}",
+                    self.strategy.native_reversal_mode.label()
+                ),
+                self.focus == Focus::NativeReversalMode,
+            ));
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => {
                     lines.push(styled_line(
@@ -369,7 +383,7 @@ impl App {
                 }
             }
             lines.push(Line::from(
-                "Type numbers or use Left/Right for numeric fields. Backspace edits typed values. Zero TP/SL disables them.",
+                "Type numbers or use Left/Right for numeric fields. Left/Right/Enter toggles timing and reversal mode. Zero TP/SL disables them.",
             ));
         } else if self.strategy.kind == StrategyKind::Lua {
             lines.push(styled_line(
@@ -410,8 +424,13 @@ impl App {
     fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
         vec![
             Line::from("Backend order: Native Rust > Lua > Machine Learning."),
-            Line::from("Native strategies execute on newly closed 1m bars after you arm them."),
+            Line::from(
+                "Native strategies can evaluate on newly closed bars or on the live forming bar after you arm them.",
+            ),
             Line::from("The native engine targets the selected contract position directly."),
+            Line::from(
+                "Direct reversal is lower latency; Flatten > Confirm > Enter is safer when broker strategy state lags.",
+            ),
             Line::from("TP, SL, and trailing stop are configured in ticks and synced natively."),
             Line::from(format!(
                 "Native runtime auto-closes {}m before session close and holds until reopen.",
@@ -423,7 +442,7 @@ impl App {
             Line::from("Strategy screen controls:"),
             Line::from("Up/Down moves focus. Left/Right edits native params or toggles fields."),
             Line::from(
-                "Enter on Continue arms the selected native strategy from the current closed bar.",
+                "Enter on Continue arms the selected native strategy from the current visible bar for the chosen timing mode.",
             ),
             Line::from(""),
             Line::from("Lua editor controls:"),
@@ -496,10 +515,12 @@ impl App {
                         self.strategy.native_hma.bars_required_to_trade
                     )),
                     Line::from(format!(
-                        "Flags: longs_only={} inverted={} trailing={}",
+                        "Flags: longs_only={} inverted={} trailing={} timing={} reversal={}",
                         bool_label(self.strategy.native_hma.longs_only),
                         bool_label(self.strategy.native_hma.inverted),
-                        bool_label(self.strategy.native_hma.use_trailing_stop)
+                        bool_label(self.strategy.native_hma.use_trailing_stop),
+                        self.strategy.native_signal_timing.label(),
+                        self.strategy.native_reversal_mode.label(),
                     )),
                     Line::from(format!(
                         "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
@@ -530,9 +551,11 @@ impl App {
                         self.strategy.native_ema.fast_length, self.strategy.native_ema.slow_length,
                     )),
                     Line::from(format!(
-                        "Flags: inverted={} trailing={}",
+                        "Flags: inverted={} trailing={} timing={} reversal={}",
                         bool_label(self.strategy.native_ema.inverted),
-                        bool_label(self.strategy.native_ema.use_trailing_stop)
+                        bool_label(self.strategy.native_ema.use_trailing_stop),
+                        self.strategy.native_signal_timing.label(),
+                        self.strategy.native_reversal_mode.label(),
                     )),
                     Line::from(format!(
                         "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
@@ -556,7 +579,10 @@ impl App {
                 Line::from(
                     "TP/SL are broker-native and keyed from the confirmed broker entry price.",
                 ),
-                Line::from("Trailing updates move the broker stop only on new closed bars."),
+                Line::from(format!(
+                    "Trailing updates follow the configured signal timing: {}.",
+                    self.strategy.native_signal_timing.label()
+                )),
                 Line::from(""),
                 Line::from(format!("Live status: {}", self.strategy_runtime_summary())),
                 Line::from(format!(

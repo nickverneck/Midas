@@ -33,7 +33,7 @@ impl App {
         );
         app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close, v visuals.".to_string());
         app.push_log(
-            "Native HMA Angle and EMA Crossover strategies can auto-trade closed 1m bars once armed from Strategy."
+            "Native HMA Angle and EMA Crossover strategies can auto-trade on closed bars or live forming bars once armed from Strategy."
                 .to_string(),
         );
         app.push_log(

@@ -1,7 +1,9 @@
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
-use crate::strategy::{LuaSourceMode, NativeStrategyKind, StrategyKind, StrategyState};
+use crate::strategy::{
+    LuaSourceMode, NativeSignalTiming, NativeStrategyKind, StrategyKind, StrategyState,
+};
 use crate::tradovate::{
     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
     ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
@@ -82,6 +84,8 @@ enum Focus {
     StrategyKind,
     OrderQty,
     NativeStrategy,
+    NativeSignalTiming,
+    NativeReversalMode,
     HmaLength,
     HmaMinAngle,
     HmaAngleLookback,
