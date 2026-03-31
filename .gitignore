@@ -31,3 +31,5 @@ target
 .auth/
 *.bin
 *.csv
+ninjatrader-tui/market replay/ES 06-26.Last.txt
+trader/market replay/ES 06-26.Last.txt
