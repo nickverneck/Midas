@@ -1,14 +1,19 @@
 mod app;
+mod broker;
 mod config;
 mod engine_control;
 mod engine_registry;
 mod ipc;
+#[cfg(feature = "ironbeam")]
+mod ironbeam;
 mod strategies;
 mod strategy;
+#[cfg(feature = "tradovate")]
 mod tradovate;
 
 use anyhow::{Result, bail};
 use app::App;
+use broker::{ServiceCommand, ServiceEvent};
 use clap::{Parser, Subcommand};
 use config::AppConfig;
 use crossterm::event::{Event as CEvent, EventStream};
@@ -28,16 +33,15 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tradovate::ServiceCommand;
 
 #[derive(Debug, Parser)]
-#[command(name = "ninjatrader-tui")]
-#[command(about = "Ratatui terminal client for Tradovate / NinjaTrader")]
+#[command(name = "trader")]
+#[command(about = "Ratatui terminal client for Tradovate and Ironbeam")]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    #[arg(long, default_value = ".run/ninjatrader-engine.sock")]
+    #[arg(long, default_value = ".run/trader-engine.sock")]
     engine_socket: PathBuf,
 
     #[arg(long)]
@@ -55,12 +59,12 @@ enum Mode {
     List,
     /// Attach a full TUI session to a running engine by ID from `list`.
     Attach {
-        /// Engine ID from `ninjatrader-tui list` (PID).
+        /// Engine ID from `trader list` (PID).
         id: u32,
     },
     /// Kill one running engine by ID.
     Kill {
-        /// Engine ID from `ninjatrader-tui list` (PID).
+        /// Engine ID from `trader list` (PID).
         id: u32,
         /// Disarm the strategy, close the selected market, then kill the engine.
         #[arg(short = 'c', long = "close")]
@@ -217,10 +221,7 @@ async fn run_tui(cli: &Cli, config: AppConfig) -> Result<()> {
                     Some(Ok(CEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
-                        app.handle_service_event(
-                            tradovate::ServiceEvent::Error(err.to_string()),
-                            &cmd_tx,
-                        );
+                        app.handle_service_event(ServiceEvent::Error(err.to_string()), &cmd_tx);
                     }
                     None => break,
                 }
@@ -248,7 +249,7 @@ async fn connect_or_spawn_engine(
 ) -> Result<(
     Option<tokio::process::Child>,
     mpsc::UnboundedSender<ServiceCommand>,
-    mpsc::UnboundedReceiver<tradovate::ServiceEvent>,
+    mpsc::UnboundedReceiver<ServiceEvent>,
 )> {
     if let Ok((cmd_tx, event_rx)) = connect_client(&cli.engine_socket).await {
         let _ = cmd_tx.send(ServiceCommand::ReplayState);

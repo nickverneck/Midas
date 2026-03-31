@@ -465,7 +465,7 @@ impl App {
 
     fn build_dashboard_visual_overlay(
         &self,
-        bars: &[crate::tradovate::Bar],
+        bars: &[crate::broker::Bar],
         buy_marker_points: &[(f64, f64)],
         sell_marker_points: &[(f64, f64)],
     ) -> DashboardVisualOverlay {

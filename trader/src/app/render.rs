@@ -11,6 +11,7 @@ impl App {
 
         self.render_header(frame, layout[0]);
         match self.screen {
+            Screen::BrokerSelect => self.render_broker_select_screen(frame, layout[1]),
             Screen::Login => self.render_login_screen(frame, layout[1]),
             Screen::Strategy => self.render_strategy_screen(frame, layout[1]),
             Screen::Selection => self.render_selection_screen(frame, layout[1]),
@@ -18,6 +19,37 @@ impl App {
         }
         self.render_logs(frame, layout[2]);
     }
+
+    fn handle_broker_select_key(&mut self, key: KeyEvent) {
+        let next_broker = match key.code {
+            KeyCode::Up | KeyCode::Left => self
+                .available_brokers
+                .iter()
+                .position(|broker| *broker == self.selected_broker)
+                .map(|index| (index + self.available_brokers.len() - 1) % self.available_brokers.len())
+                .and_then(|index| self.available_brokers.get(index).copied()),
+            KeyCode::Down | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => self
+                .available_brokers
+                .iter()
+                .position(|broker| *broker == self.selected_broker)
+                .map(|index| (index + 1) % self.available_brokers.len())
+                .and_then(|index| self.available_brokers.get(index).copied()),
+            _ => None,
+        };
+
+        if let Some(next_broker) = next_broker {
+            self.selected_broker = next_broker;
+            self.status = format!("Broker selected: {}", self.selected_broker.label());
+            return;
+        }
+
+        if key.code == KeyCode::Enter {
+            self.screen = Screen::Login;
+            self.focus = Focus::Env;
+            self.status = format!("Login for {}", self.selected_broker.label());
+        }
+    }
+
     fn handle_login_key(&mut self, key: KeyEvent, cmd_tx: &UnboundedSender<ServiceCommand>) {
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {
@@ -59,6 +91,13 @@ impl App {
             }
             Focus::ReplayMode => {
                 if key.code == KeyCode::Enter {
+                    if !self.broker_supports_replay() {
+                        self.push_log(format!(
+                            "Replay mode is unavailable for {}.",
+                            self.selected_broker.label()
+                        ));
+                        return;
+                    }
                     self.bar_type = BarType::Range1;
                     let cfg = self.current_config();
                     let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
@@ -71,12 +110,14 @@ impl App {
             Focus::TokenOverride => edit_string(&mut self.form.token_override, key),
             Focus::Username => edit_string(&mut self.form.username, key),
             Focus::Password => edit_string(&mut self.form.password, key),
+            Focus::ApiKey => edit_string(&mut self.form.api_key, key),
             Focus::AppId => edit_string(&mut self.form.app_id, key),
             Focus::AppVersion => edit_string(&mut self.form.app_version, key),
             Focus::Cid => edit_string(&mut self.form.cid, key),
             Focus::Secret => edit_string(&mut self.form.secret, key),
             Focus::TokenPath => edit_string(&mut self.form.token_path, key),
-            Focus::StrategyKind
+            Focus::BrokerList
+            | Focus::StrategyKind
             | Focus::OrderQty
             | Focus::NativeStrategy
             | Focus::NativeSignalTiming
@@ -403,7 +444,14 @@ impl App {
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
                     self.sync_selected_account(cmd_tx);
-                    self.arm_native_strategy(cmd_tx);
+                    if self.capabilities.automated_orders {
+                        self.arm_native_strategy(cmd_tx);
+                    } else {
+                        self.push_log(format!(
+                            "{} automation is not enabled yet; opening the dashboard in monitor mode.",
+                            self.selected_broker.label()
+                        ));
+                    }
                     self.push_log(format!(
                         "Strategy selected: {}",
                         self.strategy.summary_label()
@@ -416,11 +464,13 @@ impl App {
             | Focus::TokenOverride
             | Focus::Username
             | Focus::Password
+            | Focus::ApiKey
             | Focus::AppId
             | Focus::AppVersion
             | Focus::Cid
             | Focus::Secret
             | Focus::TokenPath
+            | Focus::BrokerList
             | Focus::Connect
             | Focus::ReplayMode
             | Focus::AccountList
@@ -541,7 +591,15 @@ impl App {
             Focus::BarTypeToggle => {
                 match key.code {
                     KeyCode::Left | KeyCode::Right => {
-                        self.bar_type = self.bar_type.toggle();
+                        if self.broker_supports_range_bars() {
+                            self.bar_type = self.bar_type.toggle();
+                        } else {
+                            self.bar_type = BarType::Minute1;
+                            self.status = format!(
+                                "{} currently supports 1-minute bars only.",
+                                self.selected_broker.label()
+                            );
+                        }
                         return;
                     }
                     KeyCode::Up => {
@@ -567,11 +625,13 @@ impl App {
             | Focus::TokenOverride
             | Focus::Username
             | Focus::Password
+            | Focus::ApiKey
             | Focus::AppId
             | Focus::AppVersion
             | Focus::Cid
             | Focus::Secret
             | Focus::TokenPath
+            | Focus::BrokerList
             | Focus::StrategyKind
             | Focus::OrderQty
             | Focus::NativeStrategy
@@ -643,6 +703,13 @@ impl App {
         };
 
         if let Some(action) = action {
+            if !self.capabilities.manual_orders {
+                self.push_log(format!(
+                    "{} manual order routing is not enabled yet.",
+                    self.selected_broker.label()
+                ));
+                return;
+            }
             self.sync_selected_account(cmd_tx);
             let _ = cmd_tx.send(ServiceCommand::ManualOrder { action });
         }
@@ -655,14 +722,18 @@ impl App {
             .split(area);
 
         let screen_label = match self.screen {
+            Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
             Screen::Selection => "Selection",
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",
         };
         let help = match self.screen {
+            Screen::BrokerSelect => {
+                "Up/Down choose broker | Enter continue to login | F5/Ctrl+S save logs | q quit"
+            }
             Screen::Login => {
-                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | F5/Ctrl+S save logs | q quit"
+                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | Esc broker picker | F5/Ctrl+S save logs | q quit"
             }
             Screen::Selection => {
                 "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
@@ -678,15 +749,16 @@ impl App {
                 }
             }
         };
-        let titles = ["Login", "Selection", "Strategy", "Dashboard"]
+        let titles = ["Broker", "Login", "Selection", "Strategy", "Dashboard"]
             .into_iter()
             .map(Line::from)
             .collect::<Vec<_>>();
         let selected_tab = match self.screen {
-            Screen::Login => 0,
-            Screen::Selection => 1,
-            Screen::Strategy => 2,
-            Screen::Dashboard => 3,
+            Screen::BrokerSelect => 0,
+            Screen::Login => 1,
+            Screen::Selection => 2,
+            Screen::Strategy => 3,
+            Screen::Dashboard => 4,
         };
         let tabs = Tabs::new(titles)
             .select(selected_tab)
@@ -702,11 +774,13 @@ impl App {
         let header = Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    "NinjaTrader / Tradovate TUI",
+                    "Trader",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::raw("  "),
+                Span::raw(format!("Broker: {}", self.selected_broker.label())),
                 Span::raw("  "),
                 Span::raw(format!("Screen: {screen_label}")),
                 Span::raw("  "),
@@ -734,6 +808,44 @@ impl App {
         ])
         .block(Block::default().borders(Borders::ALL).title("Session"));
         frame.render_widget(header, rows[1]);
+    }
+
+    fn render_broker_select_screen(&self, frame: &mut Frame<'_>, area: Rect) {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(area);
+
+        let brokers = self
+            .available_brokers
+            .iter()
+            .map(|broker| {
+                let prefix = if *broker == self.selected_broker { "> " } else { "  " };
+                ListItem::new(format!("{prefix}{}", broker.label()))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(brokers).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Installed Brokers"),
+        );
+        frame.render_widget(list, columns[0]);
+
+        let details = Paragraph::new(vec![
+            Line::from(format!("Selected: {}", self.selected_broker.label())),
+            Line::from(""),
+            Line::from("Broker selection appears before login when multiple backends are compiled into the binary."),
+            Line::from("Use Up/Down or Left/Right to switch."),
+            Line::from("Press Enter to continue to the login screen."),
+            Line::from(""),
+            Line::from(match self.selected_broker {
+                BrokerKind::Tradovate => "Tradovate supports live/sim login, contract search, market streams, and replay in replay-enabled builds.",
+                BrokerKind::Ironbeam => "Ironbeam support currently focuses on auth, account discovery, contract search, and live websocket bars.",
+            }),
+        ])
+        .block(Block::default().borders(Borders::ALL).title("Broker Details"))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(details, columns[1]);
     }
 
     fn render_login_screen(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1273,9 +1385,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::{
+        AccountInfo, BrokerCapabilities, BrokerKind, ContractSuggestion, ManualOrderAction,
+        ServiceEvent,
+    };
     use crate::config::{AppConfig, LogMode};
     use crate::strategy::ExecutionStateSnapshot;
-    use crate::tradovate::{AccountInfo, ContractSuggestion, ManualOrderAction, ServiceEvent};
     use serde_json::json;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -1298,6 +1413,16 @@ mod tests {
             description: "test contract".to_string(),
             raw: json!({}),
         }
+    }
+
+    fn enable_tradovate_controls(app: &mut App) {
+        app.selected_broker = BrokerKind::Tradovate;
+        app.capabilities = BrokerCapabilities {
+            replay: true,
+            manual_orders: true,
+            automated_orders: true,
+            native_protection: true,
+        };
     }
 
     fn expect_select_account(rx: &mut UnboundedReceiver<ServiceCommand>, account_id: i64) {
@@ -1385,6 +1510,7 @@ mod tests {
     fn dashboard_manual_orders_sync_selected_account_first() {
         let mut app = App::new(AppConfig::default());
         let (cmd_tx, mut cmd_rx) = unbounded_channel();
+        enable_tradovate_controls(&mut app);
         app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
         app.selected_account = 1;
 
@@ -1467,6 +1593,7 @@ mod tests {
     fn strategy_continue_syncs_selected_account_before_arming() {
         let mut app = App::new(AppConfig::default());
         let (cmd_tx, mut cmd_rx) = unbounded_channel();
+        enable_tradovate_controls(&mut app);
         app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
         app.selected_account = 1;
         app.focus = Focus::StrategyContinue;

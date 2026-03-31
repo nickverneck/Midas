@@ -1,8 +1,17 @@
 impl App {
     pub fn new(config: AppConfig) -> Self {
+        let available_brokers = compiled_brokers().to_vec();
+        let selected_broker = if available_brokers.contains(&config.broker) {
+            config.broker
+        } else {
+            default_broker()
+        };
         let form = FormState::from_config(&config);
         let mut app = Self {
             base_config: config,
+            available_brokers,
+            selected_broker,
+            capabilities: BrokerCapabilities::default(),
             form,
             strategy: StrategyState::new(),
             screen: Screen::Login,
@@ -27,9 +36,20 @@ impl App {
             last_log_at: None,
             last_market_update_at: None,
         };
+        if app.available_brokers.len() > 1 {
+            app.screen = Screen::BrokerSelect;
+            app.focus = Focus::BrokerList;
+            app.status = format!("Select a broker to continue. Current: {}", app.selected_broker.label());
+        }
         app.push_log(
-            "Phase 1 enabled: auth, account selection, contract search, 1m or 1 range history/live."
-                .to_string(),
+            format!(
+                "Broker support compiled in: {}.",
+                app.available_brokers
+                    .iter()
+                    .map(|broker| broker.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         );
         app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close, v visuals.".to_string());
         app.push_log(
@@ -37,10 +57,10 @@ impl App {
                 .to_string(),
         );
         app.push_log(
-            if cfg!(feature = "replay") {
+            if app.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay") {
                 "Replay mode available from Login: local ES tick data can stream 1 Range or 1 Min bars."
             } else {
-                "Replay mode disabled in this build; rebuild with `--features replay` to use local market replay."
+                "Replay mode is only available on Tradovate builds with `--features replay`."
             }
             .to_string(),
         );
@@ -48,12 +68,14 @@ impl App {
     }
     pub fn current_config(&self) -> AppConfig {
         let mut cfg = self.base_config.clone();
+        cfg.broker = self.selected_broker;
         cfg.env = self.form.env;
         cfg.auth_mode = self.form.auth_mode;
         cfg.log_mode = self.form.log_mode;
         cfg.token_override = self.form.token_override.clone();
         cfg.username = self.form.username.clone();
         cfg.password = self.form.password.clone();
+        cfg.api_key = self.form.api_key.clone();
         cfg.app_id = self.form.app_id.clone();
         cfg.app_version = self.form.app_version.clone();
         cfg.cid = self.form.cid.clone();
@@ -82,11 +104,15 @@ impl App {
                 self.push_log(format!("ERROR: {message}"));
             }
             ServiceEvent::Connected {
+                broker,
                 env,
                 user_name,
                 auth_mode,
                 session_kind,
+                capabilities,
             } => {
+                self.selected_broker = broker;
+                self.capabilities = capabilities;
                 self.form.env = env;
                 self.form.auth_mode = auth_mode;
                 self.session_kind = session_kind;
@@ -99,14 +125,20 @@ impl App {
                     self.focus = Focus::AccountList;
                 }
                 self.status = match user_name {
-                    Some(name) => format!("Connected to {} as {}", env.label(), name),
-                    None => format!("Connected to {}", env.label()),
+                    Some(name) => format!(
+                        "Connected to {} {} as {}",
+                        broker.label(),
+                        env.label(),
+                        name
+                    ),
+                    None => format!("Connected to {} {}", broker.label(), env.label()),
                 };
                 self.push_log(self.status.clone());
             }
             ServiceEvent::Disconnected => {
                 self.screen = Screen::Login;
                 self.focus = Focus::Env;
+                self.capabilities = BrokerCapabilities::default();
                 self.session_kind = SessionKind::Live;
                 self.accounts.clear();
                 self.account_snapshots.clear();
@@ -168,5 +200,4 @@ impl App {
             }
         }
     }
-
 }

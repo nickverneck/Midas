@@ -107,10 +107,12 @@ async fn handle_command(
             save_token_cache(&cfg.session_cache_path, &tokens)?;
 
             let _ = event_tx.send(ServiceEvent::Connected {
+                broker: BrokerKind::Tradovate,
                 env: cfg.env,
                 user_name: tokens.user_name.clone(),
                 auth_mode: cfg.auth_mode,
                 session_kind: SessionKind::Live,
+                capabilities: tradovate_capabilities(),
             });
 
             let accounts = list_accounts(&state.client, &cfg.env, &tokens.access_token).await?;
@@ -225,10 +227,12 @@ async fn handle_command(
             });
 
             let _ = event_tx.send(ServiceEvent::Connected {
+                broker: BrokerKind::Tradovate,
                 env: cfg.env,
                 user_name: Some("Replay".to_string()),
                 auth_mode: cfg.auth_mode,
                 session_kind: SessionKind::Replay,
+                capabilities: tradovate_capabilities(),
             });
             let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts.clone()));
             let _ = event_tx.send(ServiceEvent::ContractSearchResults {
@@ -257,10 +261,12 @@ async fn handle_command(
                 return Ok(());
             };
             let _ = event_tx.send(ServiceEvent::Connected {
+                broker: BrokerKind::Tradovate,
                 env: session.cfg.env,
                 user_name: session.tokens.user_name.clone(),
                 auth_mode: session.cfg.auth_mode,
                 session_kind: session.session_kind,
+                capabilities: tradovate_capabilities(),
             });
             let _ = event_tx.send(ServiceEvent::AccountsLoaded(session.accounts.clone()));
             let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(

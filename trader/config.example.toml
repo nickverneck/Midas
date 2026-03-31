@@ -1,17 +1,20 @@
+broker = "tradovate"
 env = "sim"
 auth_mode = "token_file"
+log_mode = "default"
 
 token_override = ""
 username = ""
 password = ""
-app_id = "Midas TUI"
+api_key = ""
+app_id = "Trader"
 app_version = "0.1.0"
 cid = ""
 secret = ""
 custom_tag50 = ""
 
 token_path = ".auth/bearer-token.json"
-session_cache_path = ".auth/ninjatrader-tui-session.json"
+session_cache_path = ".auth/trader-session.json"
 
 history_bars = 500
 heartbeat_ms = 2500
@@ -19,3 +22,5 @@ contract_suggest_limit = 12
 time_in_force = "Day"
 order_qty = 1
 autoconnect = false
+replay_file_path = "trader/market replay/ES 06-26.Last.txt"
+replay_bar_interval_ms = 5

@@ -10,9 +10,9 @@ pub async fn kill_engine_process(id: u32) -> Result<()> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
+    use crate::broker::{ManualOrderAction, ServiceCommand, ServiceEvent};
     use crate::engine_registry::resolve_engine;
     use crate::ipc::connect_client;
-    use crate::tradovate::{ManualOrderAction, ServiceCommand, ServiceEvent};
     use anyhow::{Context, Result, anyhow, bail};
     use std::fs;
     use std::os::unix::fs::FileTypeExt;
@@ -192,10 +192,10 @@ mod imp {
     use anyhow::{Result, bail};
 
     pub async fn close_and_kill_engine(_id: u32) -> Result<()> {
-        bail!("`ninjatrader-tui kill -c` is currently only supported on Linux and macOS");
+        bail!("`trader kill -c` is currently only supported on Linux and macOS");
     }
 
     pub async fn kill_engine_process(_id: u32) -> Result<()> {
-        bail!("`ninjatrader-tui kill` is currently only supported on Linux and macOS");
+        bail!("`trader kill` is currently only supported on Linux and macOS");
     }
 }

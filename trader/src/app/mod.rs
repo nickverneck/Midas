@@ -1,14 +1,14 @@
+use crate::broker::{
+    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
+    BrokerCapabilities, BrokerKind, ContractSuggestion, InstrumentSessionWindow, LatencySnapshot,
+    ManualOrderAction, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
+    TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
+};
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategy::{
     LuaSourceMode, NativeSignalTiming, NativeStrategyKind, StrategyKind, StrategyState,
-};
-use crate::tradovate::{
-    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
-    ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
-    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
-    TradeMarkerSide,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -26,6 +26,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub struct App {
     base_config: AppConfig,
+    available_brokers: Vec<BrokerKind>,
+    selected_broker: BrokerKind,
+    capabilities: BrokerCapabilities,
     form: FormState,
     strategy: StrategyState,
     screen: Screen,
@@ -59,6 +62,7 @@ struct FormState {
     token_override: String,
     username: String,
     password: String,
+    api_key: String,
     app_id: String,
     app_version: String,
     cid: String,
@@ -68,12 +72,14 @@ struct FormState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    BrokerList,
     Env,
     AuthMode,
     LogMode,
     TokenOverride,
     Username,
     Password,
+    ApiKey,
     AppId,
     AppVersion,
     Cid,
@@ -117,6 +123,7 @@ enum Focus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    BrokerSelect,
     Login,
     Strategy,
     Selection,

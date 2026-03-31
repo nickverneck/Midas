@@ -1,15 +1,24 @@
+use crate::broker::{
+    AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, ContractSuggestion,
+    InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
+    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
+    TradeMarkerSide, infer_session_profile,
+};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;
 use crate::strategies::hma_angle::HmaAngleExecutionState;
 use crate::strategies::{StrategySignal, side_from_signed_qty};
 use crate::strategy::{
-    ExecutionRuntimeSnapshot, ExecutionStateSnapshot, ExecutionStrategyConfig,
-    NativeReversalMode, NativeSignalTiming, NativeStrategyKind, StrategyKind,
+    ExecutionRuntimeSnapshot, ExecutionStateSnapshot, ExecutionStrategyConfig, NativeReversalMode,
+    NativeSignalTiming, NativeStrategyKind, StrategyKind,
 };
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
-use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc, Weekday};
+#[cfg(any(feature = "replay", test))]
+use chrono::TimeZone;
+use chrono::{DateTime, Utc};
+#[cfg(any(feature = "replay", test))]
 use chrono_tz::America::New_York;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -40,3 +49,12 @@ include!("latency.rs");
 include!("market.rs");
 include!("store.rs");
 include!("protocol.rs");
+
+fn tradovate_capabilities() -> BrokerCapabilities {
+    BrokerCapabilities {
+        replay: cfg!(feature = "replay"),
+        manual_orders: true,
+        automated_orders: true,
+        native_protection: true,
+    }
+}

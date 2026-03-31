@@ -738,7 +738,7 @@ mod replay_tests {
     #[test]
     fn replay_path_candidates_cover_launch_crate_and_workspace_roots() {
         let launch_dir = Path::new("/tmp/launch");
-        let manifest_dir = Path::new("/tmp/workspace/ninjatrader-tui");
+        let manifest_dir = Path::new("/tmp/workspace/trader");
         let candidates = replay_path_candidates(
             Path::new("market replay/ES 06-26.Last.txt"),
             Some(launch_dir),
@@ -749,7 +749,7 @@ mod replay_tests {
             candidates,
             vec![
                 PathBuf::from("/tmp/launch/market replay/ES 06-26.Last.txt"),
-                PathBuf::from("/tmp/workspace/ninjatrader-tui/market replay/ES 06-26.Last.txt"),
+                PathBuf::from("/tmp/workspace/trader/market replay/ES 06-26.Last.txt"),
                 PathBuf::from("/tmp/workspace/market replay/ES 06-26.Last.txt"),
             ]
         );
@@ -758,16 +758,16 @@ mod replay_tests {
     #[test]
     fn replay_path_candidates_support_workspace_relative_inputs() {
         let launch_dir = Path::new("/tmp/launch");
-        let manifest_dir = Path::new("/tmp/workspace/ninjatrader-tui");
+        let manifest_dir = Path::new("/tmp/workspace/trader");
         let candidates = replay_path_candidates(
-            Path::new("ninjatrader-tui/market replay/ES 06-26.Last.txt"),
+            Path::new("trader/market replay/ES 06-26.Last.txt"),
             Some(launch_dir),
             manifest_dir,
         );
 
         assert!(
             candidates.contains(&PathBuf::from(
-                "/tmp/workspace/ninjatrader-tui/market replay/ES 06-26.Last.txt"
+                "/tmp/workspace/trader/market replay/ES 06-26.Last.txt"
             )),
             "workspace-root-relative replay paths should be accepted"
         );

@@ -1,3 +1,4 @@
+use crate::broker::{BrokerKind, default_broker, supports_broker};
 use anyhow::{Context, Result, bail};
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
@@ -113,12 +114,14 @@ impl Default for LogMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub broker: BrokerKind,
     pub env: TradingEnvironment,
     pub auth_mode: AuthMode,
     pub log_mode: LogMode,
     pub token_override: String,
     pub username: String,
     pub password: String,
+    pub api_key: String,
     pub app_id: String,
     pub app_version: String,
     pub cid: String,
@@ -139,26 +142,28 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            broker: default_broker(),
             env: TradingEnvironment::Sim,
             auth_mode: AuthMode::TokenFile,
             log_mode: LogMode::Default,
             token_override: String::new(),
             username: String::new(),
             password: String::new(),
-            app_id: "Midas TUI".to_string(),
+            api_key: String::new(),
+            app_id: "Trader".to_string(),
             app_version: "0.1.0".to_string(),
             cid: String::new(),
             secret: String::new(),
             custom_tag50: String::new(),
             token_path: PathBuf::from(".auth/bearer-token.json"),
-            session_cache_path: PathBuf::from(".auth/ninjatrader-tui-session.json"),
+            session_cache_path: PathBuf::from(".auth/trader-session.json"),
             history_bars: 500,
             heartbeat_ms: 2500,
             contract_suggest_limit: 12,
             time_in_force: "Day".to_string(),
             order_qty: 1,
             autoconnect: false,
-            replay_file_path: PathBuf::from("ninjatrader-tui/market replay/ES 06-26.Last.txt"),
+            replay_file_path: PathBuf::from("trader/market replay/ES 06-26.Last.txt"),
             replay_bar_interval_ms: 5,
         }
     }
@@ -171,7 +176,7 @@ impl AppConfig {
         let mut cfg = Self::default();
         let config_path = path
             .map(PathBuf::from)
-            .or_else(|| env_string("MIDAS_TUI_CONFIG").map(PathBuf::from));
+            .or_else(|| env_string_any(&["TRADER_CONFIG", "MIDAS_TUI_CONFIG"]).map(PathBuf::from));
 
         if let Some(path) = config_path {
             let raw = fs::read_to_string(&path)
@@ -185,73 +190,98 @@ impl AppConfig {
     }
 
     fn apply_env_overrides(&mut self) -> Result<()> {
-        if let Some(raw) = env_string("MIDAS_TUI_ENV") {
+        if let Some(raw) = env_string_any(&["TRADER_BROKER"]) {
+            self.broker = parse_broker(&raw)?;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_ENV", "MIDAS_TUI_ENV"]) {
             self.env = parse_env(&raw)?;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_AUTH_MODE") {
+        if let Some(raw) = env_string_any(&["TRADER_AUTH_MODE", "MIDAS_TUI_AUTH_MODE"]) {
             self.auth_mode = parse_auth_mode(&raw)?;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_LOG_MODE") {
+        if let Some(raw) = env_string_any(&["TRADER_LOG_MODE", "MIDAS_TUI_LOG_MODE"]) {
             self.log_mode = parse_log_mode(&raw)?;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_TOKEN_OVERRIDE") {
+        if let Some(raw) = env_string_any(&["TRADER_TOKEN_OVERRIDE", "MIDAS_TUI_TOKEN_OVERRIDE"]) {
             self.token_override = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_USERNAME") {
+        if let Some(raw) = env_string_any(&["TRADER_USERNAME", "MIDAS_TUI_USERNAME"]) {
             self.username = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_PASSWORD") {
+        if let Some(raw) = env_string_any(&["TRADER_PASSWORD", "MIDAS_TUI_PASSWORD"]) {
             self.password = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_APP_ID") {
+        if let Some(raw) = env_string_any(&["TRADER_API_KEY"]) {
+            self.api_key = raw;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_APP_ID", "MIDAS_TUI_APP_ID"]) {
             self.app_id = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_APP_VERSION") {
+        if let Some(raw) = env_string_any(&["TRADER_APP_VERSION", "MIDAS_TUI_APP_VERSION"]) {
             self.app_version = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_CID") {
+        if let Some(raw) = env_string_any(&["TRADER_CID", "MIDAS_TUI_CID"]) {
             self.cid = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_SECRET") {
+        if let Some(raw) = env_string_any(&["TRADER_SECRET", "MIDAS_TUI_SECRET"]) {
             self.secret = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_CUSTOM_TAG50") {
+        if let Some(raw) = env_string_any(&["TRADER_CUSTOM_TAG50", "MIDAS_TUI_CUSTOM_TAG50"]) {
             self.custom_tag50 = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_TOKEN_PATH") {
+        if let Some(raw) = env_string_any(&["TRADER_TOKEN_PATH", "MIDAS_TUI_TOKEN_PATH"]) {
             self.token_path = PathBuf::from(raw);
         }
-        if let Some(raw) = env_string("MIDAS_TUI_SESSION_CACHE_PATH") {
+        if let Some(raw) =
+            env_string_any(&["TRADER_SESSION_CACHE_PATH", "MIDAS_TUI_SESSION_CACHE_PATH"])
+        {
             self.session_cache_path = PathBuf::from(raw);
         }
-        if let Some(raw) = env_parse::<usize>("MIDAS_TUI_HISTORY_BARS")? {
+        if let Some(raw) =
+            env_parse_any::<usize>(&["TRADER_HISTORY_BARS", "MIDAS_TUI_HISTORY_BARS"])?
+        {
             self.history_bars = raw;
         }
-        if let Some(raw) = env_parse::<u64>("MIDAS_TUI_HEARTBEAT_MS")? {
+        if let Some(raw) = env_parse_any::<u64>(&["TRADER_HEARTBEAT_MS", "MIDAS_TUI_HEARTBEAT_MS"])?
+        {
             self.heartbeat_ms = raw;
         }
-        if let Some(raw) = env_parse::<usize>("MIDAS_TUI_CONTRACT_SUGGEST_LIMIT")? {
+        if let Some(raw) = env_parse_any::<usize>(&[
+            "TRADER_CONTRACT_SUGGEST_LIMIT",
+            "MIDAS_TUI_CONTRACT_SUGGEST_LIMIT",
+        ])? {
             self.contract_suggest_limit = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_TIME_IN_FORCE") {
+        if let Some(raw) = env_string_any(&["TRADER_TIME_IN_FORCE", "MIDAS_TUI_TIME_IN_FORCE"]) {
             self.time_in_force = raw;
         }
-        if let Some(raw) = env_parse::<i32>("MIDAS_TUI_ORDER_QTY")? {
+        if let Some(raw) = env_parse_any::<i32>(&["TRADER_ORDER_QTY", "MIDAS_TUI_ORDER_QTY"])? {
             self.order_qty = raw;
         }
-        if let Some(raw) = env_bool("MIDAS_TUI_AUTOCONNECT")? {
+        if let Some(raw) = env_bool_any(&["TRADER_AUTOCONNECT", "MIDAS_TUI_AUTOCONNECT"])? {
             self.autoconnect = raw;
         }
-        if let Some(raw) = env_string("MIDAS_TUI_REPLAY_FILE_PATH") {
+        if let Some(raw) =
+            env_string_any(&["TRADER_REPLAY_FILE_PATH", "MIDAS_TUI_REPLAY_FILE_PATH"])
+        {
             self.replay_file_path = PathBuf::from(raw);
         }
-        if let Some(raw) = env_parse::<u64>("MIDAS_TUI_REPLAY_BAR_INTERVAL_MS")? {
+        if let Some(raw) = env_parse_any::<u64>(&[
+            "TRADER_REPLAY_BAR_INTERVAL_MS",
+            "MIDAS_TUI_REPLAY_BAR_INTERVAL_MS",
+        ])? {
             self.replay_bar_interval_ms = raw;
         }
         Ok(())
     }
 
     fn validate(&self) -> Result<()> {
+        if !supports_broker(self.broker) {
+            bail!(
+                "{} support is not enabled in this build",
+                self.broker.label()
+            );
+        }
         if self.history_bars == 0 {
             bail!("history_bars must be > 0");
         }
@@ -280,6 +310,14 @@ impl AppConfig {
     }
 }
 
+fn parse_broker(raw: &str) -> Result<BrokerKind> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tradovate" | "ninjatrader" | "ninja_trader" => Ok(BrokerKind::Tradovate),
+        "ironbeam" | "iron_beam" => Ok(BrokerKind::Ironbeam),
+        other => bail!("invalid broker `{other}`"),
+    }
+}
+
 fn parse_env(raw: &str) -> Result<TradingEnvironment> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "sim" | "demo" => Ok(TradingEnvironment::Sim),
@@ -304,42 +342,43 @@ fn parse_log_mode(raw: &str) -> Result<LogMode> {
     }
 }
 
-fn env_string(key: &str) -> Option<String> {
-    match env::var(key) {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
+fn env_string_any(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        match env::var(key) {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
+            Err(_) => {}
         }
-        Err(_) => None,
     }
+    None
 }
 
-fn env_bool(key: &str) -> Result<Option<bool>> {
-    let Some(raw) = env_string(key) else {
+fn env_bool_any(keys: &[&str]) -> Result<Option<bool>> {
+    let Some(raw) = env_string_any(keys) else {
         return Ok(None);
     };
     let parsed = match raw.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,
-        other => bail!("invalid boolean value `{other}` for {key}"),
+        other => bail!("invalid boolean value `{other}` for {}", keys.join(" / ")),
     };
     Ok(Some(parsed))
 }
 
-fn env_parse<T>(key: &str) -> Result<Option<T>>
+fn env_parse_any<T>(keys: &[&str]) -> Result<Option<T>>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
 {
-    let Some(raw) = env_string(key) else {
+    let Some(raw) = env_string_any(keys) else {
         return Ok(None);
     };
     let parsed = raw
         .parse::<T>()
-        .map_err(|err| anyhow::anyhow!("invalid {key} value `{raw}`: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("invalid {} value `{raw}`: {err}", keys.join(" / ")))?;
     Ok(Some(parsed))
 }

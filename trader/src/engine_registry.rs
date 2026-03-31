@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_ENGINE_SOCKET: &str = ".run/ninjatrader-engine.sock";
+const DEFAULT_ENGINE_SOCKET: &str = ".run/trader-engine.sock";
 
 #[derive(Debug, Clone)]
 pub struct RunningEngine {
@@ -28,8 +28,8 @@ fn build_engine(
     cwd: &Path,
     socket_path: Option<PathBuf>,
 ) -> Result<RunningEngine> {
-    if !is_ninjatrader_engine(cmdline) {
-        bail!("process {id} is not a running ninjatrader-tui engine");
+    if !is_trader_engine(cmdline) {
+        bail!("process {id} is not a running trader engine");
     }
 
     let socket_path = socket_path.unwrap_or_else(|| resolve_socket_path(cmdline, cwd));
@@ -41,14 +41,14 @@ fn build_engine(
     })
 }
 
-fn is_ninjatrader_engine(cmdline: &[String]) -> bool {
+fn is_trader_engine(cmdline: &[String]) -> bool {
     let Some(executable) = cmdline.first() else {
         return false;
     };
     let Some(name) = Path::new(executable).file_name().and_then(OsStr::to_str) else {
         return false;
     };
-    name == "ninjatrader-tui" && matches!(cmdline.last(), Some(arg) if arg == "engine")
+    name == "trader" && matches!(cmdline.last(), Some(arg) if arg == "engine")
 }
 
 fn resolve_socket_path(cmdline: &[String], cwd: &Path) -> PathBuf {
@@ -125,36 +125,36 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{DEFAULT_ENGINE_SOCKET, is_ninjatrader_engine, resolve_socket_path};
+        use super::super::{DEFAULT_ENGINE_SOCKET, is_trader_engine, resolve_socket_path};
         use std::path::Path;
 
         #[test]
         fn detects_engine_process() {
             let args = vec![
-                "/root/.cargo/bin/ninjatrader-tui".to_string(),
+                "/root/.cargo/bin/trader".to_string(),
                 "--engine-socket".to_string(),
-                "/tmp/ninjatrader-tui".to_string(),
+                "/tmp/trader".to_string(),
                 "engine".to_string(),
             ];
-            assert!(is_ninjatrader_engine(&args));
+            assert!(is_trader_engine(&args));
         }
 
         #[test]
         fn rejects_non_engine_process() {
             let args = vec![
-                "/root/.cargo/bin/ninjatrader-tui".to_string(),
+                "/root/.cargo/bin/trader".to_string(),
                 "--config".to_string(),
                 "config.toml".to_string(),
             ];
-            assert!(!is_ninjatrader_engine(&args));
+            assert!(!is_trader_engine(&args));
         }
 
         #[test]
         fn resolves_relative_socket_from_cwd() {
             let args = vec![
-                "/root/.cargo/bin/ninjatrader-tui".to_string(),
+                "/root/.cargo/bin/trader".to_string(),
                 "--engine-socket".to_string(),
-                ".run/ninjatrader-engine.sock".to_string(),
+                ".run/trader-engine.sock".to_string(),
                 "engine".to_string(),
             ];
             let resolved = resolve_socket_path(&args, Path::new("/srv/midas"));
@@ -167,7 +167,7 @@ mod imp {
         #[test]
         fn resolves_equals_socket_syntax() {
             let args = vec![
-                "/root/.cargo/bin/ninjatrader-tui".to_string(),
+                "/root/.cargo/bin/trader".to_string(),
                 "--engine-socket=/tmp/custom.sock".to_string(),
                 "engine".to_string(),
             ];
@@ -224,7 +224,7 @@ mod imp {
                 Path::new(comm)
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name == "ninjatrader-tui")
+                    .is_some_and(|name| name == "trader")
             })
             .map(|(pid, _)| pid)
             .collect())
@@ -308,10 +308,10 @@ mod imp {
 
         #[test]
         fn parses_ps_pid_comm_output() {
-            let parsed = parse_pid_comm_line(" 123 /Users/nick/.cargo/bin/ninjatrader-tui")
+            let parsed = parse_pid_comm_line(" 123 /Users/nick/.cargo/bin/trader")
                 .expect("ps line should parse");
             assert_eq!(parsed.0, 123);
-            assert_eq!(parsed.1, "/Users/nick/.cargo/bin/ninjatrader-tui");
+            assert_eq!(parsed.1, "/Users/nick/.cargo/bin/trader");
         }
     }
 }
@@ -322,10 +322,10 @@ mod imp {
     use anyhow::{Result, bail};
 
     pub fn list_running_engines() -> Result<Vec<RunningEngine>> {
-        bail!("`ninjatrader-tui list` is currently only supported on Linux and macOS");
+        bail!("`trader list` is currently only supported on Linux and macOS");
     }
 
     pub fn resolve_engine(_id: u32) -> Result<RunningEngine> {
-        bail!("`ninjatrader-tui attach` is currently only supported on Linux and macOS");
+        bail!("`trader attach` is currently only supported on Linux and macOS");
     }
 }

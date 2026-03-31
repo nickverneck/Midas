@@ -1,5 +1,5 @@
+use crate::broker::Bar;
 use crate::strategies::{PositionSide, StrategySignal};
-use crate::tradovate::Bar;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

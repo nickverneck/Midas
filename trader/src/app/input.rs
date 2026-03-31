@@ -21,6 +21,13 @@ impl App {
             && !self.is_text_focus()
             && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
         {
+            if !self.broker_supports_replay() {
+                self.push_log(format!(
+                    "{} does not support replay mode in this build.",
+                    self.selected_broker.label()
+                ));
+                return;
+            }
             self.bar_type = BarType::Range1;
             let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
                 config: self.current_config(),
@@ -52,8 +59,13 @@ impl App {
                 return;
             }
             KeyCode::Esc => {
-                self.screen = Screen::Login;
-                self.focus = Focus::Env;
+                if self.screen == Screen::Login && self.available_brokers.len() > 1 {
+                    self.screen = Screen::BrokerSelect;
+                    self.focus = Focus::BrokerList;
+                } else {
+                    self.screen = Screen::Login;
+                    self.focus = Focus::Env;
+                }
                 return;
             }
             _ => {}
@@ -65,6 +77,7 @@ impl App {
         }
 
         match self.screen {
+            Screen::BrokerSelect => self.handle_broker_select_key(key),
             Screen::Login => self.handle_login_key(key, cmd_tx),
             Screen::Strategy => self.handle_strategy_key(key, cmd_tx),
             Screen::Selection => self.handle_selection_key(key, cmd_tx),

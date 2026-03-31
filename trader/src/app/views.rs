@@ -1,6 +1,7 @@
 impl App {
     fn connection_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
+            Line::from(format!("Broker: {}", self.selected_broker.label())),
             styled_line(
                 format!("Env: {}", self.form.env.label()),
                 self.focus == Focus::Env,
@@ -39,64 +40,107 @@ impl App {
                 format!("Password: {}", mask(&self.form.password)),
                 self.focus == Focus::Password,
             ),
-            styled_line(
-                format!("App ID: {}", self.form.app_id),
-                self.focus == Focus::AppId,
-            ),
-            styled_line(
-                format!("App Version: {}", self.form.app_version),
-                self.focus == Focus::AppVersion,
-            ),
-            styled_line(format!("CID: {}", self.form.cid), self.focus == Focus::Cid),
-            styled_line(
-                format!("Secret: {}", mask(&self.form.secret)),
-                self.focus == Focus::Secret,
-            ),
             Line::from(""),
         ];
+        match self.selected_broker {
+            BrokerKind::Ironbeam => {
+                lines.push(styled_line(
+                    format!("API Key: {}", mask(&self.form.api_key)),
+                    self.focus == Focus::ApiKey,
+                ));
+                lines.push(Line::from(""));
+            }
+            BrokerKind::Tradovate => {
+                lines.push(styled_line(
+                    format!("App ID: {}", self.form.app_id),
+                    self.focus == Focus::AppId,
+                ));
+                lines.push(styled_line(
+                    format!("App Version: {}", self.form.app_version),
+                    self.focus == Focus::AppVersion,
+                ));
+                lines.push(styled_line(
+                    format!("CID: {}", self.form.cid),
+                    self.focus == Focus::Cid,
+                ));
+                lines.push(styled_line(
+                    format!("Secret: {}", mask(&self.form.secret)),
+                    self.focus == Focus::Secret,
+                ));
+                lines.push(Line::from(""));
+            }
+        }
         lines.push(styled_line(
             "[Enter] Connect / Refresh Session".to_string(),
             self.focus == Focus::Connect,
         ));
         lines.push(styled_line(
-            if cfg!(feature = "replay") {
+            if self.broker_supports_replay() {
                 "[Enter] Replay Mode (local file, skips login)".to_string()
             } else {
-                "[Enter] Replay Mode unavailable in this build".to_string()
+                "[Enter] Replay Mode unavailable for this broker/build".to_string()
             },
             self.focus == Focus::ReplayMode,
         ));
         lines
     }
     fn login_notes_lines(&self) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = vec![
             Line::from("1. Token Override is used first when non-empty."),
             Line::from("2. Token File mode reads token_path, then session cache."),
-            Line::from("3. Credentials mode requests a fresh access token."),
+            Line::from(match self.selected_broker {
+                BrokerKind::Tradovate => "3. Credentials mode requests a fresh Tradovate access token.",
+                BrokerKind::Ironbeam => "3. Credentials mode requests a fresh Ironbeam bearer token using username/password and optional api_key.",
+            }),
             Line::from("4. Debug log mode adds submit/seen/ack/fill lifecycle lines."),
             Line::from(""),
             Line::from("Use Up/Down to move between fields."),
             Line::from("Use Left/Right on Env, Auth Mode, or Log Mode."),
             Line::from("Paste a token directly into Token Override when needed."),
-            Line::from(if cfg!(feature = "replay") {
+            Line::from(if self.broker_supports_replay() {
                 "Replay Mode loads the local tick file and starts on 1 Range bars by default."
             } else {
-                "Replay Mode requires a build with `--features replay`."
+                "Replay Mode is only available on Tradovate builds with `--features replay`."
             }),
-        ]
+        ];
+        if self.selected_broker == BrokerKind::Ironbeam {
+            lines.push(Line::from("Ironbeam currently uses 1-minute bars on the selection screen."));
+        }
+        lines
     }
 
     fn login_status_lines(&self) -> Vec<Line<'static>> {
+        let (rest_url, user_ws, market_ws) = match (self.selected_broker, self.form.env) {
+            (BrokerKind::Tradovate, env) => (
+                env.rest_url().to_string(),
+                Some(env.user_ws_url().to_string()),
+                Some(env.market_ws_url().to_string()),
+            ),
+            (BrokerKind::Ironbeam, TradingEnvironment::Sim) => (
+                "https://demo.ironbeamapi.com/v2".to_string(),
+                Some("wss://demo.ironbeamapi.com/v2/stream/{streamId}?token=...".to_string()),
+                None,
+            ),
+            (BrokerKind::Ironbeam, TradingEnvironment::Live) => (
+                "https://live.ironbeamapi.com/v2".to_string(),
+                Some("wss://live.ironbeamapi.com/v2/stream/{streamId}?token=...".to_string()),
+                None,
+            ),
+        };
         vec![
             Line::from(format!("Current status: {}", self.status)),
+            Line::from(format!("Broker: {}", self.selected_broker.label())),
             Line::from(format!("Session Mode: {}", self.session_kind.label())),
-            Line::from(format!("Environment REST: {}", self.form.env.rest_url())),
+            Line::from(format!("Environment REST: {rest_url}")),
             Line::from(format!("Log Mode: {}", self.form.log_mode.label())),
-            Line::from(format!("User WebSocket: {}", self.form.env.user_ws_url())),
-            Line::from(format!(
-                "Market WebSocket: {}",
-                self.form.env.market_ws_url()
-            )),
+            Line::from(match user_ws {
+                Some(url) => format!("User WebSocket: {url}"),
+                None => "User WebSocket: n/a".to_string(),
+            }),
+            Line::from(match market_ws {
+                Some(url) => format!("Market WebSocket: {url}"),
+                None => "Market WebSocket: embedded stream".to_string(),
+            }),
             Line::from(""),
             Line::from(format!("Accounts loaded: {}", self.accounts.len())),
             Line::from(match &self.market.contract_name {
@@ -109,6 +153,7 @@ impl App {
     fn dashboard_summary_lines(&self) -> Vec<Line<'static>> {
         vec![
             Line::from(format!("Status: {}", self.status)),
+            Line::from(format!("Broker: {}", self.selected_broker.label())),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!("Mode: {}", self.session_kind.label())),
             Line::from(if self.session_kind == SessionKind::Replay {

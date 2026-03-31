@@ -7,6 +7,7 @@ impl FormState {
             token_override: config.token_override.clone(),
             username: config.username.clone(),
             password: config.password.clone(),
+            api_key: config.api_key.clone(),
             app_id: config.app_id.clone(),
             app_version: config.app_version.clone(),
             cid: config.cid.clone(),

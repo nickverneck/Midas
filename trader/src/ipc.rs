@@ -1,4 +1,4 @@
-use crate::tradovate::{ServiceCommand, ServiceEvent, service_loop};
+use crate::broker::{MarketSnapshot, ServiceCommand, ServiceEvent, service_loop};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -34,7 +34,7 @@ pub async fn run_engine_server(socket_path: &Path) -> Result<()> {
         .with_context(|| format!("bind engine socket {}", socket_path.display()))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let (market_tx, _) = watch::channel(crate::tradovate::MarketSnapshot::default());
+    let (market_tx, _) = watch::channel(MarketSnapshot::default());
     tokio::spawn(service_loop(cmd_rx, event_tx, market_tx.clone()));
 
     let mut clients = Vec::<UnboundedSender<ServiceEvent>>::new();
@@ -129,7 +129,7 @@ pub async fn connect_client(
 fn spawn_server_client(
     stream: UnixStream,
     cmd_tx: UnboundedSender<ServiceCommand>,
-    mut market_rx: watch::Receiver<crate::tradovate::MarketSnapshot>,
+    mut market_rx: watch::Receiver<MarketSnapshot>,
 ) -> UnboundedSender<ServiceEvent> {
     let (read_half, mut write_half) = stream.into_split();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServiceEvent>();

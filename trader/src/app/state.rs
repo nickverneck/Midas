@@ -19,6 +19,14 @@ fn format_log_elapsed(duration: Option<std::time::Duration>) -> String {
 }
 
 impl App {
+    fn broker_supports_replay(&self) -> bool {
+        self.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay")
+    }
+
+    fn broker_supports_range_bars(&self) -> bool {
+        self.selected_broker == BrokerKind::Tradovate
+    }
+
     fn set_replay_speed(
         &mut self,
         cmd_tx: &UnboundedSender<ServiceCommand>,
@@ -50,7 +58,7 @@ impl App {
     }
 
     fn login_focus_order(&self) -> Vec<Focus> {
-        vec![
+        let mut order = vec![
             Focus::Env,
             Focus::AuthMode,
             Focus::LogMode,
@@ -58,13 +66,26 @@ impl App {
             Focus::TokenOverride,
             Focus::Username,
             Focus::Password,
-            Focus::AppId,
-            Focus::AppVersion,
-            Focus::Cid,
-            Focus::Secret,
             Focus::Connect,
             Focus::ReplayMode,
-        ]
+        ];
+        match self.selected_broker {
+            BrokerKind::Ironbeam => {
+                order.insert(7, Focus::ApiKey);
+            }
+            BrokerKind::Tradovate => {
+                order.splice(
+                    7..7,
+                    [
+                        Focus::AppId,
+                        Focus::AppVersion,
+                        Focus::Cid,
+                        Focus::Secret,
+                    ],
+                );
+            }
+        }
+        order
     }
 
     fn strategy_focus_order(&self) -> Vec<Focus> {
@@ -178,6 +199,7 @@ impl App {
             Focus::TokenOverride
                 | Focus::Username
                 | Focus::Password
+                | Focus::ApiKey
                 | Focus::AppId
                 | Focus::AppVersion
                 | Focus::Cid
@@ -234,11 +256,12 @@ impl App {
 
     fn persist_logs_to_file(&self) -> std::io::Result<std::path::PathBuf> {
         let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        let dir = std::path::PathBuf::from(".run").join("ninjatrader-tui-logs");
+        let dir = std::path::PathBuf::from(".run").join("trader-logs");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("session-{timestamp}.txt"));
 
         let screen = match self.screen {
+            Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
             Screen::Selection => "Selection",
             Screen::Strategy => "Strategy",
@@ -260,6 +283,7 @@ impl App {
         body.push_str(&format!("saved_at_utc: {timestamp}\n"));
         body.push_str(&format!("screen: {screen}\n"));
         body.push_str(&format!("status: {}\n", self.status));
+        body.push_str(&format!("broker: {}\n", self.selected_broker.label()));
         body.push_str(&format!("env: {}\n", self.form.env.label()));
         body.push_str(&format!("auth_mode: {}\n", self.form.auth_mode.label()));
         body.push_str(&format!("log_mode: {}\n", self.form.log_mode.label()));
@@ -309,12 +333,18 @@ impl App {
     }
 
     fn sync_execution_strategy_config(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        if !self.capabilities.automated_orders {
+            return;
+        }
         let _ = cmd_tx.send(ServiceCommand::SetExecutionStrategyConfig(
             self.strategy.execution_config(),
         ));
     }
 
     fn disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        if !self.capabilities.automated_orders {
+            return;
+        }
         self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::DisarmExecutionStrategy {
             reason: "Native strategy config changed; press Continue to re-arm.".to_string(),
@@ -322,11 +352,14 @@ impl App {
     }
 
     fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        if !self.capabilities.automated_orders {
+            return;
+        }
         self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::ArmExecutionStrategy);
     }
 
-    fn closed_bars(&self) -> &[crate::tradovate::Bar] {
+    fn closed_bars(&self) -> &[crate::broker::Bar] {
         let closed_len = self.market.history_loaded.min(self.market.bars.len());
         &self.market.bars[..closed_len]
     }
@@ -374,6 +407,9 @@ impl App {
     }
 
     fn strategy_runtime_summary(&self) -> String {
+        if !self.capabilities.automated_orders {
+            return format!("{} monitor-only", self.selected_broker.label());
+        }
         if !self.strategy_runtime.last_summary.is_empty() {
             return self.strategy_runtime.last_summary.clone();
         }
