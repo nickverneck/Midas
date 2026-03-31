@@ -38,12 +38,13 @@ pub struct GrpoConfig {
     pub grpo_epochs: usize,
 }
 
-pub fn rollout_single<P: nn::Module>(
+pub fn rollout_single<P: nn::ModuleT>(
     data: &DataSet,
     window: (usize, usize),
     policy: &P,
     env_cfg: &EnvConfig,
     device: tch::Device,
+    train: bool,
 ) -> GrpoRollout {
     let (start, end) = window;
     let steps = end.saturating_sub(start + 1);
@@ -79,7 +80,7 @@ pub fn rollout_single<P: nn::Module>(
             .to_device(device);
 
         let (action_idx, logp_val) = no_grad(|| {
-            let logits = policy.forward(&obs_tensor);
+            let logits = policy.forward_t(&obs_tensor, train);
             let log_probs = logits.log_softmax(-1, Kind::Float);
             let probs = log_probs.exp();
             let action_tensor = probs.multinomial(1, true);
@@ -157,19 +158,20 @@ pub fn rollout_single<P: nn::Module>(
     }
 }
 
-pub fn rollout_group<P: nn::Module>(
+pub fn rollout_group<P: nn::ModuleT>(
     data: &DataSet,
     windows: &[(usize, usize)],
     policy: &P,
     env_cfg: &EnvConfig,
     group_size: usize,
     device: tch::Device,
+    train: bool,
 ) -> GrpoGroup {
     let mut rollouts = Vec::with_capacity(group_size);
 
     for i in 0..group_size {
         let window = windows[i % windows.len()];
-        let rollout = rollout_single(data, window, policy, env_cfg, device);
+        let rollout = rollout_single(data, window, policy, env_cfg, device, train);
         rollouts.push(rollout);
     }
 
@@ -229,7 +231,7 @@ pub fn summarize_group(group: &GrpoGroup, annualization: f64) -> GrpoMetrics {
     }
 }
 
-pub fn grpo_update<P: nn::Module>(
+pub fn grpo_update<P: nn::ModuleT>(
     policy: &P,
     opt: &mut nn::Optimizer,
     group: &GrpoGroup,
@@ -251,13 +253,13 @@ pub fn grpo_update<P: nn::Module>(
     let adv_std = squared.mean(Kind::Float).sqrt() + 1e-8;
     let normalized_adv = (&adv_tensor - &adv_mean) / &adv_std;
 
-    for epoch in 0..cfg.grpo_epochs {
+    for _epoch in 0..cfg.grpo_epochs {
         let mut epoch_policy_loss = 0.0f64;
         let mut epoch_entropy = 0.0f64;
         let mut epoch_kl = 0.0f64;
 
         for (i, rollout) in group.rollouts.iter().enumerate() {
-            let logits = policy.forward(&rollout.obs);
+            let logits = policy.forward_t(&rollout.obs, true);
             let log_probs = logits.log_softmax(-1, Kind::Float);
             let act_logp = log_probs
                 .gather(1, &rollout.actions.unsqueeze(-1), false)

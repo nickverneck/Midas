@@ -37,7 +37,11 @@ pub fn max_drawdown(equity: &[f64]) -> f64 {
     max_dd
 }
 
-pub fn liquidation_cost(position: i32, commission_round_turn: f64, slippage_per_contract: f64) -> f64 {
+pub fn liquidation_cost(
+    position: i32,
+    commission_round_turn: f64,
+    slippage_per_contract: f64,
+) -> f64 {
     if position == 0 {
         return 0.0;
     }

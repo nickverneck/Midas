@@ -1,5 +1,3 @@
-#[path = "train_ga/args.rs"]
-mod args;
 #[cfg(any(
     feature = "torch",
     feature = "backend-candle",
@@ -7,6 +5,8 @@ mod args;
 ))]
 #[path = "train_ga/actions.rs"]
 mod actions;
+#[path = "train_ga/args.rs"]
+mod args;
 #[cfg(any(
     feature = "torch",
     feature = "backend-candle",
@@ -284,7 +284,12 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
 
     let device = backends::resolve_device(&stack)?;
     stack.effective_runtime = device.effective_runtime();
-    ml::write_run_metadata(&args.outdir.join("training_stack.json"), &stack, Some("ga"))?;
+    ml::write_run_metadata(
+        &args.outdir.join("training_stack.json"),
+        &stack,
+        Some("ga"),
+        None,
+    )?;
     println!(
         "info: effective runtime resolved to {}",
         stack.effective_runtime
@@ -852,8 +857,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                 );
             }
 
-            let capture_behavior =
-                args.behavior_every > 0 && generation % args.behavior_every == 0;
+            let capture_behavior = args.behavior_every > 0 && generation % args.behavior_every == 0;
             if capture_behavior {
                 let (train_behavior_metrics, train_history) =
                     backends::evaluate_candidate_with_history(

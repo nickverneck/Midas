@@ -480,21 +480,21 @@ impl TradingEnv {
             0.0
         };
 
-        let session_close_penalty = if self.state.position != 0 && self.cfg.session_close_penalty > 0.0
-        {
-            if let Some(minutes_to_close) = ctx.minutes_to_close {
-                if minutes_to_close.is_finite() && (0.0..=60.0).contains(&minutes_to_close) {
-                    let urgency = 1.0 - (minutes_to_close / 60.0);
-                    self.cfg.session_close_penalty * urgency * self.state.position.abs() as f64
+        let session_close_penalty =
+            if self.state.position != 0 && self.cfg.session_close_penalty > 0.0 {
+                if let Some(minutes_to_close) = ctx.minutes_to_close {
+                    if minutes_to_close.is_finite() && (0.0..=60.0).contains(&minutes_to_close) {
+                        let urgency = 1.0 - (minutes_to_close / 60.0);
+                        self.cfg.session_close_penalty * urgency * self.state.position.abs() as f64
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 }
             } else {
                 0.0
-            }
-        } else {
-            0.0
-        };
+            };
 
         let flat_hold_penalty = if self.state.position == 0
             && self.cfg.max_flat_hold_bars > 0

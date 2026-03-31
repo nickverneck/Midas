@@ -188,7 +188,9 @@ fn run() -> Result<()> {
         .as_ref()
         .and_then(|json| json_string(json, "runDir"))
         .map(PathBuf::from);
-    let params = run_summary_json.as_ref().and_then(|json| json.get("params"));
+    let params = run_summary_json
+        .as_ref()
+        .and_then(|json| json.get("params"));
 
     let policy_path = if let Some(path) = args.policy.as_ref() {
         path.clone()
@@ -352,7 +354,10 @@ fn run() -> Result<()> {
     };
 
     let summary_path = outdir.join("replay_summary.json");
-    std::fs::write(&summary_path, format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
+    std::fs::write(
+        &summary_path,
+        format!("{}\n", serde_json::to_string_pretty(&summary)?),
+    )?;
 
     println!(
         "Replay complete: pnl {:.2}, sortino {:.2}, mdd {:.2}, entries {}, exits {}, pct_flat {:.2}%",
@@ -413,10 +418,10 @@ fn build_replay_config(
 ) -> Result<ReplayConfig> {
     let params = params.unwrap_or(&Value::Null);
     let margin_mode = match json_string(params, "margin-mode").unwrap_or("auto") {
-            "per-contract" => MarginMode::PerContract,
-            "price" => MarginMode::Price,
-            _ => infer_margin_mode(symbol, margin_cfg),
-        };
+        "per-contract" => MarginMode::PerContract,
+        "price" => MarginMode::Price,
+        _ => infer_margin_mode(symbol, margin_cfg),
+    };
     let contract_multiplier = json_f64(params, "contract-multiplier").unwrap_or(1.0);
     let margin_per_contract = json_f64(params, "margin-per-contract")
         .or(margin_cfg)
@@ -538,7 +543,12 @@ fn is_futures_symbol(symbol: &str) -> bool {
 fn summarize_behavior(rows: &[types::BehaviorRow]) -> BehaviorStats {
     let mut out = BehaviorStats {
         rows: rows.len(),
-        windows: rows.iter().map(|row| row.window_idx).max().map(|v| v + 1).unwrap_or(0),
+        windows: rows
+            .iter()
+            .map(|row| row.window_idx)
+            .max()
+            .map(|v| v + 1)
+            .unwrap_or(0),
         ..BehaviorStats::default()
     };
     let mut tracker = TradeTracker::default();
@@ -676,7 +686,9 @@ fn write_behavior_csv(
             row.auto_close_executed.to_string(),
             row.session_open.to_string(),
             row.margin_ok.to_string(),
-            row.minutes_to_close.map(|value| value.to_string()).unwrap_or_default(),
+            row.minutes_to_close
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
             row.session_closed_violation.to_string(),
             row.margin_call_violation.to_string(),
             row.position_limit_violation.to_string(),

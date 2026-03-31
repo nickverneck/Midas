@@ -48,13 +48,14 @@ pub struct PpoConfig {
     pub ppo_epochs: usize,
 }
 
-pub fn rollout<P: nn::Module, V: nn::Module>(
+pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
     data: &DataSet,
     window: (usize, usize),
     policy: &P,
     value: &V,
     env_cfg: &EnvConfig,
     cfg: &RolloutConfig,
+    train: bool,
 ) -> RolloutBatch {
     let (start, end) = window;
     let steps = end.saturating_sub(start + 1);
@@ -91,7 +92,7 @@ pub fn rollout<P: nn::Module, V: nn::Module>(
             .to_device(cfg.device);
 
         let (action_idx, logp_val, value_val) = no_grad(|| {
-            let logits = policy.forward(&obs_tensor);
+            let logits = policy.forward_t(&obs_tensor, train);
             let log_probs = logits.log_softmax(-1, Kind::Float);
             let probs = log_probs.exp();
             let action_tensor = probs.multinomial(1, true);
@@ -99,7 +100,7 @@ pub fn rollout<P: nn::Module, V: nn::Module>(
             let logp_val = log_probs
                 .gather(1, &action_tensor, false)
                 .double_value(&[0, 0]) as f32;
-            let value_val = value.forward(&obs_tensor).double_value(&[0, 0]) as f32;
+            let value_val = value.forward_t(&obs_tensor, train).double_value(&[0, 0]) as f32;
             (action_idx, logp_val, value_val)
         });
 
@@ -205,7 +206,7 @@ pub fn summarize_batch(batch: &RolloutBatch, annualization: f64) -> RolloutMetri
     }
 }
 
-pub fn ppo_update<P: nn::Module, V: nn::Module>(
+pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
     policy: &P,
     value: &V,
     opt: &mut nn::Optimizer,
@@ -218,7 +219,7 @@ pub fn ppo_update<P: nn::Module, V: nn::Module>(
     let mut total_loss_sum = 0.0f64;
 
     for _ in 0..cfg.ppo_epochs {
-        let logits = policy.forward(&batch.obs);
+        let logits = policy.forward_t(&batch.obs, true);
         let log_probs = logits.log_softmax(-1, Kind::Float);
         let act_logp = log_probs
             .gather(1, &batch.actions.unsqueeze(-1), false)
@@ -237,7 +238,7 @@ pub fn ppo_update<P: nn::Module, V: nn::Module>(
         let surr = stacked.min_dim(0, false).0;
         let policy_loss = -surr.mean(Kind::Float);
 
-        let value_pred = value.forward(&batch.obs).flatten(0, -1);
+        let value_pred = value.forward_t(&batch.obs, true).flatten(0, -1);
         let value_diff = &value_pred - &batch.ret;
         let value_loss = (&value_diff * &value_diff).mean(Kind::Float);
 

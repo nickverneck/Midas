@@ -113,6 +113,7 @@
 		clip: 0.2,
 		"vf-coef": 0.5,
 		"ent-coef": 0.01,
+		dropout: 0.0,
 		hidden: 64,
 		layers: 2,
 		"eval-windows": 2,
@@ -570,6 +571,9 @@
 	const buildRlParams = () => {
 		const params = { ...rlParams } as Record<string, unknown>;
 		params.algorithm = rlAlgorithm;
+		if (params.backend !== 'candle' && params.backend !== 'libtorch') {
+			delete params.dropout;
+		}
 		if (rlDataMode === 'full') {
 			params["full-file"] = true;
 		} else {
@@ -1386,19 +1390,28 @@
 
 												<details class="rounded-lg border bg-background/60 p-4">
 													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-hidden">Hidden Units</Label>
-															<Input id="rl-hidden" type="number" min="1" bind:value={rlParams.hidden} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-layers">Layers</Label>
-															<Input id="rl-layers" type="number" min="1" bind:value={rlParams.layers} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-initial-balance">Initial Balance</Label>
-															<Input id="rl-initial-balance" type="number" step="0.01" bind:value={rlParams["initial-balance"]} />
-														</div>
+														<div class="mt-4 grid gap-4 md:grid-cols-2">
+															<div class="grid gap-2">
+																<Label for="rl-hidden">Hidden Units</Label>
+																<Input id="rl-hidden" type="number" min="1" bind:value={rlParams.hidden} />
+															</div>
+															<div class="grid gap-2">
+																<Label for="rl-layers">Layers</Label>
+																<Input id="rl-layers" type="number" min="1" bind:value={rlParams.layers} />
+															</div>
+															{#if rlParams.backend === 'candle' || rlParams.backend === 'libtorch'}
+															<div class="grid gap-2">
+																<Label for="rl-dropout">Dropout</Label>
+																<Input id="rl-dropout" type="number" min="0" max="0.95" step="0.05" bind:value={rlParams.dropout} />
+																<div class="text-xs text-muted-foreground">
+																	Libtorch and Candle only. Applied after each hidden-layer activation during training; eval and test disable it.
+																</div>
+															</div>
+															{/if}
+															<div class="grid gap-2">
+																<Label for="rl-initial-balance">Initial Balance</Label>
+																<Input id="rl-initial-balance" type="number" step="0.01" bind:value={rlParams["initial-balance"]} />
+															</div>
 														<div class="grid gap-2">
 															<Label for="rl-max-position">Max Position (0 = no cap)</Label>
 															<Input id="rl-max-position" type="number" min="0" bind:value={rlParams["max-position"]} />

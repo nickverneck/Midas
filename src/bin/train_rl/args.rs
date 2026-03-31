@@ -68,6 +68,8 @@ pub struct Args {
     pub vf_coef: f64,
     #[arg(long, default_value_t = 0.01)]
     pub ent_coef: f64,
+    #[arg(long, default_value_t = 0.0)]
+    pub dropout: f64,
     #[arg(long, default_value_t = 128)]
     pub hidden: usize,
     #[arg(long, default_value_t = 2)]

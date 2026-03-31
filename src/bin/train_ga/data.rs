@@ -185,11 +185,7 @@ pub fn build_observation(
         obs.push(*col.get(idx.saturating_sub(1)).unwrap_or(&f64::NAN));
     }
 
-    if let Some(dt) = data
-        .datetime_ns
-        .as_ref()
-        .and_then(|d| d.get(prev_idx))
-    {
+    if let Some(dt) = data.datetime_ns.as_ref().and_then(|d| d.get(prev_idx)) {
         let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(*dt);
         let dt_et = dt.with_timezone(&New_York);
         let hour = dt_et.hour() as f64 + dt_et.minute() as f64 / 60.0;

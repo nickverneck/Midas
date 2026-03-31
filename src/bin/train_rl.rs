@@ -31,9 +31,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use clap::Parser;
-use midas_env::ml::{self, MlBackend, TrainerKind};
 #[cfg(feature = "torch")]
 use midas_env::env::{EnvConfig, MarginMode};
+use midas_env::ml::{self, MlBackend, TrainerKind};
 #[cfg(feature = "torch")]
 use rand::rngs::StdRng;
 #[cfg(feature = "torch")]
@@ -93,12 +93,17 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.outdir)?;
     println!("info: run directory {}", args.outdir.display());
 
+    if !(0.0..1.0).contains(&args.dropout) {
+        anyhow::bail!("--dropout must be in [0, 1), got {}", args.dropout);
+    }
+
     let device = util::resolve_device(stack.requested_runtime);
     stack.effective_runtime = util::runtime_from_device(&device);
     ml::write_run_metadata(
         &args.outdir.join("training_stack.json"),
         &stack,
         Some(&args.algorithm),
+        Some(data::OBSERVATION_SCHEMA_NORMALIZED),
     )?;
     println!(
         "info: effective runtime resolved to {}",
@@ -229,6 +234,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         args.hidden as i64,
         args.layers,
         action_dim,
+        args.dropout,
     );
     let value = if use_grpo {
         None
@@ -238,8 +244,16 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
             obs_dim,
             args.hidden as i64,
             args.layers,
+            args.dropout,
         ))
     };
+
+    if args.dropout > 0.0 {
+        println!(
+            "info: libtorch dropout set to {:.3} on hidden layers during training; eval/test disable dropout",
+            args.dropout
+        );
+    }
 
     if let Some(path) = &args.load_checkpoint {
         load_checkpoint(&mut vs, device, path)?;
@@ -307,6 +321,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                     &env_cfg,
                     grpo_cfg.group_size,
                     device,
+                    true,
                 );
                 let advantages = grpo::compute_grpo_advantages(&group);
                 let losses = grpo::grpo_update(&policy, &mut opt, &group, &advantages, &grpo_cfg);
@@ -324,6 +339,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                     value.as_ref().unwrap(),
                     &env_cfg,
                     &rollout_cfg,
+                    true,
                 );
                 let metrics = ppo::summarize_batch(&batch, args.sortino_annualization);
                 let losses =
@@ -339,7 +355,8 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         let mut eval_metrics = Vec::with_capacity(eval_count);
         for window in windows_val.iter().take(eval_count) {
             if use_grpo {
-                let group = grpo::rollout_group(&val, &[*window], &policy, &env_cfg, 1, device);
+                let group =
+                    grpo::rollout_group(&val, &[*window], &policy, &env_cfg, 1, device, false);
                 eval_metrics.push(grpo::summarize_group(&group, args.sortino_annualization));
             } else {
                 let batch = ppo::rollout(
@@ -349,6 +366,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                     value.as_ref().unwrap(),
                     &env_cfg,
                     &rollout_cfg,
+                    false,
                 );
                 eval_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
             }
@@ -430,7 +448,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     let mut test_metrics = Vec::with_capacity(eval_count);
     for window in windows_test.iter().take(eval_count) {
         if use_grpo {
-            let group = grpo::rollout_group(&test, &[*window], &policy, &env_cfg, 1, device);
+            let group = grpo::rollout_group(&test, &[*window], &policy, &env_cfg, 1, device, false);
             test_metrics.push(grpo::summarize_group(&group, args.sortino_annualization));
         } else {
             let batch = ppo::rollout(
@@ -440,6 +458,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                 value.as_ref().unwrap(),
                 &env_cfg,
                 &rollout_cfg,
+                false,
             );
             test_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
         }

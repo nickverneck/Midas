@@ -156,6 +156,7 @@ pub struct RunMetadata<'a> {
     pub implementation_status: ImplementationStatus,
     pub cargo_feature: &'a str,
     pub algorithm: Option<&'a str>,
+    pub observation_schema: Option<&'a str>,
     pub os: &'a str,
     pub arch: &'a str,
 }
@@ -243,6 +244,7 @@ pub fn write_run_metadata(
     path: &Path,
     stack: &ResolvedTrainingStack,
     algorithm: Option<&str>,
+    observation_schema: Option<&str>,
 ) -> Result<()> {
     let metadata = RunMetadata {
         trainer: stack.trainer,
@@ -252,6 +254,7 @@ pub fn write_run_metadata(
         implementation_status: stack.implementation_status,
         cargo_feature: stack.cargo_feature.as_str(),
         algorithm,
+        observation_schema,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
     };

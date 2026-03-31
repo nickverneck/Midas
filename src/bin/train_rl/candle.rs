@@ -1,9 +1,8 @@
 use anyhow::{Context, Result, bail};
 use candle_core::{Device, Tensor};
 use candle_nn::{
-    AdamW, Module, Optimizer, ParamsAdamW, Sequential, VarBuilder, VarMap, linear,
+    AdamW, Dropout, Linear, Module, ModuleT, Optimizer, ParamsAdamW, VarBuilder, VarMap, linear,
     ops::{log_softmax, softmax},
-    sequential::seq,
 };
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
 use midas_env::ml::{self, ComputeRuntime};
@@ -93,9 +92,33 @@ struct GrpoConfig {
     grpo_epochs: usize,
 }
 
+pub(crate) struct Mlp {
+    hidden_layers: Vec<Linear>,
+    out: Linear,
+    dropout: Option<Dropout>,
+}
+
+impl Mlp {
+    pub(crate) fn forward(&self, xs: &Tensor, train: bool) -> Result<Tensor> {
+        let mut xs = xs.clone();
+        for layer in self.hidden_layers.iter() {
+            xs = layer.forward(&xs)?;
+            xs = xs.tanh()?;
+            if let Some(dropout) = &self.dropout {
+                xs = dropout.forward_t(&xs, train)?;
+            }
+        }
+        Ok(self.out.forward(&xs)?)
+    }
+}
+
 pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.outdir)?;
     println!("info: run directory {}", args.outdir.display());
+
+    if !(0.0..1.0).contains(&args.dropout) {
+        bail!("--dropout must be in [0, 1), got {}", args.dropout);
+    }
 
     let device = resolve_device(stack.requested_runtime)?;
     stack.effective_runtime = runtime_from_device(&device);
@@ -103,6 +126,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         &args.outdir.join("training_stack.json"),
         &stack,
         Some(&args.algorithm),
+        Some(crate::data::OBSERVATION_SCHEMA_NORMALIZED),
     )?;
     println!(
         "info: effective runtime resolved to {}",
@@ -236,6 +260,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         args.hidden,
         args.layers,
         action_dim,
+        args.dropout,
     )?;
     let value = if use_grpo {
         None
@@ -245,8 +270,16 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
             obs_dim,
             args.hidden,
             args.layers,
+            args.dropout,
         )?)
     };
+
+    if args.dropout > 0.0 {
+        println!(
+            "info: candle dropout set to {:.3} on hidden layers during training; eval/test disable dropout",
+            args.dropout
+        );
+    }
 
     if let Some(path) = &args.load_checkpoint {
         load_checkpoint(&mut varmap, path)?;
@@ -315,6 +348,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     &policy,
                     &env_cfg,
                     &rollout_cfg,
+                    true,
                     grpo_cfg.group_size,
                     &device,
                     &mut rng,
@@ -334,6 +368,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     value.as_ref().expect("value network"),
                     &env_cfg,
                     &rollout_cfg,
+                    true,
                     &device,
                     &mut rng,
                 )?;
@@ -363,6 +398,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     &policy,
                     &env_cfg,
                     &rollout_cfg,
+                    false,
                     1,
                     &device,
                     &mut rng,
@@ -376,6 +412,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     value.as_ref().expect("value network"),
                     &env_cfg,
                     &rollout_cfg,
+                    false,
                     &device,
                     &mut rng,
                 )?;
@@ -469,6 +506,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                 &policy,
                 &env_cfg,
                 &rollout_cfg,
+                false,
                 1,
                 &device,
                 &mut rng,
@@ -482,6 +520,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                 value.as_ref().expect("value network"),
                 &env_cfg,
                 &rollout_cfg,
+                false,
                 &device,
                 &mut rng,
             )?;
@@ -522,8 +561,9 @@ pub(crate) fn build_policy(
     hidden: usize,
     layers: usize,
     action_dim: usize,
-) -> Result<Sequential> {
-    build_mlp(vb, input_dim, hidden, layers, action_dim)
+    dropout: f64,
+) -> Result<Mlp> {
+    build_mlp(vb, input_dim, hidden, layers, action_dim, dropout)
 }
 
 fn build_value(
@@ -531,8 +571,9 @@ fn build_value(
     input_dim: usize,
     hidden: usize,
     layers: usize,
-) -> Result<Sequential> {
-    build_mlp(vb, input_dim, hidden, layers, 1)
+    dropout: f64,
+) -> Result<Mlp> {
+    build_mlp(vb, input_dim, hidden, layers, 1, dropout)
 }
 
 fn build_mlp(
@@ -541,26 +582,29 @@ fn build_mlp(
     hidden: usize,
     layers: usize,
     output_dim: usize,
-) -> Result<Sequential> {
-    let mut seq = seq();
+    dropout: f64,
+) -> Result<Mlp> {
+    let mut hidden_layers = Vec::with_capacity(layers);
     let mut in_dim = input_dim;
     for i in 0..layers {
-        seq = seq
-            .add(linear(in_dim, hidden, vb.pp(format!("layer_{i}")))?)
-            .add_fn(|xs| xs.tanh());
+        hidden_layers.push(linear(in_dim, hidden, vb.pp(format!("layer_{i}")))?);
         in_dim = hidden;
     }
-    seq = seq.add(linear(in_dim, output_dim, vb.pp("out"))?);
-    Ok(seq)
+    Ok(Mlp {
+        hidden_layers,
+        out: linear(in_dim, output_dim, vb.pp("out"))?,
+        dropout: (dropout > 0.0).then(|| Dropout::new(dropout as f32)),
+    })
 }
 
 fn rollout(
     data: &DataSet,
     window: (usize, usize),
-    policy: &Sequential,
-    value: &Sequential,
+    policy: &Mlp,
+    value: &Mlp,
     env_cfg: &EnvConfig,
     cfg: &RolloutConfig,
+    train: bool,
     device: &Device,
     rng: &mut StdRng,
 ) -> Result<RolloutBatch> {
@@ -595,7 +639,7 @@ fn rollout(
         obs_buf.extend_from_slice(&obs);
         let obs_tensor = Tensor::from_vec(obs, (1, obs_dim), device)?;
 
-        let logits = policy.forward(&obs_tensor)?;
+        let logits = policy.forward(&obs_tensor, train)?;
         let probs = softmax(&logits, 1)?.squeeze(0)?.to_vec1::<f32>()?;
         let action_idx = sample_from_probs(&probs, rng) as u32;
         let logp_val = probs
@@ -605,7 +649,7 @@ fn rollout(
             .max(1e-8)
             .ln();
         let value_val = value
-            .forward(&obs_tensor)?
+            .forward(&obs_tensor, train)?
             .squeeze(0)?
             .squeeze(0)?
             .to_scalar::<f32>()?;
@@ -694,8 +738,8 @@ fn summarize_batch(batch: &RolloutBatch, annualization: f64) -> RolloutMetrics {
 }
 
 fn ppo_update(
-    policy: &Sequential,
-    value: &Sequential,
+    policy: &Mlp,
+    value: &Mlp,
     opt: &mut AdamW,
     batch: &RolloutBatch,
     device: &Device,
@@ -710,7 +754,7 @@ fn ppo_update(
     let mut total_loss_sum = 0.0;
 
     for _ in 0..cfg.ppo_epochs {
-        let logits = policy.forward(&batch.obs)?;
+        let logits = policy.forward(&batch.obs, true)?;
         let log_probs = log_softmax(&logits, 1)?;
         let actions = batch.actions.unsqueeze(1)?;
         let act_logp = log_probs.gather(&actions, 1)?.squeeze(1)?;
@@ -722,7 +766,7 @@ fn ppo_update(
         let surr = Tensor::stack(&[&surr1, &surr2], 0)?.min(0)?;
         let policy_loss = surr.neg()?.mean_all()?;
 
-        let value_pred = value.forward(&batch.obs)?.squeeze(1)?;
+        let value_pred = value.forward(&batch.obs, true)?.squeeze(1)?;
         let value_loss = (&value_pred - &batch.ret)?.sqr()?.mean_all()?;
 
         let probs = softmax(&logits, 1)?;
@@ -751,9 +795,10 @@ fn ppo_update(
 fn rollout_single(
     data: &DataSet,
     window: (usize, usize),
-    policy: &Sequential,
+    policy: &Mlp,
     env_cfg: &EnvConfig,
     cfg: &RolloutConfig,
+    train: bool,
     device: &Device,
     rng: &mut StdRng,
 ) -> Result<GrpoRollout> {
@@ -787,7 +832,7 @@ fn rollout_single(
         obs_buf.extend_from_slice(&obs);
         let obs_tensor = Tensor::from_vec(obs, (1, obs_dim), device)?;
 
-        let logits = policy.forward(&obs_tensor)?;
+        let logits = policy.forward(&obs_tensor, train)?;
         let probs = softmax(&logits, 1)?.squeeze(0)?.to_vec1::<f32>()?;
         let action_idx = sample_from_probs(&probs, rng) as u32;
         let logp_val = probs
@@ -859,9 +904,10 @@ fn rollout_single(
 fn rollout_group(
     data: &DataSet,
     windows: &[(usize, usize)],
-    policy: &Sequential,
+    policy: &Mlp,
     env_cfg: &EnvConfig,
     cfg: &RolloutConfig,
+    train: bool,
     group_size: usize,
     device: &Device,
     rng: &mut StdRng,
@@ -870,7 +916,7 @@ fn rollout_group(
     for i in 0..group_size {
         let window = windows[i % windows.len()];
         rollouts.push(rollout_single(
-            data, window, policy, env_cfg, cfg, device, rng,
+            data, window, policy, env_cfg, cfg, train, device, rng,
         )?);
     }
 
@@ -926,7 +972,7 @@ fn summarize_group(group: &GrpoGroup, annualization: f64) -> RolloutMetrics {
 }
 
 fn grpo_update(
-    policy: &Sequential,
+    policy: &Mlp,
     opt: &mut AdamW,
     group: &GrpoGroup,
     advantages: &[f64],
@@ -944,7 +990,7 @@ fn grpo_update(
         let mut epoch_kl = 0.0;
 
         for (i, rollout) in group.rollouts.iter().enumerate() {
-            let logits = policy.forward(&rollout.obs)?;
+            let logits = policy.forward(&rollout.obs, true)?;
             let log_probs = log_softmax(&logits, 1)?;
             let act_logp = log_probs
                 .gather(&rollout.actions.unsqueeze(1)?, 1)?

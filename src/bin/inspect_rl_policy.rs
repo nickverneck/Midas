@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Module, VarBuilder, VarMap, ops::softmax};
+use candle_nn::{VarBuilder, VarMap, ops::softmax};
 use clap::Parser;
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
 use rand::Rng;
@@ -172,6 +172,7 @@ struct ReplaySummary {
     run_summary: Option<String>,
     checkpoint: String,
     checkpoint_metric: String,
+    observation_schema: String,
     parquet: String,
     outdir: String,
     full_file: bool,
@@ -215,7 +216,9 @@ fn run() -> Result<()> {
         .as_ref()
         .and_then(|json| json_string(json, "runDir"))
         .map(PathBuf::from);
-    let params = run_summary_json.as_ref().and_then(|json| json.get("params"));
+    let params = run_summary_json
+        .as_ref()
+        .and_then(|json| json.get("params"));
 
     let algorithm = params
         .and_then(|value| json_string(value, "algorithm"))
@@ -249,9 +252,17 @@ fn run() -> Result<()> {
     std::fs::create_dir_all(&outdir)?;
 
     let default_session = args.globex && !args.rth;
-    let dataset = data::load_dataset(&parquet_path, default_session)
-        .with_context(|| format!("load dataset {}", parquet_path.display()))?;
-    let (margin_cfg, session_cfg) = common::load_symbol_config(&args.symbol_config, &dataset.symbol)?;
+    let observation_schema =
+        resolve_observation_schema(run_summary_json.as_ref(), run_dir.as_ref())?;
+    println!(
+        "info: replay observation schema {}",
+        observation_schema.as_str()
+    );
+    let dataset =
+        data::load_dataset_with_schema(&parquet_path, default_session, observation_schema)
+            .with_context(|| format!("load dataset {}", parquet_path.display()))?;
+    let (margin_cfg, session_cfg) =
+        common::load_symbol_config(&args.symbol_config, &dataset.symbol)?;
     let use_globex = if let Some(session) = session_cfg {
         match session.as_str() {
             "rth" => false,
@@ -297,6 +308,7 @@ fn run() -> Result<()> {
         replay_cfg.hidden,
         replay_cfg.layers,
         4,
+        0.0,
     )?;
     candle_backend::load_checkpoint(&mut varmap, &checkpoint_path)?;
 
@@ -334,7 +346,8 @@ fn run() -> Result<()> {
                 .unwrap_or_else(|| rand::thread_rng().r#gen()),
         )
     } else {
-        args.seed.or_else(|| params.and_then(|value| json_u64(value, "seed")))
+        args.seed
+            .or_else(|| params.and_then(|value| json_u64(value, "seed")))
     };
     let mut rng = seed.map(rand::rngs::StdRng::seed_from_u64);
     let (metrics, history) = replay_policy(
@@ -360,6 +373,7 @@ fn run() -> Result<()> {
             .map(|path| path.display().to_string()),
         checkpoint: checkpoint_path.display().to_string(),
         checkpoint_metric: args.checkpoint_metric.clone(),
+        observation_schema: dataset.observation_schema.as_str().to_string(),
         parquet: parquet_path.display().to_string(),
         outdir: outdir.display().to_string(),
         full_file,
@@ -373,7 +387,10 @@ fn run() -> Result<()> {
     };
 
     let summary_path = outdir.join("replay_summary.json");
-    std::fs::write(&summary_path, format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
+    std::fs::write(
+        &summary_path,
+        format!("{}\n", serde_json::to_string_pretty(&summary)?),
+    )?;
 
     println!(
         "Replay complete: pnl {:.2}, sortino {:.2}, mdd {:.2}, entries {}, exits {}, pct_flat {:.2}%",
@@ -394,7 +411,7 @@ fn replay_policy(
     data: &data::DataSet,
     windows: &[(usize, usize)],
     eval_windows: usize,
-    policy: &candle_nn::Sequential,
+    policy: &candle_backend::Mlp,
     env_cfg: &EnvConfig,
     cfg: &ReplayConfig,
     sample: bool,
@@ -431,12 +448,13 @@ fn replay_policy(
                 cfg.initial_balance,
             );
             let obs_tensor = Tensor::from_vec(obs, (1, data.obs_dim), device)?;
-            let logits = policy.forward(&obs_tensor)?;
+            let logits = policy.forward(&obs_tensor, false)?;
             let probs = softmax(&logits, 1)?.squeeze(0)?.to_vec1::<f32>()?;
             let action_idx = if sample {
                 sample_from_probs(
                     &probs,
-                    rng.as_deref_mut().context("sample replay requested without RNG seed")?,
+                    rng.as_deref_mut()
+                        .context("sample replay requested without RNG seed")?,
                 )
             } else {
                 argmax_index(&probs)
@@ -587,6 +605,38 @@ fn resolve_checkpoint_path(
 }
 
 #[cfg(feature = "backend-candle")]
+fn resolve_observation_schema(
+    run_summary: Option<&Value>,
+    run_dir: Option<&PathBuf>,
+) -> Result<data::ObservationSchema> {
+    if let Some(schema) = run_summary
+        .and_then(|json| json.get("trainingStack"))
+        .and_then(|stack| json_string(stack, "observation_schema"))
+        .and_then(data::ObservationSchema::from_str)
+    {
+        return Ok(schema);
+    }
+
+    if let Some(dir) = run_dir {
+        let stack_path = dir.join("training_stack.json");
+        if stack_path.exists() {
+            let stack_json = read_json(&stack_path)?;
+            if let Some(schema) = json_string(&stack_json, "observation_schema")
+                .and_then(data::ObservationSchema::from_str)
+            {
+                return Ok(schema);
+            }
+        }
+    }
+
+    if run_summary.is_some() {
+        Ok(data::ObservationSchema::LegacyV1)
+    } else {
+        Ok(data::ObservationSchema::NormalizedV2)
+    }
+}
+
+#[cfg(feature = "backend-candle")]
 fn build_replay_config(
     params: Option<&Value>,
     symbol: &str,
@@ -676,7 +726,12 @@ fn build_windows(
 fn summarize_behavior(rows: &[BehaviorRow]) -> BehaviorStats {
     let mut out = BehaviorStats {
         rows: rows.len(),
-        windows: rows.iter().map(|row| row.window_idx).max().map(|v| v + 1).unwrap_or(0),
+        windows: rows
+            .iter()
+            .map(|row| row.window_idx)
+            .max()
+            .map(|v| v + 1)
+            .unwrap_or(0),
         ..BehaviorStats::default()
     };
     let mut tracker = TradeTracker::default();

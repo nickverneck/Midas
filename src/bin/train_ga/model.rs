@@ -23,7 +23,12 @@ pub fn build_mlp(p: &nn::Path, input_dim: i64, hidden: i64, layers: usize) -> nn
         seq = seq.add(linear).add_fn(|xs| xs.tanh());
         in_dim = hidden;
     }
-    let out = nn::linear(p / "out", in_dim, POLICY_ACTION_DIM as i64, Default::default());
+    let out = nn::linear(
+        p / "out",
+        in_dim,
+        POLICY_ACTION_DIM as i64,
+        Default::default(),
+    );
     seq.add(out)
 }
 
