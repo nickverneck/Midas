@@ -1,8 +1,12 @@
 use anyhow::Result;
 use midas_env::env::MarginMode;
 use midas_env::ml::ComputeRuntime;
+use rand::distributions::WeightedIndex;
+use rand::prelude::Distribution;
+use rand::rngs::StdRng;
 use std::env;
 use std::path::{Path, PathBuf};
+use tch::{Kind, Tensor};
 
 use crate::args::Args;
 
@@ -231,4 +235,60 @@ pub fn infer_margin_mode(symbol: &str, margin_cfg: Option<f64>) -> MarginMode {
 fn is_futures_symbol(symbol: &str) -> bool {
     let sym = symbol.to_ascii_uppercase();
     sym.contains("MES") || sym == "ES" || sym.contains("ES@") || sym.ends_with("ES")
+}
+
+pub fn tensor_to_vec_f32(tensor: &Tensor) -> Vec<f32> {
+    let flat = tensor
+        .to_device(tch::Device::Cpu)
+        .to_kind(Kind::Float)
+        .reshape([-1].as_ref());
+    let numel = flat.numel();
+    let mut values = vec![0f32; numel];
+    flat.copy_data(&mut values, numel);
+    values
+}
+
+pub fn argmax_index(probs: &[f32]) -> i64 {
+    probs
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(idx, _)| idx as i64)
+        .unwrap_or(0)
+}
+
+pub fn sample_from_probs(probs: &[f32], rng: &mut StdRng) -> i64 {
+    let weights: Vec<f64> = probs
+        .iter()
+        .map(|prob| {
+            if prob.is_finite() && *prob > 0.0 {
+                *prob as f64
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    if weights.iter().all(|weight| *weight <= 0.0) {
+        return argmax_index(probs);
+    }
+
+    WeightedIndex::new(&weights)
+        .map(|dist| dist.sample(rng) as i64)
+        .unwrap_or_else(|_| argmax_index(probs))
+}
+
+pub fn named_grad_l2_norm(vs: &tch::nn::VarStore, prefix: &str) -> f64 {
+    let mut total = 0.0f64;
+    for (name, tensor) in vs.variables() {
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let grad = tensor.grad();
+        if !grad.defined() {
+            continue;
+        }
+        total += (&grad * &grad).sum(Kind::Float).double_value(&[]);
+    }
+    total.sqrt()
 }

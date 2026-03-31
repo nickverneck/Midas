@@ -1,8 +1,10 @@
 use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
+use rand::rngs::StdRng;
 use tch::{Kind, Tensor, nn, no_grad};
 
 use crate::data::{DataSet, build_observation};
 use crate::metrics::{compute_sortino, max_drawdown};
+use crate::util;
 
 pub struct RolloutBatch {
     pub obs: Tensor,
@@ -15,14 +17,35 @@ pub struct RolloutBatch {
     pub pnl: Vec<f64>,
     pub returns: Vec<f64>,
     pub equity: Vec<f64>,
+    pub realized_pnl: f64,
+    pub commission: f64,
+    pub slippage: f64,
+    pub action_counts: [usize; 4],
+    pub max_prob_sum: f64,
+    pub entries: usize,
+    pub exits: usize,
+    pub flips: usize,
+    pub total_trade_bars: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct RolloutMetrics {
     pub ret_mean: f64,
     pub pnl: f64,
+    pub realized_pnl: f64,
     pub sortino: f64,
     pub drawdown: f64,
+    pub commission: f64,
+    pub slippage: f64,
+    pub buy_frac: f64,
+    pub sell_frac: f64,
+    pub hold_frac: f64,
+    pub revert_frac: f64,
+    pub mean_max_prob: f64,
+    pub entries: f64,
+    pub exits: f64,
+    pub flips: f64,
+    pub avg_hold: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +54,10 @@ pub struct LossStats {
     pub value_loss: f64,
     pub entropy: f64,
     pub total_loss: f64,
+    pub policy_grad_norm: f64,
+    pub value_grad_norm: f64,
+    pub approx_kl: f64,
+    pub clip_frac: f64,
 }
 
 pub struct RolloutConfig {
@@ -56,6 +83,8 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
     env_cfg: &EnvConfig,
     cfg: &RolloutConfig,
     train: bool,
+    rng: &mut StdRng,
+    greedy: bool,
 ) -> RolloutBatch {
     let (start, end) = window;
     let steps = end.saturating_sub(start + 1);
@@ -74,6 +103,16 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
     let mut pnl_buf = Vec::with_capacity(steps);
     let mut ret_series = Vec::with_capacity(steps);
     let mut equity_curve = Vec::with_capacity(steps);
+    let mut realized_pnl = 0.0f64;
+    let mut commission = 0.0f64;
+    let mut slippage = 0.0f64;
+    let mut action_counts = [0usize; 4];
+    let mut max_prob_sum = 0.0f64;
+    let mut entries = 0usize;
+    let mut exits = 0usize;
+    let mut flips = 0usize;
+    let mut entry_step = None;
+    let mut total_trade_bars = 0usize;
 
     for t in (start + 1)..end {
         let obs = build_observation(
@@ -91,18 +130,28 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
             .reshape(&[1, obs_dim as i64])
             .to_device(cfg.device);
 
-        let (action_idx, logp_val, value_val) = no_grad(|| {
+        let (probs, value_val) = no_grad(|| {
             let logits = policy.forward_t(&obs_tensor, train);
             let log_probs = logits.log_softmax(-1, Kind::Float);
             let probs = log_probs.exp();
-            let action_tensor = probs.multinomial(1, true);
-            let action_idx = action_tensor.int64_value(&[0, 0]);
-            let logp_val = log_probs
-                .gather(1, &action_tensor, false)
-                .double_value(&[0, 0]) as f32;
             let value_val = value.forward_t(&obs_tensor, train).double_value(&[0, 0]) as f32;
-            (action_idx, logp_val, value_val)
+            (util::tensor_to_vec_f32(&probs), value_val)
         });
+        let action_idx = if greedy {
+            util::argmax_index(&probs)
+        } else {
+            util::sample_from_probs(&probs, rng)
+        };
+        let logp_val = probs
+            .get(action_idx as usize)
+            .copied()
+            .unwrap_or(1e-8)
+            .max(1e-8)
+            .ln();
+        let max_prob = probs
+            .iter()
+            .copied()
+            .fold(0.0f32, |acc, value| acc.max(value)) as f64;
 
         let action = match action_idx {
             0 => Action::Buy,
@@ -126,6 +175,7 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
             .copied();
         let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
+        let position_before = position;
         let (reward, info) = env.step(
             action,
             data.close[t],
@@ -137,9 +187,11 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
         );
         position = env.state().position;
         equity = env.state().cash + env.state().unrealized_pnl;
+        let position_after = position;
+        let step_idx = t.saturating_sub(start + 1);
 
         act_buf.push(action_idx);
-        logp_buf.push(logp_val);
+        logp_buf.push(logp_val as f32);
         val_buf.push(value_val);
         rew_buf.push(reward);
         pnl_buf.push(info.pnl_change);
@@ -151,6 +203,29 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
         ret_series.push(info.pnl_change / denom);
         equity_curve.push(equity);
         prev_equity = equity;
+        realized_pnl += info.realized_pnl_change;
+        commission += info.commission_paid;
+        slippage += info.slippage_paid;
+        max_prob_sum += max_prob;
+        if let Some(count) = action_counts.get_mut(action_idx as usize) {
+            *count += 1;
+        }
+        if position_before == 0 && position_after != 0 {
+            entries += 1;
+            entry_step = Some(step_idx);
+        }
+        if position_before != 0 && position_after == 0 {
+            exits += 1;
+            if let Some(start_step) = entry_step.take() {
+                total_trade_bars += step_idx.saturating_sub(start_step) + 1;
+            }
+        }
+        if position_before.signum() != position_after.signum()
+            && position_before != 0
+            && position_after != 0
+        {
+            flips += 1;
+        }
     }
 
     let (adv_buf, ret_buf) = compute_gae(&rew_buf, &val_buf, cfg.gamma, cfg.lam);
@@ -186,6 +261,15 @@ pub fn rollout<P: nn::ModuleT, V: nn::ModuleT>(
         pnl: pnl_buf,
         returns: ret_series,
         equity: equity_curve,
+        realized_pnl,
+        commission,
+        slippage,
+        action_counts,
+        max_prob_sum,
+        entries,
+        exits,
+        flips,
+        total_trade_bars,
     }
 }
 
@@ -198,17 +282,35 @@ pub fn summarize_batch(batch: &RolloutBatch, annualization: f64) -> RolloutMetri
     let pnl_total = batch.pnl.iter().sum::<f64>();
     let sortino = compute_sortino(&batch.returns, annualization, 0.0, 50.0);
     let drawdown = max_drawdown(&batch.equity);
+    let steps = batch.returns.len().max(1) as f64;
     RolloutMetrics {
         ret_mean,
         pnl: pnl_total,
+        realized_pnl: batch.realized_pnl,
         sortino,
         drawdown,
+        commission: batch.commission,
+        slippage: batch.slippage,
+        buy_frac: batch.action_counts[0] as f64 / steps,
+        sell_frac: batch.action_counts[1] as f64 / steps,
+        hold_frac: batch.action_counts[2] as f64 / steps,
+        revert_frac: batch.action_counts[3] as f64 / steps,
+        mean_max_prob: batch.max_prob_sum / steps,
+        entries: batch.entries as f64,
+        exits: batch.exits as f64,
+        flips: batch.flips as f64,
+        avg_hold: if batch.exits > 0 {
+            batch.total_trade_bars as f64 / batch.exits as f64
+        } else {
+            0.0
+        },
     }
 }
 
 pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
     policy: &P,
     value: &V,
+    vs: &nn::VarStore,
     opt: &mut nn::Optimizer,
     batch: &RolloutBatch,
     cfg: &PpoConfig,
@@ -217,6 +319,10 @@ pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
     let mut value_loss_sum = 0.0f64;
     let mut entropy_sum = 0.0f64;
     let mut total_loss_sum = 0.0f64;
+    let mut policy_grad_norm_sum = 0.0f64;
+    let mut value_grad_norm_sum = 0.0f64;
+    let mut approx_kl_sum = 0.0f64;
+    let mut clip_frac_sum = 0.0f64;
 
     for _ in 0..cfg.ppo_epochs {
         let logits = policy.forward_t(&batch.obs, true);
@@ -224,7 +330,8 @@ pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
         let act_logp = log_probs
             .gather(1, &batch.actions.unsqueeze(-1), false)
             .squeeze();
-        let ratio = (&act_logp - &batch.logp).exp();
+        let log_ratio = &act_logp - &batch.logp;
+        let ratio = log_ratio.exp();
 
         let adv_mean = batch.adv.mean(Kind::Float);
         let adv_diff = &batch.adv - &adv_mean;
@@ -232,8 +339,9 @@ pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
         let adv_std = adv_var.sqrt() + 1e-8;
         let adv = adv_diff / adv_std;
 
+        let clipped_ratio = ratio.shallow_clone().clamp(1.0 - cfg.clip, 1.0 + cfg.clip);
         let surr1 = &ratio * &adv;
-        let surr2 = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * &adv;
+        let surr2 = &clipped_ratio * &adv;
         let stacked = Tensor::stack(&[surr1, surr2], 0);
         let surr = stacked.min_dim(0, false).0;
         let policy_loss = -surr.mean(Kind::Float);
@@ -247,15 +355,25 @@ pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
             .mean(Kind::Float);
 
         let loss = &policy_loss + cfg.vf_coef * &value_loss - cfg.ent_coef * &entropy;
+        let approx_kl = ((&ratio - 1.0) - &log_ratio).mean(Kind::Float);
+        let clip_frac = (&ratio - &clipped_ratio)
+            .abs()
+            .gt(1e-6)
+            .to_kind(Kind::Float)
+            .mean(Kind::Float);
 
         opt.zero_grad();
         loss.backward();
+        policy_grad_norm_sum += util::named_grad_l2_norm(vs, "policy.");
+        value_grad_norm_sum += util::named_grad_l2_norm(vs, "value.");
         opt.step();
 
         policy_loss_sum += policy_loss.double_value(&[]);
         value_loss_sum += value_loss.double_value(&[]);
         entropy_sum += entropy.double_value(&[]);
         total_loss_sum += loss.double_value(&[]);
+        approx_kl_sum += approx_kl.double_value(&[]);
+        clip_frac_sum += clip_frac.double_value(&[]);
     }
 
     let denom = cfg.ppo_epochs.max(1) as f64;
@@ -264,6 +382,10 @@ pub fn ppo_update<P: nn::ModuleT, V: nn::ModuleT>(
         value_loss: value_loss_sum / denom,
         entropy: entropy_sum / denom,
         total_loss: total_loss_sum / denom,
+        policy_grad_norm: policy_grad_norm_sum / denom,
+        value_grad_norm: value_grad_norm_sum / denom,
+        approx_kl: approx_kl_sum / denom,
+        clip_frac: clip_frac_sum / denom,
     }
 }
 

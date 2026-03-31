@@ -1,8 +1,10 @@
 use midas_env::env::{Action, EnvConfig, StepContext, TradingEnv};
+use rand::rngs::StdRng;
 use tch::{Kind, Tensor, nn, no_grad};
 
 use crate::data::{DataSet, build_observation};
 use crate::metrics::{compute_sortino, max_drawdown};
+use crate::util;
 
 pub struct GrpoRollout {
     pub obs: Tensor,
@@ -12,6 +14,15 @@ pub struct GrpoRollout {
     pub pnl: f64,
     pub returns: Vec<f64>,
     pub equity: Vec<f64>,
+    pub realized_pnl: f64,
+    pub commission: f64,
+    pub slippage: f64,
+    pub action_counts: [usize; 4],
+    pub max_prob_sum: f64,
+    pub entries: usize,
+    pub exits: usize,
+    pub flips: usize,
+    pub total_trade_bars: usize,
 }
 
 pub struct GrpoGroup {
@@ -29,6 +40,8 @@ pub struct GrpoLossStats {
     pub entropy: f64,
     pub total_loss: f64,
     pub kl_div: f64,
+    pub policy_grad_norm: f64,
+    pub clip_frac: f64,
 }
 
 pub struct GrpoConfig {
@@ -45,6 +58,8 @@ pub fn rollout_single<P: nn::ModuleT>(
     env_cfg: &EnvConfig,
     device: tch::Device,
     train: bool,
+    rng: &mut StdRng,
+    greedy: bool,
 ) -> GrpoRollout {
     let (start, end) = window;
     let steps = end.saturating_sub(start + 1);
@@ -62,6 +77,16 @@ pub fn rollout_single<P: nn::ModuleT>(
     let mut total_pnl = 0.0f64;
     let mut ret_series = Vec::with_capacity(steps);
     let mut equity_curve = Vec::with_capacity(steps);
+    let mut realized_pnl = 0.0f64;
+    let mut commission = 0.0f64;
+    let mut slippage = 0.0f64;
+    let mut action_counts = [0usize; 4];
+    let mut max_prob_sum = 0.0f64;
+    let mut entries = 0usize;
+    let mut exits = 0usize;
+    let mut flips = 0usize;
+    let mut entry_step = None;
+    let mut total_trade_bars = 0usize;
 
     for t in (start + 1)..end {
         let obs = build_observation(
@@ -79,17 +104,27 @@ pub fn rollout_single<P: nn::ModuleT>(
             .reshape(&[1, obs_dim as i64])
             .to_device(device);
 
-        let (action_idx, logp_val) = no_grad(|| {
+        let probs = no_grad(|| {
             let logits = policy.forward_t(&obs_tensor, train);
             let log_probs = logits.log_softmax(-1, Kind::Float);
             let probs = log_probs.exp();
-            let action_tensor = probs.multinomial(1, true);
-            let action_idx = action_tensor.int64_value(&[0, 0]);
-            let logp_val = log_probs
-                .gather(1, &action_tensor, false)
-                .double_value(&[0, 0]) as f32;
-            (action_idx, logp_val)
+            util::tensor_to_vec_f32(&probs)
         });
+        let action_idx = if greedy {
+            util::argmax_index(&probs)
+        } else {
+            util::sample_from_probs(&probs, rng)
+        };
+        let logp_val = probs
+            .get(action_idx as usize)
+            .copied()
+            .unwrap_or(1e-8)
+            .max(1e-8)
+            .ln();
+        let max_prob = probs
+            .iter()
+            .copied()
+            .fold(0.0f32, |acc, value| acc.max(value)) as f64;
 
         let action = match action_idx {
             0 => Action::Buy,
@@ -110,6 +145,7 @@ pub fn rollout_single<P: nn::ModuleT>(
             .copied();
         let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
+        let position_before = position;
         let (reward, info) = env.step(
             action,
             data.close[t],
@@ -121,9 +157,11 @@ pub fn rollout_single<P: nn::ModuleT>(
         );
         position = env.state().position;
         equity = env.state().cash + env.state().unrealized_pnl;
+        let position_after = position;
+        let step_idx = t.saturating_sub(start + 1);
 
         act_buf.push(action_idx);
-        logp_buf.push(logp_val);
+        logp_buf.push(logp_val as f32);
         total_reward += reward;
         total_pnl += info.pnl_change;
         let denom = if (prev_equity as f64).abs() < 1e-8 {
@@ -134,6 +172,29 @@ pub fn rollout_single<P: nn::ModuleT>(
         ret_series.push(info.pnl_change / denom);
         equity_curve.push(equity);
         prev_equity = equity;
+        realized_pnl += info.realized_pnl_change;
+        commission += info.commission_paid;
+        slippage += info.slippage_paid;
+        max_prob_sum += max_prob;
+        if let Some(count) = action_counts.get_mut(action_idx as usize) {
+            *count += 1;
+        }
+        if position_before == 0 && position_after != 0 {
+            entries += 1;
+            entry_step = Some(step_idx);
+        }
+        if position_before != 0 && position_after == 0 {
+            exits += 1;
+            if let Some(start_step) = entry_step.take() {
+                total_trade_bars += step_idx.saturating_sub(start_step) + 1;
+            }
+        }
+        if position_before.signum() != position_after.signum()
+            && position_before != 0
+            && position_after != 0
+        {
+            flips += 1;
+        }
     }
 
     let obs_tensor = Tensor::f_from_slice(&obs_buf)
@@ -155,6 +216,15 @@ pub fn rollout_single<P: nn::ModuleT>(
         pnl: total_pnl,
         returns: ret_series,
         equity: equity_curve,
+        realized_pnl,
+        commission,
+        slippage,
+        action_counts,
+        max_prob_sum,
+        entries,
+        exits,
+        flips,
+        total_trade_bars,
     }
 }
 
@@ -166,12 +236,14 @@ pub fn rollout_group<P: nn::ModuleT>(
     group_size: usize,
     device: tch::Device,
     train: bool,
+    rng: &mut StdRng,
+    greedy: bool,
 ) -> GrpoGroup {
     let mut rollouts = Vec::with_capacity(group_size);
 
     for i in 0..group_size {
         let window = windows[i % windows.len()];
-        let rollout = rollout_single(data, window, policy, env_cfg, device, train);
+        let rollout = rollout_single(data, window, policy, env_cfg, device, train, rng, greedy);
         rollouts.push(rollout);
     }
 
@@ -213,6 +285,27 @@ pub fn summarize_group(group: &GrpoGroup, annualization: f64) -> GrpoMetrics {
     };
 
     let pnl_total = group.rollouts.iter().map(|r| r.pnl).sum::<f64>();
+    let realized_pnl = group.rollouts.iter().map(|r| r.realized_pnl).sum::<f64>();
+    let commission = group.rollouts.iter().map(|r| r.commission).sum::<f64>();
+    let slippage = group.rollouts.iter().map(|r| r.slippage).sum::<f64>();
+    let mut action_counts = [0usize; 4];
+    let mut max_prob_sum = 0.0f64;
+    let mut steps = 0usize;
+    let mut entries = 0usize;
+    let mut exits = 0usize;
+    let mut flips = 0usize;
+    let mut total_trade_bars = 0usize;
+    for rollout in &group.rollouts {
+        for (idx, count) in rollout.action_counts.iter().enumerate() {
+            action_counts[idx] += *count;
+            steps += *count;
+        }
+        max_prob_sum += rollout.max_prob_sum;
+        entries += rollout.entries;
+        exits += rollout.exits;
+        flips += rollout.flips;
+        total_trade_bars += rollout.total_trade_bars;
+    }
 
     let all_equity: Vec<f64> = group
         .rollouts
@@ -226,13 +319,30 @@ pub fn summarize_group(group: &GrpoGroup, annualization: f64) -> GrpoMetrics {
     GrpoMetrics {
         ret_mean,
         pnl: pnl_total,
+        realized_pnl,
         sortino,
         drawdown,
+        commission,
+        slippage,
+        buy_frac: action_counts[0] as f64 / steps.max(1) as f64,
+        sell_frac: action_counts[1] as f64 / steps.max(1) as f64,
+        hold_frac: action_counts[2] as f64 / steps.max(1) as f64,
+        revert_frac: action_counts[3] as f64 / steps.max(1) as f64,
+        mean_max_prob: max_prob_sum / steps.max(1) as f64,
+        entries: entries as f64,
+        exits: exits as f64,
+        flips: flips as f64,
+        avg_hold: if exits > 0 {
+            total_trade_bars as f64 / exits as f64
+        } else {
+            0.0
+        },
     }
 }
 
 pub fn grpo_update<P: nn::ModuleT>(
     policy: &P,
+    vs: &nn::VarStore,
     opt: &mut nn::Optimizer,
     group: &GrpoGroup,
     advantages: &[f64],
@@ -242,6 +352,8 @@ pub fn grpo_update<P: nn::ModuleT>(
     let mut entropy_sum = 0.0f64;
     let mut total_loss_sum = 0.0f64;
     let mut kl_sum = 0.0f64;
+    let mut policy_grad_norm_sum = 0.0f64;
+    let mut clip_frac_sum = 0.0f64;
 
     let adv_tensor = Tensor::f_from_slice(advantages)
         .expect("tensor from advantages")
@@ -257,6 +369,7 @@ pub fn grpo_update<P: nn::ModuleT>(
         let mut epoch_policy_loss = 0.0f64;
         let mut epoch_entropy = 0.0f64;
         let mut epoch_kl = 0.0f64;
+        let mut epoch_clip_frac = 0.0f64;
 
         for (i, rollout) in group.rollouts.iter().enumerate() {
             let logits = policy.forward_t(&rollout.obs, true);
@@ -268,7 +381,8 @@ pub fn grpo_update<P: nn::ModuleT>(
 
             let adv = normalized_adv.get(i as i64);
             let surr1 = &ratio * &adv;
-            let surr2 = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * &adv;
+            let clipped_ratio = ratio.shallow_clone().clamp(1.0 - cfg.clip, 1.0 + cfg.clip);
+            let surr2 = &clipped_ratio * &adv;
             let stacked = Tensor::stack(&[surr1, surr2], 0);
             let surr = stacked.min_dim(0, false).0;
             let policy_loss = -surr.mean(Kind::Float);
@@ -282,6 +396,7 @@ pub fn grpo_update<P: nn::ModuleT>(
 
             opt.zero_grad();
             loss.backward();
+            policy_grad_norm_sum += util::named_grad_l2_norm(vs, "policy.");
             opt.step();
 
             epoch_policy_loss += policy_loss.double_value(&[]);
@@ -292,11 +407,18 @@ pub fn grpo_update<P: nn::ModuleT>(
                 .double_value(&[])
                 .abs();
             epoch_kl += kl;
+            epoch_clip_frac += (&ratio - &clipped_ratio)
+                .abs()
+                .gt(1e-6)
+                .to_kind(Kind::Float)
+                .mean(Kind::Float)
+                .double_value(&[]);
         }
 
         policy_loss_sum += epoch_policy_loss / group.rollouts.len() as f64;
         entropy_sum += epoch_entropy / group.rollouts.len() as f64;
         kl_sum += epoch_kl / group.rollouts.len() as f64;
+        clip_frac_sum += epoch_clip_frac / group.rollouts.len() as f64;
         total_loss_sum +=
             (epoch_policy_loss - cfg.ent_coef * epoch_entropy) / group.rollouts.len() as f64;
     }
@@ -307,5 +429,7 @@ pub fn grpo_update<P: nn::ModuleT>(
         entropy: entropy_sum / denom,
         total_loss: total_loss_sum / denom,
         kl_div: kl_sum / denom,
+        policy_grad_norm: policy_grad_norm_sum / denom,
+        clip_frac: clip_frac_sum / denom,
     }
 }

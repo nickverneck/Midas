@@ -8,7 +8,7 @@
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import GaChart from "$lib/components/GaChart.svelte";
 
-	type ChartTab = 'fitness' | 'performance' | 'drawdown' | 'frontier' | 'loss';
+	type ChartTab = 'fitness' | 'performance' | 'drawdown' | 'frontier' | 'loss' | 'gradients' | 'policy' | 'probe';
 	type FolderEntry = { name: string; path: string; kind: "dir" | "file"; mtime?: number };
 	
 	type RlPoint = {
@@ -19,15 +19,58 @@
 		trainRealizedPnl: number | null;
 		trainSortino: number | null;
 		trainDrawdown: number | null;
+		trainCommission: number | null;
+		trainSlippage: number | null;
+		trainBuyFrac: number | null;
+		trainSellFrac: number | null;
+		trainHoldFrac: number | null;
+		trainRevertFrac: number | null;
+		trainMeanMaxProb: number | null;
+		trainEntries: number | null;
+		trainExits: number | null;
+		trainFlips: number | null;
+		trainAvgHold: number | null;
 		evalRet: number | null;
 		evalPnl: number | null;
 		evalRealizedPnl: number | null;
 		evalSortino: number | null;
 		evalDrawdown: number | null;
+		evalCommission: number | null;
+		evalSlippage: number | null;
+		evalBuyFrac: number | null;
+		evalSellFrac: number | null;
+		evalHoldFrac: number | null;
+		evalRevertFrac: number | null;
+		evalMeanMaxProb: number | null;
+		evalEntries: number | null;
+		evalExits: number | null;
+		evalFlips: number | null;
+		evalAvgHold: number | null;
+		probeRet: number | null;
+		probePnl: number | null;
+		probeRealizedPnl: number | null;
+		probeSortino: number | null;
+		probeDrawdown: number | null;
+		probeCommission: number | null;
+		probeSlippage: number | null;
+		probeBuyFrac: number | null;
+		probeSellFrac: number | null;
+		probeHoldFrac: number | null;
+		probeRevertFrac: number | null;
+		probeMeanMaxProb: number | null;
+		probeEntries: number | null;
+		probeExits: number | null;
+		probeFlips: number | null;
+		probeAvgHold: number | null;
 		policyLoss: number | null;
 		valueLoss: number | null;
+		policyGradNorm: number | null;
+		valueGradNorm: number | null;
+		approxKl: number | null;
 		klDiv: number | null;
+		clipFrac: number | null;
 		entropy: number | null;
+		perplexity: number | null;
 		totalLoss: number | null;
 		algorithm: 'ppo' | 'grpo' | null;
 	};
@@ -141,15 +184,23 @@
 			const epoch = toNumber(row.epoch);
 			if (epoch === null) continue;
 			const valueLoss = toNumber(row.value_loss);
+			const approxKl = toNumber(row.approx_kl);
 			const klDiv = toNumber(row.kl_div);
+			const clipFrac = toNumber(row.clip_frac);
 			const trainRealizedPnl = firstNumber(row, TRAIN_REALIZED_KEYS);
 			const evalRealizedPnl = firstNumber(row, EVAL_REALIZED_KEYS);
+			const entropy = toNumber(row.entropy);
+			const algorithmName =
+				typeof row.algorithm === 'string' ? row.algorithm.trim().toLowerCase() : '';
 			let algorithm: 'ppo' | 'grpo' | null = null;
-			if (valueLoss !== null) {
+			if (algorithmName === 'ppo' || algorithmName === 'grpo') {
+				algorithm = algorithmName;
+			} else if (valueLoss !== null) {
 				algorithm = 'ppo';
 			} else if (klDiv !== null) {
 				algorithm = 'grpo';
 			}
+			const perplexity = toNumber(row.perplexity) ?? (entropy !== null ? Math.exp(entropy) : null);
 			next.set(epoch, {
 				epoch,
 				fitness: toNumber(row.fitness),
@@ -158,15 +209,58 @@
 				trainRealizedPnl,
 				trainSortino: toNumber(row.train_sortino),
 				trainDrawdown: toNumber(row.train_drawdown),
+				trainCommission: toNumber(row.train_commission),
+				trainSlippage: toNumber(row.train_slippage),
+				trainBuyFrac: toNumber(row.train_buy_frac),
+				trainSellFrac: toNumber(row.train_sell_frac),
+				trainHoldFrac: toNumber(row.train_hold_frac),
+				trainRevertFrac: toNumber(row.train_revert_frac),
+				trainMeanMaxProb: toNumber(row.train_mean_max_prob),
+				trainEntries: toNumber(row.train_entries),
+				trainExits: toNumber(row.train_exits),
+				trainFlips: toNumber(row.train_flips),
+				trainAvgHold: toNumber(row.train_avg_hold),
 				evalRet: toNumber(row.eval_ret_mean),
 				evalPnl: toNumber(row.eval_pnl),
 				evalRealizedPnl,
 				evalSortino: toNumber(row.eval_sortino),
 				evalDrawdown: toNumber(row.eval_drawdown),
+				evalCommission: toNumber(row.eval_commission),
+				evalSlippage: toNumber(row.eval_slippage),
+				evalBuyFrac: toNumber(row.eval_buy_frac),
+				evalSellFrac: toNumber(row.eval_sell_frac),
+				evalHoldFrac: toNumber(row.eval_hold_frac),
+				evalRevertFrac: toNumber(row.eval_revert_frac),
+				evalMeanMaxProb: toNumber(row.eval_mean_max_prob),
+				evalEntries: toNumber(row.eval_entries),
+				evalExits: toNumber(row.eval_exits),
+				evalFlips: toNumber(row.eval_flips),
+				evalAvgHold: toNumber(row.eval_avg_hold),
+				probeRet: toNumber(row.probe_ret_mean),
+				probePnl: toNumber(row.probe_pnl),
+				probeRealizedPnl: toNumber(row.probe_realized_pnl),
+				probeSortino: toNumber(row.probe_sortino),
+				probeDrawdown: toNumber(row.probe_drawdown),
+				probeCommission: toNumber(row.probe_commission),
+				probeSlippage: toNumber(row.probe_slippage),
+				probeBuyFrac: toNumber(row.probe_buy_frac),
+				probeSellFrac: toNumber(row.probe_sell_frac),
+				probeHoldFrac: toNumber(row.probe_hold_frac),
+				probeRevertFrac: toNumber(row.probe_revert_frac),
+				probeMeanMaxProb: toNumber(row.probe_mean_max_prob),
+				probeEntries: toNumber(row.probe_entries),
+				probeExits: toNumber(row.probe_exits),
+				probeFlips: toNumber(row.probe_flips),
+				probeAvgHold: toNumber(row.probe_avg_hold),
 				policyLoss: toNumber(row.policy_loss),
 				valueLoss,
+				policyGradNorm: toNumber(row.policy_grad_norm),
+				valueGradNorm: toNumber(row.value_grad_norm),
+				approxKl,
 				klDiv,
-				entropy: toNumber(row.entropy),
+				clipFrac,
+				entropy,
+				perplexity,
 				totalLoss: toNumber(row.total_loss),
 				algorithm
 			});
@@ -486,8 +580,222 @@
 				borderDash: [4, 4],
 				yAxisID: 'y1',
 				tension: 0.1
+			},
+			{
+				label: 'Perplexity',
+				data: toSeries((row) => row.perplexity),
+				borderColor: 'rgb(249, 115, 22)',
+				backgroundColor: 'rgba(249, 115, 22, 0.18)',
+				yAxisID: 'y1',
+				tension: 0.1
+			},
+			{
+				label: 'Approx KL',
+				data: toSeries((row) => row.approxKl),
+				borderColor: 'rgb(244, 63, 94)',
+				backgroundColor: 'rgba(244, 63, 94, 0.18)',
+				yAxisID: 'y2',
+				tension: 0.1
+			},
+			{
+				label: 'KL Div',
+				data: toSeries((row) => row.klDiv),
+				borderColor: 'rgb(236, 72, 153)',
+				backgroundColor: 'rgba(236, 72, 153, 0.18)',
+				borderDash: [4, 4],
+				yAxisID: 'y2',
+				tension: 0.1
+			},
+			{
+				label: 'Clip Frac',
+				data: toSeries((row) => row.clipFrac),
+				borderColor: 'rgb(14, 165, 233)',
+				backgroundColor: 'rgba(14, 165, 233, 0.18)',
+				borderDash: [2, 3],
+				yAxisID: 'y2',
+				tension: 0.1
 			}
 		]
+	}));
+
+	let lossOptions = $derived.by(() => ({
+		scales: {
+			x: {
+				type: 'linear' as const,
+				title: { display: true, text: 'Epoch' },
+				ticks: { precision: 0 }
+			},
+			y: {
+				title: { display: true, text: 'Loss' }
+			},
+			y1: {
+				position: 'right' as const,
+				grid: { drawOnChartArea: false },
+				title: { display: true, text: 'Entropy / Perplexity' }
+			},
+			y2: {
+				position: 'right' as const,
+				grid: { drawOnChartArea: false },
+				title: { display: true, text: 'KL / Clip' }
+			}
+		}
+	}));
+
+	let gradientChartData = $derived.by(() => ({
+		datasets: [
+			{
+				label: 'Policy Grad Norm',
+				data: toSeries((row) => row.policyGradNorm),
+				borderColor: 'rgb(59, 130, 246)',
+				backgroundColor: 'rgba(59, 130, 246, 0.25)',
+				tension: 0.1
+			},
+			{
+				label: 'Value Grad Norm',
+				data: toSeries((row) => row.valueGradNorm),
+				borderColor: 'rgb(16, 185, 129)',
+				backgroundColor: 'rgba(16, 185, 129, 0.22)',
+				tension: 0.1
+			}
+		]
+	}));
+
+	let gradientOptions = $derived.by(() => ({
+		scales: {
+			x: {
+				type: 'linear' as const,
+				title: { display: true, text: 'Epoch' },
+				ticks: { precision: 0 }
+			},
+			y: {
+				title: { display: true, text: 'L2 Gradient Norm' }
+			}
+		}
+	}));
+
+	let policyChartData = $derived.by(() => ({
+		datasets: [
+			{
+				label: 'Eval Buy %',
+				data: toSeries((row) => row.evalBuyFrac),
+				borderColor: 'rgb(34, 197, 94)',
+				backgroundColor: 'rgba(34, 197, 94, 0.2)',
+				tension: 0.1
+			},
+			{
+				label: 'Eval Sell %',
+				data: toSeries((row) => row.evalSellFrac),
+				borderColor: 'rgb(239, 68, 68)',
+				backgroundColor: 'rgba(239, 68, 68, 0.2)',
+				tension: 0.1
+			},
+			{
+				label: 'Eval Hold %',
+				data: toSeries((row) => row.evalHoldFrac),
+				borderColor: 'rgb(148, 163, 184)',
+				backgroundColor: 'rgba(148, 163, 184, 0.18)',
+				tension: 0.1
+			},
+			{
+				label: 'Eval Revert %',
+				data: toSeries((row) => row.evalRevertFrac),
+				borderColor: 'rgb(168, 85, 247)',
+				backgroundColor: 'rgba(168, 85, 247, 0.16)',
+				tension: 0.1
+			},
+			{
+				label: 'Eval Max Prob',
+				data: toSeries((row) => row.evalMeanMaxProb),
+				borderColor: 'rgb(245, 158, 11)',
+				backgroundColor: 'rgba(245, 158, 11, 0.18)',
+				borderDash: [4, 4],
+				tension: 0.1
+			},
+			{
+				label: 'Probe Max Prob',
+				data: toSeries((row) => row.probeMeanMaxProb),
+				borderColor: 'rgb(14, 165, 233)',
+				backgroundColor: 'rgba(14, 165, 233, 0.18)',
+				borderDash: [2, 3],
+				tension: 0.1
+			}
+		]
+	}));
+
+	let policyOptions = $derived.by(() => ({
+		scales: {
+			x: {
+				type: 'linear' as const,
+				title: { display: true, text: 'Epoch' },
+				ticks: { precision: 0 }
+			},
+			y: {
+				min: 0,
+				max: 1,
+				title: { display: true, text: 'Fraction / Probability' }
+			}
+		}
+	}));
+
+	let probeChartData = $derived.by(() => ({
+		datasets: [
+			{
+				label: 'Probe PnL',
+				data: toSeries((row) => row.probePnl),
+				borderColor: 'rgb(59, 130, 246)',
+				backgroundColor: 'rgba(59, 130, 246, 0.22)',
+				tension: 0.1
+			},
+			{
+				label: 'Probe Realized PnL',
+				data: toSeries((row) => row.probeRealizedPnl),
+				borderColor: 'rgb(16, 185, 129)',
+				backgroundColor: 'rgba(16, 185, 129, 0.2)',
+				tension: 0.1
+			},
+			{
+				label: 'Probe Drawdown',
+				data: toSeries((row) => row.probeDrawdown),
+				borderColor: 'rgb(239, 68, 68)',
+				backgroundColor: 'rgba(239, 68, 68, 0.18)',
+				yAxisID: 'y1',
+				tension: 0.1
+			},
+			{
+				label: 'Probe Max Prob',
+				data: toSeries((row) => row.probeMeanMaxProb),
+				borderColor: 'rgb(245, 158, 11)',
+				backgroundColor: 'rgba(245, 158, 11, 0.18)',
+				yAxisID: 'y2',
+				borderDash: [4, 4],
+				tension: 0.1
+			}
+		]
+	}));
+
+	let probeOptions = $derived.by(() => ({
+		scales: {
+			x: {
+				type: 'linear' as const,
+				title: { display: true, text: 'Epoch' },
+				ticks: { precision: 0 }
+			},
+			y: {
+				title: { display: true, text: 'PnL' }
+			},
+			y1: {
+				position: 'right' as const,
+				grid: { drawOnChartArea: false },
+				title: { display: true, text: 'Drawdown (%)' }
+			},
+			y2: {
+				position: 'right' as const,
+				grid: { drawOnChartArea: false },
+				min: 0,
+				max: 1,
+				title: { display: true, text: 'Confidence' }
+			}
+		}
 	}));
 </script>
 
@@ -495,7 +803,7 @@
 	<div class="flex flex-wrap items-center justify-between gap-4">
 		<div>
 			<h1 class="text-4xl font-bold tracking-tight">RL Analytics</h1>
-			<p class="text-sm text-muted-foreground">PPO training metrics from Rust runs.</p>
+			<p class="text-sm text-muted-foreground">RL training metrics from Rust runs.</p>
 		</div>
 		<div class="flex flex-wrap items-center gap-3">
 			<div class="flex items-center gap-2">
@@ -563,12 +871,15 @@
 			</Card.Header>
 			<Card.Content>
 				<Tabs.Root bind:value={chartTab} class="w-full">
-					<Tabs.List class="mb-4 grid w-full grid-cols-2 lg:w-[820px] lg:grid-cols-5">
+					<Tabs.List class="mb-4 grid w-full grid-cols-2 lg:w-[1240px] lg:grid-cols-8">
 						<Tabs.Trigger value="fitness">Fitness</Tabs.Trigger>
 						<Tabs.Trigger value="performance">Performance</Tabs.Trigger>
 						<Tabs.Trigger value="drawdown">Drawdown</Tabs.Trigger>
 						<Tabs.Trigger value="frontier">Frontier</Tabs.Trigger>
 						<Tabs.Trigger value="loss">Loss</Tabs.Trigger>
+						<Tabs.Trigger value="gradients">Gradients</Tabs.Trigger>
+						<Tabs.Trigger value="policy">Policy</Tabs.Trigger>
+						<Tabs.Trigger value="probe">Probe</Tabs.Trigger>
 					</Tabs.List>
 					<Tabs.Content value="fitness">
 						<div class="h-[320px]">
@@ -605,7 +916,22 @@
 					</Tabs.Content>
 					<Tabs.Content value="loss">
 						<div class="h-[320px]">
-							<GaChart data={lossChartData} options={chartOptions} />
+							<GaChart data={lossChartData} options={lossOptions} />
+						</div>
+					</Tabs.Content>
+					<Tabs.Content value="gradients">
+						<div class="h-[320px]">
+							<GaChart data={gradientChartData} options={gradientOptions} />
+						</div>
+					</Tabs.Content>
+					<Tabs.Content value="policy">
+						<div class="h-[320px]">
+							<GaChart data={policyChartData} options={policyOptions} />
+						</div>
+					</Tabs.Content>
+					<Tabs.Content value="probe">
+						<div class="h-[320px]">
+							<GaChart data={probeChartData} options={probeOptions} />
 						</div>
 					</Tabs.Content>
 				</Tabs.Root>
@@ -620,6 +946,10 @@
 			<Card.Content>
 				{#if latest}
 					<div class="space-y-3 text-sm">
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Algorithm</span>
+							<span class="font-semibold uppercase">{latest.algorithm ?? '—'}</span>
+						</div>
 						<div class="flex items-center justify-between">
 							<span class="text-muted-foreground">Epoch</span>
 							<span class="font-semibold">{latest.epoch}</span>
@@ -641,12 +971,28 @@
 							<span>{latest.evalPnl ?? '—'}</span>
 						</div>
 						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Eval Realized PnL</span>
+							<span>{latest.evalRealizedPnl ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
 							<span class="text-muted-foreground">Eval Sortino</span>
 							<span>{latest.evalSortino ?? '—'}</span>
 						</div>
 						<div class="flex items-center justify-between">
 							<span class="text-muted-foreground">Eval Drawdown</span>
 							<span>{latest.evalDrawdown ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Eval Max Prob</span>
+							<span>{latest.evalMeanMaxProb ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Probe PnL</span>
+							<span>{latest.probePnl ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Probe Drawdown</span>
+							<span>{latest.probeDrawdown ?? '—'}</span>
 						</div>
 						<div class="flex items-center justify-between">
 							<span class="text-muted-foreground">Policy Loss</span>
@@ -657,8 +1003,36 @@
 							<span>{latest.valueLoss ?? '—'}</span>
 						</div>
 						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Policy Grad Norm</span>
+							<span>{latest.policyGradNorm ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Value Grad Norm</span>
+							<span>{latest.valueGradNorm ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
 							<span class="text-muted-foreground">Entropy</span>
 							<span>{latest.entropy ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Perplexity</span>
+							<span>{latest.perplexity ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Approx KL</span>
+							<span>{latest.approxKl ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">KL Div</span>
+							<span>{latest.klDiv ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Clip Frac</span>
+							<span>{latest.clipFrac ?? '—'}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">Probe Entries / Flips</span>
+							<span>{latest.probeEntries ?? '—'} / {latest.probeFlips ?? '—'}</span>
 						</div>
 					</div>
 				{:else}

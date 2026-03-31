@@ -23,8 +23,20 @@ use crate::metrics::{compute_sortino, max_drawdown};
 struct RolloutMetrics {
     ret_mean: f64,
     pnl: f64,
+    realized_pnl: f64,
     sortino: f64,
     drawdown: f64,
+    commission: f64,
+    slippage: f64,
+    buy_frac: f64,
+    sell_frac: f64,
+    hold_frac: f64,
+    revert_frac: f64,
+    mean_max_prob: f64,
+    entries: f64,
+    exits: f64,
+    flips: f64,
+    avg_hold: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +45,10 @@ struct LossStats {
     value_loss: f64,
     entropy: f64,
     total_loss: f64,
+    policy_grad_norm: f64,
+    value_grad_norm: f64,
+    approx_kl: f64,
+    clip_frac: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +57,8 @@ struct GrpoLossStats {
     entropy: f64,
     total_loss: f64,
     kl_div: f64,
+    policy_grad_norm: f64,
+    clip_frac: f64,
 }
 
 struct RolloutBatch {
@@ -53,6 +71,15 @@ struct RolloutBatch {
     pnl: Vec<f64>,
     returns: Vec<f64>,
     equity: Vec<f64>,
+    realized_pnl: f64,
+    commission: f64,
+    slippage: f64,
+    action_counts: [usize; 4],
+    max_prob_sum: f64,
+    entries: usize,
+    exits: usize,
+    flips: usize,
+    total_trade_bars: usize,
 }
 
 struct GrpoRollout {
@@ -63,6 +90,15 @@ struct GrpoRollout {
     pnl: f64,
     returns: Vec<f64>,
     equity: Vec<f64>,
+    realized_pnl: f64,
+    commission: f64,
+    slippage: f64,
+    action_counts: [usize; 4],
+    max_prob_sum: f64,
+    entries: usize,
+    exits: usize,
+    flips: usize,
+    total_trade_bars: usize,
 }
 
 struct GrpoGroup {
@@ -296,14 +332,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
     .context("build candle optimizer")?;
 
     let log_path = args.outdir.join("rl_log.csv");
-    if !log_path.exists() || std::fs::metadata(&log_path)?.len() == 0 {
-        let header = if use_grpo {
-            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,entropy,total_loss,kl_div\n"
-        } else {
-            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,value_loss,entropy,total_loss\n"
-        };
-        std::fs::write(&log_path, header)?;
-    }
+    common::ensure_csv_header(&log_path, common::RL_LOG_HEADER_V2)?;
 
     let rollout_cfg = RolloutConfig {
         gamma: args.gamma,
@@ -352,9 +381,11 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     grpo_cfg.group_size,
                     &device,
                     &mut rng,
+                    false,
                 )?;
                 let advantages = compute_grpo_advantages(&group);
-                let losses = grpo_update(&policy, &mut opt, &group, &advantages, &grpo_cfg)?;
+                let losses =
+                    grpo_update(&policy, &varmap, &mut opt, &group, &advantages, &grpo_cfg)?;
                 let metrics = summarize_group(&group, args.sortino_annualization);
                 train_metrics.push(metrics);
                 loss_stats_grpo.push(losses);
@@ -371,11 +402,13 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     true,
                     &device,
                     &mut rng,
+                    false,
                 )?;
                 let metrics = summarize_batch(&batch, args.sortino_annualization);
                 let losses = ppo_update(
                     &policy,
                     value.as_ref().expect("value network"),
+                    &varmap,
                     &mut opt,
                     &batch,
                     &device,
@@ -402,6 +435,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     1,
                     &device,
                     &mut rng,
+                    false,
                 )?;
                 eval_metrics.push(summarize_group(&group, args.sortino_annualization));
             } else {
@@ -415,11 +449,51 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     false,
                     &device,
                     &mut rng,
+                    false,
                 )?;
                 eval_metrics.push(summarize_batch(&batch, args.sortino_annualization));
             }
         }
         let eval_summary = average_metrics(&eval_metrics);
+
+        let probe_summary = if args.log_interval > 0 && epoch % args.log_interval == 0 {
+            windows_val
+                .first()
+                .map(|window| {
+                    if use_grpo {
+                        rollout_group(
+                            &val,
+                            &[*window],
+                            &policy,
+                            &env_cfg,
+                            &rollout_cfg,
+                            false,
+                            1,
+                            &device,
+                            &mut rng,
+                            true,
+                        )
+                        .map(|group| summarize_group(&group, args.sortino_annualization))
+                    } else {
+                        rollout(
+                            &val,
+                            *window,
+                            &policy,
+                            value.as_ref().expect("value network"),
+                            &env_cfg,
+                            &rollout_cfg,
+                            false,
+                            &device,
+                            &mut rng,
+                            true,
+                        )
+                        .map(|batch| summarize_batch(&batch, args.sortino_annualization))
+                    }
+                })
+                .transpose()?
+        } else {
+            None
+        };
 
         let fitness_source = if args.fitness_use_eval {
             eval_summary
@@ -430,13 +504,14 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
             - (args.w_mdd * fitness_source.drawdown);
 
         println!(
-            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | fitness {:.4} | time {}",
+            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | eval conf {:.3} | fitness {:.4} | time {}",
             epoch,
             train_summary.ret_mean,
             train_summary.pnl,
             eval_summary.pnl,
             eval_summary.sortino,
             eval_summary.drawdown,
+            eval_summary.mean_max_prob,
             fitness,
             format_duration(epoch_start.elapsed())
         );
@@ -445,43 +520,43 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
             let mut file = std::fs::OpenOptions::new().append(true).open(&log_path)?;
             if use_grpo {
                 let loss_summary = average_grpo_losses(&loss_stats_grpo);
-                writeln!(
-                    file,
-                    "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
+                write_rl_log_row(
+                    &mut file,
                     epoch,
-                    train_summary.ret_mean,
-                    train_summary.pnl,
-                    train_summary.sortino,
-                    train_summary.drawdown,
-                    eval_summary.ret_mean,
-                    eval_summary.pnl,
-                    eval_summary.sortino,
-                    eval_summary.drawdown,
+                    "grpo",
+                    &train_summary,
+                    &eval_summary,
+                    probe_summary.as_ref(),
                     fitness,
                     loss_summary.policy_loss,
+                    None,
                     loss_summary.entropy,
                     loss_summary.total_loss,
-                    loss_summary.kl_div
+                    loss_summary.policy_grad_norm,
+                    None,
+                    None,
+                    Some(loss_summary.kl_div),
+                    loss_summary.clip_frac,
                 )?;
             } else {
                 let loss_summary = average_losses(&loss_stats_ppo);
-                writeln!(
-                    file,
-                    "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
+                write_rl_log_row(
+                    &mut file,
                     epoch,
-                    train_summary.ret_mean,
-                    train_summary.pnl,
-                    train_summary.sortino,
-                    train_summary.drawdown,
-                    eval_summary.ret_mean,
-                    eval_summary.pnl,
-                    eval_summary.sortino,
-                    eval_summary.drawdown,
+                    "ppo",
+                    &train_summary,
+                    &eval_summary,
+                    probe_summary.as_ref(),
                     fitness,
                     loss_summary.policy_loss,
-                    loss_summary.value_loss,
+                    Some(loss_summary.value_loss),
                     loss_summary.entropy,
-                    loss_summary.total_loss
+                    loss_summary.total_loss,
+                    loss_summary.policy_grad_norm,
+                    Some(loss_summary.value_grad_norm),
+                    Some(loss_summary.approx_kl),
+                    None,
+                    loss_summary.clip_frac,
                 )?;
             }
         }
@@ -510,6 +585,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                 1,
                 &device,
                 &mut rng,
+                false,
             )?;
             test_metrics.push(summarize_group(&group, args.sortino_annualization));
         } else {
@@ -523,6 +599,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                 false,
                 &device,
                 &mut rng,
+                false,
             )?;
             test_metrics.push(summarize_batch(&batch, args.sortino_annualization));
         }
@@ -607,6 +684,7 @@ fn rollout(
     train: bool,
     device: &Device,
     rng: &mut StdRng,
+    greedy: bool,
 ) -> Result<RolloutBatch> {
     let (start, end) = window;
     let steps = end.saturating_sub(start + 1);
@@ -625,6 +703,16 @@ fn rollout(
     let mut pnl_buf = Vec::with_capacity(steps);
     let mut ret_series = Vec::with_capacity(steps);
     let mut equity_curve = Vec::with_capacity(steps);
+    let mut realized_pnl = 0.0f64;
+    let mut commission = 0.0f64;
+    let mut slippage = 0.0f64;
+    let mut action_counts = [0usize; 4];
+    let mut max_prob_sum = 0.0f64;
+    let mut entries = 0usize;
+    let mut exits = 0usize;
+    let mut flips = 0usize;
+    let mut entry_step = None;
+    let mut total_trade_bars = 0usize;
 
     for t in (start + 1)..end {
         let obs = build_observation(
@@ -641,13 +729,21 @@ fn rollout(
 
         let logits = policy.forward(&obs_tensor, train)?;
         let probs = softmax(&logits, 1)?.squeeze(0)?.to_vec1::<f32>()?;
-        let action_idx = sample_from_probs(&probs, rng) as u32;
+        let action_idx = if greedy {
+            argmax_index(&probs) as u32
+        } else {
+            sample_from_probs(&probs, rng) as u32
+        };
         let logp_val = probs
             .get(action_idx as usize)
             .copied()
             .unwrap_or(1e-8)
             .max(1e-8)
             .ln();
+        let max_prob = probs
+            .iter()
+            .copied()
+            .fold(0.0f32, |acc, value| acc.max(value)) as f64;
         let value_val = value
             .forward(&obs_tensor, train)?
             .squeeze(0)?
@@ -677,6 +773,7 @@ fn rollout(
             .copied();
         let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
+        let position_before = position;
         let (reward, info) = env.step(
             action,
             data.close[t],
@@ -688,6 +785,8 @@ fn rollout(
         );
         position = env.state().position;
         equity = env.state().cash + env.state().unrealized_pnl;
+        let position_after = position;
+        let step_idx = t.saturating_sub(start + 1);
 
         act_buf.push(action_idx);
         logp_buf.push(logp_val);
@@ -702,6 +801,29 @@ fn rollout(
         ret_series.push(info.pnl_change / denom);
         equity_curve.push(equity);
         prev_equity = equity;
+        realized_pnl += info.realized_pnl_change;
+        commission += info.commission_paid;
+        slippage += info.slippage_paid;
+        max_prob_sum += max_prob;
+        if let Some(count) = action_counts.get_mut(action_idx as usize) {
+            *count += 1;
+        }
+        if position_before == 0 && position_after != 0 {
+            entries += 1;
+            entry_step = Some(step_idx);
+        }
+        if position_before != 0 && position_after == 0 {
+            exits += 1;
+            if let Some(start_step) = entry_step.take() {
+                total_trade_bars += step_idx.saturating_sub(start_step) + 1;
+            }
+        }
+        if position_before.signum() != position_after.signum()
+            && position_before != 0
+            && position_after != 0
+        {
+            flips += 1;
+        }
     }
 
     let (adv_buf, ret_buf) = compute_gae(&rew_buf, &val_buf, cfg.gamma, cfg.lam);
@@ -716,6 +838,15 @@ fn rollout(
         pnl: pnl_buf,
         returns: ret_series,
         equity: equity_curve,
+        realized_pnl,
+        commission,
+        slippage,
+        action_counts,
+        max_prob_sum,
+        entries,
+        exits,
+        flips,
+        total_trade_bars,
     })
 }
 
@@ -729,17 +860,35 @@ fn summarize_batch(batch: &RolloutBatch, annualization: f64) -> RolloutMetrics {
     let sortino = compute_sortino(&batch.returns, annualization, 0.0, 50.0);
     let drawdown = max_drawdown(&batch.equity);
     let _ = batch.rewards.len();
+    let steps = batch.returns.len().max(1) as f64;
     RolloutMetrics {
         ret_mean,
         pnl: pnl_total,
+        realized_pnl: batch.realized_pnl,
         sortino,
         drawdown,
+        commission: batch.commission,
+        slippage: batch.slippage,
+        buy_frac: batch.action_counts[0] as f64 / steps,
+        sell_frac: batch.action_counts[1] as f64 / steps,
+        hold_frac: batch.action_counts[2] as f64 / steps,
+        revert_frac: batch.action_counts[3] as f64 / steps,
+        mean_max_prob: batch.max_prob_sum / steps,
+        entries: batch.entries as f64,
+        exits: batch.exits as f64,
+        flips: batch.flips as f64,
+        avg_hold: if batch.exits > 0 {
+            batch.total_trade_bars as f64 / batch.exits as f64
+        } else {
+            0.0
+        },
     }
 }
 
 fn ppo_update(
     policy: &Mlp,
     value: &Mlp,
+    varmap: &VarMap,
     opt: &mut AdamW,
     batch: &RolloutBatch,
     device: &Device,
@@ -752,16 +901,21 @@ fn ppo_update(
     let mut value_loss_sum = 0.0;
     let mut entropy_sum = 0.0;
     let mut total_loss_sum = 0.0;
+    let mut policy_grad_norm_sum = 0.0;
+    let mut value_grad_norm_sum = 0.0;
+    let mut approx_kl_sum = 0.0;
+    let mut clip_frac_sum = 0.0;
 
     for _ in 0..cfg.ppo_epochs {
         let logits = policy.forward(&batch.obs, true)?;
         let log_probs = log_softmax(&logits, 1)?;
         let actions = batch.actions.unsqueeze(1)?;
         let act_logp = log_probs.gather(&actions, 1)?.squeeze(1)?;
-        let ratio = (&act_logp - &batch.logp)?.exp()?;
+        let log_ratio = (&act_logp - &batch.logp)?;
+        let ratio = log_ratio.exp()?;
 
         let surr1 = (&ratio * &adv_tensor)?;
-        let clipped_ratio = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip)?;
+        let clipped_ratio = ratio.clone().clamp(1.0 - cfg.clip, 1.0 + cfg.clip)?;
         let surr2 = (&clipped_ratio * &adv_tensor)?;
         let surr = Tensor::stack(&[&surr1, &surr2], 0)?.min(0)?;
         let policy_loss = surr.neg()?.mean_all()?;
@@ -775,12 +929,37 @@ fn ppo_update(
         let loss = (&policy_loss + (&value_loss * cfg.vf_coef)?)?;
         let loss = (&loss - (&entropy * cfg.ent_coef)?)?;
 
-        opt.backward_step(&loss)?;
+        let grads = loss.backward()?;
+        policy_grad_norm_sum += named_grad_l2_norm(varmap, "policy", &grads)?;
+        value_grad_norm_sum += named_grad_l2_norm(varmap, "value", &grads)?;
+        opt.step(&grads)?;
+
+        let ratio_values = ratio.to_vec1::<f32>()?;
+        let log_ratio_values = log_ratio.to_vec1::<f32>()?;
+        let denom = ratio_values.len().max(1) as f64;
+        let approx_kl = ratio_values
+            .iter()
+            .zip(log_ratio_values.iter())
+            .map(|(ratio_value, log_ratio_value)| {
+                (*ratio_value as f64 - 1.0) - *log_ratio_value as f64
+            })
+            .sum::<f64>()
+            / denom;
+        let clip_frac = ratio_values
+            .iter()
+            .filter(|ratio_value| {
+                let ratio_value = **ratio_value as f64;
+                ratio_value < 1.0 - cfg.clip || ratio_value > 1.0 + cfg.clip
+            })
+            .count() as f64
+            / denom;
 
         policy_loss_sum += policy_loss.to_scalar::<f32>()? as f64;
         value_loss_sum += value_loss.to_scalar::<f32>()? as f64;
         entropy_sum += entropy.to_scalar::<f32>()? as f64;
         total_loss_sum += loss.to_scalar::<f32>()? as f64;
+        approx_kl_sum += approx_kl;
+        clip_frac_sum += clip_frac;
     }
 
     let denom = cfg.ppo_epochs.max(1) as f64;
@@ -789,6 +968,10 @@ fn ppo_update(
         value_loss: value_loss_sum / denom,
         entropy: entropy_sum / denom,
         total_loss: total_loss_sum / denom,
+        policy_grad_norm: policy_grad_norm_sum / denom,
+        value_grad_norm: value_grad_norm_sum / denom,
+        approx_kl: approx_kl_sum / denom,
+        clip_frac: clip_frac_sum / denom,
     })
 }
 
@@ -801,6 +984,7 @@ fn rollout_single(
     train: bool,
     device: &Device,
     rng: &mut StdRng,
+    greedy: bool,
 ) -> Result<GrpoRollout> {
     let (start, end) = window;
     let steps = end.saturating_sub(start + 1);
@@ -818,6 +1002,16 @@ fn rollout_single(
     let mut total_pnl = 0.0;
     let mut ret_series = Vec::with_capacity(steps);
     let mut equity_curve = Vec::with_capacity(steps);
+    let mut realized_pnl = 0.0f64;
+    let mut commission = 0.0f64;
+    let mut slippage = 0.0f64;
+    let mut action_counts = [0usize; 4];
+    let mut max_prob_sum = 0.0f64;
+    let mut entries = 0usize;
+    let mut exits = 0usize;
+    let mut flips = 0usize;
+    let mut entry_step = None;
+    let mut total_trade_bars = 0usize;
 
     for t in (start + 1)..end {
         let obs = build_observation(
@@ -834,13 +1028,21 @@ fn rollout_single(
 
         let logits = policy.forward(&obs_tensor, train)?;
         let probs = softmax(&logits, 1)?.squeeze(0)?.to_vec1::<f32>()?;
-        let action_idx = sample_from_probs(&probs, rng) as u32;
+        let action_idx = if greedy {
+            argmax_index(&probs) as u32
+        } else {
+            sample_from_probs(&probs, rng) as u32
+        };
         let logp_val = probs
             .get(action_idx as usize)
             .copied()
             .unwrap_or(1e-8)
             .max(1e-8)
             .ln();
+        let max_prob = probs
+            .iter()
+            .copied()
+            .fold(0.0f32, |acc, value| acc.max(value)) as f64;
 
         let action = match action_idx {
             0 => Action::Buy,
@@ -864,6 +1066,7 @@ fn rollout_single(
             .copied();
         let margin_ok = *data.margin_ok.get(t).unwrap_or(&true);
 
+        let position_before = position;
         let (reward, info) = env.step(
             action,
             data.close[t],
@@ -875,6 +1078,8 @@ fn rollout_single(
         );
         position = env.state().position;
         equity = env.state().cash + env.state().unrealized_pnl;
+        let position_after = position;
+        let step_idx = t.saturating_sub(start + 1);
 
         act_buf.push(action_idx);
         logp_buf.push(logp_val);
@@ -888,6 +1093,29 @@ fn rollout_single(
         ret_series.push(info.pnl_change / denom);
         equity_curve.push(equity);
         prev_equity = equity;
+        realized_pnl += info.realized_pnl_change;
+        commission += info.commission_paid;
+        slippage += info.slippage_paid;
+        max_prob_sum += max_prob;
+        if let Some(count) = action_counts.get_mut(action_idx as usize) {
+            *count += 1;
+        }
+        if position_before == 0 && position_after != 0 {
+            entries += 1;
+            entry_step = Some(step_idx);
+        }
+        if position_before != 0 && position_after == 0 {
+            exits += 1;
+            if let Some(start_step) = entry_step.take() {
+                total_trade_bars += step_idx.saturating_sub(start_step) + 1;
+            }
+        }
+        if position_before.signum() != position_after.signum()
+            && position_before != 0
+            && position_after != 0
+        {
+            flips += 1;
+        }
     }
 
     Ok(GrpoRollout {
@@ -898,6 +1126,15 @@ fn rollout_single(
         pnl: total_pnl,
         returns: ret_series,
         equity: equity_curve,
+        realized_pnl,
+        commission,
+        slippage,
+        action_counts,
+        max_prob_sum,
+        entries,
+        exits,
+        flips,
+        total_trade_bars,
     })
 }
 
@@ -911,12 +1148,13 @@ fn rollout_group(
     group_size: usize,
     device: &Device,
     rng: &mut StdRng,
+    greedy: bool,
 ) -> Result<GrpoGroup> {
     let mut rollouts = Vec::with_capacity(group_size);
     for i in 0..group_size {
         let window = windows[i % windows.len()];
         rollouts.push(rollout_single(
-            data, window, policy, env_cfg, cfg, train, device, rng,
+            data, window, policy, env_cfg, cfg, train, device, rng, greedy,
         )?);
     }
 
@@ -956,6 +1194,27 @@ fn summarize_group(group: &GrpoGroup, annualization: f64) -> RolloutMetrics {
         all_returns.iter().sum::<f64>() / all_returns.len() as f64
     };
     let pnl_total = group.rollouts.iter().map(|r| r.pnl).sum::<f64>();
+    let realized_pnl = group.rollouts.iter().map(|r| r.realized_pnl).sum::<f64>();
+    let commission = group.rollouts.iter().map(|r| r.commission).sum::<f64>();
+    let slippage = group.rollouts.iter().map(|r| r.slippage).sum::<f64>();
+    let mut action_counts = [0usize; 4];
+    let mut max_prob_sum = 0.0f64;
+    let mut steps = 0usize;
+    let mut entries = 0usize;
+    let mut exits = 0usize;
+    let mut flips = 0usize;
+    let mut total_trade_bars = 0usize;
+    for rollout in &group.rollouts {
+        for (idx, count) in rollout.action_counts.iter().enumerate() {
+            action_counts[idx] += *count;
+            steps += *count;
+        }
+        max_prob_sum += rollout.max_prob_sum;
+        entries += rollout.entries;
+        exits += rollout.exits;
+        flips += rollout.flips;
+        total_trade_bars += rollout.total_trade_bars;
+    }
     let all_equity: Vec<f64> = group
         .rollouts
         .iter()
@@ -966,13 +1225,30 @@ fn summarize_group(group: &GrpoGroup, annualization: f64) -> RolloutMetrics {
     RolloutMetrics {
         ret_mean,
         pnl: pnl_total,
+        realized_pnl,
         sortino,
         drawdown,
+        commission,
+        slippage,
+        buy_frac: action_counts[0] as f64 / steps.max(1) as f64,
+        sell_frac: action_counts[1] as f64 / steps.max(1) as f64,
+        hold_frac: action_counts[2] as f64 / steps.max(1) as f64,
+        revert_frac: action_counts[3] as f64 / steps.max(1) as f64,
+        mean_max_prob: max_prob_sum / steps.max(1) as f64,
+        entries: entries as f64,
+        exits: exits as f64,
+        flips: flips as f64,
+        avg_hold: if exits > 0 {
+            total_trade_bars as f64 / exits as f64
+        } else {
+            0.0
+        },
     }
 }
 
 fn grpo_update(
     policy: &Mlp,
+    varmap: &VarMap,
     opt: &mut AdamW,
     group: &GrpoGroup,
     advantages: &[f64],
@@ -983,11 +1259,14 @@ fn grpo_update(
     let mut entropy_sum = 0.0;
     let mut total_loss_sum = 0.0;
     let mut kl_sum = 0.0;
+    let mut policy_grad_norm_sum = 0.0;
+    let mut clip_frac_sum = 0.0;
 
     for _ in 0..cfg.grpo_epochs {
         let mut epoch_policy_loss = 0.0;
         let mut epoch_entropy = 0.0;
         let mut epoch_kl = 0.0;
+        let mut epoch_clip_frac = 0.0;
 
         for (i, rollout) in group.rollouts.iter().enumerate() {
             let logits = policy.forward(&rollout.obs, true)?;
@@ -999,7 +1278,7 @@ fn grpo_update(
 
             let adv = normalized_adv.get(i).copied().unwrap_or(0.0);
             let surr1 = (&ratio * adv)?;
-            let clipped_ratio = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip)?;
+            let clipped_ratio = ratio.clone().clamp(1.0 - cfg.clip, 1.0 + cfg.clip)?;
             let surr2 = (&clipped_ratio * adv)?;
             let surr = Tensor::stack(&[&surr1, &surr2], 0)?.min(0)?;
             let policy_loss = surr.neg()?.mean_all()?;
@@ -1008,7 +1287,9 @@ fn grpo_update(
             let entropy = (&probs * &log_probs)?.sum(1)?.neg()?.mean_all()?;
 
             let loss = (&policy_loss - (&entropy * cfg.ent_coef)?)?;
-            opt.backward_step(&loss)?;
+            let grads = loss.backward()?;
+            policy_grad_norm_sum += named_grad_l2_norm(varmap, "policy", &grads)?;
+            opt.step(&grads)?;
 
             epoch_policy_loss += policy_loss.to_scalar::<f32>()? as f64;
             epoch_entropy += entropy.to_scalar::<f32>()? as f64;
@@ -1016,12 +1297,23 @@ fn grpo_update(
                 .mean_all()?
                 .abs()?
                 .to_scalar::<f32>()? as f64;
+            let ratio_values = ratio.to_vec1::<f32>()?;
+            let denom = ratio_values.len().max(1) as f64;
+            epoch_clip_frac += ratio_values
+                .iter()
+                .filter(|ratio_value| {
+                    let ratio_value = **ratio_value as f64;
+                    ratio_value < 1.0 - cfg.clip || ratio_value > 1.0 + cfg.clip
+                })
+                .count() as f64
+                / denom;
         }
 
         let denom = group.rollouts.len().max(1) as f64;
         policy_loss_sum += epoch_policy_loss / denom;
         entropy_sum += epoch_entropy / denom;
         kl_sum += epoch_kl / denom;
+        clip_frac_sum += epoch_clip_frac / denom;
         total_loss_sum += (epoch_policy_loss - cfg.ent_coef * epoch_entropy) / denom;
     }
 
@@ -1031,6 +1323,8 @@ fn grpo_update(
         entropy: entropy_sum / denom,
         total_loss: total_loss_sum / denom,
         kl_div: kl_sum / denom,
+        policy_grad_norm: policy_grad_norm_sum / denom,
+        clip_frac: clip_frac_sum / denom,
     })
 }
 
@@ -1102,14 +1396,35 @@ fn sample_from_probs(probs: &[f32], rng: &mut StdRng) -> usize {
 
     WeightedIndex::new(&weights)
         .map(|dist| dist.sample(rng))
-        .unwrap_or_else(|_| {
-            probs
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0)
-        })
+        .unwrap_or_else(|_| argmax_index(probs))
+}
+
+fn argmax_index(probs: &[f32]) -> usize {
+    probs
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn named_grad_l2_norm(
+    varmap: &VarMap,
+    prefix: &str,
+    grads: &candle_core::backprop::GradStore,
+) -> Result<f64> {
+    let vars = varmap.data().lock().unwrap();
+    let mut total = 0.0f64;
+    for (name, var) in vars.iter() {
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let Some(grad) = grads.get(var.as_tensor()) else {
+            continue;
+        };
+        total += grad.sqr()?.sum_all()?.to_scalar::<f32>()? as f64;
+    }
+    Ok(total.sqrt())
 }
 
 fn average_metrics(values: &[RolloutMetrics]) -> RolloutMetrics {
@@ -1117,26 +1432,74 @@ fn average_metrics(values: &[RolloutMetrics]) -> RolloutMetrics {
         return RolloutMetrics {
             ret_mean: 0.0,
             pnl: 0.0,
+            realized_pnl: 0.0,
             sortino: 0.0,
             drawdown: 0.0,
+            commission: 0.0,
+            slippage: 0.0,
+            buy_frac: 0.0,
+            sell_frac: 0.0,
+            hold_frac: 0.0,
+            revert_frac: 0.0,
+            mean_max_prob: 0.0,
+            entries: 0.0,
+            exits: 0.0,
+            flips: 0.0,
+            avg_hold: 0.0,
         };
     }
     let mut ret_mean = 0.0;
     let mut pnl = 0.0;
+    let mut realized_pnl = 0.0;
     let mut sortino = 0.0;
     let mut drawdown = 0.0;
+    let mut commission = 0.0;
+    let mut slippage = 0.0;
+    let mut buy_frac = 0.0;
+    let mut sell_frac = 0.0;
+    let mut hold_frac = 0.0;
+    let mut revert_frac = 0.0;
+    let mut mean_max_prob = 0.0;
+    let mut entries = 0.0;
+    let mut exits = 0.0;
+    let mut flips = 0.0;
+    let mut avg_hold = 0.0;
     for value in values {
         ret_mean += value.ret_mean;
         pnl += value.pnl;
+        realized_pnl += value.realized_pnl;
         sortino += value.sortino;
         drawdown += value.drawdown;
+        commission += value.commission;
+        slippage += value.slippage;
+        buy_frac += value.buy_frac;
+        sell_frac += value.sell_frac;
+        hold_frac += value.hold_frac;
+        revert_frac += value.revert_frac;
+        mean_max_prob += value.mean_max_prob;
+        entries += value.entries;
+        exits += value.exits;
+        flips += value.flips;
+        avg_hold += value.avg_hold;
     }
     let denom = values.len() as f64;
     RolloutMetrics {
         ret_mean: ret_mean / denom,
         pnl: pnl / denom,
+        realized_pnl: realized_pnl / denom,
         sortino: sortino / denom,
         drawdown: drawdown / denom,
+        commission: commission / denom,
+        slippage: slippage / denom,
+        buy_frac: buy_frac / denom,
+        sell_frac: sell_frac / denom,
+        hold_frac: hold_frac / denom,
+        revert_frac: revert_frac / denom,
+        mean_max_prob: mean_max_prob / denom,
+        entries: entries / denom,
+        exits: exits / denom,
+        flips: flips / denom,
+        avg_hold: avg_hold / denom,
     }
 }
 
@@ -1147,17 +1510,29 @@ fn average_losses(values: &[LossStats]) -> LossStats {
             value_loss: 0.0,
             entropy: 0.0,
             total_loss: 0.0,
+            policy_grad_norm: 0.0,
+            value_grad_norm: 0.0,
+            approx_kl: 0.0,
+            clip_frac: 0.0,
         };
     }
     let mut policy_loss = 0.0;
     let mut value_loss = 0.0;
     let mut entropy = 0.0;
     let mut total_loss = 0.0;
+    let mut policy_grad_norm = 0.0;
+    let mut value_grad_norm = 0.0;
+    let mut approx_kl = 0.0;
+    let mut clip_frac = 0.0;
     for value in values {
         policy_loss += value.policy_loss;
         value_loss += value.value_loss;
         entropy += value.entropy;
         total_loss += value.total_loss;
+        policy_grad_norm += value.policy_grad_norm;
+        value_grad_norm += value.value_grad_norm;
+        approx_kl += value.approx_kl;
+        clip_frac += value.clip_frac;
     }
     let denom = values.len() as f64;
     LossStats {
@@ -1165,6 +1540,10 @@ fn average_losses(values: &[LossStats]) -> LossStats {
         value_loss: value_loss / denom,
         entropy: entropy / denom,
         total_loss: total_loss / denom,
+        policy_grad_norm: policy_grad_norm / denom,
+        value_grad_norm: value_grad_norm / denom,
+        approx_kl: approx_kl / denom,
+        clip_frac: clip_frac / denom,
     }
 }
 
@@ -1175,17 +1554,23 @@ fn average_grpo_losses(values: &[GrpoLossStats]) -> GrpoLossStats {
             entropy: 0.0,
             total_loss: 0.0,
             kl_div: 0.0,
+            policy_grad_norm: 0.0,
+            clip_frac: 0.0,
         };
     }
     let mut policy_loss = 0.0;
     let mut entropy = 0.0;
     let mut total_loss = 0.0;
     let mut kl_div = 0.0;
+    let mut policy_grad_norm = 0.0;
+    let mut clip_frac = 0.0;
     for value in values {
         policy_loss += value.policy_loss;
         entropy += value.entropy;
         total_loss += value.total_loss;
         kl_div += value.kl_div;
+        policy_grad_norm += value.policy_grad_norm;
+        clip_frac += value.clip_frac;
     }
     let denom = values.len() as f64;
     GrpoLossStats {
@@ -1193,7 +1578,83 @@ fn average_grpo_losses(values: &[GrpoLossStats]) -> GrpoLossStats {
         entropy: entropy / denom,
         total_loss: total_loss / denom,
         kl_div: kl_div / denom,
+        policy_grad_norm: policy_grad_norm / denom,
+        clip_frac: clip_frac / denom,
     }
+}
+
+fn format_log_f64(value: f64, precision: usize) -> String {
+    format!("{value:.precision$}")
+}
+
+fn format_log_opt(value: Option<f64>, precision: usize) -> String {
+    value
+        .map(|inner| format_log_f64(inner, precision))
+        .unwrap_or_default()
+}
+
+fn append_rollout_fields(fields: &mut Vec<String>, metrics: Option<&RolloutMetrics>) {
+    let Some(metrics) = metrics else {
+        for _ in 0..16 {
+            fields.push(String::new());
+        }
+        return;
+    };
+    fields.push(format_log_f64(metrics.ret_mean, 4));
+    fields.push(format_log_f64(metrics.pnl, 4));
+    fields.push(format_log_f64(metrics.realized_pnl, 4));
+    fields.push(format_log_f64(metrics.sortino, 4));
+    fields.push(format_log_f64(metrics.drawdown, 4));
+    fields.push(format_log_f64(metrics.commission, 4));
+    fields.push(format_log_f64(metrics.slippage, 4));
+    fields.push(format_log_f64(metrics.buy_frac, 6));
+    fields.push(format_log_f64(metrics.sell_frac, 6));
+    fields.push(format_log_f64(metrics.hold_frac, 6));
+    fields.push(format_log_f64(metrics.revert_frac, 6));
+    fields.push(format_log_f64(metrics.mean_max_prob, 6));
+    fields.push(format_log_f64(metrics.entries, 4));
+    fields.push(format_log_f64(metrics.exits, 4));
+    fields.push(format_log_f64(metrics.flips, 4));
+    fields.push(format_log_f64(metrics.avg_hold, 4));
+}
+
+fn write_rl_log_row(
+    file: &mut std::fs::File,
+    epoch: usize,
+    algorithm: &str,
+    train: &RolloutMetrics,
+    eval: &RolloutMetrics,
+    probe: Option<&RolloutMetrics>,
+    fitness: f64,
+    policy_loss: f64,
+    value_loss: Option<f64>,
+    entropy: f64,
+    total_loss: f64,
+    policy_grad_norm: f64,
+    value_grad_norm: Option<f64>,
+    approx_kl: Option<f64>,
+    kl_div: Option<f64>,
+    clip_frac: f64,
+) -> Result<()> {
+    let mut fields = Vec::with_capacity(60);
+    fields.push(epoch.to_string());
+    fields.push(algorithm.to_string());
+    append_rollout_fields(&mut fields, Some(train));
+    append_rollout_fields(&mut fields, Some(eval));
+    append_rollout_fields(&mut fields, probe);
+    fields.push(format_log_f64(fitness, 4));
+    fields.push(format_log_f64(policy_loss, 6));
+    fields.push(format_log_opt(value_loss, 6));
+    fields.push(format_log_f64(entropy, 6));
+    fields.push(format_log_f64(entropy.exp(), 6));
+    fields.push(format_log_f64(total_loss, 6));
+    fields.push(format_log_f64(policy_grad_norm, 6));
+    fields.push(format_log_opt(value_grad_norm, 6));
+    fields.push(format_log_opt(approx_kl, 6));
+    fields.push(format_log_opt(kl_div, 6));
+    fields.push(format_log_f64(clip_frac, 6));
+    writeln!(file, "{}", fields.join(","))?;
+    Ok(())
 }
 
 fn resolve_device(requested: ComputeRuntime) -> Result<Device> {

@@ -265,14 +265,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         .context("build optimizer")?;
 
     let log_path = args.outdir.join("rl_log.csv");
-    if !log_path.exists() || std::fs::metadata(&log_path)?.len() == 0 {
-        let header = if use_grpo {
-            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,entropy,total_loss,kl_div\n"
-        } else {
-            "epoch,train_ret_mean,train_pnl,train_sortino,train_drawdown,eval_ret_mean,eval_pnl,eval_sortino,eval_drawdown,fitness,policy_loss,value_loss,entropy,total_loss\n"
-        };
-        std::fs::write(&log_path, header)?;
-    }
+    common::ensure_csv_header(&log_path, common::RL_LOG_HEADER_V2)?;
 
     let rollout_cfg = RolloutConfig {
         gamma: args.gamma,
@@ -322,9 +315,12 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                     grpo_cfg.group_size,
                     device,
                     true,
+                    &mut rng,
+                    false,
                 );
                 let advantages = grpo::compute_grpo_advantages(&group);
-                let losses = grpo::grpo_update(&policy, &mut opt, &group, &advantages, &grpo_cfg);
+                let losses =
+                    grpo::grpo_update(&policy, &vs, &mut opt, &group, &advantages, &grpo_cfg);
                 let metrics = grpo::summarize_group(&group, args.sortino_annualization);
                 train_metrics.push(metrics);
                 loss_stats_grpo.push(losses);
@@ -340,10 +336,18 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                     &env_cfg,
                     &rollout_cfg,
                     true,
+                    &mut rng,
+                    false,
                 );
                 let metrics = ppo::summarize_batch(&batch, args.sortino_annualization);
-                let losses =
-                    ppo::ppo_update(&policy, value.as_ref().unwrap(), &mut opt, &batch, &ppo_cfg);
+                let losses = ppo::ppo_update(
+                    &policy,
+                    value.as_ref().unwrap(),
+                    &vs,
+                    &mut opt,
+                    &batch,
+                    &ppo_cfg,
+                );
                 train_metrics.push(metrics);
                 loss_stats_ppo.push(losses);
             }
@@ -355,8 +359,17 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         let mut eval_metrics = Vec::with_capacity(eval_count);
         for window in windows_val.iter().take(eval_count) {
             if use_grpo {
-                let group =
-                    grpo::rollout_group(&val, &[*window], &policy, &env_cfg, 1, device, false);
+                let group = grpo::rollout_group(
+                    &val,
+                    &[*window],
+                    &policy,
+                    &env_cfg,
+                    1,
+                    device,
+                    false,
+                    &mut rng,
+                    false,
+                );
                 eval_metrics.push(grpo::summarize_group(&group, args.sortino_annualization));
             } else {
                 let batch = ppo::rollout(
@@ -367,11 +380,47 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                     &env_cfg,
                     &rollout_cfg,
                     false,
+                    &mut rng,
+                    false,
                 );
                 eval_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
             }
         }
         let eval_summary = average_metrics(&eval_metrics);
+
+        let probe_summary = if args.log_interval > 0 && epoch % args.log_interval == 0 {
+            windows_val.first().map(|window| {
+                if use_grpo {
+                    let group = grpo::rollout_group(
+                        &val,
+                        &[*window],
+                        &policy,
+                        &env_cfg,
+                        1,
+                        device,
+                        false,
+                        &mut rng,
+                        true,
+                    );
+                    grpo::summarize_group(&group, args.sortino_annualization)
+                } else {
+                    let batch = ppo::rollout(
+                        &val,
+                        *window,
+                        &policy,
+                        value.as_ref().unwrap(),
+                        &env_cfg,
+                        &rollout_cfg,
+                        false,
+                        &mut rng,
+                        true,
+                    );
+                    ppo::summarize_batch(&batch, args.sortino_annualization)
+                }
+            })
+        } else {
+            None
+        };
 
         let fitness_source = if args.fitness_use_eval {
             eval_summary
@@ -382,13 +431,14 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
             - (args.w_mdd * fitness_source.drawdown);
 
         println!(
-            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | fitness {:.4} | time {}",
+            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | eval conf {:.3} | fitness {:.4} | time {}",
             epoch,
             train_summary.ret_mean,
             train_summary.pnl,
             eval_summary.pnl,
             eval_summary.sortino,
             eval_summary.drawdown,
+            eval_summary.mean_max_prob,
             fitness,
             format_duration(epoch_start.elapsed())
         );
@@ -397,43 +447,43 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
             let mut file = std::fs::OpenOptions::new().append(true).open(&log_path)?;
             if use_grpo {
                 let loss_summary = average_grpo_losses(&loss_stats_grpo);
-                writeln!(
-                    file,
-                    "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
+                write_rl_log_row(
+                    &mut file,
                     epoch,
-                    train_summary.ret_mean,
-                    train_summary.pnl,
-                    train_summary.sortino,
-                    train_summary.drawdown,
-                    eval_summary.ret_mean,
-                    eval_summary.pnl,
-                    eval_summary.sortino,
-                    eval_summary.drawdown,
+                    "grpo",
+                    &train_summary,
+                    &eval_summary,
+                    probe_summary.as_ref(),
                     fitness,
                     loss_summary.policy_loss,
+                    None,
                     loss_summary.entropy,
                     loss_summary.total_loss,
-                    loss_summary.kl_div
+                    loss_summary.policy_grad_norm,
+                    None,
+                    None,
+                    Some(loss_summary.kl_div),
+                    loss_summary.clip_frac,
                 )?;
             } else {
                 let loss_summary = average_losses(&loss_stats_ppo);
-                writeln!(
-                    file,
-                    "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{:.6}",
+                write_rl_log_row(
+                    &mut file,
                     epoch,
-                    train_summary.ret_mean,
-                    train_summary.pnl,
-                    train_summary.sortino,
-                    train_summary.drawdown,
-                    eval_summary.ret_mean,
-                    eval_summary.pnl,
-                    eval_summary.sortino,
-                    eval_summary.drawdown,
+                    "ppo",
+                    &train_summary,
+                    &eval_summary,
+                    probe_summary.as_ref(),
                     fitness,
                     loss_summary.policy_loss,
-                    loss_summary.value_loss,
+                    Some(loss_summary.value_loss),
                     loss_summary.entropy,
-                    loss_summary.total_loss
+                    loss_summary.total_loss,
+                    loss_summary.policy_grad_norm,
+                    Some(loss_summary.value_grad_norm),
+                    Some(loss_summary.approx_kl),
+                    None,
+                    loss_summary.clip_frac,
                 )?;
             }
         }
@@ -448,7 +498,17 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     let mut test_metrics = Vec::with_capacity(eval_count);
     for window in windows_test.iter().take(eval_count) {
         if use_grpo {
-            let group = grpo::rollout_group(&test, &[*window], &policy, &env_cfg, 1, device, false);
+            let group = grpo::rollout_group(
+                &test,
+                &[*window],
+                &policy,
+                &env_cfg,
+                1,
+                device,
+                false,
+                &mut rng,
+                false,
+            );
             test_metrics.push(grpo::summarize_group(&group, args.sortino_annualization));
         } else {
             let batch = ppo::rollout(
@@ -458,6 +518,8 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
                 value.as_ref().unwrap(),
                 &env_cfg,
                 &rollout_cfg,
+                false,
+                &mut rng,
                 false,
             );
             test_metrics.push(ppo::summarize_batch(&batch, args.sortino_annualization));
@@ -520,27 +582,153 @@ fn average_metrics(values: &[RolloutMetrics]) -> RolloutMetrics {
         return RolloutMetrics {
             ret_mean: 0.0,
             pnl: 0.0,
+            realized_pnl: 0.0,
             sortino: 0.0,
             drawdown: 0.0,
+            commission: 0.0,
+            slippage: 0.0,
+            buy_frac: 0.0,
+            sell_frac: 0.0,
+            hold_frac: 0.0,
+            revert_frac: 0.0,
+            mean_max_prob: 0.0,
+            entries: 0.0,
+            exits: 0.0,
+            flips: 0.0,
+            avg_hold: 0.0,
         };
     }
     let mut ret_mean = 0.0;
     let mut pnl = 0.0;
+    let mut realized_pnl = 0.0;
     let mut sortino = 0.0;
     let mut drawdown = 0.0;
+    let mut commission = 0.0;
+    let mut slippage = 0.0;
+    let mut buy_frac = 0.0;
+    let mut sell_frac = 0.0;
+    let mut hold_frac = 0.0;
+    let mut revert_frac = 0.0;
+    let mut mean_max_prob = 0.0;
+    let mut entries = 0.0;
+    let mut exits = 0.0;
+    let mut flips = 0.0;
+    let mut avg_hold = 0.0;
     for v in values {
         ret_mean += v.ret_mean;
         pnl += v.pnl;
+        realized_pnl += v.realized_pnl;
         sortino += v.sortino;
         drawdown += v.drawdown;
+        commission += v.commission;
+        slippage += v.slippage;
+        buy_frac += v.buy_frac;
+        sell_frac += v.sell_frac;
+        hold_frac += v.hold_frac;
+        revert_frac += v.revert_frac;
+        mean_max_prob += v.mean_max_prob;
+        entries += v.entries;
+        exits += v.exits;
+        flips += v.flips;
+        avg_hold += v.avg_hold;
     }
     let denom = values.len() as f64;
     RolloutMetrics {
         ret_mean: ret_mean / denom,
         pnl: pnl / denom,
+        realized_pnl: realized_pnl / denom,
         sortino: sortino / denom,
         drawdown: drawdown / denom,
+        commission: commission / denom,
+        slippage: slippage / denom,
+        buy_frac: buy_frac / denom,
+        sell_frac: sell_frac / denom,
+        hold_frac: hold_frac / denom,
+        revert_frac: revert_frac / denom,
+        mean_max_prob: mean_max_prob / denom,
+        entries: entries / denom,
+        exits: exits / denom,
+        flips: flips / denom,
+        avg_hold: avg_hold / denom,
     }
+}
+
+#[cfg(feature = "torch")]
+fn format_log_f64(value: f64, precision: usize) -> String {
+    format!("{value:.precision$}")
+}
+
+#[cfg(feature = "torch")]
+fn format_log_opt(value: Option<f64>, precision: usize) -> String {
+    value
+        .map(|inner| format_log_f64(inner, precision))
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "torch")]
+fn append_rollout_fields(fields: &mut Vec<String>, metrics: Option<&RolloutMetrics>) {
+    let Some(metrics) = metrics else {
+        for _ in 0..16 {
+            fields.push(String::new());
+        }
+        return;
+    };
+    fields.push(format_log_f64(metrics.ret_mean, 4));
+    fields.push(format_log_f64(metrics.pnl, 4));
+    fields.push(format_log_f64(metrics.realized_pnl, 4));
+    fields.push(format_log_f64(metrics.sortino, 4));
+    fields.push(format_log_f64(metrics.drawdown, 4));
+    fields.push(format_log_f64(metrics.commission, 4));
+    fields.push(format_log_f64(metrics.slippage, 4));
+    fields.push(format_log_f64(metrics.buy_frac, 6));
+    fields.push(format_log_f64(metrics.sell_frac, 6));
+    fields.push(format_log_f64(metrics.hold_frac, 6));
+    fields.push(format_log_f64(metrics.revert_frac, 6));
+    fields.push(format_log_f64(metrics.mean_max_prob, 6));
+    fields.push(format_log_f64(metrics.entries, 4));
+    fields.push(format_log_f64(metrics.exits, 4));
+    fields.push(format_log_f64(metrics.flips, 4));
+    fields.push(format_log_f64(metrics.avg_hold, 4));
+}
+
+#[cfg(feature = "torch")]
+fn write_rl_log_row(
+    file: &mut std::fs::File,
+    epoch: usize,
+    algorithm: &str,
+    train: &RolloutMetrics,
+    eval: &RolloutMetrics,
+    probe: Option<&RolloutMetrics>,
+    fitness: f64,
+    policy_loss: f64,
+    value_loss: Option<f64>,
+    entropy: f64,
+    total_loss: f64,
+    policy_grad_norm: f64,
+    value_grad_norm: Option<f64>,
+    approx_kl: Option<f64>,
+    kl_div: Option<f64>,
+    clip_frac: f64,
+) -> anyhow::Result<()> {
+    let mut fields = Vec::with_capacity(60);
+    fields.push(epoch.to_string());
+    fields.push(algorithm.to_string());
+    append_rollout_fields(&mut fields, Some(train));
+    append_rollout_fields(&mut fields, Some(eval));
+    append_rollout_fields(&mut fields, probe);
+    fields.push(format_log_f64(fitness, 4));
+    fields.push(format_log_f64(policy_loss, 6));
+    fields.push(format_log_opt(value_loss, 6));
+    fields.push(format_log_f64(entropy, 6));
+    fields.push(format_log_f64(entropy.exp(), 6));
+    fields.push(format_log_f64(total_loss, 6));
+    fields.push(format_log_f64(policy_grad_norm, 6));
+    fields.push(format_log_opt(value_grad_norm, 6));
+    fields.push(format_log_opt(approx_kl, 6));
+    fields.push(format_log_opt(kl_div, 6));
+    fields.push(format_log_f64(clip_frac, 6));
+    writeln!(file, "{}", fields.join(","))?;
+    Ok(())
 }
 
 #[cfg(feature = "torch")]
@@ -551,17 +739,29 @@ fn average_losses(values: &[LossStats]) -> LossStats {
             value_loss: 0.0,
             entropy: 0.0,
             total_loss: 0.0,
+            policy_grad_norm: 0.0,
+            value_grad_norm: 0.0,
+            approx_kl: 0.0,
+            clip_frac: 0.0,
         };
     }
     let mut policy_loss = 0.0;
     let mut value_loss = 0.0;
     let mut entropy = 0.0;
     let mut total_loss = 0.0;
+    let mut policy_grad_norm = 0.0;
+    let mut value_grad_norm = 0.0;
+    let mut approx_kl = 0.0;
+    let mut clip_frac = 0.0;
     for v in values {
         policy_loss += v.policy_loss;
         value_loss += v.value_loss;
         entropy += v.entropy;
         total_loss += v.total_loss;
+        policy_grad_norm += v.policy_grad_norm;
+        value_grad_norm += v.value_grad_norm;
+        approx_kl += v.approx_kl;
+        clip_frac += v.clip_frac;
     }
     let denom = values.len() as f64;
     LossStats {
@@ -569,6 +769,10 @@ fn average_losses(values: &[LossStats]) -> LossStats {
         value_loss: value_loss / denom,
         entropy: entropy / denom,
         total_loss: total_loss / denom,
+        policy_grad_norm: policy_grad_norm / denom,
+        value_grad_norm: value_grad_norm / denom,
+        approx_kl: approx_kl / denom,
+        clip_frac: clip_frac / denom,
     }
 }
 
@@ -580,17 +784,23 @@ fn average_grpo_losses(values: &[grpo::GrpoLossStats]) -> grpo::GrpoLossStats {
             entropy: 0.0,
             total_loss: 0.0,
             kl_div: 0.0,
+            policy_grad_norm: 0.0,
+            clip_frac: 0.0,
         };
     }
     let mut policy_loss = 0.0;
     let mut entropy = 0.0;
     let mut total_loss = 0.0;
     let mut kl_div = 0.0;
+    let mut policy_grad_norm = 0.0;
+    let mut clip_frac = 0.0;
     for v in values {
         policy_loss += v.policy_loss;
         entropy += v.entropy;
         total_loss += v.total_loss;
         kl_div += v.kl_div;
+        policy_grad_norm += v.policy_grad_norm;
+        clip_frac += v.clip_frac;
     }
     let denom = values.len() as f64;
     grpo::GrpoLossStats {
@@ -598,6 +808,8 @@ fn average_grpo_losses(values: &[grpo::GrpoLossStats]) -> grpo::GrpoLossStats {
         entropy: entropy / denom,
         total_loss: total_loss / denom,
         kl_div: kl_div / denom,
+        policy_grad_norm: policy_grad_norm / denom,
+        clip_frac: clip_frac / denom,
     }
 }
 
