@@ -4,11 +4,184 @@ fn execution_state_snapshot(session: &SessionState) -> ExecutionStateSnapshot {
         config: session.execution_config.clone(),
         runtime: session.execution_runtime.snapshot(),
         selected_account_id: session.selected_account_id,
-        selected_contract_name: session.selected_contract.as_ref().map(|contract| contract.name.clone()),
+        selected_contract_name: session
+            .selected_contract
+            .as_ref()
+            .map(|contract| contract.name.clone()),
         market_position_qty: selected_market_position_qty(session),
         market_entry_price: selected_market_entry_price(session),
         selected_contract_take_profit_price: take_profit_price,
         selected_contract_stop_price: stop_price,
+    }
+}
+
+fn execution_probe_order_snapshot(order: &Value) -> ExecutionProbeOrder {
+    ExecutionProbeOrder {
+        order_id: extract_entity_id(order),
+        order_strategy_id: json_i64(order, "orderStrategyId"),
+        cl_ord_id: order
+            .get("clOrdId")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        order_type: order
+            .get("orderType")
+            .and_then(Value::as_str)
+            .or_else(|| order.get("ordType").and_then(Value::as_str))
+            .map(ToString::to_string),
+        action: order
+            .get("action")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        order_qty: pick_number(order, &["orderQty", "qty", "quantity"])
+            .map(|value| value.abs().round() as i32),
+        price: pick_number(order, &["price"]),
+        stop_price: pick_number(order, &["stopPrice"]),
+        status: order
+            .get("ordStatus")
+            .and_then(Value::as_str)
+            .or_else(|| order.get("status").and_then(Value::as_str))
+            .map(ToString::to_string),
+    }
+}
+
+fn parse_order_strategy_params_qtys(strategy: &Value) -> (Option<i32>, Vec<i32>) {
+    let params = strategy
+        .get("params")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let entry_qty = params
+        .as_ref()
+        .and_then(|params| params.get("entryVersion"))
+        .and_then(|entry| pick_number(entry, &["orderQty", "qty", "quantity"]))
+        .map(|value| value.abs().round() as i32);
+    let bracket_qtys = params
+        .as_ref()
+        .and_then(|params| params.get("brackets"))
+        .and_then(Value::as_array)
+        .map(|brackets| {
+            brackets
+                .iter()
+                .filter_map(|bracket| {
+                    pick_number(bracket, &["qty", "orderQty", "quantity"])
+                        .map(|value| value.abs().round() as i32)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (entry_qty, bracket_qtys)
+}
+
+fn execution_probe_snapshot(
+    session: &SessionState,
+    latency: LatencySnapshot,
+    tag: String,
+) -> ExecutionProbeSnapshot {
+    let execution_state = execution_state_snapshot(session);
+    let selected_key = selected_strategy_key(session).ok();
+    let account_id = session.selected_account_id;
+    let tracker_order_id = session.order_latency_tracker.as_ref().and_then(|tracker| {
+        tracker.order_id.or_else(|| {
+            account_id.and_then(|account_id| {
+                session
+                    .user_store
+                    .order_id_by_client_id(account_id, &tracker.cl_ord_id)
+            })
+        })
+    });
+    let tracker_order_is_active = tracker_order_id.zip(account_id).is_some_and(
+        |(order_id, account_id)| {
+            session
+                .user_store
+                .find_order(account_id, order_id)
+                .is_some_and(order_is_active)
+        },
+    );
+    let tracker_order_strategy_id = session
+        .order_latency_tracker
+        .as_ref()
+        .and_then(|tracker| tracker.order_strategy_id);
+    let tracker_strategy_has_live_orders = selected_key.zip(tracker_order_strategy_id).is_some_and(
+        |(key, order_strategy_id)| strategy_has_live_broker_path(session, key, order_strategy_id),
+    );
+    let tracker_within_strategy_grace = tracker_order_strategy_id
+        .is_some_and(|order_strategy_id| tracker_within_broker_path_grace(session, order_strategy_id));
+    let tracked_order_strategy_id = active_order_strategy_matches_selected(session)
+        .map(|tracked| tracked.order_strategy_id);
+    let broker_strategy = selected_key.and_then(|key| {
+        session
+            .user_store
+            .find_active_order_strategy(key.account_id, key.contract_id)
+    });
+    let broker_order_strategy_id = broker_strategy.and_then(extract_entity_id);
+    let broker_order_strategy_status = broker_strategy.and_then(|strategy| {
+        strategy
+            .get("status")
+            .and_then(Value::as_str)
+            .or_else(|| strategy.get("strategyStatus").and_then(Value::as_str))
+            .map(ToString::to_string)
+    });
+    let (broker_strategy_entry_order_qty, broker_strategy_bracket_qtys) = broker_strategy
+        .map(parse_order_strategy_params_qtys)
+        .unwrap_or((None, Vec::new()));
+
+    let selected_working_orders = selected_key
+        .and_then(|key| session.user_store.orders.get(&key.account_id).map(|orders| (key, orders)))
+        .map(|(key, orders)| {
+            orders
+                .values()
+                .filter(|order| {
+                    order_is_active(order) && order_contract_id(order) == Some(key.contract_id)
+                })
+                .map(execution_probe_order_snapshot)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let linked_active_orders = match (selected_key, broker_order_strategy_id) {
+        (Some(key), Some(order_strategy_id)) => session
+            .user_store
+            .linked_strategy_orders(key.account_id, order_strategy_id)
+            .into_iter()
+            .filter(|order| {
+                order_is_active(order) && order_contract_id(order) == Some(key.contract_id)
+            })
+            .map(execution_probe_order_snapshot)
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    let managed_protection = selected_key
+        .and_then(|key| session.managed_protection.get(&key))
+        .map(|protection| ExecutionProbeManagedProtection {
+            signed_qty: protection.signed_qty,
+            take_profit_price: protection.take_profit_price,
+            stop_price: protection.stop_price,
+            take_profit_order_id: protection.take_profit_order_id,
+            stop_order_id: protection.stop_order_id,
+            take_profit_cl_ord_id: protection.take_profit_cl_ord_id.clone(),
+            stop_cl_ord_id: protection.stop_cl_ord_id.clone(),
+        });
+
+    ExecutionProbeSnapshot {
+        tag,
+        captured_at_utc: Utc::now(),
+        execution_state,
+        latency,
+        order_submit_in_flight: session.order_submit_in_flight,
+        protection_sync_in_flight: session.protection_sync_in_flight,
+        tracker_order_id,
+        tracker_order_is_active,
+        tracker_order_strategy_id,
+        tracker_strategy_has_live_orders,
+        tracker_within_strategy_grace,
+        tracked_order_strategy_id,
+        broker_order_strategy_id,
+        broker_order_strategy_status,
+        broker_strategy_entry_order_qty,
+        broker_strategy_bracket_qtys,
+        selected_working_orders,
+        linked_active_orders,
+        managed_protection,
     }
 }
 
@@ -49,50 +222,29 @@ fn session_window_at(session: &SessionState, ts_ns: i64) -> Option<InstrumentSes
         .map(|profile| profile.evaluate(ts_ns))
 }
 
-fn selected_contract_positions<'a>(session: &'a SessionState) -> Vec<&'a Value> {
-    let Some(account_id) = session.selected_account_id else {
-        return Vec::new();
-    };
-    let Some(contract) = session.selected_contract.as_ref() else {
-        return Vec::new();
-    };
-    session
-        .user_store
-        .positions
-        .get(&account_id)
-        .into_iter()
-        .flat_map(|positions| positions.values())
-        .filter(|position| position_matches_contract(position, contract))
-        .collect()
+fn selected_contract_position<'a>(session: &'a SessionState) -> Option<&'a Value> {
+    let account_id = session.selected_account_id?;
+    let contract = session.selected_contract.as_ref()?;
+    best_contract_position(
+        session
+            .user_store
+            .positions
+            .get(&account_id)
+            .into_iter()
+            .flat_map(|positions| positions.values()),
+        contract,
+    )
 }
 
 fn selected_market_position_qty(session: &SessionState) -> i32 {
-    let qty = selected_contract_positions(session)
-        .into_iter()
-        .filter_map(position_qty)
-        .sum::<f64>();
-    qty.round() as i32
+    selected_contract_position(session)
+        .and_then(position_qty)
+        .unwrap_or_default()
+        .round() as i32
 }
 
 fn selected_market_entry_price(session: &SessionState) -> Option<f64> {
-    let positions = selected_contract_positions(session);
-    let mut weighted_sum = 0.0;
-    let mut total_qty = 0.0;
-    for position in positions {
-        let qty = position_qty(position)?.abs();
-        if qty <= f64::EPSILON {
-            continue;
-        }
-        let entry_price = pick_number(position, &["netPrice", "avgPrice", "averagePrice"])?;
-        weighted_sum += entry_price * qty;
-        total_qty += qty;
-    }
-
-    if total_qty <= f64::EPSILON {
-        None
-    } else {
-        Some(weighted_sum / total_qty)
-    }
+    selected_contract_position(session).and_then(position_entry_price)
 }
 
 fn selected_protection_prices(session: &SessionState) -> (Option<f64>, Option<f64>) {
@@ -198,16 +350,16 @@ fn execution_observability_context(session: &SessionState) -> String {
         .map(|value| value.to_string())
         .unwrap_or_else(|| "none".to_string());
     let tracked_strategy = active_order_strategy_matches_selected(session);
-    let tracked_strategy_id = tracked_strategy.as_ref().map(|tracked| tracked.order_strategy_id);
-    let broker_strategy_id = selected_strategy_key(session)
-        .ok()
-        .and_then(|key| {
-            session
-                .user_store
-                .find_active_order_strategy(key.account_id, key.contract_id)
-                .and_then(extract_entity_id)
-                .map(|strategy_id| (key, strategy_id))
-        });
+    let tracked_strategy_id = tracked_strategy
+        .as_ref()
+        .map(|tracked| tracked.order_strategy_id);
+    let broker_strategy_id = selected_strategy_key(session).ok().and_then(|key| {
+        session
+            .user_store
+            .find_active_order_strategy(key.account_id, key.contract_id)
+            .and_then(extract_entity_id)
+            .map(|strategy_id| (key, strategy_id))
+    });
 
     let tracked_linked_orders = tracked_strategy
         .as_ref()
@@ -442,17 +594,89 @@ fn should_wait_for_strategy_owned_protection(session: &SessionState) -> bool {
     if !native_order_strategy_enabled(session) || selected_market_position_qty(session) == 0 {
         return false;
     }
-    let Some(tracked) = active_order_strategy_matches_selected(session) else {
+
+    if session.order_latency_tracker.as_ref().is_some_and(|tracker| {
+        tracker.strategy_owned_protection
+            && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_POSITION_SYNC_GRACE_MS
+    }) {
+        return true;
+    }
+
+    // Tradovate demo/live can leave orderStrategyLink/list empty even while the
+    // broker-native TP/SL bracket is active. In that case, keep waiting only if
+    // the selected contract still shows working protective orders. A stale
+    // orderStrategy record without any live child orders should not block native
+    // protection sync after a market-delta reversal.
+    selected_contract_has_active_protective_orders(session)
+}
+
+fn selected_contract_has_active_protective_orders(session: &SessionState) -> bool {
+    let Some(key) = selected_strategy_key(session).ok() else {
         return false;
     };
-    let has_linked_orders = session
+    session
         .user_store
-        .linked_strategy_orders(tracked.key.account_id, tracked.order_strategy_id)
+        .orders
+        .get(&key.account_id)
         .into_iter()
+        .flat_map(|orders| orders.values())
         .any(|order| {
-            order_is_active(order) && order_contract_id(order) == Some(tracked.key.contract_id)
-        });
-    has_linked_orders && !session.managed_protection.contains_key(&tracked.key)
+            order_is_active(order)
+                && order_contract_id(order) == Some(key.contract_id)
+                && matches!(
+                    order_type(order)
+                        .as_deref()
+                        .map(|order_type| order_type.to_ascii_lowercase()),
+                    Some(ref order_type)
+                        if matches!(
+                            order_type.as_str(),
+                            "limit"
+                                | "mit"
+                                | "stop"
+                                | "stoplimit"
+                                | "trailingstop"
+                                | "trailingstoplimit"
+                        )
+                )
+        })
+}
+
+fn selected_managed_protection_waiting_for_position_sync(session: &mut SessionState) -> bool {
+    if session.protection_sync_in_flight || session.pending_protection_sync.is_some() {
+        return false;
+    }
+
+    let Some(key) = selected_strategy_key(session).ok() else {
+        return false;
+    };
+    let actual_qty = selected_market_position_qty(session);
+    if actual_qty == 0 {
+        return false;
+    }
+
+    refresh_managed_protection_order_ids(session, key);
+    let Some(protection) = session.managed_protection.get(&key).cloned() else {
+        return false;
+    };
+    if protection.signed_qty != actual_qty {
+        return false;
+    }
+
+    let (take_profit_candidates, stop_candidates) = collect_live_protection_orders(session, key);
+    let take_profit_live = protection.take_profit_price.is_none()
+        || recover_live_protection_order(
+            protection.take_profit_cl_ord_id.as_deref(),
+            &take_profit_candidates,
+        )
+        .is_some();
+    let stop_live = protection.stop_price.is_none()
+        || recover_live_protection_order(
+            protection.stop_cl_ord_id.as_deref(),
+            &stop_candidates,
+        )
+        .is_some();
+
+    !take_profit_live || !stop_live
 }
 
 fn sync_active_execution_position(
@@ -607,15 +831,16 @@ fn strategy_has_live_broker_path(
 
 const ORDER_STRATEGY_HYDRATION_GRACE_MS: u128 = 1_500;
 const MARKET_ORDER_POSITION_SYNC_GRACE_MS: u128 = 3_000;
+const ORDER_STRATEGY_POSITION_SYNC_GRACE_MS: u128 = 10_000;
 
-fn tracker_within_broker_path_grace(
-    session: &SessionState,
-    order_strategy_id: i64,
-) -> bool {
-    session.order_latency_tracker.as_ref().is_some_and(|tracker| {
-        tracker.order_strategy_id == Some(order_strategy_id)
-            && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_HYDRATION_GRACE_MS
-    })
+fn tracker_within_broker_path_grace(session: &SessionState, order_strategy_id: i64) -> bool {
+    session
+        .order_latency_tracker
+        .as_ref()
+        .is_some_and(|tracker| {
+            tracker.order_strategy_id == Some(order_strategy_id)
+                && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_HYDRATION_GRACE_MS
+        })
 }
 
 fn selected_contract_has_live_broker_path(session: &SessionState) -> bool {
@@ -631,10 +856,11 @@ fn selected_contract_has_live_broker_path(session: &SessionState) -> bool {
     };
 
     if let Some(tracker) = session.order_latency_tracker.as_ref() {
-        if let Some(order_id) = tracker
-            .order_id
-            .or_else(|| session.user_store.order_id_by_client_id(account_id, &tracker.cl_ord_id))
-        {
+        if let Some(order_id) = tracker.order_id.or_else(|| {
+            session
+                .user_store
+                .order_id_by_client_id(account_id, &tracker.cl_ord_id)
+        }) {
             if session
                 .user_store
                 .find_order(account_id, order_id)
@@ -663,7 +889,7 @@ fn pending_target_has_live_broker_path(session: &SessionState) -> bool {
     selected_contract_has_live_broker_path(session)
 }
 
-fn should_wait_for_market_position_sync(
+fn should_wait_for_automated_position_sync(
     session: &SessionState,
     pending_target_qty: i32,
     actual_qty: i32,
@@ -675,18 +901,22 @@ fn should_wait_for_market_position_sync(
     let Some(tracker) = session.order_latency_tracker.as_ref() else {
         return false;
     };
-    if tracker.order_strategy_id.is_some() {
-        return false;
-    }
-    if !(tracker.order_id.is_some()
+    let has_submission_progress = tracker.order_strategy_id.is_some()
+        || tracker.order_id.is_some()
         || tracker.seen_recorded
         || tracker.exec_report_recorded
-        || tracker.fill_recorded)
-    {
+        || tracker.fill_recorded;
+    if !has_submission_progress {
         return false;
     }
 
-    tracker.started_at.elapsed().as_millis() <= MARKET_ORDER_POSITION_SYNC_GRACE_MS
+    let grace_ms = if tracker.order_strategy_id.is_some() {
+        ORDER_STRATEGY_POSITION_SYNC_GRACE_MS
+    } else {
+        MARKET_ORDER_POSITION_SYNC_GRACE_MS
+    };
+
+    tracker.started_at.elapsed().as_millis() <= grace_ms
 }
 
 fn clear_stale_pending_target(
@@ -702,8 +932,8 @@ fn clear_stale_pending_target(
     session.execution_runtime.last_summary = format!(
         "Pending target {pending} cleared: broker has no active order path and position is still {actual_qty}; re-evaluating."
     );
-    session.execution_runtime.last_closed_bar_ts = latest_strategy_bar_ts(session)
-        .map(|last_strategy_ts| last_strategy_ts.saturating_sub(1));
+    session.execution_runtime.last_closed_bar_ts =
+        latest_strategy_bar_ts(session).map(|last_strategy_ts| last_strategy_ts.saturating_sub(1));
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Pending target {pending} cleared: broker has no active order path; re-evaluating."
     )));
@@ -792,8 +1022,13 @@ fn continue_staged_reversal(
             return Ok(true);
         }
 
-        let dispatch_outcome =
-            dispatch_target_position_order(session, broker_tx, staged.target_qty, true, &staged.reason)?;
+        let dispatch_outcome = dispatch_target_position_order(
+            session,
+            broker_tx,
+            staged.target_qty,
+            true,
+            &staged.reason,
+        )?;
         match dispatch_outcome {
             MarketOrderDispatchOutcome::NoOp { message } => {
                 session.execution_runtime.pending_reversal_entry = None;
@@ -817,7 +1052,8 @@ fn continue_staged_reversal(
         "{} | staged reversal flatten {} -> 0 before {}",
         staged.reason, actual_qty, staged.target_qty
     );
-    let dispatch_outcome = dispatch_target_position_order(session, broker_tx, 0, true, &flatten_reason)?;
+    let dispatch_outcome =
+        dispatch_target_position_order(session, broker_tx, 0, true, &flatten_reason)?;
     match dispatch_outcome {
         MarketOrderDispatchOutcome::NoOp { message } => {
             session.execution_runtime.last_summary = message.clone();
@@ -912,6 +1148,25 @@ fn handle_execution_account_sync(
         }
         runtime_changed = true;
     }
+    if session.execution_runtime.armed
+        && session.execution_config.kind == StrategyKind::Native
+        && actual_qty == 0
+        && session.execution_runtime.pending_target_qty.is_none()
+        && selected_contract_has_live_broker_path(session)
+    {
+        let next_summary =
+            "Waiting for broker sync: flat position reported while an order path is still active."
+                .to_string();
+        emit_execution_transition_debug(
+            event_tx,
+            session,
+            &next_summary,
+            "execution flat broker sync wait",
+        );
+        session.execution_runtime.last_summary = next_summary;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
     if let Some(pending) = session.execution_runtime.pending_target_qty {
         let reached = pending == actual_qty;
         // Position overshot past target — entry filled, then something else
@@ -941,9 +1196,9 @@ fn handle_execution_account_sync(
                 runtime_changed = true;
             }
         } else if pending != 0 && !pending_target_has_live_broker_path(session) {
-            if should_wait_for_market_position_sync(session, pending, actual_qty) {
+            if should_wait_for_automated_position_sync(session, pending, actual_qty) {
                 let next_summary = format!(
-                    "Waiting for position sync after market order settle (actual {actual_qty}, pending target {pending})."
+                    "Waiting for position sync after automated order settle (actual {actual_qty}, pending target {pending})."
                 );
                 emit_execution_transition_debug(
                     event_tx,
@@ -966,7 +1221,24 @@ fn handle_execution_account_sync(
         runtime_changed = true;
     }
 
-    if session.execution_runtime.armed && session.execution_config.kind == StrategyKind::Native {
+    let waiting_for_native_protection_sync = session.execution_runtime.armed
+        && session.execution_config.kind == StrategyKind::Native
+        && session.execution_runtime.pending_target_qty.is_none()
+        && selected_managed_protection_waiting_for_position_sync(session);
+    if waiting_for_native_protection_sync {
+        let next_summary =
+            format!("Waiting for broker sync after native protection activity (position still {actual_qty}).");
+        emit_execution_transition_debug(
+            event_tx,
+            session,
+            &next_summary,
+            "execution native protection sync wait",
+        );
+        session.execution_runtime.last_summary = next_summary;
+        runtime_changed = true;
+    } else if session.execution_runtime.armed
+        && session.execution_config.kind == StrategyKind::Native
+    {
         sync_execution_protection(session, broker_tx, None)?;
     }
 
@@ -1038,10 +1310,13 @@ fn maybe_run_execution_strategy(
 
     if let Some(pending_target_qty) = session.execution_runtime.pending_target_qty {
         if pending_target_qty != 0 && !pending_target_has_live_broker_path(session) {
-            if should_wait_for_market_position_sync(session, pending_target_qty, actual_market_qty)
-            {
+            if should_wait_for_automated_position_sync(
+                session,
+                pending_target_qty,
+                actual_market_qty,
+            ) {
                 let next_summary = format!(
-                    "Waiting for position sync after market order settle (actual {actual_market_qty}, pending target {pending_target_qty})."
+                    "Waiting for position sync after automated order settle (actual {actual_market_qty}, pending target {pending_target_qty})."
                 );
                 emit_execution_transition_debug(
                     event_tx,
@@ -1066,6 +1341,21 @@ fn maybe_run_execution_strategy(
             session,
             &next_summary,
             "execution pending target wait",
+        );
+        session.execution_runtime.last_summary = next_summary;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if selected_managed_protection_waiting_for_position_sync(session) {
+        let next_summary = format!(
+            "Waiting for broker sync after native protection activity (position still {actual_market_qty})."
+        );
+        emit_execution_transition_debug(
+            event_tx,
+            session,
+            &next_summary,
+            "execution native protection sync wait",
         );
         session.execution_runtime.last_summary = next_summary;
         emit_execution_state(event_tx, session);
@@ -1350,7 +1640,7 @@ mod execution_tests {
     }
 
     #[test]
-    fn does_not_wait_for_strategy_owned_protection_without_linked_orders() {
+    fn waits_for_strategy_owned_protection_during_hydration_grace_without_linked_orders() {
         let mut session = test_session();
         session.execution_config.kind = StrategyKind::Native;
         session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -1376,8 +1666,20 @@ mod execution_tests {
                 }),
             )]),
         );
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
+            cl_ord_id: "midas-hydrating-strategy".to_string(),
+            strategy_owned_protection: true,
+            order_id: Some(88),
+            order_strategy_id: Some(77),
+            seen_recorded: true,
+            exec_report_recorded: true,
+            fill_recorded: true,
+        });
 
-        assert!(!should_wait_for_strategy_owned_protection(&session));
+        assert!(should_wait_for_strategy_owned_protection(&session));
     }
 
     #[test]
@@ -1395,6 +1697,7 @@ mod execution_tests {
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
             cl_ord_id: "midas-stale-entry".to_string(),
+            strategy_owned_protection: false,
             order_id: Some(77),
             order_strategy_id: None,
             seen_recorded: true,
@@ -1416,10 +1719,12 @@ mod execution_tests {
         assert_eq!(session.execution_runtime.pending_target_qty, None);
         assert!(session.order_latency_tracker.is_none());
         assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(99));
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Pending target 1 cleared"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Pending target 1 cleared")
+        );
 
         let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
@@ -1447,10 +1752,11 @@ mod execution_tests {
         session.execution_runtime.pending_target_qty = Some(-1);
         session.execution_runtime.last_closed_bar_ts = Some(200);
         session.order_latency_tracker = Some(OrderLatencyTracker {
-            started_at: time::Instant::now() - time::Duration::from_secs(3),
+            started_at: time::Instant::now() - time::Duration::from_secs(11),
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Sell (qty 0 -> -1)".to_string()),
             cl_ord_id: "midas-stale-strategy-loop".to_string(),
+            strategy_owned_protection: true,
             order_id: Some(88),
             order_strategy_id: Some(77),
             seen_recorded: true,
@@ -1472,10 +1778,12 @@ mod execution_tests {
         assert_eq!(session.execution_runtime.pending_target_qty, None);
         assert!(session.order_latency_tracker.is_none());
         assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(199));
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Pending target -1 cleared"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Pending target -1 cleared")
+        );
 
         let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
@@ -1516,6 +1824,7 @@ mod execution_tests {
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
             cl_ord_id: "midas-fresh-strategy-loop".to_string(),
+            strategy_owned_protection: true,
             order_id: Some(88),
             order_strategy_id: Some(77),
             seen_recorded: true,
@@ -1536,10 +1845,12 @@ mod execution_tests {
 
         assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
         assert!(session.order_latency_tracker.is_some());
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Waiting for prior automated order to settle"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Waiting for prior automated order to settle")
+        );
     }
 
     #[test]
@@ -1569,6 +1880,7 @@ mod execution_tests {
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
             cl_ord_id: "midas-market-sync".to_string(),
+            strategy_owned_protection: false,
             order_id: Some(88),
             order_strategy_id: None,
             seen_recorded: true,
@@ -1589,17 +1901,71 @@ mod execution_tests {
 
         assert_eq!(session.execution_runtime.pending_target_qty, Some(-1));
         assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(320));
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Waiting for position sync after market order settle"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Waiting for position sync after automated order settle")
+        );
 
         let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
             event,
             ServiceEvent::DebugLog(message)
                 if message.contains("execution market position sync wait")
-                    || message.contains("Waiting for position sync after market order settle")
+                    || message.contains("Waiting for position sync after automated order settle")
+        )));
+    }
+
+    #[test]
+    fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace() {
+        let mut session = test_session();
+        let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_runtime.armed = true;
+        session.execution_runtime.pending_target_qty = Some(1);
+        session.execution_runtime.last_closed_bar_ts = Some(325);
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now() - time::Duration::from_secs(3),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
+            cl_ord_id: "midas-strategy-position-sync".to_string(),
+            strategy_owned_protection: true,
+            order_id: Some(88),
+            order_strategy_id: Some(77),
+            seen_recorded: true,
+            exec_report_recorded: true,
+            fill_recorded: true,
+        });
+        session.market.bars = vec![Bar {
+            ts_ns: 325,
+            open: 5000.0,
+            high: 5001.0,
+            low: 4999.0,
+            close: 5000.5,
+        }];
+        session.market.history_loaded = 1;
+
+        maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+            .expect("order-strategy entry should wait for position sync");
+
+        assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+        assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(325));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Waiting for position sync after automated order settle")
+        );
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServiceEvent::DebugLog(message)
+                if message.contains("execution market position sync wait")
+                    || message.contains("Waiting for position sync after automated order settle")
         )));
     }
 
@@ -1630,6 +1996,7 @@ mod execution_tests {
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
             cl_ord_id: "midas-market-sync-stale".to_string(),
+            strategy_owned_protection: false,
             order_id: Some(99),
             order_strategy_id: None,
             seen_recorded: true,
@@ -1650,10 +2017,12 @@ mod execution_tests {
 
         assert_eq!(session.execution_runtime.pending_target_qty, None);
         assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(329));
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Pending target -1 cleared"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Pending target -1 cleared")
+        );
 
         let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
@@ -1693,15 +2062,41 @@ mod execution_tests {
         );
         session.user_store.orders.insert(
             42,
-            BTreeMap::from([(
-                1001,
-                json!({
-                    "id": 1001,
-                    "accountId": 42,
-                    "contractId": 3570918,
-                    "ordStatus": "Working"
-                }),
-            )]),
+            BTreeMap::from([
+                (
+                    1001,
+                    json!({
+                        "id": 1001,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "ordStatus": "Working"
+                    }),
+                ),
+                (
+                    1002,
+                    json!({
+                        "id": 1002,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "ordStatus": "Working",
+                        "orderType": "Limit",
+                        "price": 4998.0,
+                        "clOrdId": "midas-tp"
+                    }),
+                ),
+                (
+                    1003,
+                    json!({
+                        "id": 1003,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "ordStatus": "Working",
+                        "orderType": "Stop",
+                        "stopPrice": 5002.0,
+                        "clOrdId": "midas-sl"
+                    }),
+                ),
+            ]),
         );
         session.user_store.order_strategy_links.insert(
             1,
@@ -1713,6 +2108,273 @@ mod execution_tests {
         );
 
         assert!(should_wait_for_strategy_owned_protection(&session));
+    }
+
+    #[test]
+    fn sync_execution_protection_waits_for_hydrating_order_strategy_before_ack() {
+        let mut session = test_session();
+        let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.execution_config.native_ema.stop_loss_ticks = 8.0;
+        session.execution_runtime.armed = true;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1,
+                    "netPrice": 5000.0
+                }),
+            )]),
+        );
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Buy (qty -1 -> 1)".to_string()),
+            cl_ord_id: "midas-hydrating-strategy".to_string(),
+            strategy_owned_protection: true,
+            order_id: Some(88),
+            order_strategy_id: None,
+            seen_recorded: true,
+            exec_report_recorded: true,
+            fill_recorded: true,
+        });
+
+        sync_execution_protection(&mut session, &broker_tx, None)
+            .expect("hydrating strategy-owned protection should block manual sync");
+
+        assert!(
+            broker_rx.try_recv().is_err(),
+            "manual protection sync should not queue while broker-owned bracket is still hydrating"
+        );
+    }
+
+    #[test]
+    fn direct_reversal_syncs_native_protection_at_net_position_size() {
+        let mut session = test_session();
+        let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_runtime.armed = true;
+        session.execution_config.native_ema.take_profit_ticks = 10.0;
+        session.execution_config.native_ema.stop_loss_ticks = 10.0;
+        session.execution_config.order_qty = 1;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1,
+                    "netPrice": 6545.0
+                }),
+            )]),
+        );
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
+            cl_ord_id: "midas-direct-reversal".to_string(),
+            strategy_owned_protection: false,
+            order_id: Some(77),
+            order_strategy_id: None,
+            seen_recorded: true,
+            exec_report_recorded: true,
+            fill_recorded: true,
+        });
+
+        sync_execution_protection(&mut session, &broker_tx, None)
+            .expect("direct reversal should queue native TP/SL at net position size");
+
+        match broker_rx.try_recv().expect("expected native protection command") {
+            BrokerCommand::NativeProtection { sync, .. } => match sync.operation {
+                ProtectionSyncOperation::Replace {
+                    request: ProtectionPlaceRequest::Oco { payload },
+                    ..
+                } => {
+                    assert_eq!(payload.get("orderQty").and_then(Value::as_i64), Some(1));
+                    assert_eq!(
+                        payload
+                            .get("other")
+                            .and_then(|other| other.get("orderQty"))
+                            .and_then(Value::as_i64),
+                        Some(1)
+                    );
+                }
+                _ => panic!("expected OCO protection sync"),
+            },
+            _ => panic!("expected native protection command"),
+        }
+    }
+
+    #[test]
+    fn stale_strategy_record_without_live_child_orders_does_not_block_direct_reversal_sync() {
+        let mut session = test_session();
+        let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_runtime.armed = true;
+        session.execution_config.native_ema.take_profit_ticks = 10.0;
+        session.execution_config.native_ema.stop_loss_ticks = 10.0;
+        session.execution_config.order_qty = 1;
+        session.market.tick_size = Some(0.25);
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": "ActiveStrategy",
+                "customTag50": "midas-stale-strategy",
+            }),
+        );
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1,
+                    "netPrice": 6545.0
+                }),
+            )]),
+        );
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
+            cl_ord_id: "midas-direct-reversal".to_string(),
+            strategy_owned_protection: false,
+            order_id: Some(77),
+            order_strategy_id: None,
+            seen_recorded: true,
+            exec_report_recorded: true,
+            fill_recorded: true,
+        });
+
+        sync_execution_protection(&mut session, &broker_tx, None)
+            .expect("stale strategy records should not block direct reversal protection sync");
+
+        assert!(matches!(
+            broker_rx.try_recv(),
+            Ok(BrokerCommand::NativeProtection { .. })
+        ));
+    }
+
+    #[test]
+    fn account_sync_waits_when_position_is_temporarily_flat_but_strategy_orders_are_live() {
+        let mut session = test_session();
+        let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::HmaAngle;
+        session.execution_config.native_hma.take_profit_ticks = 30.0;
+        session.execution_config.native_hma.stop_loss_ticks = 30.0;
+        session.execution_runtime.armed = true;
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": "Working",
+            }),
+        );
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([
+                (
+                    1001,
+                    json!({
+                        "id": 1001,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "orderStrategyId": 77,
+                        "ordStatus": "Working",
+                        "orderType": "Limit",
+                        "price": 5030.0,
+                        "action": "Sell"
+                    }),
+                ),
+                (
+                    1002,
+                    json!({
+                        "id": 1002,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "orderStrategyId": 77,
+                        "ordStatus": "Working",
+                        "orderType": "Stop",
+                        "stopPrice": 4970.0,
+                        "action": "Sell"
+                    }),
+                ),
+            ]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        session.user_store.order_strategy_links.insert(
+            2,
+            json!({
+                "id": 2,
+                "orderStrategyId": 77,
+                "orderId": 1002
+            }),
+        );
+
+        handle_execution_account_sync(&mut session, &broker_tx, &event_tx)
+            .expect("flat hydration gap should wait for broker sync");
+
+        assert!(
+            broker_rx.try_recv().is_err(),
+            "account sync should not clear broker-owned protection during the hydration gap"
+        );
+        assert_eq!(
+            session.execution_runtime.last_summary,
+            "Waiting for broker sync: flat position reported while an order path is still active."
+        );
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServiceEvent::ExecutionState(state)
+                if state.runtime.last_summary
+                    == "Waiting for broker sync: flat position reported while an order path is still active."
+        )));
     }
 
     #[test]
@@ -1771,10 +2433,12 @@ mod execution_tests {
             .expect("live strategy path should suppress transient drift disarm");
 
         assert!(session.execution_runtime.armed);
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Waiting for broker sync"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Waiting for broker sync")
+        );
     }
 
     #[test]
@@ -1857,9 +2521,16 @@ mod execution_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let unique_wait_logs = wait_logs
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
 
-        assert_eq!(wait_logs.len(), 1);
-        let wait_log = wait_logs.first().expect("expected broker sync wait log");
+        assert_eq!(unique_wait_logs.len(), 1);
+        let wait_log = unique_wait_logs
+            .first()
+            .expect("expected broker sync wait log");
         assert!(wait_log.contains("tracked strategy 77 (1 active linked)"));
         assert!(wait_log.contains("broker strategy none (0 active linked)"));
         assert!(wait_log.contains("tp 4998.00 [order 1002 clOrdId midas-tp]"));
@@ -1923,10 +2594,12 @@ mod execution_tests {
             .expect("active strategy path should suppress transient drift disarm");
 
         assert!(session.execution_runtime.armed);
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("Waiting for broker sync"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Waiting for broker sync")
+        );
     }
 
     #[test]
@@ -1941,12 +2614,48 @@ mod execution_tests {
         session.execution_config.native_ema.slow_length = 4;
         session.market.history_loaded = 5;
         session.market.bars = vec![
-            Bar { ts_ns: 1, open: 10.0, high: 10.5, low: 9.5, close: 10.0 },
-            Bar { ts_ns: 2, open: 10.0, high: 10.5, low: 9.5, close: 10.0 },
-            Bar { ts_ns: 3, open: 10.0, high: 10.5, low: 9.5, close: 10.0 },
-            Bar { ts_ns: 4, open: 10.0, high: 10.5, low: 9.5, close: 10.0 },
-            Bar { ts_ns: 5, open: 8.0, high: 8.5, low: 7.5, close: 8.0 },
-            Bar { ts_ns: 6, open: 12.0, high: 12.5, low: 11.5, close: 12.0 },
+            Bar {
+                ts_ns: 1,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 2,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 3,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 4,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 5,
+                open: 8.0,
+                high: 8.5,
+                low: 7.5,
+                close: 8.0,
+            },
+            Bar {
+                ts_ns: 6,
+                open: 12.0,
+                high: 12.5,
+                low: 11.5,
+                close: 12.0,
+            },
         ];
         session.execution_runtime.armed = true;
         session.execution_runtime.last_closed_bar_ts = Some(6);
@@ -2025,10 +2734,115 @@ mod execution_tests {
             .expect("flat/local qty with live broker path should wait instead of opening");
 
         assert!(broker_rx.try_recv().is_err(), "no order should be queued");
-        assert!(session
-            .execution_runtime
-            .last_summary
-            .contains("flat position reported while an order path is still active"));
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("flat position reported while an order path is still active")
+        );
+    }
+
+    #[test]
+    fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
+        let mut session = test_session();
+        let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;
+        session.execution_config.native_ema.fast_length = 2;
+        session.execution_config.native_ema.slow_length = 4;
+        session.execution_config.native_ema.take_profit_ticks = 10.0;
+        session.execution_config.native_ema.stop_loss_ticks = 10.0;
+        session.market.tick_size = Some(0.25);
+        session.market.history_loaded = 5;
+        session.market.bars = vec![
+            Bar {
+                ts_ns: 1,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 2,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 3,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 4,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: 5,
+                open: 8.0,
+                high: 8.5,
+                low: 7.5,
+                close: 8.0,
+            },
+            Bar {
+                ts_ns: 6,
+                open: 12.0,
+                high: 12.5,
+                low: 11.5,
+                close: 12.0,
+            },
+        ];
+        session.execution_runtime.armed = true;
+        session.execution_runtime.last_closed_bar_ts = Some(6);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": -1,
+                    "avgPrice": 5000.0
+                }),
+            )]),
+        );
+        session.managed_protection.insert(
+            StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            ManagedProtectionOrders {
+                signed_qty: -1,
+                take_profit_price: Some(4997.5),
+                stop_price: Some(5002.5),
+                last_requested_take_profit_price: Some(4997.5),
+                last_requested_stop_price: Some(5002.5),
+                take_profit_cl_ord_id: Some("midas-short-tp".to_string()),
+                stop_cl_ord_id: Some("midas-short-sl".to_string()),
+                take_profit_order_id: Some(1001),
+                stop_order_id: Some(1002),
+            },
+        );
+
+        maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+            .expect("missing native protection legs should pause signal evaluation");
+
+        assert!(broker_rx.try_recv().is_err(), "no order should be queued");
+        assert!(
+            session
+                .execution_runtime
+                .last_summary
+                .contains("Waiting for broker sync after native protection activity")
+        );
     }
 
     #[test]
@@ -2071,6 +2885,50 @@ mod execution_tests {
         assert_eq!(snapshot.market_entry_price, Some(6659.75));
         assert_eq!(snapshot.selected_contract_take_profit_price, Some(6662.5));
         assert_eq!(snapshot.selected_contract_stop_price, Some(6659.0));
+    }
+
+    #[test]
+    fn duplicate_symbol_position_record_does_not_trigger_false_drift_disarm() {
+        let mut session = test_session();
+        let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.order_qty = 1;
+        session.execution_runtime.armed = true;
+        session.execution_runtime.last_summary = "Armed".to_string();
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([
+                (
+                    1,
+                    json!({
+                        "id": 1,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "netPos": 1,
+                        "avgPrice": 6659.75
+                    }),
+                ),
+                (
+                    2,
+                    json!({
+                        "id": 2,
+                        "accountId": 42,
+                        "symbol": "ESH6",
+                        "netPos": 1,
+                        "avgPrice": 6659.75
+                    }),
+                ),
+            ]),
+        );
+
+        handle_execution_account_sync(&mut session, &broker_tx, &event_tx)
+            .expect("duplicate mirror records should not disarm");
+
+        assert!(session.execution_runtime.armed);
+        assert_eq!(selected_market_position_qty(&session), 1);
+        assert_eq!(selected_market_entry_price(&session), Some(6659.75));
     }
 
     #[test]
@@ -2132,15 +2990,22 @@ mod execution_tests {
 
         let first_next_state = match broker_rx.try_recv().expect("expected stop modify command") {
             BrokerCommand::NativeProtection { sync, .. } => {
-                assert!(sync.simulate, "replay mode should use simulated protection sync");
+                assert!(
+                    sync.simulate,
+                    "replay mode should use simulated protection sync"
+                );
                 match sync.operation {
                     ProtectionSyncOperation::ModifyStop { payload } => {
                         assert_eq!(payload.get("orderId").and_then(Value::as_i64), Some(1002));
-                        assert_eq!(payload.get("stopPrice").and_then(Value::as_f64), Some(101.0));
+                        assert_eq!(
+                            payload.get("stopPrice").and_then(Value::as_f64),
+                            Some(101.0)
+                        );
                     }
                     _ => panic!("expected stop modification"),
                 }
-                sync.next_state.expect("planner should provide the updated protection snapshot")
+                sync.next_state
+                    .expect("planner should provide the updated protection snapshot")
             }
             _ => panic!("expected native protection command"),
         };
@@ -2198,11 +3063,15 @@ mod execution_tests {
                 match sync.operation {
                     ProtectionSyncOperation::ModifyStop { payload } => {
                         assert_eq!(payload.get("orderId").and_then(Value::as_i64), Some(1002));
-                        assert_eq!(payload.get("stopPrice").and_then(Value::as_f64), Some(101.5));
+                        assert_eq!(
+                            payload.get("stopPrice").and_then(Value::as_f64),
+                            Some(101.5)
+                        );
                     }
                     _ => panic!("expected stop modification"),
                 }
-                sync.next_state.expect("planner should retain the replay protection snapshot")
+                sync.next_state
+                    .expect("planner should retain the replay protection snapshot")
             }
             _ => panic!("expected native protection command"),
         };

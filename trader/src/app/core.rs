@@ -66,6 +66,11 @@ impl App {
         );
         app
     }
+
+    pub fn awaiting_broker_selection(&self) -> bool {
+        self.screen == Screen::BrokerSelect
+    }
+
     pub fn current_config(&self) -> AppConfig {
         let mut cfg = self.base_config.clone();
         cfg.broker = self.selected_broker;
@@ -136,8 +141,13 @@ impl App {
                 self.push_log(self.status.clone());
             }
             ServiceEvent::Disconnected => {
-                self.screen = Screen::Login;
-                self.focus = Focus::Env;
+                if self.awaiting_broker_selection() {
+                    self.screen = Screen::BrokerSelect;
+                    self.focus = Focus::BrokerList;
+                } else {
+                    self.screen = Screen::Login;
+                    self.focus = Focus::Env;
+                }
                 self.capabilities = BrokerCapabilities::default();
                 self.session_kind = SessionKind::Live;
                 self.accounts.clear();
@@ -195,6 +205,7 @@ impl App {
                     }
                 }
             }
+            ServiceEvent::ExecutionProbe(_) => {}
             ServiceEvent::ReplaySpeedUpdated(speed) => {
                 self.replay_speed = speed;
             }

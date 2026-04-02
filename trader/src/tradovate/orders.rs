@@ -48,8 +48,15 @@ fn dispatch_manual_order(
                     ),
                 });
             }
-            let liquidation =
-                build_liquidation_request(session, &account, &contract, false, Some(0));
+            let liquidation = build_liquidation_request(
+                session,
+                &account,
+                &contract,
+                false,
+                Some(0),
+                None,
+                Vec::new(),
+            );
             enqueue_liquidation(session, broker_tx, liquidation)?;
             return Ok(MarketOrderDispatchOutcome::Queued {
                 target_qty: Some(0),
@@ -62,12 +69,12 @@ fn dispatch_manual_order(
     } else {
         None
     };
-    let detached = if interrupt_order_strategy_id.is_some() {
+    let detached = if current_qty != 0 {
+        detach_strategy_protection_for_selected(session)?
+    } else {
         DetachedStrategyProtection {
             cancel_order_ids: Vec::new(),
         }
-    } else {
-        detach_strategy_protection_for_selected(session)?
     };
 
     let order = build_market_order_request(
@@ -108,6 +115,10 @@ fn dispatch_native_order_strategy_target(
         );
     }
 
+    let strategy_key = StrategyProtectionKey {
+        account_id: account.id,
+        contract_id: contract.id,
+    };
     let delta = target_qty.saturating_sub(current_qty);
     if delta == 0 {
         return Ok(MarketOrderDispatchOutcome::NoOp {
@@ -118,9 +129,8 @@ fn dispatch_native_order_strategy_target(
         });
     }
 
-    let is_reversal = current_qty != 0
-        && target_qty != 0
-        && current_qty.signum() != target_qty.signum();
+    let is_reversal =
+        current_qty != 0 && target_qty != 0 && current_qty.signum() != target_qty.signum();
     if is_reversal
         && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenConfirmEnter
     {
@@ -140,6 +150,7 @@ fn dispatch_native_order_strategy_target(
             "{reason} | staged reversal flatten {} -> 0 before {}",
             current_qty, target_qty
         );
+        let detached = detach_strategy_protection_for_selected(session)?;
         let order = build_market_order_request(
             session,
             &account,
@@ -151,7 +162,7 @@ fn dispatch_native_order_strategy_target(
             Some(&flatten_reason),
             Some(0),
             interrupt_order_strategy_id,
-            Vec::new(),
+            detached.cancel_order_ids,
         );
         enqueue_market_order(session, broker_tx, order)?;
         session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
@@ -163,8 +174,64 @@ fn dispatch_native_order_strategy_target(
         });
     }
 
-    let interrupt_order_strategy_id = if current_qty != 0 && !is_reversal {
-        selected_active_order_strategy_id(session)
+    if is_reversal && session.execution_config.native_reversal_mode == NativeReversalMode::CloseAllEnter
+    {
+        let _detached = detach_strategy_protection_for_selected(session)?;
+        let liquidation = build_liquidation_request(
+            session,
+            &account,
+            &contract,
+            true,
+            Some(target_qty),
+            None,
+            Vec::new(),
+        );
+        let order_action = if target_qty > 0 { "Buy" } else { "Sell" };
+        let strategy = build_order_strategy_request(
+            session,
+            &account,
+            &contract,
+            order_action,
+            target_qty.abs(),
+            target_qty,
+            Some(reason),
+            None,
+            Vec::new(),
+        )?;
+        enqueue_liquidation_then_order_strategy(session, broker_tx, liquidation, strategy)?;
+        return Ok(MarketOrderDispatchOutcome::Queued {
+            target_qty: Some(target_qty),
+        });
+    }
+
+    if is_reversal && session.execution_config.native_reversal_mode == NativeReversalMode::Direct {
+        let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
+        let detached = detach_strategy_protection_for_selected(session)?;
+        let order_action = if delta > 0 { "Buy" } else { "Sell" };
+        let order_qty = delta.unsigned_abs() as i32;
+        let order = build_market_order_request(
+            session,
+            &account,
+            &contract,
+            order_action,
+            order_qty,
+            "Strategy",
+            true,
+            Some(reason),
+            Some(target_qty),
+            interrupt_order_strategy_id,
+            detached.cancel_order_ids,
+        );
+        enqueue_market_order(session, broker_tx, order)?;
+        return Ok(MarketOrderDispatchOutcome::Queued {
+            target_qty: Some(target_qty),
+        });
+    }
+
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session).filter(|order_strategy_id| {
+            strategy_has_live_broker_path(session, strategy_key, *order_strategy_id)
+        })
     } else {
         None
     };
@@ -176,6 +243,13 @@ fn dispatch_native_order_strategy_target(
             ),
         });
     }
+    let detached = if current_qty != 0 {
+        detach_strategy_protection_for_selected(session)?
+    } else {
+        DetachedStrategyProtection {
+            cancel_order_ids: Vec::new(),
+        }
+    };
 
     if target_qty == 0 {
         let order_action = if delta > 0 { "Buy" } else { "Sell" };
@@ -191,7 +265,7 @@ fn dispatch_native_order_strategy_target(
             Some(reason),
             Some(target_qty),
             interrupt_order_strategy_id,
-            Vec::new(),
+            detached.cancel_order_ids,
         );
         enqueue_market_order(session, broker_tx, order)?;
         return Ok(MarketOrderDispatchOutcome::Queued {
@@ -210,6 +284,88 @@ fn dispatch_native_order_strategy_target(
         target_qty,
         Some(reason),
         interrupt_order_strategy_id,
+        detached.cancel_order_ids,
+    )?;
+    enqueue_order_strategy(session, broker_tx, strategy)?;
+    Ok(MarketOrderDispatchOutcome::Queued {
+        target_qty: Some(target_qty),
+    })
+}
+
+fn dispatch_profile_legacy_order_strategy_target(
+    session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    target_qty: i32,
+    reason: &str,
+) -> Result<MarketOrderDispatchOutcome> {
+    if target_qty == 0 {
+        return dispatch_target_position_order(session, broker_tx, target_qty, true, reason);
+    }
+
+    let order_ctx = resolve_order_context(session)?;
+    let account = order_ctx.account.clone();
+    let contract = order_ctx.contract.clone();
+    ensure_no_market_order_submit_in_flight(session)?;
+    let current_qty = session
+        .user_store
+        .contract_position_qty(account.id, &contract)
+        .unwrap_or(0.0)
+        .round() as i32;
+    if current_qty.abs() > session.execution_config.order_qty.max(1) {
+        bail!(
+            "automated position drift detected ({current_qty}); refusing legacy strategy transition"
+        );
+    }
+
+    let strategy_key = StrategyProtectionKey {
+        account_id: account.id,
+        contract_id: contract.id,
+    };
+    let delta = target_qty.saturating_sub(current_qty);
+    if delta == 0 {
+        return Ok(MarketOrderDispatchOutcome::NoOp {
+            message: format!(
+                "Strategy target already satisfied: {} at {} on {} ({reason})",
+                target_qty, contract.name, account.name
+            ),
+        });
+    }
+
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session).filter(|order_strategy_id| {
+            strategy_has_live_broker_path(session, strategy_key, *order_strategy_id)
+        })
+    } else {
+        None
+    };
+    if current_qty != 0 && interrupt_order_strategy_id.is_none() {
+        return Ok(MarketOrderDispatchOutcome::NoOp {
+            message: format!(
+                "Waiting for broker order-strategy state to reconcile before legacy strategy transition {} -> {} on {} ({reason})",
+                current_qty, target_qty, contract.name
+            ),
+        });
+    }
+    let detached = if current_qty != 0 {
+        detach_strategy_protection_for_selected(session)?
+    } else {
+        DetachedStrategyProtection {
+            cancel_order_ids: Vec::new(),
+        }
+    };
+
+    let order_action = if delta > 0 { "Buy" } else { "Sell" };
+    let entry_order_qty = delta.unsigned_abs() as i32;
+    let strategy = build_order_strategy_request(
+        session,
+        &account,
+        &contract,
+        order_action,
+        entry_order_qty,
+        target_qty,
+        Some(reason),
+        interrupt_order_strategy_id,
+        detached.cancel_order_ids,
     )?;
     enqueue_order_strategy(session, broker_tx, strategy)?;
     Ok(MarketOrderDispatchOutcome::Queued {
@@ -252,12 +408,12 @@ fn dispatch_target_position_order(
     } else {
         None
     };
-    let detached = if interrupt_order_strategy_id.is_some() {
+    let detached = if current_qty != 0 {
+        detach_strategy_protection_for_selected(session)?
+    } else {
         DetachedStrategyProtection {
             cancel_order_ids: Vec::new(),
         }
-    } else {
-        detach_strategy_protection_for_selected(session)?
     };
 
     let order_action = if delta > 0 { "Buy" } else { "Sell" };
@@ -414,16 +570,14 @@ fn plan_native_protection_sync(
 
     refresh_managed_protection_order_ids(session, key);
     if let Some(existing) = session.managed_protection.get(&key).cloned() {
-        let missing_live_leg =
-            (take_profit_price.is_some() && existing.take_profit_order_id.is_none())
-                || (stop_price.is_some() && existing.stop_order_id.is_none());
+        let missing_live_leg = (take_profit_price.is_some()
+            && existing.take_profit_order_id.is_none())
+            || (stop_price.is_some() && existing.stop_order_id.is_none());
         let same_position = existing.signed_qty == signed_qty;
         let same_take_profit = prices_match(existing.take_profit_price, take_profit_price);
         let same_stop = prices_match(existing.stop_price, stop_price);
-        let same_requested_take_profit = prices_match(
-            existing.last_requested_take_profit_price,
-            take_profit_price,
-        );
+        let same_requested_take_profit =
+            prices_match(existing.last_requested_take_profit_price, take_profit_price);
         let same_requested_stop = prices_match(existing.last_requested_stop_price, stop_price);
         if same_position
             && same_take_profit
@@ -434,11 +588,7 @@ fn plan_native_protection_sync(
             return Ok(None);
         }
 
-        if same_position
-            && same_take_profit
-            && stop_price.is_some()
-            && !missing_live_leg
-        {
+        if same_position && same_take_profit && stop_price.is_some() && !missing_live_leg {
             let Some(stop_order_id) = existing.stop_order_id else {
                 // Do not cancel and recreate a healthy bracket just because the live stop ID has
                 // not been observed yet. That path can exceed broker working-order limits on
@@ -589,10 +739,13 @@ fn strategy_has_live_linked_orders(
 }
 
 fn strategy_within_interrupt_grace(session: &SessionState, order_strategy_id: i64) -> bool {
-    session.order_latency_tracker.as_ref().is_some_and(|tracker| {
-        tracker.order_strategy_id == Some(order_strategy_id)
-            && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_INTERRUPT_GRACE_MS
-    })
+    session
+        .order_latency_tracker
+        .as_ref()
+        .is_some_and(|tracker| {
+            tracker.order_strategy_id == Some(order_strategy_id)
+                && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_INTERRUPT_GRACE_MS
+        })
 }
 
 fn selected_active_order_strategy_id(session: &SessionState) -> Option<i64> {
@@ -640,8 +793,18 @@ fn current_native_fixed_stop_ticks(session: &SessionState) -> f64 {
     }
 }
 
+fn active_native_uses_trailing_stop(session: &SessionState) -> bool {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => session.execution_config.native_hma.use_trailing_stop,
+        NativeStrategyKind::EmaCross => session.execution_config.native_ema.use_trailing_stop,
+    }
+}
+
 fn current_native_fixed_stop_offset(session: &SessionState) -> Option<f64> {
-    price_offset_from_ticks(current_native_fixed_stop_ticks(session), session.market.tick_size)
+    price_offset_from_ticks(
+        current_native_fixed_stop_ticks(session),
+        session.market.tick_size,
+    )
 }
 
 fn price_offset_from_ticks(ticks: f64, tick_size: Option<f64>) -> Option<f64> {
@@ -672,7 +835,11 @@ fn native_order_strategy_enabled(session: &SessionState) -> bool {
     if session.execution_config.kind != StrategyKind::Native {
         return false;
     }
-    current_native_fixed_take_profit_ticks(session) > 0.0 || current_native_fixed_stop_ticks(session) > 0.0
+    if active_native_uses_trailing_stop(session) {
+        return false;
+    }
+    current_native_fixed_take_profit_ticks(session) > 0.0
+        || current_native_fixed_stop_ticks(session) > 0.0
 }
 
 fn build_order_strategy_request(
@@ -684,6 +851,7 @@ fn build_order_strategy_request(
     target_qty: i32,
     reason_suffix: Option<&str>,
     interrupt_order_strategy_id: Option<i64>,
+    cancel_order_ids: Vec<i64>,
 ) -> Result<PendingOrderStrategyTransition> {
     let take_profit_ticks = current_native_fixed_take_profit_ticks(session);
     let stop_loss_ticks = current_native_fixed_stop_ticks(session);
@@ -752,6 +920,7 @@ fn build_order_strategy_request(
         uuid,
         payload,
         interrupt_order_strategy_id,
+        cancel_order_ids,
         order_action: order_action.to_string(),
         entry_order_qty,
         target_qty,
@@ -834,6 +1003,8 @@ fn build_liquidation_request(
     contract: &ContractSuggestion,
     automated: bool,
     target_qty: Option<i32>,
+    interrupt_order_strategy_id: Option<i64>,
+    cancel_order_ids: Vec<i64>,
 ) -> PendingLiquidation {
     PendingLiquidation {
         simulate: session.replay_enabled,
@@ -851,6 +1022,8 @@ fn build_liquidation_request(
         reference_ts_ns: session.market.bars.last().map(|bar| bar.ts_ns),
         reference_price: session.market.bars.last().map(|bar| bar.close),
         target_qty,
+        interrupt_order_strategy_id,
+        cancel_order_ids,
     }
 }
 
@@ -866,6 +1039,7 @@ fn enqueue_market_order(
         signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
         signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: order.cl_ord_id.clone(),
+        strategy_owned_protection: false,
         order_id: None,
         order_strategy_id: None,
         seen_recorded: false,
@@ -905,6 +1079,42 @@ fn enqueue_liquidation(
     Ok(())
 }
 
+fn enqueue_liquidation_then_order_strategy(
+    session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    liquidation: PendingLiquidation,
+    strategy: PendingOrderStrategyTransition,
+) -> Result<()> {
+    let pending_signal = session.pending_signal_context.take();
+    session.order_submit_in_flight = true;
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        started_at: time::Instant::now(),
+        signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
+        signal_context: pending_signal.map(|signal| signal.description),
+        cl_ord_id: strategy.uuid.clone(),
+        strategy_owned_protection: true,
+        order_id: None,
+        order_strategy_id: None,
+        seen_recorded: false,
+        exec_report_recorded: false,
+        fill_recorded: false,
+    });
+    let request_tx = session.request_tx.clone();
+    if broker_tx
+        .send(BrokerCommand::LiquidateThenOrderStrategy {
+            request_tx,
+            liquidation,
+            strategy,
+        })
+        .is_err()
+    {
+        session.order_submit_in_flight = false;
+        session.order_latency_tracker = None;
+        bail!("broker gateway is closed");
+    }
+    Ok(())
+}
+
 fn enqueue_order_strategy(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
@@ -917,6 +1127,7 @@ fn enqueue_order_strategy(
         signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
         signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: strategy.uuid.clone(),
+        strategy_owned_protection: true,
         order_id: None,
         order_strategy_id: None,
         seen_recorded: false,
@@ -958,6 +1169,22 @@ fn detach_strategy_protection_by_key(
 
     let session = &*session;
 
+    let linked_ids: Vec<i64> = if selected_strategy_key(session).ok() == Some(key) {
+        selected_active_order_strategy_id(session)
+            .into_iter()
+            .flat_map(|order_strategy_id| {
+                session
+                    .user_store
+                    .linked_strategy_orders(key.account_id, order_strategy_id)
+                    .into_iter()
+            })
+            .filter(|order| order_is_active(order) && order_contract_id(order) == Some(key.contract_id))
+            .filter_map(extract_entity_id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Collect ALL active strategy orders for this contract from the user store.
     // This catches orphaned orders whose IDs we never captured from the OCO
     // placement response (the stop leg ID often arrives later via WebSocket).
@@ -978,14 +1205,21 @@ fn detach_strategy_protection_by_key(
         .filter_map(|(id, _)| Some(*id))
         .collect();
 
-    let mut cancel_order_ids = orphan_ids.clone();
+    let mut cancel_order_ids = linked_ids;
+    for order_id in orphan_ids {
+        if !cancel_order_ids.contains(&order_id) {
+            cancel_order_ids.push(order_id);
+        }
+    }
     if let Some(state) = existing.as_ref() {
-        cancel_order_ids.extend(
-            [state.stop_order_id, state.take_profit_order_id]
-                .into_iter()
-                .flatten()
-                .filter(|id| !orphan_ids.contains(id)),
-        );
+        for order_id in [state.stop_order_id, state.take_profit_order_id]
+            .into_iter()
+            .flatten()
+        {
+            if !cancel_order_ids.contains(&order_id) {
+                cancel_order_ids.push(order_id);
+            }
+        }
     }
 
     DetachedStrategyProtection { cancel_order_ids }
@@ -1029,7 +1263,10 @@ fn collect_live_protection_orders(
                 }
             }
             "stop" | "stoplimit" | "trailingstop" | "trailingstoplimit" => {
-                if !stop_orders.iter().any(|existing| existing.order_id == order_id) {
+                if !stop_orders
+                    .iter()
+                    .any(|existing| existing.order_id == order_id)
+                {
                     stop_orders.push(candidate);
                 }
             }
@@ -1276,7 +1513,8 @@ async fn interrupt_order_strategy_by_id(
     let payload = json!({
         "orderStrategyId": order_strategy_id,
     });
-    let _ = request_order_json(request_tx, "orderStrategy/interruptorderstrategy", &payload).await?;
+    let _ =
+        request_order_json(request_tx, "orderStrategy/interruptorderstrategy", &payload).await?;
     Ok(())
 }
 
@@ -1485,7 +1723,10 @@ mod order_tests {
         match sync.operation {
             ProtectionSyncOperation::ModifyStop { payload } => {
                 assert_eq!(payload.get("orderId").and_then(Value::as_i64), Some(1002));
-                assert_eq!(payload.get("stopPrice").and_then(Value::as_f64), Some(6644.5));
+                assert_eq!(
+                    payload.get("stopPrice").and_then(Value::as_f64),
+                    Some(6644.5)
+                );
             }
             _ => panic!("expected stop modification"),
         }
@@ -1649,9 +1890,17 @@ mod order_tests {
         match broker_rx.try_recv().expect("broker command queued") {
             BrokerCommand::LiquidatePosition { liquidation, .. } => {
                 assert_eq!(liquidation.target_qty, Some(0));
-                assert_eq!(liquidation.payload.get("accountId").and_then(Value::as_i64), Some(42));
+                assert_eq!(liquidation.interrupt_order_strategy_id, None);
+                assert!(liquidation.cancel_order_ids.is_empty());
                 assert_eq!(
-                    liquidation.payload.get("contractId").and_then(Value::as_i64),
+                    liquidation.payload.get("accountId").and_then(Value::as_i64),
+                    Some(42)
+                );
+                assert_eq!(
+                    liquidation
+                        .payload
+                        .get("contractId")
+                        .and_then(Value::as_i64),
                     Some(3570918)
                 );
                 assert_eq!(
@@ -1697,6 +1946,72 @@ mod order_tests {
     }
 
     #[test]
+    fn manual_buy_interrupts_live_strategy_and_cancels_protection() {
+        let mut session = test_session();
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key: StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome = dispatch_manual_order(&mut session, &broker_tx, ManualOrderAction::Buy)
+            .expect("manual buy should clear live strategy protection before re-entry");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued { target_qty: None }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, Some(77));
+                assert_eq!(order.cancel_order_ids, vec![1001]);
+                assert_eq!(
+                    order.payload.get("action").and_then(Value::as_str),
+                    Some("Buy")
+                );
+            }
+            _ => panic!("expected market order command"),
+        }
+    }
+
+    #[test]
     fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
         let mut session = test_session();
         session.execution_config.kind = StrategyKind::Native;
@@ -1713,13 +2028,9 @@ mod order_tests {
         });
         let (broker_tx, mut broker_rx) = unbounded_channel();
 
-        let outcome = dispatch_native_order_strategy_target(
-            &mut session,
-            &broker_tx,
-            1,
-            "ema_cross signal",
-        )
-        .expect("flat-to-long entry should queue order strategy");
+        let outcome =
+            dispatch_native_order_strategy_target(&mut session, &broker_tx, 1, "ema_cross signal")
+                .expect("flat-to-long entry should queue order strategy");
 
         assert!(matches!(
             outcome,
@@ -1743,7 +2054,41 @@ mod order_tests {
     }
 
     #[test]
-    fn automated_reversal_uses_single_strategy_call_without_interrupt() {
+    fn native_strategy_entry_with_trailing_stop_uses_market_order_path() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.execution_config.native_ema.stop_loss_ticks = 8.0;
+        session.execution_config.native_ema.use_trailing_stop = true;
+        session.market.tick_size = Some(0.25);
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome =
+            dispatch_target_position_order(&mut session, &broker_tx, 1, true, "ema_cross signal")
+                .expect("trailing configs should fall back to market entry + managed protection");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(1)
+            }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.target_qty, Some(1));
+                assert_eq!(
+                    order.payload.get("action").and_then(Value::as_str),
+                    Some("Buy")
+                );
+            }
+            _ => panic!("expected market order command"),
+        }
+    }
+
+    #[test]
+    fn automated_reversal_uses_market_order_path_for_direct_mode() {
         let mut session = test_session();
         session.execution_config.kind = StrategyKind::Native;
         session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -1763,32 +2108,153 @@ mod order_tests {
         );
         let (broker_tx, mut broker_rx) = unbounded_channel();
 
-        let outcome = dispatch_native_order_strategy_target(
-            &mut session,
-            &broker_tx,
-            -1,
-            "ema_cross signal",
-        )
-        .expect("non-flat reversal should queue a single order-strategy call");
+        let outcome =
+            dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
+                .expect("non-flat direct reversal should queue a market order");
 
         match outcome {
             MarketOrderDispatchOutcome::Queued {
                 target_qty: Some(-1),
-            } => {
-                match broker_rx.try_recv().expect("broker command queued") {
-                    BrokerCommand::OrderStrategy { strategy, .. } => {
-                        assert_eq!(strategy.interrupt_order_strategy_id, None);
-                        assert_eq!(strategy.target_qty, -1);
-                        assert_eq!(strategy.entry_order_qty, 2);
-                        assert_eq!(
-                            strategy.payload.get("action").and_then(Value::as_str),
-                            Some("Sell")
-                        );
-                    }
-                    _ => panic!("expected order strategy command"),
+            } => match broker_rx.try_recv().expect("broker command queued") {
+                BrokerCommand::MarketOrder { order, .. } => {
+                    assert_eq!(order.interrupt_order_strategy_id, None);
+                    assert!(order.cancel_order_ids.is_empty());
+                    assert_eq!(order.target_qty, Some(-1));
+                    assert_eq!(order.order_qty, 2);
+                    assert_eq!(order.order_action, "Sell");
                 }
+                _ => panic!("expected market order command"),
+            },
+            _ => panic!("expected queued direct reversal"),
+        }
+    }
+
+    #[test]
+    fn automated_reversal_interrupts_live_order_strategy_path() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key: StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome =
+            dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
+                .expect("live reversal should interrupt the previous strategy path");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(-1)
             }
-            _ => panic!("expected queued order-strategy reversal"),
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, Some(77));
+                assert_eq!(order.cancel_order_ids, vec![1001]);
+                assert_eq!(order.target_qty, Some(-1));
+                assert_eq!(order.order_qty, 2);
+                assert_eq!(order.order_action, "Sell");
+            }
+            _ => panic!("expected market order command"),
+        }
+    }
+
+    #[test]
+    fn automated_reversal_cancels_orphan_native_protection_when_strategy_path_missing() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working",
+                    "clOrdId": "midas-orphan-tp"
+                }),
+            )]),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome =
+            dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
+                .expect("reversal should clear orphan protection before starting a new strategy");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(-1)
+            }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, None);
+                assert_eq!(order.cancel_order_ids, vec![1001]);
+                assert_eq!(order.target_qty, Some(-1));
+                assert_eq!(order.order_qty, 2);
+                assert_eq!(order.order_action, "Sell");
+            }
+            _ => panic!("expected market order command"),
         }
     }
 
@@ -1843,13 +2309,9 @@ mod order_tests {
         );
         let (broker_tx, mut broker_rx) = unbounded_channel();
 
-        let outcome = dispatch_native_order_strategy_target(
-            &mut session,
-            &broker_tx,
-            -1,
-            "ema_cross signal",
-        )
-        .expect("staged reversal should queue a flatten first");
+        let outcome =
+            dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
+                .expect("staged reversal should queue a flatten first");
 
         assert!(matches!(
             outcome,
@@ -1869,11 +2331,102 @@ mod order_tests {
         match broker_rx.try_recv().expect("broker command queued") {
             BrokerCommand::MarketOrder { order, .. } => {
                 assert_eq!(order.interrupt_order_strategy_id, Some(77));
+                assert_eq!(order.cancel_order_ids, vec![1001]);
                 assert_eq!(order.target_qty, Some(0));
                 assert_eq!(order.order_qty, 1);
                 assert_eq!(order.order_action, "Sell");
             }
             _ => panic!("expected staged flatten market order"),
+        }
+    }
+
+    #[test]
+    fn automated_reversal_closeall_mode_queues_liquidation_then_entry_strategy() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+        session.execution_config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+        session.execution_config.native_ema.take_profit_ticks = 8.0;
+        session.market.tick_size = Some(0.25);
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome =
+            dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
+                .expect("immediate close-all reversal should queue both submits");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(-1)
+            }
+        ));
+        assert!(session.execution_runtime.pending_reversal_entry.is_none());
+        assert!(session.order_latency_tracker.is_some());
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::LiquidateThenOrderStrategy {
+                liquidation,
+                strategy,
+                ..
+            } => {
+                assert_eq!(liquidation.target_qty, Some(-1));
+                assert_eq!(liquidation.interrupt_order_strategy_id, None);
+                assert!(liquidation.cancel_order_ids.is_empty());
+                assert_eq!(
+                    liquidation.payload.get("contractId").and_then(Value::as_i64),
+                    Some(3570918)
+                );
+                assert_eq!(strategy.interrupt_order_strategy_id, None);
+                assert!(strategy.cancel_order_ids.is_empty());
+                assert_eq!(strategy.target_qty, -1);
+                assert_eq!(strategy.entry_order_qty, 1);
+                assert_eq!(
+                    strategy.payload.get("action").and_then(Value::as_str),
+                    Some("Sell")
+                );
+            }
+            _ => panic!("expected close-all plus order strategy command"),
         }
     }
 
@@ -1886,14 +2439,9 @@ mod order_tests {
         session.market.tick_size = Some(0.25);
         let (broker_tx, mut broker_rx) = unbounded_channel();
 
-        let outcome = dispatch_target_position_order(
-            &mut session,
-            &broker_tx,
-            1,
-            true,
-            "ema_cross signal",
-        )
-        .expect("automated target should queue order strategy");
+        let outcome =
+            dispatch_target_position_order(&mut session, &broker_tx, 1, true, "ema_cross signal")
+                .expect("automated target should queue order strategy");
 
         assert!(matches!(
             outcome,
@@ -1945,14 +2493,9 @@ mod order_tests {
         );
         let (broker_tx, mut broker_rx) = unbounded_channel();
 
-        let outcome = dispatch_target_position_order(
-            &mut session,
-            &broker_tx,
-            -1,
-            true,
-            "ema_cross signal",
-        )
-        .expect("stale bare strategy should not block market reversal fallback");
+        let outcome =
+            dispatch_target_position_order(&mut session, &broker_tx, -1, true, "ema_cross signal")
+                .expect("stale bare strategy should not block market reversal fallback");
 
         assert!(matches!(
             outcome,
@@ -1964,6 +2507,75 @@ mod order_tests {
         match broker_rx.try_recv().expect("broker command queued") {
             BrokerCommand::MarketOrder { order, .. } => {
                 assert_eq!(order.interrupt_order_strategy_id, None);
+                assert_eq!(order.target_qty, Some(-1));
+                assert_eq!(order.order_action, "Sell");
+                assert_eq!(order.order_qty, 2);
+            }
+            _ => panic!("expected market order command"),
+        }
+    }
+
+    #[test]
+    fn automated_market_reversal_interrupts_live_strategy_and_cancels_protection() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Lua;
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1
+                }),
+            )]),
+        );
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key: StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([(
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            )]),
+        );
+        session.user_store.order_strategy_links.insert(
+            1,
+            json!({
+                "id": 1,
+                "orderStrategyId": 77,
+                "orderId": 1001
+            }),
+        );
+        let (broker_tx, mut broker_rx) = unbounded_channel();
+
+        let outcome =
+            dispatch_target_position_order(&mut session, &broker_tx, -1, true, "ema_cross signal")
+                .expect("market reversal fallback should clear live strategy protection");
+
+        assert!(matches!(
+            outcome,
+            MarketOrderDispatchOutcome::Queued {
+                target_qty: Some(-1)
+            }
+        ));
+
+        match broker_rx.try_recv().expect("broker command queued") {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.interrupt_order_strategy_id, Some(77));
+                assert_eq!(order.cancel_order_ids, vec![1001]);
                 assert_eq!(order.target_qty, Some(-1));
                 assert_eq!(order.order_action, "Sell");
                 assert_eq!(order.order_qty, 2);

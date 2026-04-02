@@ -5,8 +5,7 @@ pub async fn service_loop(
 ) {
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
     let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (replay_speed_tx, _replay_speed_rx) =
-        tokio::sync::watch::channel(ReplaySpeed::default());
+    let (replay_speed_tx, _replay_speed_rx) = tokio::sync::watch::channel(ReplaySpeed::default());
     let _broker_task = spawn_broker_gateway_task(broker_rx, internal_tx.clone());
     let mut state = ServiceState {
         client: Client::builder()
@@ -39,14 +38,9 @@ pub async fn service_loop(
     } {
         match next {
             Either::Command(cmd) => {
-                if let Err(err) = handle_command(
-                    cmd,
-                    &mut state,
-                    &event_tx,
-                    &market_tx,
-                    internal_tx.clone(),
-                )
-                .await
+                if let Err(err) =
+                    handle_command(cmd, &mut state, &event_tx, &market_tx, internal_tx.clone())
+                        .await
                 {
                     let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
                 }
@@ -176,7 +170,10 @@ async fn handle_command(
                 emit_execution_state(event_tx, session);
             }
         }
-        ServiceCommand::EnterReplayMode { config: cfg, bar_type } => {
+        ServiceCommand::EnterReplayMode {
+            config: cfg,
+            bar_type,
+        } => {
             shutdown_tasks(state);
             state.latency = LatencySnapshot::default();
             state.replay_speed = ReplaySpeed::default();
@@ -416,10 +413,35 @@ async fn handle_command(
             let Some(session) = state.session.as_mut() else {
                 bail!("connect first");
             };
-            if let MarketOrderDispatchOutcome::NoOp { message } =
-                dispatch_target_position_order(session, &broker_tx, target_qty, automated, &reason)?
+            match dispatch_target_position_order(session, &broker_tx, target_qty, automated, &reason)?
             {
-                let _ = event_tx.send(ServiceEvent::Status(message));
+                MarketOrderDispatchOutcome::NoOp { message } => {
+                    let _ = event_tx.send(ServiceEvent::Status(message));
+                }
+                MarketOrderDispatchOutcome::Queued { target_qty } => {
+                    session.execution_runtime.pending_target_qty = target_qty;
+                    emit_execution_state(event_tx, session);
+                }
+            }
+        }
+        ServiceCommand::ProfileLegacyOrderStrategyTarget { target_qty, reason } => {
+            let broker_tx = state.broker_tx.clone();
+            let Some(session) = state.session.as_mut() else {
+                bail!("connect first");
+            };
+            match dispatch_profile_legacy_order_strategy_target(
+                session,
+                &broker_tx,
+                target_qty,
+                &reason,
+            )? {
+                MarketOrderDispatchOutcome::NoOp { message } => {
+                    let _ = event_tx.send(ServiceEvent::Status(message));
+                }
+                MarketOrderDispatchOutcome::Queued { target_qty } => {
+                    session.execution_runtime.pending_target_qty = target_qty;
+                    emit_execution_state(event_tx, session);
+                }
             }
         }
         ServiceCommand::SyncNativeProtection {
@@ -472,6 +494,16 @@ async fn handle_command(
             };
             disarm_execution_strategy(session, reason);
             emit_execution_state(event_tx, session);
+        }
+        ServiceCommand::ProbeExecution { tag } => {
+            let Some(session) = state.session.as_ref() else {
+                bail!("connect first");
+            };
+            let _ = event_tx.send(ServiceEvent::ExecutionProbe(execution_probe_snapshot(
+                session,
+                state.latency,
+                tag,
+            )));
         }
     }
     Ok(())
@@ -547,7 +579,10 @@ async fn handle_internal(
                     let session = state.session.as_mut().expect("checked session above");
                     let closed_bar_advanced = apply_market_update(&mut session.market, update);
                     maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
-                    (display_market_snapshot(&session.market), closed_bar_advanced)
+                    (
+                        display_market_snapshot(&session.market),
+                        closed_bar_advanced,
+                    )
                 };
                 if closed_bar_advanced {
                     request_snapshot_refresh(state, &internal_tx);
@@ -774,6 +809,9 @@ async fn handle_internal(
             }
 
             let actual_qty = selected_market_position_qty(session);
+            if should_wait_for_automated_position_sync(session, pending, actual_qty) {
+                return Ok(());
+            }
             clear_stale_pending_target(session, pending, actual_qty, event_tx);
             emit_execution_state(event_tx, session);
         }
@@ -858,7 +896,10 @@ fn format_debug_latency_ms(value: u64) -> String {
     }
 }
 
-fn debug_signal_latency_suffix(signal_latency_ms: Option<u64>, signal_context: Option<&str>) -> String {
+fn debug_signal_latency_suffix(
+    signal_latency_ms: Option<u64>,
+    signal_context: Option<&str>,
+) -> String {
     let Some(signal_latency_ms) = signal_latency_ms else {
         return String::new();
     };
@@ -869,10 +910,7 @@ fn debug_signal_latency_suffix(signal_latency_ms: Option<u64>, signal_context: O
     suffix
 }
 
-fn debug_tracker_context(
-    tracker: Option<&OrderLatencyTracker>,
-    session: &SessionState,
-) -> String {
+fn debug_tracker_context(tracker: Option<&OrderLatencyTracker>, session: &SessionState) -> String {
     let mut parts = Vec::new();
 
     if let Some(contract) = session.selected_contract.as_ref() {
@@ -880,7 +918,12 @@ fn debug_tracker_context(
     }
     if let Some(account_name) = session
         .selected_account_id
-        .and_then(|selected_id| session.accounts.iter().find(|account| account.id == selected_id))
+        .and_then(|selected_id| {
+            session
+                .accounts
+                .iter()
+                .find(|account| account.id == selected_id)
+        })
         .map(|account| account.name.clone())
     {
         parts.push(format!("on {account_name}"));
@@ -1070,7 +1113,9 @@ fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
 #[cfg(test)]
 mod service_tests {
     use super::*;
+    use crate::strategy::{NativeReversalMode, StrategyKind};
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn test_session() -> SessionState {
         let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1162,6 +1207,7 @@ mod service_tests {
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
             cl_ord_id: "midas-stale-direct-reversal".to_string(),
+            strategy_owned_protection: false,
             order_id: Some(77),
             order_strategy_id: Some(stale_strategy_id),
             seen_recorded: false,
@@ -1209,10 +1255,12 @@ mod service_tests {
             session.execution_runtime.last_summary,
             "Previous strategy was already inactive; retrying current signal after broker sync."
         );
-        assert!(!session
-            .user_store
-            .order_strategies
-            .contains_key(&stale_strategy_id));
+        assert!(
+            !session
+                .user_store
+                .order_strategies
+                .contains_key(&stale_strategy_id)
+        );
 
         let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
@@ -1226,6 +1274,147 @@ mod service_tests {
             ServiceEvent::Status(message)
                 if message.contains("already inactive")
         )));
-        assert!(!events.iter().any(|event| matches!(event, ServiceEvent::Error(_))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServiceEvent::Error(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_target_watchdog_respects_order_strategy_position_sync_grace() {
+        let mut session = test_session();
+        session.execution_runtime.armed = true;
+        session.execution_runtime.pending_target_qty = Some(1);
+        session.execution_runtime.last_closed_bar_ts = Some(200);
+        session.market.history_loaded = 1;
+        session.market.bars = vec![Bar {
+            ts_ns: 200,
+            open: 6400.0,
+            high: 6401.0,
+            low: 6399.0,
+            close: 6400.5,
+        }];
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now() - Duration::from_secs(3),
+            signal_started_at: Some(time::Instant::now()),
+            signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
+            cl_ord_id: "midas-strategy-position-sync".to_string(),
+            strategy_owned_protection: true,
+            order_id: Some(77),
+            order_strategy_id: Some(88),
+            seen_recorded: true,
+            exec_report_recorded: true,
+            fill_recorded: true,
+        });
+
+        let mut state = test_state(session);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+        let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        handle_internal(
+            InternalEvent::PendingTargetWatchdog,
+            &mut state,
+            &event_tx,
+            &market_tx,
+            internal_tx,
+        )
+        .await
+        .expect("watchdog should preserve order-strategy pending target during sync grace");
+
+        let session = state.session.expect("session should persist");
+        assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+        assert!(session.order_latency_tracker.is_some());
+        assert!(session.execution_runtime.last_summary.is_empty());
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ServiceEvent::DebugLog(message) if message.contains("pending target cleared")
+        )));
+    }
+
+    #[tokio::test]
+    async fn set_target_position_records_pending_target_for_staged_reversal() {
+        let mut session = test_session();
+        session.execution_config.kind = StrategyKind::Native;
+        session.execution_config.native_hma.take_profit_ticks = 30.0;
+        session.execution_config.native_hma.stop_loss_ticks = 30.0;
+        session.execution_config.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+        session.execution_runtime.armed = true;
+        session.user_store.positions.insert(
+            42,
+            BTreeMap::from([(
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "netPos": 1,
+                    "netPrice": 6400.0
+                }),
+            )]),
+        );
+        let key = StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        };
+        session.active_order_strategy = Some(TrackedOrderStrategy {
+            key,
+            order_strategy_id: 77,
+            target_qty: 1,
+        });
+        session.order_latency_tracker = Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: None,
+            signal_context: None,
+            cl_ord_id: "midas-live-strategy".to_string(),
+            strategy_owned_protection: true,
+            order_id: None,
+            order_strategy_id: Some(77),
+            seen_recorded: false,
+            exec_report_recorded: false,
+            fill_recorded: false,
+        });
+
+        let (broker_tx, mut _broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (replay_speed_tx, _replay_speed_rx) =
+            tokio::sync::watch::channel(ReplaySpeed::default());
+        let mut state = ServiceState {
+            client: Client::builder().build().expect("client"),
+            broker_tx,
+            replay_speed_tx,
+            replay_speed: ReplaySpeed::default(),
+            session: Some(session),
+            replay: None,
+            user_task: None,
+            market_task: None,
+            rest_probe_task: None,
+            latency: LatencySnapshot::default(),
+            snapshot_revision: 0,
+        };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+        let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        handle_command(
+            ServiceCommand::SetTargetPosition {
+                target_qty: -1,
+                automated: true,
+                reason: "test staged reversal".to_string(),
+            },
+            &mut state,
+            &event_tx,
+            &market_tx,
+            internal_tx,
+        )
+        .await
+        .expect("staged reversal target should queue");
+
+        let session = state.session.expect("session should persist");
+        assert_eq!(session.execution_runtime.pending_target_qty, Some(0));
+        assert!(session.execution_runtime.pending_reversal_entry.is_some());
+        assert!(session.order_submit_in_flight);
     }
 }

@@ -1,5 +1,6 @@
 use crate::broker::{
     AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, ContractSuggestion,
+    ExecutionProbeManagedProtection, ExecutionProbeOrder, ExecutionProbeSnapshot,
     InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
     MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
     TradeMarkerSide, infer_session_profile,
@@ -49,6 +50,7 @@ include!("latency.rs");
 include!("market.rs");
 include!("store.rs");
 include!("protocol.rs");
+include!("profiler.rs");
 
 fn tradovate_capabilities() -> BrokerCapabilities {
     BrokerCapabilities {

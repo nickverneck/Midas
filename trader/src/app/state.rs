@@ -1,3 +1,12 @@
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct DisplayedTradeLevels {
+    entry_price: Option<f64>,
+    take_profit_price: Option<f64>,
+    stop_price: Option<f64>,
+    take_profit_projected: bool,
+    stop_price_projected: bool,
+}
+
 impl LogEntry {
     fn render_line(&self) -> String {
         format!(
@@ -427,6 +436,94 @@ impl App {
                 .unwrap_or(0.0)
                 .round() as i32
         })
+    }
+
+    fn displayed_trade_levels(&self) -> DisplayedTradeLevels {
+        let entry_price = self
+            .selected_snapshot()
+            .and_then(|snapshot| snapshot.market_entry_price)
+            .filter(|price| price.is_finite());
+        let signed_qty = self
+            .selected_snapshot()
+            .and_then(|snapshot| snapshot.market_position_qty)
+            .map(|qty| qty.round() as i32)
+            .filter(|qty| *qty != 0);
+        let mut levels = DisplayedTradeLevels {
+            entry_price,
+            take_profit_price: self
+                .selected_snapshot()
+                .and_then(|snapshot| snapshot.selected_contract_take_profit_price)
+                .filter(|price| price.is_finite()),
+            stop_price: self
+                .selected_snapshot()
+                .and_then(|snapshot| snapshot.selected_contract_stop_price)
+                .filter(|price| price.is_finite()),
+            ..DisplayedTradeLevels::default()
+        };
+
+        let (Some(entry_price), Some(signed_qty)) = (entry_price, signed_qty) else {
+            return levels;
+        };
+
+        if levels.take_profit_price.is_none() {
+            levels.take_profit_price = self.projected_native_take_profit_price(entry_price, signed_qty);
+            levels.take_profit_projected = levels.take_profit_price.is_some();
+        }
+        if levels.stop_price.is_none() {
+            levels.stop_price = self.projected_native_stop_price(entry_price, signed_qty);
+            levels.stop_price_projected = levels.stop_price.is_some();
+        }
+
+        levels
+    }
+
+    fn projected_native_take_profit_price(&self, entry_price: f64, signed_qty: i32) -> Option<f64> {
+        if self.strategy.kind != StrategyKind::Native || !entry_price.is_finite() || signed_qty == 0 {
+            return None;
+        }
+
+        let offset = match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                self.strategy.native_hma.take_profit_offset(self.market.tick_size)?
+            }
+            NativeStrategyKind::EmaCross => {
+                self.strategy.native_ema.take_profit_offset(self.market.tick_size)?
+            }
+        };
+
+        Some(if signed_qty > 0 {
+            entry_price + offset
+        } else {
+            entry_price - offset
+        })
+    }
+
+    fn projected_native_stop_price(&self, entry_price: f64, signed_qty: i32) -> Option<f64> {
+        if self.strategy.kind != StrategyKind::Native || !entry_price.is_finite() || signed_qty == 0 {
+            return None;
+        }
+
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                let mut runtime = crate::strategies::hma_angle::HmaAngleExecutionState::default();
+                self.strategy
+                    .native_hma
+                    .sync_position(&mut runtime, signed_qty, Some(entry_price));
+                self.strategy
+                    .native_hma
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+            NativeStrategyKind::EmaCross => {
+                let mut runtime = crate::strategies::ema_cross::EmaCrossExecutionState::default();
+                self.strategy
+                    .native_ema
+                    .sync_position(&mut runtime, signed_qty, Some(entry_price));
+                self.strategy
+                    .native_ema
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+        }
+        .filter(|price| price.is_finite())
     }
 
 }

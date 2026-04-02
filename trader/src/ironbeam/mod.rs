@@ -477,6 +477,11 @@ async fn handle_command(
             emit_execution_state(event_tx, session);
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
+        ServiceCommand::ProfileLegacyOrderStrategyTarget { .. } => {
+            let _ = event_tx.send(ServiceEvent::Error(
+                "legacy order-strategy profiler mode is only available on Tradovate".to_string(),
+            ));
+        }
         ServiceCommand::SyncNativeProtection {
             signed_qty,
             take_profit_price,
@@ -521,6 +526,11 @@ async fn handle_command(
             let session = require_session_mut(state.session.as_mut())?;
             disarm_execution_strategy(session, reason);
             emit_execution_state(event_tx, session);
+        }
+        ServiceCommand::ProbeExecution { .. } => {
+            let _ = event_tx.send(ServiceEvent::Error(
+                "Execution probe is only available on Tradovate.".to_string(),
+            ));
         }
     }
 
@@ -1516,6 +1526,41 @@ async fn dispatch_target_position_order(
 
     let is_reversal =
         current_qty != 0 && target_qty != 0 && current_qty.signum() != target_qty.signum();
+    if automated
+        && is_reversal
+        && session.execution_config.native_reversal_mode == NativeReversalMode::CloseAllEnter
+    {
+        cancel_selected_protection(client, session, latency, internal_tx.clone()).await?;
+        let flatten_side = if current_qty > 0 { "SELL" } else { "BUY" };
+        submit_market_order(
+            client,
+            &session.cfg,
+            &session.token,
+            &account_name,
+            &symbol,
+            flatten_side,
+            current_qty.abs(),
+            latency,
+        )
+        .await?;
+        let entry_side = if target_qty > 0 { "BUY" } else { "SELL" };
+        submit_market_order(
+            client,
+            &session.cfg,
+            &session.token,
+            &account_name,
+            &symbol,
+            entry_side,
+            target_qty.abs(),
+            latency,
+        )
+        .await?;
+        schedule_followup_refresh(internal_tx);
+        return Ok(OrderDispatchOutcome::Queued {
+            target_qty: Some(target_qty),
+        });
+    }
+
     if automated
         && is_reversal
         && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenConfirmEnter

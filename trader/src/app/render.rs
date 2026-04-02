@@ -199,9 +199,14 @@ impl App {
                 _ => {}
             },
             Focus::NativeReversalMode => match key.code {
-                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                KeyCode::Left => {
                     self.strategy.native_reversal_mode =
-                        self.strategy.native_reversal_mode.toggle();
+                        self.strategy.native_reversal_mode.prev();
+                    self.disarm_native_strategy(cmd_tx);
+                }
+                KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.strategy.native_reversal_mode =
+                        self.strategy.native_reversal_mode.next();
                     self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
@@ -730,7 +735,7 @@ impl App {
         };
         let help = match self.screen {
             Screen::BrokerSelect => {
-                "Up/Down choose broker | Enter continue to login | F5/Ctrl+S save logs | q quit"
+                "Up/Down/Left/Right choose broker | Enter open login/token options | F5/Ctrl+S save logs | q quit"
             }
             Screen::Login => {
                 "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | Esc broker picker | F5/Ctrl+S save logs | q quit"
@@ -811,41 +816,74 @@ impl App {
     }
 
     fn render_broker_select_screen(&self, frame: &mut Frame<'_>, area: Rect) {
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        let centered_row = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Percentage(60),
+                Constraint::Percentage(20),
+            ])
             .split(area);
+        let centered_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Percentage(60),
+                Constraint::Percentage(20),
+            ])
+            .split(centered_row[1])[1];
 
-        let brokers = self
-            .available_brokers
-            .iter()
-            .map(|broker| {
-                let prefix = if *broker == self.selected_broker { "> " } else { "  " };
-                ListItem::new(format!("{prefix}{}", broker.label()))
-            })
-            .collect::<Vec<_>>();
-        let list = List::new(brokers).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Installed Brokers"),
-        );
-        frame.render_widget(list, columns[0]);
+        let broker_details = match self.selected_broker {
+            BrokerKind::Tradovate => {
+                "Tradovate supports live and sim login, token-based auth, contract search, and replay in replay-enabled builds."
+            }
+            BrokerKind::Ironbeam => {
+                "Ironbeam supports live and sim login, token and credential flows, account discovery, and live websocket bars."
+            }
+        };
 
-        let details = Paragraph::new(vec![
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Select Broker",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Choose the broker you want to use for this session."),
+            Line::from(""),
+        ];
+        lines.extend(self.available_brokers.iter().map(|broker| {
+            let selected = *broker == self.selected_broker;
+            let label = if selected {
+                format!("> {} <", broker.label())
+            } else {
+                broker.label().to_string()
+            };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(Span::styled(label, style))
+        }));
+        lines.extend([
+            Line::from(""),
             Line::from(format!("Selected: {}", self.selected_broker.label())),
+            Line::from(broker_details),
             Line::from(""),
-            Line::from("Broker selection appears before login when multiple backends are compiled into the binary."),
-            Line::from("Use Up/Down or Left/Right to switch."),
+            Line::from("Use the arrow keys to switch brokers."),
             Line::from("Press Enter to continue to the login screen."),
-            Line::from(""),
-            Line::from(match self.selected_broker {
-                BrokerKind::Tradovate => "Tradovate supports live/sim login, contract search, market streams, and replay in replay-enabled builds.",
-                BrokerKind::Ironbeam => "Ironbeam support currently focuses on auth, account discovery, contract search, and live websocket bars.",
-            }),
-        ])
-        .block(Block::default().borders(Borders::ALL).title("Broker Details"))
-        .wrap(Wrap { trim: true });
-        frame.render_widget(details, columns[1]);
+        ]);
+
+        let card = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Broker Selection"))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(card, centered_area);
     }
 
     fn render_login_screen(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -885,9 +923,11 @@ impl App {
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(area);
 
+        let notes_lines = self.strategy_notes_lines();
+        let notes_height = (notes_lines.len() as u16).saturating_add(2);
         let left = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(18), Constraint::Min(10)])
+            .constraints([Constraint::Min(10), Constraint::Length(notes_height)])
             .split(columns[0]);
 
         let setup = Paragraph::new(self.strategy_setup_lines())
@@ -899,7 +939,7 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(setup, left[0]);
 
-        let notes = Paragraph::new(self.strategy_notes_lines())
+        let notes = Paragraph::new(notes_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -1113,16 +1153,10 @@ impl App {
             .collect::<Vec<_>>();
         let selected_snapshot = self.selected_snapshot();
         let selected_account_id = selected_snapshot.map(|snapshot| snapshot.account_id);
-        let entry_price = selected_snapshot
-            .filter(|snapshot| snapshot.market_position_qty.unwrap_or_default().abs() > f64::EPSILON)
-            .and_then(|snapshot| snapshot.market_entry_price)
-            .filter(|price| price.is_finite());
-        let take_profit_price = selected_snapshot
-            .and_then(|snapshot| snapshot.selected_contract_take_profit_price)
-            .filter(|price| price.is_finite());
-        let stop_price = selected_snapshot
-            .and_then(|snapshot| snapshot.selected_contract_stop_price)
-            .filter(|price| price.is_finite());
+        let trade_levels = self.displayed_trade_levels();
+        let entry_price = trade_levels.entry_price;
+        let take_profit_price = trade_levels.take_profit_price;
+        let stop_price = trade_levels.stop_price;
         let mut chart_prices = bars.iter().map(|bar| bar.close).collect::<Vec<_>>();
         let bar_label = self.bar_type.label();
         let mut title = match &self.market.contract_name {
@@ -1138,11 +1172,21 @@ impl App {
             chart_prices.push(price);
         }
         if let Some(price) = take_profit_price {
-            overlay_labels.push(format!("TP {price:.2}"));
+            let label = if trade_levels.take_profit_projected {
+                "TP*"
+            } else {
+                "TP"
+            };
+            overlay_labels.push(format!("{label} {price:.2}"));
             chart_prices.push(price);
         }
         if let Some(price) = stop_price {
-            overlay_labels.push(format!("SL {price:.2}"));
+            let label = if trade_levels.stop_price_projected {
+                "SL*"
+            } else {
+                "SL"
+            };
+            overlay_labels.push(format!("{label} {price:.2}"));
             chart_prices.push(price);
         }
         if !overlay_labels.is_empty() {
@@ -1386,11 +1430,13 @@ impl App {
 mod tests {
     use super::*;
     use crate::broker::{
-        AccountInfo, BrokerCapabilities, BrokerKind, ContractSuggestion, ManualOrderAction,
-        ServiceEvent,
+        AccountInfo, AccountSnapshot, BrokerCapabilities, BrokerKind, ContractSuggestion,
+        ManualOrderAction, ServiceEvent,
     };
     use crate::config::{AppConfig, LogMode};
-    use crate::strategy::ExecutionStateSnapshot;
+    use crate::strategy::{
+        ExecutionStateSnapshot, NativeReversalMode, NativeStrategyKind, StrategyKind,
+    };
     use serde_json::json;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -1415,6 +1461,34 @@ mod tests {
         }
     }
 
+    fn account_snapshot(
+        account_id: i64,
+        market_position_qty: Option<f64>,
+        market_entry_price: Option<f64>,
+        take_profit_price: Option<f64>,
+        stop_price: Option<f64>,
+    ) -> AccountSnapshot {
+        AccountSnapshot {
+            account_id,
+            account_name: "SIM".to_string(),
+            balance: None,
+            cash_balance: None,
+            net_liq: None,
+            realized_pnl: None,
+            unrealized_pnl: None,
+            intraday_margin: None,
+            open_position_qty: market_position_qty,
+            market_position_qty,
+            market_entry_price,
+            selected_contract_take_profit_price: take_profit_price,
+            selected_contract_stop_price: stop_price,
+            raw_account: None,
+            raw_risk: None,
+            raw_cash: None,
+            raw_positions: Vec::new(),
+        }
+    }
+
     fn enable_tradovate_controls(app: &mut App) {
         app.selected_broker = BrokerKind::Tradovate;
         app.capabilities = BrokerCapabilities {
@@ -1432,6 +1506,57 @@ mod tests {
             }
             _ => panic!("expected select-account command"),
         }
+    }
+
+    #[test]
+    fn app_starts_on_broker_select_when_multiple_brokers_are_available() {
+        let app = App::new(AppConfig::default());
+
+        if compiled_brokers().len() > 1 {
+            assert_eq!(app.screen, Screen::BrokerSelect);
+            assert_eq!(app.focus, Focus::BrokerList);
+            assert!(app.awaiting_broker_selection());
+        } else {
+            assert_eq!(app.screen, Screen::Login);
+            assert_eq!(app.focus, Focus::Env);
+            assert!(!app.awaiting_broker_selection());
+        }
+    }
+
+    #[test]
+    fn startup_disconnected_event_keeps_broker_picker_visible() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+
+        app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+
+        if compiled_brokers().len() > 1 {
+            assert_eq!(app.screen, Screen::BrokerSelect);
+            assert_eq!(app.focus, Focus::BrokerList);
+            assert!(app.awaiting_broker_selection());
+        } else {
+            assert_eq!(app.screen, Screen::Login);
+            assert_eq!(app.focus, Focus::Env);
+            assert!(!app.awaiting_broker_selection());
+        }
+    }
+
+    #[test]
+    fn broker_picker_uses_arrow_keys_and_enter_to_open_login() {
+        let mut app = App::new(AppConfig::default());
+        if app.available_brokers.len() < 2 {
+            return;
+        }
+
+        let original = app.selected_broker;
+        app.handle_broker_select_key(key(KeyCode::Down));
+        assert_ne!(app.selected_broker, original);
+        assert!(app.awaiting_broker_selection());
+
+        app.handle_broker_select_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::Login);
+        assert_eq!(app.focus, Focus::Env);
+        assert!(!app.awaiting_broker_selection());
     }
 
     #[test]
@@ -1483,6 +1608,94 @@ mod tests {
 
         app.handle_login_key(key(KeyCode::Left), &cmd_tx);
         assert_eq!(app.form.log_mode, LogMode::Default);
+    }
+
+    #[test]
+    fn strategy_reversal_mode_cycles_through_all_three_options() {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.screen = Screen::Strategy;
+        app.focus = Focus::NativeReversalMode;
+
+        assert_eq!(app.strategy.native_reversal_mode, NativeReversalMode::Direct);
+
+        app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(
+            app.strategy.native_reversal_mode,
+            NativeReversalMode::FlattenConfirmEnter
+        );
+
+        app.handle_strategy_key(key(KeyCode::Left), &cmd_tx);
+        assert_eq!(app.strategy.native_reversal_mode, NativeReversalMode::Direct);
+
+        app.handle_strategy_key(key(KeyCode::Left), &cmd_tx);
+        assert_eq!(
+            app.strategy.native_reversal_mode,
+            NativeReversalMode::CloseAllEnter
+        );
+
+        app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(app.strategy.native_reversal_mode, NativeReversalMode::Direct);
+
+        app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(
+            app.strategy.native_reversal_mode,
+            NativeReversalMode::FlattenConfirmEnter
+        );
+
+        app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(
+            app.strategy.native_reversal_mode,
+            NativeReversalMode::CloseAllEnter
+        );
+    }
+
+    #[test]
+    fn native_trade_levels_project_tp_sl_until_broker_sync() {
+        let mut app = App::new(AppConfig::default());
+        app.accounts = vec![account(42, "SIM")];
+        app.account_snapshots = vec![account_snapshot(42, Some(1.0), Some(100.0), None, None)];
+        app.selected_account = 0;
+        app.market.tick_size = Some(0.25);
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+        app.strategy.native_ema.take_profit_ticks = 8.0;
+        app.strategy.native_ema.stop_loss_ticks = 6.0;
+
+        let levels = app.displayed_trade_levels();
+
+        assert_eq!(levels.entry_price, Some(100.0));
+        assert_eq!(levels.take_profit_price, Some(102.0));
+        assert_eq!(levels.stop_price, Some(98.5));
+        assert!(levels.take_profit_projected);
+        assert!(levels.stop_price_projected);
+    }
+
+    #[test]
+    fn synced_native_trade_levels_override_projected_values() {
+        let mut app = App::new(AppConfig::default());
+        app.accounts = vec![account(42, "SIM")];
+        app.account_snapshots = vec![account_snapshot(
+            42,
+            Some(-1.0),
+            Some(100.0),
+            Some(98.0),
+            Some(101.5),
+        )];
+        app.selected_account = 0;
+        app.market.tick_size = Some(0.25);
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+        app.strategy.native_ema.take_profit_ticks = 12.0;
+        app.strategy.native_ema.stop_loss_ticks = 10.0;
+
+        let levels = app.displayed_trade_levels();
+
+        assert_eq!(levels.entry_price, Some(100.0));
+        assert_eq!(levels.take_profit_price, Some(98.0));
+        assert_eq!(levels.stop_price, Some(101.5));
+        assert!(!levels.take_profit_projected);
+        assert!(!levels.stop_price_projected);
     }
 
     #[test]

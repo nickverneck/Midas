@@ -14,7 +14,7 @@ mod tradovate;
 use anyhow::{Result, bail};
 use app::App;
 use broker::{ServiceCommand, ServiceEvent};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use config::AppConfig;
 use crossterm::event::{Event as CEvent, EventStream};
 use crossterm::execute;
@@ -51,7 +51,40 @@ struct Cli {
     mode: Option<Mode>,
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Args)]
+struct SwipeProfileArgs {
+    #[arg(long, default_value = "DEMO")]
+    account_filter: String,
+
+    #[arg(long, default_value = "ES")]
+    contract_query: String,
+
+    #[arg(long)]
+    contract_exact: Option<String>,
+
+    #[arg(long, value_delimiter = ',', default_values_t = [50_u64, 250, 500, 1_000, 5_000])]
+    delays_ms: Vec<u64>,
+
+    #[arg(long, default_value_t = 10)]
+    iterations: usize,
+
+    #[arg(long, default_value_t = 400.0)]
+    take_profit_ticks: f64,
+
+    #[arg(long, default_value_t = 400.0)]
+    stop_loss_ticks: f64,
+
+    #[arg(long, default_value_t = 1)]
+    order_qty: i32,
+
+    #[arg(long, default_value_t = 20_000)]
+    settle_timeout_ms: u64,
+
+    #[arg(long)]
+    output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
 enum Mode {
     /// Run the background engine server.
     Engine,
@@ -77,11 +110,39 @@ enum Mode {
         #[arg(short = 'c', long = "close")]
         close: bool,
     },
+    /// Run a non-TUI Tradovate sim swipe profiler for reversal paths.
+    #[command(name = "swipe-profile")]
+    SwipeProfile(SwipeProfileArgs),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
+    #[cfg(feature = "tradovate")]
+    if let Some(Mode::SwipeProfile(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return tradovate::run_swipe_profile(
+            config,
+            tradovate::SwipeProfileOptions {
+                account_filter: args.account_filter,
+                contract_query: args.contract_query,
+                contract_exact: args.contract_exact,
+                delays_ms: args.delays_ms,
+                iterations_per_delay: args.iterations,
+                take_profit_ticks: args.take_profit_ticks,
+                stop_loss_ticks: args.stop_loss_ticks,
+                order_qty: args.order_qty,
+                settle_timeout_ms: args.settle_timeout_ms,
+                output_dir: args.output_dir,
+            },
+        )
+        .await;
+    }
+    #[cfg(not(feature = "tradovate"))]
+    if matches!(cli.mode, Some(Mode::SwipeProfile(_))) {
+        bail!("tradovate support is not enabled in this build");
+    }
+
     if matches!(cli.mode, Some(Mode::Engine)) {
         return run_engine_server(&cli.engine_socket).await;
     }
@@ -206,7 +267,7 @@ async fn run_tui(cli: &Cli, config: AppConfig) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(125));
     tick.tick().await;
 
-    if config.autoconnect {
+    if config.autoconnect && !app.awaiting_broker_selection() {
         let _ = cmd_tx.send(ServiceCommand::Connect(config));
     }
 

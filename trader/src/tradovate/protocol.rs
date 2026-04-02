@@ -362,6 +362,45 @@ mod tests {
     }
 
     #[test]
+    fn contract_position_qty_uses_best_match_when_duplicate_position_records_overlap() {
+        let mut store = UserSyncStore::default();
+        store.positions.insert(
+            42,
+            BTreeMap::from([
+                (
+                    1,
+                    json!({
+                        "id": 1,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "netPos": 1,
+                        "avgPrice": 6000.0
+                    }),
+                ),
+                (
+                    2,
+                    json!({
+                        "id": 2,
+                        "accountId": 42,
+                        "symbol": "ESM6",
+                        "netPos": 1,
+                        "avgPrice": 5999.0
+                    }),
+                ),
+            ]),
+        );
+
+        let contract = ContractSuggestion {
+            id: 3570918,
+            name: "ESM6".to_string(),
+            description: String::new(),
+            raw: json!({ "contractMaturityId": 53951 }),
+        };
+
+        assert_eq!(store.contract_position_qty(42, &contract), Some(1.0));
+    }
+
+    #[test]
     fn fallback_unrealized_pnl_uses_latest_close_and_value_per_point() {
         let market = MarketSnapshot {
             contract_id: Some(3570918),
@@ -388,6 +427,41 @@ mod tests {
             "netPos": 1,
             "netPrice": 6725.75
         })];
+
+        assert_eq!(fallback_unrealized_pnl(&positions, &market), Some(75.0));
+    }
+
+    #[test]
+    fn fallback_unrealized_pnl_ignores_duplicate_symbol_only_position_records() {
+        let market = MarketSnapshot {
+            contract_id: Some(3570918),
+            contract_name: Some("ESM6".to_string()),
+            bars: vec![Bar {
+                ts_ns: 0,
+                open: 6725.0,
+                high: 6730.0,
+                low: 6724.0,
+                close: 6727.25,
+            }],
+            value_per_point: Some(50.0),
+            ..MarketSnapshot::default()
+        };
+        let positions = vec![
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": 1,
+                "netPrice": 6725.75
+            }),
+            json!({
+                "id": 2,
+                "accountId": 42,
+                "symbol": "ESM6",
+                "netPos": 1,
+                "netPrice": 6724.75
+            }),
+        ];
 
         assert_eq!(fallback_unrealized_pnl(&positions, &market), Some(75.0));
     }
@@ -664,6 +738,7 @@ mod tests {
             signal_started_at: None,
             signal_context: None,
             cl_ord_id: "midas-1-entry".to_string(),
+            strategy_owned_protection: false,
             order_id: None,
             order_strategy_id: None,
             seen_recorded: false,
@@ -703,6 +778,7 @@ mod tests {
                 signal_started_at: None,
                 signal_context: None,
                 cl_ord_id: "midas-1-strategy".to_string(),
+                strategy_owned_protection: true,
                 order_id: None,
                 order_strategy_id: Some(77),
                 seen_recorded: false,
@@ -767,6 +843,7 @@ mod tests {
                 signal_started_at: Some(time::Instant::now()),
                 signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
                 cl_ord_id: "midas-1-entry".to_string(),
+                strategy_owned_protection: false,
                 order_id: Some(42),
                 order_strategy_id: None,
                 seen_recorded: false,

@@ -467,33 +467,40 @@ impl App {
     }
 
     fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
-        vec![
-            Line::from("Backend order: Native Rust > Lua > Machine Learning."),
-            Line::from(
-                "Native strategies can evaluate on newly closed bars or on the live forming bar after you arm them.",
-            ),
-            Line::from("The native engine targets the selected contract position directly."),
-            Line::from(
-                "Direct reversal is lower latency; Flatten > Confirm > Enter is safer when broker strategy state lags.",
-            ),
-            Line::from("TP, SL, and trailing stop are configured in ticks and synced natively."),
-            Line::from(format!(
-                "Native runtime auto-closes {}m before session close and holds until reopen.",
-                AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
-            )),
-            Line::from("Lua can be loaded from file or typed directly in the TUI."),
-            Line::from("ML remains selection-only for now."),
-            Line::from(""),
-            Line::from("Strategy screen controls:"),
-            Line::from("Up/Down moves focus. Left/Right edits native params or toggles fields."),
-            Line::from(
-                "Enter on Continue arms the selected native strategy from the current visible bar for the chosen timing mode.",
-            ),
-            Line::from(""),
-            Line::from("Lua editor controls:"),
-            Line::from("Normal: h/j/k/l move, i insert, a append, o open line, x delete."),
-            Line::from("Insert: type text, Enter newline, Backspace delete, Esc back to normal."),
-        ]
+        let mut lines = vec![Line::from(
+            "Backend order: Native Rust > Lua > Machine Learning.",
+        )];
+
+        match self.strategy.kind {
+            StrategyKind::Native => lines.extend([
+                Line::from("Native can run on closed bars or live bars."),
+                Line::from("Direct reversal is fastest."),
+                Line::from("Flatten > Confirm > Enter is safer."),
+                Line::from("CloseAll > Enter flattens the contract, then submits the reverse entry without waiting for position sync."),
+                Line::from("TP/SL/trailing stop sync in ticks."),
+                Line::from(format!(
+                    "Auto-close flattens {}m before close.",
+                    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                )),
+                Line::from("Controls: Up/Down move, Left/Right edit."),
+                Line::from("Enter on Continue arms the strategy."),
+            ]),
+            StrategyKind::Lua => lines.extend([
+                Line::from("Lua can load from file or editor."),
+                Line::from("Native stays higher priority than Lua."),
+                Line::from("ML remains selection-only for now."),
+                Line::from("Controls: Up/Down move, Enter loads or arms."),
+                Line::from("Lua normal: h/j/k/l move, i/a/o/x edit."),
+                Line::from("Lua insert: type, Enter newline, Esc exit."),
+            ]),
+            StrategyKind::MachineLearning => lines.extend([
+                Line::from("ML stays selection-only for now."),
+                Line::from("Native and Lua remain higher priority."),
+                Line::from("Controls: Up/Down move, Enter continues."),
+            ]),
+        }
+
+        lines
     }
 
     fn strategy_preview_lines(&self) -> Vec<Line<'static>> {
@@ -624,6 +631,9 @@ impl App {
                 Line::from(
                     "TP/SL are broker-native and keyed from the confirmed broker entry price.",
                 ),
+                Line::from(
+                    "Chart labels TP*/SL* are projected from the native config until broker protection sync lands.",
+                ),
                 Line::from(format!(
                     "Trailing updates follow the configured signal timing: {}.",
                     self.strategy.native_signal_timing.label()
@@ -636,10 +646,7 @@ impl App {
                 )),
                 Line::from(format!(
                     "Selected contract entry: {}",
-                    format_money(
-                        self.selected_snapshot()
-                            .and_then(|snapshot| snapshot.market_entry_price)
-                    )
+                    format_money(self.displayed_trade_levels().entry_price)
                 )),
                 Line::from(format!(
                     "Tick Size: {}",
@@ -734,6 +741,17 @@ impl App {
                 Line::from("Connect and wait for account sync."),
             ];
         };
+        let trade_levels = self.displayed_trade_levels();
+        let tp_label = if trade_levels.take_profit_projected {
+            "TP*"
+        } else {
+            "TP"
+        };
+        let sl_label = if trade_levels.stop_price_projected {
+            "SL*"
+        } else {
+            "SL"
+        };
         let hotkeys = if self.session_kind == SessionKind::Replay {
             format!(
                 "Order {} {} | Keys b/s/c/v [/] 0 ({})",
@@ -778,10 +796,18 @@ impl App {
                 format_quantity(snapshot.market_position_qty),
             )),
             Line::from(format!(
-                "Entry: {}  TP: {}  SL: {}",
-                format_money(snapshot.market_entry_price),
-                format_money(snapshot.selected_contract_take_profit_price),
-                format_money(snapshot.selected_contract_stop_price),
+                "Entry: {}  {tp_label}: {}  {sl_label}: {}",
+                format_money(trade_levels.entry_price.or(snapshot.market_entry_price)),
+                format_money(
+                    trade_levels
+                        .take_profit_price
+                        .or(snapshot.selected_contract_take_profit_price)
+                ),
+                format_money(
+                    trade_levels
+                        .stop_price
+                        .or(snapshot.selected_contract_stop_price)
+                ),
             )),
             Line::from(match &self.market.contract_name {
                 Some(name) => format!("Contract: {name}"),

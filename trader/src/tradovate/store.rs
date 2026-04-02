@@ -305,18 +305,9 @@ impl UserSyncStore {
                     &raw_positions,
                     &["netPos", "netPosition", "qty", "quantity", "netQty"],
                 );
-                let market_position_qty = market.and_then(|market| {
-                    let values = raw_positions
-                        .iter()
-                        .filter(|position| position_matches_market(position, market))
-                        .filter_map(position_qty)
-                        .collect::<Vec<_>>();
-                    if values.is_empty() {
-                        None
-                    } else {
-                        Some(values.iter().sum())
-                    }
-                });
+                let market_position_qty = market
+                    .and_then(|market| best_market_position(raw_positions.iter(), market))
+                    .and_then(position_qty);
                 let market_entry_price =
                     market.and_then(|market| weighted_market_entry_price(&raw_positions, market));
                 let (selected_contract_take_profit_price, selected_contract_stop_price) = market
@@ -358,20 +349,14 @@ impl UserSyncStore {
     }
 
     fn contract_position_qty(&self, account_id: i64, contract: &ContractSuggestion) -> Option<f64> {
-        let values = self
-            .positions
-            .get(&account_id)
-            .into_iter()
-            .flat_map(|positions| positions.values())
-            .filter(|position| position_matches_contract(position, contract))
-            .filter_map(position_qty)
-            .collect::<Vec<_>>();
-
-        if values.is_empty() {
-            None
-        } else {
-            Some(values.iter().sum())
-        }
+        best_contract_position(
+            self.positions
+                .get(&account_id)
+                .into_iter()
+                .flat_map(|positions| positions.values()),
+            contract,
+        )
+        .and_then(position_qty)
     }
 
     fn order_id_by_client_id(&self, account_id: i64, cl_ord_id: &str) -> Option<i64> {
@@ -616,67 +601,87 @@ fn replay_fill_signed_qty(fill: &Value) -> Option<f64> {
 fn fallback_unrealized_pnl(positions: &[Value], market: &MarketSnapshot) -> Option<f64> {
     let last_close = market.bars.last().map(|bar| bar.close)?;
     let value_per_point = market.value_per_point?;
-    let values = positions
-        .iter()
-        .filter(|position| position_matches_market(position, market))
-        .filter_map(|position| {
-            let qty = position_qty(position)?;
-            let entry_price = pick_number(position, &["netPrice", "avgPrice", "averagePrice"])?;
-            Some((last_close - entry_price) * qty * value_per_point)
-        })
-        .collect::<Vec<_>>();
-
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.iter().sum())
-    }
+    let position = best_market_position(positions.iter(), market)?;
+    let qty = position_qty(position)?;
+    let entry_price = position_entry_price(position)?;
+    Some((last_close - entry_price) * qty * value_per_point)
 }
 
 fn weighted_market_entry_price(positions: &[Value], market: &MarketSnapshot) -> Option<f64> {
-    let mut weighted_sum = 0.0;
-    let mut total_qty = 0.0;
-    for position in positions
-        .iter()
-        .filter(|position| position_matches_market(position, market))
-    {
-        let qty = position_qty(position)?.abs();
-        if qty <= f64::EPSILON {
-            continue;
-        }
-        let entry_price = pick_number(position, &["netPrice", "avgPrice", "averagePrice"])?;
-        weighted_sum += entry_price * qty;
-        total_qty += qty;
-    }
-
-    if total_qty <= f64::EPSILON {
-        None
-    } else {
-        Some(weighted_sum / total_qty)
-    }
+    best_market_position(positions.iter(), market).and_then(position_entry_price)
 }
 
-fn position_matches_contract(position: &Value, contract: &ContractSuggestion) -> bool {
-    let contract_id_match = position_contract_id(position) == Some(contract.id);
-    let contract_maturity_match = json_i64(&contract.raw, "contractMaturityId")
+fn best_contract_position<'a>(
+    positions: impl IntoIterator<Item = &'a Value>,
+    contract: &ContractSuggestion,
+) -> Option<&'a Value> {
+    best_position_by_rank(positions, |position| {
+        position_match_rank_for_contract(position, contract)
+    })
+}
+
+fn best_market_position<'a>(
+    positions: impl IntoIterator<Item = &'a Value>,
+    market: &MarketSnapshot,
+) -> Option<&'a Value> {
+    best_position_by_rank(positions, |position| {
+        position_match_rank_for_market(position, market)
+    })
+}
+
+fn best_position_by_rank<'a>(
+    positions: impl IntoIterator<Item = &'a Value>,
+    rank_for_position: impl Fn(&Value) -> Option<u8>,
+) -> Option<&'a Value> {
+    positions
+        .into_iter()
+        .filter_map(|position| {
+            let rank = rank_for_position(position)?;
+            Some((
+                position,
+                (
+                    rank,
+                    has_net_position_qty(position),
+                    position_entry_price(position).is_some(),
+                    extract_entity_id(position).unwrap_or_default(),
+                ),
+            ))
+        })
+        .max_by_key(|(_, rank)| *rank)
+        .map(|(position, _)| position)
+}
+
+fn position_match_rank_for_contract(position: &Value, contract: &ContractSuggestion) -> Option<u8> {
+    if position_contract_id(position) == Some(contract.id) {
+        return Some(3);
+    }
+
+    if json_i64(&contract.raw, "contractMaturityId")
         .zip(position_contract_maturity_id(position))
-        .is_some_and(|(expected, actual)| expected == actual);
-    let symbol_match =
-        position_symbol(position).is_some_and(|symbol| symbol.eq_ignore_ascii_case(&contract.name));
+        .is_some_and(|(expected, actual)| expected == actual)
+    {
+        return Some(2);
+    }
 
-    contract_id_match || contract_maturity_match || symbol_match
+    position_symbol(position)
+        .is_some_and(|symbol| symbol.eq_ignore_ascii_case(&contract.name))
+        .then_some(1)
 }
 
-fn position_matches_market(position: &Value, market: &MarketSnapshot) -> bool {
-    let contract_id_match = market
+fn position_match_rank_for_market(position: &Value, market: &MarketSnapshot) -> Option<u8> {
+    if market
         .contract_id
-        .is_some_and(|contract_id| position_contract_id(position) == Some(contract_id));
-    let symbol_match = market
+        .is_some_and(|contract_id| position_contract_id(position) == Some(contract_id))
+    {
+        return Some(2);
+    }
+
+    market
         .contract_name
         .as_deref()
         .zip(position_symbol(position))
-        .is_some_and(|(expected, actual)| actual.eq_ignore_ascii_case(expected));
-    contract_id_match || symbol_match
+        .is_some_and(|(expected, actual)| actual.eq_ignore_ascii_case(expected))
+        .then_some(1)
 }
 
 fn position_qty(position: &Value) -> Option<f64> {
@@ -693,6 +698,14 @@ fn position_qty(position: &Value) -> Option<f64> {
         }
     });
     Some(raw_qty.abs() * sign)
+}
+
+fn has_net_position_qty(position: &Value) -> bool {
+    pick_number(position, &["netPos", "netPosition", "netQty"]).is_some()
+}
+
+fn position_entry_price(position: &Value) -> Option<f64> {
+    pick_number(position, &["netPrice", "avgPrice", "averagePrice"])
 }
 
 fn position_contract_id(position: &Value) -> Option<i64> {

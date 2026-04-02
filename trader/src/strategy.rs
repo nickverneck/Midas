@@ -97,6 +97,7 @@ impl NativeSignalTiming {
 pub enum NativeReversalMode {
     Direct,
     FlattenConfirmEnter,
+    CloseAllEnter,
 }
 
 impl NativeReversalMode {
@@ -104,13 +105,23 @@ impl NativeReversalMode {
         match self {
             Self::Direct => "Direct",
             Self::FlattenConfirmEnter => "Flatten > Confirm > Enter",
+            Self::CloseAllEnter => "CloseAll > Enter",
         }
     }
 
-    pub fn toggle(self) -> Self {
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Direct => Self::CloseAllEnter,
+            Self::FlattenConfirmEnter => Self::Direct,
+            Self::CloseAllEnter => Self::FlattenConfirmEnter,
+        }
+    }
+
+    pub fn next(self) -> Self {
         match self {
             Self::Direct => Self::FlattenConfirmEnter,
-            Self::FlattenConfirmEnter => Self::Direct,
+            Self::FlattenConfirmEnter => Self::CloseAllEnter,
+            Self::CloseAllEnter => Self::Direct,
         }
     }
 }

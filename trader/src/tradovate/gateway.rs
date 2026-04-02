@@ -29,6 +29,7 @@ struct OrderLatencyTracker {
     signal_started_at: Option<time::Instant>,
     signal_context: Option<String>,
     cl_ord_id: String,
+    strategy_owned_protection: bool,
     order_id: Option<i64>,
     order_strategy_id: Option<i64>,
     seen_recorded: bool,
@@ -89,6 +90,11 @@ enum BrokerCommand {
         request_tx: UnboundedSender<UserSocketCommand>,
         strategy: PendingOrderStrategyTransition,
     },
+    LiquidateThenOrderStrategy {
+        request_tx: UnboundedSender<UserSocketCommand>,
+        liquidation: PendingLiquidation,
+        strategy: PendingOrderStrategyTransition,
+    },
     NativeProtection {
         request_tx: UnboundedSender<UserSocketCommand>,
         sync: PendingProtectionSync,
@@ -131,6 +137,8 @@ struct PendingLiquidation {
     reference_ts_ns: Option<i64>,
     reference_price: Option<f64>,
     target_qty: Option<i32>,
+    interrupt_order_strategy_id: Option<i64>,
+    cancel_order_ids: Vec<i64>,
 }
 
 struct PendingOrderStrategyTransition {
@@ -138,6 +146,7 @@ struct PendingOrderStrategyTransition {
     uuid: String,
     payload: Value,
     interrupt_order_strategy_id: Option<i64>,
+    cancel_order_ids: Vec<i64>,
     order_action: String,
     entry_order_qty: i32,
     target_qty: i32,
@@ -402,7 +411,10 @@ impl ReplayBrokerState {
         if let Some(reason) = order.reason_suffix.as_deref() {
             message.push_str(&format!(" [{reason}]"));
         }
-        message.push_str(&format!(" (order {order_id}) [clOrdId {}]", order.cl_ord_id));
+        message.push_str(&format!(
+            " (order {order_id}) [clOrdId {}]",
+            order.cl_ord_id
+        ));
 
         Ok(vec![
             InternalEvent::BrokerOrderAck(BrokerOrderAck {
@@ -435,7 +447,11 @@ impl ReplayBrokerState {
             account_id: liquidation.account_id,
             contract_id: liquidation.contract_id,
         };
-        let current_qty = self.positions.get(&key).map(|position| position.qty).unwrap_or(0);
+        let current_qty = self
+            .positions
+            .get(&key)
+            .map(|position| position.qty)
+            .unwrap_or(0);
         let order_action = if current_qty >= 0 { "Sell" } else { "Buy" };
         let order_qty = current_qty.abs().max(1);
 
@@ -501,6 +517,54 @@ impl ReplayBrokerState {
             }),
             InternalEvent::UserEntities(envelopes),
         ])
+    }
+
+    fn simulate_liquidation_then_order_strategy(
+        &mut self,
+        liquidation: PendingLiquidation,
+        strategy: PendingOrderStrategyTransition,
+    ) -> std::result::Result<Vec<InternalEvent>, BrokerOrderStrategyFailure> {
+        let mut liquidation_entities = Vec::new();
+        let mut liquidation_message = None;
+        for event in self
+            .simulate_liquidation(liquidation)
+            .map_err(|failure| BrokerOrderStrategyFailure {
+                uuid: strategy.uuid.clone(),
+                message: failure.message,
+                target_qty: strategy.target_qty,
+                stale_interrupt: failure.stale_interrupt,
+            })?
+        {
+            match event {
+                InternalEvent::BrokerOrderAck(ack) => {
+                    liquidation_message = Some(ack.message);
+                }
+                InternalEvent::UserEntities(entities) => liquidation_entities.extend(entities),
+                _ => {}
+            }
+        }
+
+        let mut strategy_entities = Vec::new();
+        let mut strategy_ack = None;
+        for event in self.simulate_order_strategy(strategy)? {
+            match event {
+                InternalEvent::OrderStrategyAck(ack) => strategy_ack = Some(ack),
+                InternalEvent::UserEntities(entities) => strategy_entities.extend(entities),
+                _ => {}
+            }
+        }
+
+        let mut ack = strategy_ack.expect("strategy replay should emit an ack");
+        if let Some(liquidation_message) = liquidation_message {
+            ack.message = format!("{liquidation_message}; {}", ack.message);
+        }
+
+        let mut events = vec![InternalEvent::OrderStrategyAck(ack)];
+        if !liquidation_entities.is_empty() || !strategy_entities.is_empty() {
+            liquidation_entities.extend(strategy_entities);
+            events.push(InternalEvent::UserEntities(liquidation_entities));
+        }
+        Ok(events)
     }
 
     fn simulate_order_strategy(
@@ -688,7 +752,8 @@ impl ReplayBrokerState {
                 }),
             });
         }
-        self.order_strategies.insert(order_strategy_id, strategy_state);
+        self.order_strategies
+            .insert(order_strategy_id, strategy_state);
         envelopes.extend(self.update_position(
             strategy.key,
             &strategy.contract_name,
@@ -706,7 +771,10 @@ impl ReplayBrokerState {
         if let Some(reason) = strategy.reason_suffix.as_deref() {
             message.push_str(&format!(" [{reason}]"));
         }
-        message.push_str(&format!(" (strategy {order_strategy_id}) [uuid {}]", strategy.uuid));
+        message.push_str(&format!(
+            " (strategy {order_strategy_id}) [uuid {}]",
+            strategy.uuid
+        ));
 
         Ok(vec![
             InternalEvent::OrderStrategyAck(BrokerOrderStrategyAck {
@@ -771,7 +839,8 @@ impl ReplayBrokerState {
                 match request {
                     ProtectionPlaceRequest::TakeProfit { payload } => {
                         let order_id = self.next_order_id();
-                        let entity = working_order_entity(order_id, sync.key.contract_id, &payload, None);
+                        let entity =
+                            working_order_entity(order_id, sync.key.contract_id, &payload, None);
                         self.active_orders.insert(
                             order_id,
                             SimActiveOrder {
@@ -791,7 +860,8 @@ impl ReplayBrokerState {
                     }
                     ProtectionPlaceRequest::StopLoss { payload } => {
                         let order_id = self.next_order_id();
-                        let entity = working_order_entity(order_id, sync.key.contract_id, &payload, None);
+                        let entity =
+                            working_order_entity(order_id, sync.key.contract_id, &payload, None);
                         self.active_orders.insert(
                             order_id,
                             SimActiveOrder {
@@ -940,7 +1010,11 @@ impl ReplayBrokerState {
     }
 
     fn fill_replay_order(&mut self, order_id: i64, bar: &Bar) -> Vec<EntityEnvelope> {
-        let Some(order) = self.active_orders.get(&order_id).map(|active| active.order.clone()) else {
+        let Some(order) = self
+            .active_orders
+            .get(&order_id)
+            .map(|active| active.order.clone())
+        else {
             return Vec::new();
         };
         let Some(key) = replay_order_key(&order) else {
@@ -1245,11 +1319,7 @@ impl ReplayBrokerState {
 }
 
 fn exit_action_for_target(target_qty: i32) -> &'static str {
-    if target_qty > 0 {
-        "Sell"
-    } else {
-        "Buy"
-    }
+    if target_qty > 0 { "Sell" } else { "Buy" }
 }
 
 fn synthetic_ts_ns(reference_ts_ns: Option<i64>) -> i64 {
@@ -1393,6 +1463,41 @@ async fn broker_gateway_worker(
                         }
                         Err(failure) => {
                             let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+                        }
+                    }
+                }
+            }
+            BrokerCommand::LiquidateThenOrderStrategy {
+                request_tx,
+                liquidation,
+                strategy,
+            } => {
+                if liquidation.simulate {
+                    match replay_state
+                        .simulate_liquidation_then_order_strategy(liquidation, strategy)
+                    {
+                        Ok(events) => {
+                            for event in events {
+                                let _ = internal_tx.send(event);
+                            }
+                        }
+                        Err(failure) => {
+                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                        }
+                    }
+                } else {
+                    match submit_liquidation_then_order_strategy_via_gateway(
+                        &request_tx,
+                        liquidation,
+                        strategy,
+                    )
+                    .await
+                    {
+                        Ok(ack) => {
+                            let _ = internal_tx.send(InternalEvent::OrderStrategyAck(ack));
+                        }
+                        Err(failure) => {
+                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
                         }
                     }
                 }
@@ -1603,18 +1708,49 @@ async fn submit_liquidation_via_gateway(
     request_tx: &UnboundedSender<UserSocketCommand>,
     liquidation: PendingLiquidation,
 ) -> Result<BrokerOrderAck, BrokerOrderFailure> {
-    let started_at = time::Instant::now();
-    let parsed = match request_order_json(request_tx, "order/liquidateposition", &liquidation.payload).await {
-        Ok(parsed) => parsed,
-        Err(err) => {
+    if let Some(order_strategy_id) = liquidation.interrupt_order_strategy_id {
+        if let Err(err) = interrupt_order_strategy_by_id(request_tx, order_strategy_id).await {
+            let stale_interrupt = interrupt_error_is_stale(&err);
             return Err(BrokerOrderFailure {
                 cl_ord_id: liquidation.request_id,
-                message: err.to_string(),
+                message: if stale_interrupt {
+                    format!(
+                        "strategy {order_strategy_id} was already inactive before close-all"
+                    )
+                } else {
+                    format!("failed to interrupt strategy {order_strategy_id}: {err}")
+                },
+                target_qty: liquidation.target_qty,
+                stale_interrupt,
+            });
+        }
+    }
+
+    for order_id in &liquidation.cancel_order_ids {
+        if let Err(err) = cancel_order_by_id(request_tx, *order_id).await {
+            return Err(BrokerOrderFailure {
+                cl_ord_id: liquidation.request_id.clone(),
+                message: format!("failed to clear strategy protection before close-all: {err}"),
                 target_qty: liquidation.target_qty,
                 stale_interrupt: false,
             });
         }
-    };
+    }
+
+    let started_at = time::Instant::now();
+    let parsed =
+        match request_order_json(request_tx, "order/liquidateposition", &liquidation.payload).await
+        {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return Err(BrokerOrderFailure {
+                    cl_ord_id: liquidation.request_id,
+                    message: err.to_string(),
+                    target_qty: liquidation.target_qty,
+                    stale_interrupt: false,
+                });
+            }
+        };
     let submit_rtt_ms = started_at.elapsed().as_millis() as u64;
     let order_id = json_i64(&parsed, "orderId").or_else(|| json_i64(&parsed, "id"));
     let mut message = format!(
@@ -1630,6 +1766,26 @@ async fn submit_liquidation_via_gateway(
         submit_rtt_ms,
         message,
     })
+}
+
+async fn submit_liquidation_then_order_strategy_via_gateway(
+    request_tx: &UnboundedSender<UserSocketCommand>,
+    liquidation: PendingLiquidation,
+    strategy: PendingOrderStrategyTransition,
+) -> Result<BrokerOrderStrategyAck, BrokerOrderStrategyFailure> {
+    let strategy_uuid = strategy.uuid.clone();
+    let target_qty = strategy.target_qty;
+    let liquidation_ack = submit_liquidation_via_gateway(request_tx, liquidation)
+        .await
+        .map_err(|failure| BrokerOrderStrategyFailure {
+            uuid: strategy_uuid,
+            message: format!("failed to submit close-all before immediate reversal: {}", failure.message),
+            target_qty,
+            stale_interrupt: failure.stale_interrupt,
+        })?;
+    let mut strategy_ack = submit_order_strategy_via_gateway(request_tx, strategy).await?;
+    strategy_ack.message = format!("{}; {}", liquidation_ack.message, strategy_ack.message);
+    Ok(strategy_ack)
 }
 
 async fn submit_order_strategy_via_gateway(
@@ -1654,8 +1810,25 @@ async fn submit_order_strategy_via_gateway(
         }
     }
 
+    for order_id in &strategy.cancel_order_ids {
+        if let Err(err) = cancel_order_by_id(request_tx, *order_id).await {
+            return Err(BrokerOrderStrategyFailure {
+                uuid: strategy.uuid,
+                message: format!("failed to clear strategy protection: {err}"),
+                target_qty: strategy.target_qty,
+                stale_interrupt: false,
+            });
+        }
+    }
+
     let started_at = time::Instant::now();
-    let parsed = match request_order_json(request_tx, "orderStrategy/startorderstrategy", &strategy.payload).await {
+    let parsed = match request_order_json(
+        request_tx,
+        "orderStrategy/startorderstrategy",
+        &strategy.payload,
+    )
+    .await
+    {
         Ok(parsed) => parsed,
         Err(err) => {
             return Err(BrokerOrderStrategyFailure {
