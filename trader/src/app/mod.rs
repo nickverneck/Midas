@@ -154,7 +154,7 @@ struct NumericInputState {
 include!("core.rs");
 include!("input.rs");
 mod render;
-include!("views.rs");
+mod views;
 include!("state.rs");
 include!("form.rs");
 include!("helpers.rs");

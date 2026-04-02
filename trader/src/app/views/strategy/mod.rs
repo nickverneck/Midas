@@ -1,0 +1,2 @@
+mod detail;
+mod setup;
