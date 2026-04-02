@@ -43,6 +43,7 @@ mod orders;
 mod profiler;
 mod protocol;
 mod replay;
+mod service;
 
 use self::protocol::*;
 use execution::*;
@@ -56,9 +57,9 @@ use orders::{
     sync_native_protection, sync_native_protection_target,
 };
 pub use profiler::{SwipeProfileOptions, run_swipe_profile};
+pub use self::service::service_loop;
 
 include!("types.rs");
-include!("service.rs");
 include!("session.rs");
 include!("auth.rs");
 include!("latency.rs");
