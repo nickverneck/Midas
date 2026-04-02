@@ -155,7 +155,9 @@ impl AttemptBook {
     }
 
     pub(super) fn report_clone(&self, index: usize) -> Option<SwipeAttemptReport> {
-        self.attempts.get(index).map(|attempt| attempt.report.clone())
+        self.attempts
+            .get(index)
+            .map(|attempt| attempt.report.clone())
     }
 
     pub(super) fn has_submit_for_reason(&self, reason_tag: &str) -> bool {

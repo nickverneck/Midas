@@ -348,10 +348,16 @@ impl ProfileHarness {
         let started = Instant::now();
         loop {
             let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-                bail!("timed out after {}ms waiting for broker event", timeout.as_millis());
+                bail!(
+                    "timed out after {}ms waiting for broker event",
+                    timeout.as_millis()
+                );
             };
             let Some(event) = self.next_event(remaining, attempts).await? else {
-                bail!("timed out after {}ms waiting for broker event", timeout.as_millis());
+                bail!(
+                    "timed out after {}ms waiting for broker event",
+                    timeout.as_millis()
+                );
             };
             if predicate(&self.state, &event) {
                 return Ok(event);

@@ -9,17 +9,16 @@ mod workflow;
 
 use analysis::{profile_output_dir, select_profile_account, select_profile_contract};
 use attempts::AttemptBook;
-use harness::{ProfileHarness, ProfileRestInspector};
 #[cfg(test)]
 use harness::merge_probe_order_detail;
+use harness::{ProfileHarness, ProfileRestInspector};
 pub use report::SwipeProfileOptions;
 use report::{
     SwipeProfileReport, SwipeProfileReportOptions, SwipeScenario, SwipeScenarioReport,
     render_text_report,
 };
 use workflow::{
-    build_profile_execution_config, flatten_selected_contract, open_bootstrap_long,
-    run_delay_sweep,
+    build_profile_execution_config, flatten_selected_contract, open_bootstrap_long, run_delay_sweep,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -112,13 +111,17 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
             SwipeScenario::CloseAllEnter,
         ] {
             let execution_config = build_profile_execution_config(&options, scenario);
-            harness.send(ServiceCommand::SetExecutionStrategyConfig(execution_config.clone()))?;
+            harness.send(ServiceCommand::SetExecutionStrategyConfig(
+                execution_config.clone(),
+            ))?;
             harness
                 .wait_for(EXECUTION_CONFIG_TIMEOUT, &mut attempts, |state, _| {
                     state.execution_state().config == execution_config
                 })
                 .await
-                .with_context(|| format!("waiting for execution config sync for {}", scenario.slug()))?;
+                .with_context(|| {
+                    format!("waiting for execution config sync for {}", scenario.slug())
+                })?;
             harness.send(ServiceCommand::ArmExecutionStrategy)?;
             harness
                 .wait_for(EXECUTION_ARM_TIMEOUT, &mut attempts, |state, _| {
@@ -147,14 +150,9 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
 
             let mut delay_reports = Vec::new();
             for delay_ms in &options.delays_ms {
-                let delay_report = run_delay_sweep(
-                    &mut harness,
-                    &mut attempts,
-                    scenario,
-                    *delay_ms,
-                    &options,
-                )
-                .await?;
+                let delay_report =
+                    run_delay_sweep(&mut harness, &mut attempts, scenario, *delay_ms, &options)
+                        .await?;
                 delay_reports.push(delay_report);
                 flatten_selected_contract(
                     &mut harness,
@@ -242,7 +240,10 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
 
     println!("Swipe profile complete.");
     println!("Account: {} ({})", report.account_name, report.account_id);
-    println!("Contract: {} ({})", report.contract_name, report.contract_id);
+    println!(
+        "Contract: {} ({})",
+        report.contract_name, report.contract_id
+    );
     println!("Event log: {}", raw_log_path.display());
     println!("JSON report: {}", json_report_path.display());
     println!("Text report: {}", text_report_path.display());

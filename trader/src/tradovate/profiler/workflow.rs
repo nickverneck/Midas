@@ -3,9 +3,7 @@ use super::analysis::{
 };
 use super::attempts::{AttemptBook, AttemptDispatchProgress};
 use super::harness::ProfileHarness;
-use super::report::{
-    SwipeBootstrapReport, SwipeDelayReport, SwipeProfileOptions, SwipeScenario,
-};
+use super::report::{SwipeBootstrapReport, SwipeDelayReport, SwipeProfileOptions, SwipeScenario};
 use super::*;
 use std::time::Instant;
 
@@ -122,7 +120,11 @@ pub(super) async fn run_delay_sweep(
         final_expected_qty,
         options.order_qty.abs(),
         Duration::from_millis(options.settle_timeout_ms),
-        &format!("swipe-profile:{}:delay-{}ms:final", scenario.slug(), delay_ms),
+        &format!(
+            "swipe-profile:{}:delay-{}ms:final",
+            scenario.slug(),
+            delay_ms
+        ),
     )
     .await?;
 
@@ -152,7 +154,8 @@ pub(super) async fn flatten_selected_contract(
     let pre_probe = harness
         .request_probe(&format!("{reason_tag}:pre"), attempts)
         .await?;
-    if pre_probe.execution_state.market_position_qty == 0 && !has_any_visible_broker_path(&pre_probe)
+    if pre_probe.execution_state.market_position_qty == 0
+        && !has_any_visible_broker_path(&pre_probe)
     {
         return Ok(());
     }
@@ -207,7 +210,12 @@ async fn wait_for_settled_state(
     expected_abs_qty: i32,
     timeout: Duration,
     probe_prefix: &str,
-) -> Result<(bool, Option<u64>, Option<ExecutionProbeSnapshot>, Vec<String>)> {
+) -> Result<(
+    bool,
+    Option<u64>,
+    Option<ExecutionProbeSnapshot>,
+    Vec<String>,
+)> {
     let started = Instant::now();
     let mut probe_counter = 0usize;
     let mut last_probe: Option<ExecutionProbeSnapshot>;

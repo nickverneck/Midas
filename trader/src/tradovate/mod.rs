@@ -41,8 +41,10 @@ mod execution;
 mod gateway;
 mod orders;
 mod profiler;
+mod protocol;
 mod replay;
 
+use self::protocol::*;
 use execution::*;
 use gateway::*;
 use orders::{
@@ -62,7 +64,6 @@ include!("auth.rs");
 include!("latency.rs");
 include!("market.rs");
 include!("store.rs");
-include!("protocol.rs");
 
 fn tradovate_capabilities() -> BrokerCapabilities {
     BrokerCapabilities {

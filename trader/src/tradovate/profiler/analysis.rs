@@ -64,10 +64,12 @@ pub(super) fn profile_output_dir(requested: Option<&PathBuf>) -> Result<PathBuf>
 }
 
 fn protective_orders(probe: &ExecutionProbeSnapshot) -> Vec<&ExecutionProbeOrder> {
-    probe.selected_working_orders
+    probe
+        .selected_working_orders
         .iter()
         .filter(|order| {
-            order.order_type
+            order
+                .order_type
                 .as_deref()
                 .map(|order_type| {
                     matches!(
@@ -122,27 +124,21 @@ pub(super) fn probe_is_settled(
     }
 
     let protective_orders = protective_orders(probe);
-    let has_matching_visible_protection = probe
-        .managed_protection
-        .as_ref()
-        .is_some_and(|protection| {
+    let has_matching_visible_protection =
+        probe.managed_protection.as_ref().is_some_and(|protection| {
             protection.signed_qty.abs() == expected_abs_qty
                 && protection.take_profit_price.is_some()
                 && protection.stop_price.is_some()
-        })
-        || (protective_orders.len() >= 2
+        }) || (protective_orders.len() >= 2
             && protective_orders
                 .iter()
                 .all(|order| order.order_qty == Some(expected_abs_qty)))
-        || has_matching_strategy_owned_protection(probe, expected_abs_qty);
+            || has_matching_strategy_owned_protection(probe, expected_abs_qty);
 
     has_matching_visible_protection
 }
 
-pub(super) fn probe_findings(
-    probe: &ExecutionProbeSnapshot,
-    expected_abs_qty: i32,
-) -> Vec<String> {
+pub(super) fn probe_findings(probe: &ExecutionProbeSnapshot, expected_abs_qty: i32) -> Vec<String> {
     let mut findings = Vec::new();
     let actual_qty = probe.execution_state.market_position_qty;
     if actual_qty.abs() > expected_abs_qty {
@@ -206,7 +202,10 @@ pub(super) fn probe_findings(
 pub(super) fn summarize_delay_reports(attempts: &[SwipeAttemptReport]) -> SwipeDelaySummary {
     SwipeDelaySummary {
         attempts_total: attempts.len(),
-        submit_observed: attempts.iter().filter(|attempt| attempt.submit.is_some()).count(),
+        submit_observed: attempts
+            .iter()
+            .filter(|attempt| attempt.submit.is_some())
+            .count(),
         fill_observed: attempts
             .iter()
             .filter(|attempt| {
@@ -244,31 +243,27 @@ pub(super) fn summarize_delay_reports(attempts: &[SwipeAttemptReport]) -> SwipeD
                     .any(|finding| finding.contains("exceeds configured qty"))
             })
             .count(),
-        avg_submit_rtt_ms: avg_option_u64(
-            attempts.iter().filter_map(|attempt| {
-                attempt
-                    .submit
-                    .as_ref()
-                    .and_then(|submit| submit.broker_submit_ms)
-            }),
-        ),
+        avg_submit_rtt_ms: avg_option_u64(attempts.iter().filter_map(|attempt| {
+            attempt
+                .submit
+                .as_ref()
+                .and_then(|submit| submit.broker_submit_ms)
+        })),
         avg_seen_ms: avg_option_u64(
-            attempts.iter().filter_map(|attempt| {
-                attempt.submit.as_ref().and_then(|submit| submit.seen_ms)
-            }),
+            attempts
+                .iter()
+                .filter_map(|attempt| attempt.submit.as_ref().and_then(|submit| submit.seen_ms)),
         ),
-        avg_exec_report_ms: avg_option_u64(
-            attempts.iter().filter_map(|attempt| {
-                attempt
-                    .submit
-                    .as_ref()
-                    .and_then(|submit| submit.exec_report_ms)
-            }),
-        ),
+        avg_exec_report_ms: avg_option_u64(attempts.iter().filter_map(|attempt| {
+            attempt
+                .submit
+                .as_ref()
+                .and_then(|submit| submit.exec_report_ms)
+        })),
         avg_fill_ms: avg_option_u64(
-            attempts.iter().filter_map(|attempt| {
-                attempt.submit.as_ref().and_then(|submit| submit.fill_ms)
-            }),
+            attempts
+                .iter()
+                .filter_map(|attempt| attempt.submit.as_ref().and_then(|submit| submit.fill_ms)),
         ),
     }
 }
