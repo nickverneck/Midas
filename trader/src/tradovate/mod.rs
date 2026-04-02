@@ -38,10 +38,12 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 mod execution;
+mod gateway;
 mod orders;
 mod replay;
 
 use execution::*;
+use gateway::*;
 use orders::{
     MarketOrderDispatchOutcome, cancel_order_by_id, cancel_orders_by_id,
     collect_live_protection_orders, dispatch_manual_order,
@@ -52,7 +54,6 @@ use orders::{
 };
 
 include!("types.rs");
-include!("gateway.rs");
 include!("service.rs");
 include!("session.rs");
 include!("auth.rs");
