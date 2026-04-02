@@ -40,6 +40,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 mod execution;
 mod gateway;
 mod orders;
+mod profiler;
 mod replay;
 
 use execution::*;
@@ -52,6 +53,7 @@ use orders::{
     refresh_managed_protection_order_ids, request_order_json, selected_strategy_key,
     sync_native_protection, sync_native_protection_target,
 };
+pub use profiler::{SwipeProfileOptions, run_swipe_profile};
 
 include!("types.rs");
 include!("service.rs");
@@ -61,7 +63,6 @@ include!("latency.rs");
 include!("market.rs");
 include!("store.rs");
 include!("protocol.rs");
-include!("profiler.rs");
 
 fn tradovate_capabilities() -> BrokerCapabilities {
     BrokerCapabilities {
