@@ -37,7 +37,17 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+mod orders;
 mod replay;
+
+use orders::{
+    MarketOrderDispatchOutcome, cancel_order_by_id, cancel_orders_by_id,
+    collect_live_protection_orders, dispatch_manual_order,
+    dispatch_profile_legacy_order_strategy_target, dispatch_target_position_order,
+    interrupt_order_strategy_by_id, native_order_strategy_enabled, recover_live_protection_order,
+    refresh_managed_protection_order_ids, request_order_json, selected_strategy_key,
+    sync_native_protection, sync_native_protection_target,
+};
 
 include!("types.rs");
 include!("gateway.rs");
@@ -45,7 +55,6 @@ include!("execution.rs");
 include!("service.rs");
 include!("session.rs");
 include!("auth.rs");
-include!("orders.rs");
 include!("latency.rs");
 include!("market.rs");
 include!("store.rs");
