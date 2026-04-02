@@ -1,7 +1,5 @@
 use super::debug::{
-    debug_signal_latency_suffix,
-    emit_debug_logs_from_latency_delta,
-    format_debug_latency_ms,
+    debug_signal_latency_suffix, emit_debug_logs_from_latency_delta, format_debug_latency_ms,
 };
 use super::*;
 
@@ -117,7 +115,10 @@ fn handle_market_update(
         let session = state.session.as_mut().expect("checked session above");
         let closed_bar_advanced = apply_market_update(&mut session.market, update);
         maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
-        (display_market_snapshot(&session.market), closed_bar_advanced)
+        (
+            display_market_snapshot(&session.market),
+            closed_bar_advanced,
+        )
     };
     if closed_bar_advanced {
         request_snapshot_refresh(state, &internal_tx);

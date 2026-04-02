@@ -5,11 +5,7 @@ mod debug;
 mod internal;
 mod maintenance;
 
-use self::{
-    commands::handle_command,
-    internal::handle_internal,
-    maintenance::maintain_session,
-};
+use self::{commands::handle_command, internal::handle_internal, maintenance::maintain_session};
 
 pub async fn service_loop(
     mut cmd_rx: UnboundedReceiver<ServiceCommand>,

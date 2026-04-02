@@ -101,7 +101,10 @@ async fn connect_live_session(
     let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
     let _ = event_tx.send(ServiceEvent::Latency(state.latency));
 
-    let account_ids = accounts.iter().map(|account| account.id).collect::<Vec<_>>();
+    let account_ids = accounts
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
     let (request_tx, user_task) = spawn_user_sync_task(
         cfg.clone(),
         tokens.clone(),
@@ -232,10 +235,7 @@ async fn enter_replay_mode(
     Ok(())
 }
 
-fn replay_state(
-    state: &ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
-) -> Result<()> {
+fn replay_state(state: &ServiceState, event_tx: &UnboundedSender<ServiceEvent>) -> Result<()> {
     let Some(session) = state.session.as_ref() else {
         let _ = event_tx.send(ServiceEvent::Disconnected);
         return Ok(());

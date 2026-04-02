@@ -46,6 +46,7 @@ mod replay;
 mod service;
 
 use self::protocol::*;
+pub use self::service::service_loop;
 use execution::*;
 use gateway::*;
 use orders::{
@@ -57,7 +58,6 @@ use orders::{
     sync_native_protection, sync_native_protection_target,
 };
 pub use profiler::{SwipeProfileOptions, run_swipe_profile};
-pub use self::service::service_loop;
 
 include!("types.rs");
 include!("session.rs");
