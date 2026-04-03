@@ -1,30 +1,41 @@
 <script lang="ts">
-	import * as Card from "$lib/components/ui/card";
-	import { Button } from "$lib/components/ui/button";
-	import { Input } from "$lib/components/ui/input";
-	import { Label } from "$lib/components/ui/label";
-	import { ScrollArea } from "$lib/components/ui/scroll-area";
-	import { Badge } from "$lib/components/ui/badge";
-	import * as Tabs from "$lib/components/ui/tabs";
-	import GaChart from "$lib/components/GaChart.svelte";
+	import {
+		defaultStepBars,
+		defaultWindowBars,
+		futuresPresets
+	} from "./constants";
+	import TrainConsoleCard from "./_components/TrainConsoleCard.svelte";
+	import TrainDiagnosticsCard from "./_components/TrainDiagnosticsCard.svelte";
+	import TrainFileBrowserModal from "./_components/TrainFileBrowserModal.svelte";
+	import TrainFitnessCard from "./_components/TrainFitnessCard.svelte";
+	import TrainPageHeader from "./_components/TrainPageHeader.svelte";
+	import TrainSidebar from "./_components/TrainSidebar.svelte";
+	import type {
+		BuildProfile,
+		ConsoleLine,
+		DataMode,
+		FileEntry,
+		FilePickerTarget,
+		FitnessPoint,
+		FuturesPresetKey,
+		GaParams,
+		MlBackend,
+		ParquetKey,
+		RlAlgorithm,
+		RlParams,
+		StartChoice,
+		TrainMode
+	} from "./types";
 
-	type TrainMode = 'ga' | 'rl';
-	type RlAlgorithm = 'ppo' | 'grpo';
-	type MlBackend = 'libtorch' | 'burn' | 'candle' | 'mlx';
-	type BuildProfile = 'debug' | 'release';
-	type ConsoleLine = { type: string; text: string };
-	type DataMode = 'full' | 'windowed';
-	type StartChoice = 'new' | 'resume';
-
-	let trainMode = $state<TrainMode>('ga');
-	let rlAlgorithm = $state<RlAlgorithm>('ppo');
+	let trainMode = $state<TrainMode>("ga");
+	let rlAlgorithm = $state<RlAlgorithm>("ppo");
 	let consoleOutput = $state<ConsoleLine[]>([]);
 	let training = $state(false);
 	let paramsCollapsed = $state(false);
 	let startChoice = $state<StartChoice | null>(null);
-	let checkpointPath = $state('');
-	let gaDataMode = $state<DataMode>('windowed');
-	let rlDataMode = $state<DataMode>('windowed');
+	let checkpointPath = $state("");
+	let gaDataMode = $state<DataMode>("windowed");
+	let rlDataMode = $state<DataMode>("windowed");
 	let abortController: AbortController | null = null;
 	let fitnessByGen = $state(new Map<number, number>());
 	let logOffset = $state(0);
@@ -40,11 +51,9 @@
 	let diagnosticsError = $state<string | null>(null);
 	let diagnosticsLoading = $state(false);
 	let diagnosticsEnv = $state<Record<string, string | null> | null>(null);
-	let buildProfile = $state<BuildProfile>('debug');
-	const defaultWindowBars = 7 * 24 * 60;
-	const defaultStepBars = 128;
-	
-	let gaParams = $state({
+	let buildProfile = $state<BuildProfile>("debug");
+
+	let gaParams = $state<GaParams>({
 		backend: "libtorch",
 		outdir: "runs_ga",
 		"train-parquet": "data/train",
@@ -92,7 +101,7 @@
 		"checkpoint-every": 1
 	});
 
-	let rlParams = $state({
+	let rlParams = $state<RlParams>({
 		algorithm: "ppo",
 		backend: "libtorch",
 		outdir: "runs_rl",
@@ -136,13 +145,6 @@
 		"checkpoint-every": 1
 	});
 
-	type ParquetKey = "train-parquet" | "val-parquet" | "test-parquet";
-	type FuturesPresetKey = "mes-micro" | "es-mini";
-	type FileEntry = { name: string; path: string; kind: "dir" | "file" };
-	type FilePickerTarget =
-		| { kind: "parquet"; mode: TrainMode; key: ParquetKey }
-		| { kind: "checkpoint"; mode: TrainMode };
-
 	let filePickerTarget: FilePickerTarget | null = null;
 	let fileBrowserOpen = $state(false);
 	let fileBrowserDir = $state("");
@@ -159,24 +161,6 @@
 			gaParams[key] = value;
 		} else {
 			rlParams[key] = value;
-		}
-	};
-
-	const futuresPresets: Record<
-		FuturesPresetKey,
-		{ label: string; marginPerContract: number; contractMultiplier: number; note: string }
-	> = {
-		"mes-micro": {
-			label: "MES Micro",
-			marginPerContract: 50,
-			contractMultiplier: 5,
-			note: "NinjaTrader MES intraday"
-		},
-		"es-mini": {
-			label: "ES Mini",
-			marginPerContract: 500,
-			contractMultiplier: 50,
-			note: "NinjaTrader ES intraday"
 		}
 	};
 
@@ -205,15 +189,15 @@
 		diagnosticsError = null;
 		diagnosticsEnv = null;
 		try {
-			const response = await fetch('/api/diagnostics');
+			const response = await fetch("/api/diagnostics");
 			const data = await response.json();
 			if (!response.ok || !data.ok) {
-				diagnosticsOutput = (data.stdout || data.output || '').trim();
-				diagnosticsError = (data.stderr || data.error || 'Diagnostics failed').trim();
+				diagnosticsOutput = (data.stdout || data.output || "").trim();
+				diagnosticsError = (data.stderr || data.error || "Diagnostics failed").trim();
 				diagnosticsEnv = data.env ?? null;
 				return;
 			}
-			diagnosticsOutput = (data.output || '').trim();
+			diagnosticsOutput = (data.output || "").trim();
 			diagnosticsEnv = data.env ?? null;
 		} catch (err) {
 			diagnosticsError = err instanceof Error ? err.message : String(err);
@@ -321,41 +305,42 @@
 	};
 
 	const toNumber = (value: unknown): number | null => {
-		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-		if (typeof value === 'string' && value.trim() !== '') {
+		if (typeof value === "number") return Number.isFinite(value) ? value : null;
+		if (typeof value === "string" && value.trim() !== "") {
 			const parsed = Number(value);
 			return Number.isFinite(parsed) ? parsed : null;
 		}
 		return null;
 	};
+
 	const trimmedCheckpoint = $derived.by(() => checkpointPath.trim());
 	const canStartTraining = $derived.by(() => {
 		if (!startChoice) return false;
-		if (startChoice === 'resume') return trimmedCheckpoint.length > 0;
+		if (startChoice === "resume") return trimmedCheckpoint.length > 0;
 		return true;
 	});
 	const runLabel = $derived.by(() => {
-		if (training) return 'Stop Training';
-		if (startChoice === 'resume') {
-			return trainMode === 'ga' ? 'Resume GA Training' : 'Resume RL Training';
+		if (training) return "Stop Training";
+		if (startChoice === "resume") {
+			return trainMode === "ga" ? "Resume GA Training" : "Resume RL Training";
 		}
-		if (startChoice === 'new') {
-			return trainMode === 'ga' ? 'Start GA Training' : 'Start RL Training';
+		if (startChoice === "new") {
+			return trainMode === "ga" ? "Start GA Training" : "Start RL Training";
 		}
-		return 'Start Training';
+		return "Start Training";
 	});
 	const runTitle = $derived.by(() => {
-		if (training) return 'Stop Training';
-		if (startChoice === 'resume') return 'Resume Training';
-		if (startChoice === 'new') return 'Start Training';
-		return 'Start Training';
+		if (training) return "Stop Training";
+		if (startChoice === "resume") return "Resume Training";
+		if (startChoice === "new") return "Start Training";
+		return "Start Training";
 	});
-	const collapsedLabel = $derived.by(() => (training ? 'Stop' : 'Setup'));
-	const collapsedTitle = $derived.by(() => (training ? 'Stop Training' : 'Open Setup'));
-	const logKey = $derived.by(() => (trainMode === 'rl' ? 'epoch' : 'gen'));
-	const logLabel = $derived.by(() => (trainMode === 'rl' ? 'Epoch' : 'Gen'));
-	const logType = $derived.by(() => (trainMode === 'rl' ? 'rl' : 'ga'));
-	const fitnessSeries = $derived.by(() =>
+	const collapsedLabel = $derived.by(() => (training ? "Stop" : "Setup"));
+	const collapsedTitle = $derived.by(() => (training ? "Stop Training" : "Open Setup"));
+	const logKey = $derived.by(() => (trainMode === "rl" ? "epoch" : "gen"));
+	const logLabel = $derived.by(() => (trainMode === "rl" ? "Epoch" : "Gen"));
+	const logType = $derived.by(() => (trainMode === "rl" ? "rl" : "ga"));
+	const fitnessSeries = $derived.by<FitnessPoint[]>(() =>
 		Array.from(fitnessByGen.entries())
 			.sort(([a], [b]) => a - b)
 			.map(([gen, fitness]) => ({ gen, fitness }))
@@ -364,21 +349,25 @@
 		labels: fitnessSeries.map((point) => `${logLabel} ${point.gen}`),
 		datasets: [
 			{
-				label: 'Best Fitness',
+				label: "Best Fitness",
 				data: fitnessSeries.map((point) => point.fitness),
-				borderColor: 'rgb(59, 130, 246)',
-				backgroundColor: 'rgba(59, 130, 246, 0.35)',
+				borderColor: "rgb(59, 130, 246)",
+				backgroundColor: "rgba(59, 130, 246, 0.35)",
 				tension: 0.2,
 				fill: false
 			}
 		]
 	}));
+	const fileBrowserEmptyMessage = $derived.by(() =>
+		fileBrowserExtensions.includes("parquet") ? "No parquet files found here." : "No matching files found here."
+	);
+
 	const fitnessChartOptions = {
 		scales: {
 			y: {
 				title: {
 					display: true,
-					text: 'Fitness'
+					text: "Fitness"
 				}
 			}
 		}
@@ -396,7 +385,7 @@
 
 	const updateFitnessFromRows = (rows: Array<Record<string, unknown>>) => {
 		for (const row of rows) {
-			if (!row || typeof row !== 'object') continue;
+			if (!row || typeof row !== "object") continue;
 			const gen = toNumber(row[logKey]);
 			const fitness = toNumber(row.fitness);
 			if (gen !== null && fitness !== null) {
@@ -425,7 +414,8 @@
 		if (!res.ok) throw new Error(`Log fetch failed (${res.status})`);
 		const payload = await res.json();
 		const rows = Array.isArray(payload.data) ? payload.data : [];
-		const nextOffset = typeof payload.nextOffset === 'number' ? payload.nextOffset : offset + rows.length;
+		const nextOffset =
+			typeof payload.nextOffset === "number" ? payload.nextOffset : offset + rows.length;
 		const done = Boolean(payload.done);
 		return {
 			rows: rows as Array<Record<string, unknown>>,
@@ -457,27 +447,6 @@
 		}
 	};
 
-	const loadAllLogs = async (dir: string) => {
-		let offset = 0;
-		let done = false;
-		let emptyReads = 0;
-		while (!done && emptyReads < 20) {
-			const payload = await fetchLogPayload(dir, offset);
-			if (payload.rows.length > 0) {
-				updateFitnessFromRows(payload.rows);
-				offset = payload.nextOffset;
-				emptyReads = 0;
-			} else {
-				emptyReads += 1;
-			}
-			done = payload.done;
-			if (!done) {
-				await sleep(200);
-			}
-		}
-		logOffset = offset;
-	};
-
 	const rebuildFitnessFromLogs = async (dir: string) => {
 		fitnessByGen = new Map();
 		logOffset = 0;
@@ -490,7 +459,7 @@
 			updateFitnessFromRows(rows);
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
-			consoleOutput = [...consoleOutput, { type: 'error', text: message }];
+			consoleOutput = [...consoleOutput, { type: "error", text: message }];
 		}
 	};
 
@@ -502,14 +471,11 @@
 				updateFitnessFromRows(rows);
 				logPollDelay = logPollInterval;
 			} else {
-				logPollDelay = Math.min(
-					logPollDelay + (notFound ? 1000 : 500),
-					logPollMaxInterval
-				);
+				logPollDelay = Math.min(logPollDelay + (notFound ? 1000 : 500), logPollMaxInterval);
 			}
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
-			consoleOutput = [...consoleOutput, { type: 'error', text: message }];
+			consoleOutput = [...consoleOutput, { type: "error", text: message }];
 			stopLogPolling();
 		} finally {
 			if (logPolling) {
@@ -519,7 +485,7 @@
 	};
 
 	const startLogPolling = (dir: string) => {
-		const fallbackDir = trainMode === 'rl' ? "runs_rl" : "runs_ga";
+		const fallbackDir = trainMode === "rl" ? "runs_rl" : "runs_ga";
 		activeLogDir = dir.trim() || fallbackDir;
 		logOffset = 0;
 		logPolling = true;
@@ -537,19 +503,19 @@
 	const selectStartChoice = (choice: StartChoice) => {
 		if (training) return;
 		startChoice = choice;
-		if (choice === 'new') {
-			checkpointPath = '';
+		if (choice === "new") {
+			checkpointPath = "";
 		}
 	};
 
 	const resetTrainingSetup = () => {
 		if (training) return;
 		startChoice = null;
-		checkpointPath = '';
+		checkpointPath = "";
 	};
 
 	const attachCheckpoint = (params: Record<string, unknown>) => {
-		if (startChoice === 'resume') {
+		if (startChoice === "resume") {
 			const trimmed = checkpointPath.trim();
 			if (trimmed) {
 				params["load-checkpoint"] = trimmed;
@@ -560,7 +526,7 @@
 
 	const buildGaParams = () => {
 		const params = { ...gaParams } as Record<string, unknown>;
-		if (gaDataMode === 'full') {
+		if (gaDataMode === "full") {
 			params["full-file"] = true;
 		} else {
 			params.windowed = true;
@@ -571,10 +537,10 @@
 	const buildRlParams = () => {
 		const params = { ...rlParams } as Record<string, unknown>;
 		params.algorithm = rlAlgorithm;
-		if (params.backend !== 'candle' && params.backend !== 'libtorch') {
+		if (params.backend !== "candle" && params.backend !== "libtorch") {
 			delete params.dropout;
 		}
-		if (rlDataMode === 'full') {
+		if (rlDataMode === "full") {
 			params["full-file"] = true;
 		} else {
 			params.windowed = true;
@@ -588,12 +554,12 @@
 		} else {
 			if (!canStartTraining) {
 				const message = startChoice
-					? 'Add a checkpoint path to resume training.'
-					: 'Choose new training or resume from a checkpoint first.';
-				consoleOutput = [...consoleOutput, { type: 'error', text: message }];
+					? "Add a checkpoint path to resume training."
+					: "Choose new training or resume from a checkpoint first.";
+				consoleOutput = [...consoleOutput, { type: "error", text: message }];
 				return;
 			}
-			startTraining(trainMode);
+			void startTraining(trainMode);
 		}
 	};
 
@@ -602,27 +568,30 @@
 		if (!startChoice) {
 			consoleOutput = [
 				...consoleOutput,
-				{ type: 'error', text: 'Choose new training or resume from a checkpoint first.' }
+				{ type: "error", text: "Choose new training or resume from a checkpoint first." }
 			];
 			return;
 		}
-		if (startChoice === 'resume' && !checkpointPath.trim()) {
-			consoleOutput = [...consoleOutput, { type: 'error', text: 'Checkpoint path is required to resume.' }];
+		if (startChoice === "resume" && !checkpointPath.trim()) {
+			consoleOutput = [
+				...consoleOutput,
+				{ type: "error", text: "Checkpoint path is required to resume." }
+			];
 			return;
 		}
-		const params = mode === 'ga' ? buildGaParams() : buildRlParams();
-		const backend = (typeof params.backend === 'string' ? params.backend : 'libtorch') as MlBackend;
-		const fallbackDir = trainMode === 'rl' ? "runs_rl" : "runs_ga";
-		const outdir = typeof params.outdir === 'string' ? params.outdir : fallbackDir;
+		const params = mode === "ga" ? buildGaParams() : buildRlParams();
+		const backend = (typeof params.backend === "string" ? params.backend : "libtorch") as MlBackend;
+		const fallbackDir = trainMode === "rl" ? "runs_rl" : "runs_ga";
+		const outdir = typeof params.outdir === "string" ? params.outdir : fallbackDir;
 		abortController?.abort();
 		abortController = new AbortController();
 		training = true;
-		const verb = startChoice === 'resume' ? 'Resuming' : 'Starting';
-		const suffix = startChoice === 'resume' ? ' from checkpoint' : '';
-		const algoInfo = mode === 'rl' ? ` (${rlAlgorithm.toUpperCase()})` : '';
+		const verb = startChoice === "resume" ? "Resuming" : "Starting";
+		const suffix = startChoice === "resume" ? " from checkpoint" : "";
+		const algoInfo = mode === "rl" ? ` (${rlAlgorithm.toUpperCase()})` : "";
 		consoleOutput = [
 			{
-				type: 'system',
+				type: "system",
 				text: `${verb} ${mode.toUpperCase()}${algoInfo} training on ${String(backend).toUpperCase()} using ${buildProfile.toUpperCase()} build${suffix}...`
 			}
 		];
@@ -633,11 +602,11 @@
 			activeLogDir = outdir;
 			logOffset = 0;
 		}
-		
+
 		try {
-			const response = await fetch('/api/train', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+			const response = await fetch("/api/train", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ engine: mode, params, profile: buildProfile }),
 				signal: abortController.signal
 			});
@@ -654,45 +623,46 @@
 				if (done) break;
 
 				const chunk = decoder.decode(value);
-				const lines = chunk.split('\n\n');
-				
+				const lines = chunk.split("\n\n");
+
 				for (const line of lines) {
-					if (line.startsWith('data: ')) {
-						const data = JSON.parse(line.substring(6));
-						if (data.type === 'stdout' || data.type === 'stderr') {
-							consoleOutput = [...consoleOutput, { type: data.type, text: data.content }];
-							// Parse the run directory from Rust output
-							const runDirMatch = data.content.match(/info: run directory (.+)/);
-							if (runDirMatch) {
-								const actualDir = runDirMatch[1].trim();
-								activeLogDir = actualDir;
-								if (liveLogUpdates) {
-									stopLogPolling();
-									startLogPolling(actualDir);
-								}
-							}
-						} else if (data.type === 'error') {
-							consoleOutput = [...consoleOutput, { type: 'error', text: data.content }];
-						} else if (data.type === 'exit') {
-							training = false;
-							abortController = null;
-							stopLogPolling();
+					if (!line.startsWith("data: ")) continue;
+					const data = JSON.parse(line.substring(6));
+					if (data.type === "stdout" || data.type === "stderr") {
+						consoleOutput = [...consoleOutput, { type: data.type, text: data.content }];
+						const runDirMatch = data.content.match(/info: run directory (.+)/);
+						if (runDirMatch) {
+							const actualDir = runDirMatch[1].trim();
+							activeLogDir = actualDir;
 							if (liveLogUpdates) {
-								await drainLogs(activeLogDir);
+								stopLogPolling();
+								startLogPolling(actualDir);
 							}
-							await sleep(300);
-							await rebuildFitnessFromLogs(activeLogDir);
-							consoleOutput = [...consoleOutput, { type: 'system', text: `Process exited with code ${data.code}` }];
 						}
+					} else if (data.type === "error") {
+						consoleOutput = [...consoleOutput, { type: "error", text: data.content }];
+					} else if (data.type === "exit") {
+						training = false;
+						abortController = null;
+						stopLogPolling();
+						if (liveLogUpdates) {
+							await drainLogs(activeLogDir);
+						}
+						await sleep(300);
+						await rebuildFitnessFromLogs(activeLogDir);
+						consoleOutput = [
+							...consoleOutput,
+							{ type: "system", text: `Process exited with code ${data.code}` }
+						];
 					}
 				}
 			}
 		} catch (e) {
-			if (e instanceof DOMException && e.name === 'AbortError') {
-				consoleOutput = [...consoleOutput, { type: 'system', text: 'Training stopped by user.' }];
+			if (e instanceof DOMException && e.name === "AbortError") {
+				consoleOutput = [...consoleOutput, { type: "system", text: "Training stopped by user." }];
 			} else {
 				const message = e instanceof Error ? e.message : String(e);
-				consoleOutput = [...consoleOutput, { type: 'error', text: message }];
+				consoleOutput = [...consoleOutput, { type: "error", text: message }];
 			}
 			training = false;
 			abortController = null;
@@ -713,999 +683,76 @@
 			paramsCollapsed = false;
 		}
 	};
+
+	const handleBrowseCheckpoint = () => openCheckpointPicker(trainMode);
 </script>
 
 <div class="min-h-screen bg-background">
-	<aside
-		class={`bg-card border-r shadow-sm transition-[width] duration-200 ease-out w-full lg:fixed lg:inset-y-0 lg:left-0 lg:pt-14 relative ${paramsCollapsed ? 'lg:w-[120px]' : 'lg:w-[360px]'}`}
-	>
-		{#if paramsCollapsed}
-			<button
-				type="button"
-				class="absolute inset-0 cursor-pointer bg-transparent border-0 p-0 appearance-none z-0"
-				aria-label="Expand training parameters"
-				title="Expand parameters"
-				onclick={() => (paramsCollapsed = false)}
-			></button>
-		{/if}
-		<div class="relative z-10 flex h-full flex-col">
-			{#if !paramsCollapsed}
-				<div class="flex items-center justify-between px-6 py-4 border-b">
-					<div class="text-sm font-semibold tracking-tight">Training Controls</div>
-					<Button variant="ghost" size="sm" onclick={() => (paramsCollapsed = true)}>
-						Collapse
-					</Button>
-				</div>
-			{/if}
-			{#if paramsCollapsed}
-				<div class="px-4 py-4">
-					<Button
-						variant={training ? "destructive" : "secondary"}
-						onclick={handleCollapsedAction}
-						class="w-full"
-						title={collapsedTitle}
-					>
-						{collapsedLabel}
-					</Button>
-				</div>
-			{:else}
-				<div class="flex-1 overflow-y-auto px-6 pb-6">
-					<div class="space-y-6">
-						<div class="rounded-lg border bg-card/50 p-4 space-y-3">
-							<div class="flex items-start justify-between gap-3">
-								<div>
-									<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 1</div>
-									<div class="text-sm font-semibold">Choose a starting point</div>
-								</div>
-								{#if startChoice}
-									<Button variant="ghost" size="sm" onclick={resetTrainingSetup} disabled={training}>
-										New Training
-									</Button>
-								{/if}
-							</div>
-							{#if !startChoice}
-								<p class="text-xs text-muted-foreground">
-									Do you want to start fresh or continue from a checkpoint?
-								</p>
-								<div class="grid gap-2">
-									<Button onclick={() => selectStartChoice('new')} disabled={training}>
-										New Training
-									</Button>
-									<Button variant="outline" onclick={() => selectStartChoice('resume')} disabled={training}>
-										Continue from Checkpoint
-									</Button>
-									<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
-										{diagnosticsLoading ? 'Running diagnostics...' : 'Run libtorch + MLX diagnostics'}
-									</Button>
-								</div>
-							{:else}
-								<div class="flex items-center gap-2 text-sm">
-									<span class="text-muted-foreground">Selected:</span>
-									<Badge variant="secondary">
-										{startChoice === 'resume' ? 'Resume from Checkpoint' : 'New Training'}
-									</Badge>
-								</div>
-								<div class="grid gap-2">
-									<Label for="build-profile">Build Profile</Label>
-									<select
-										id="build-profile"
-										bind:value={buildProfile}
-										disabled={training}
-										class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-									>
-										<option value="debug">Debug</option>
-										<option value="release">Release</option>
-									</select>
-									<div class="text-xs text-muted-foreground">
-										`release` uses optimized Rust binaries and is the right choice for backend speed comparisons. `debug` compiles faster while you are iterating.
-									</div>
-								</div>
-								<Button variant="outline" onclick={runDiagnostics} disabled={diagnosticsLoading}>
-									{diagnosticsLoading ? 'Running diagnostics...' : 'Run libtorch + MLX diagnostics'}
-								</Button>
-								{#if startChoice === 'resume'}
-									<div class="grid gap-2">
-										<Label for="checkpoint-path">Checkpoint Path</Label>
-										<div class="flex flex-col gap-2">
-											<Input
-												id="checkpoint-path"
-												type="text"
-												bind:value={checkpointPath}
-												placeholder={trainMode === 'ga' ? "runs_ga/checkpoint_gen4.bin" : "runs_rl/checkpoint_epoch4.pt"}
-											/>
-											<Button type="button" variant="outline" onclick={() => openCheckpointPicker(trainMode)}>
-												Browse
-											</Button>
-										</div>
-										<div class="text-xs text-muted-foreground">
-											GA checkpoints still use `.bin`. Policy artifacts are backend-specific: `libtorch` writes `.pt`, Candle GA/RL writes `.safetensors`, and Burn GA writes portable JSON today.
-										</div>
-									</div>
-								{/if}
-							{/if}
-						</div>
+	<TrainSidebar
+		bind:paramsCollapsed
+		{training}
+		{startChoice}
+		bind:buildProfile
+		bind:checkpointPath
+		bind:trainMode
+		bind:rlAlgorithm
+		bind:gaDataMode
+		bind:rlDataMode
+		{gaParams}
+		{rlParams}
+		{diagnosticsLoading}
+		bind:liveLogUpdates
+		{canStartTraining}
+		{runLabel}
+		{runTitle}
+		{trimmedCheckpoint}
+		{collapsedLabel}
+		{collapsedTitle}
+		onResetTrainingSetup={resetTrainingSetup}
+		onSelectStartChoice={selectStartChoice}
+		onRunDiagnostics={runDiagnostics}
+		onBrowseCheckpoint={handleBrowseCheckpoint}
+		onBrowseParquet={openParquetPicker}
+		onApplyFuturesPreset={applyFuturesPreset}
+		onToggleTraining={toggleTraining}
+		onCollapsedAction={handleCollapsedAction}
+		onSubmitGa={() => void startTraining("ga")}
+		onSubmitRl={() => void startTraining("rl")}
+	/>
 
-						{#if startChoice}
-							<div class="rounded-lg border bg-card/50 p-4 space-y-4">
-								<div class="flex items-center justify-between">
-									<div>
-										<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 2</div>
-										<div class="text-sm font-semibold">Configure your run</div>
-									</div>
-									<Badge variant="outline">{trainMode === 'ga' ? 'GA' : 'RL'}</Badge>
-								</div>
-
-								<Tabs.Root bind:value={trainMode} class="w-full">
-									<Tabs.List class="grid w-full grid-cols-2 mb-4">
-										<Tabs.Trigger value="ga">GA (Primary)</Tabs.Trigger>
-										<Tabs.Trigger value="rl">RL (PPO/GRPO)</Tabs.Trigger>
-									</Tabs.List>
-
-									<Tabs.Content value="ga">
-										<form
-											class="space-y-4"
-											onsubmit={(event) => {
-												event.preventDefault();
-												startTraining('ga');
-											}}
-										>
-											<div class="space-y-4">
-												<details class="rounded-lg border bg-background/60 p-4" open>
-													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="ga-train-parquet">Train Parquet</Label>
-															<div class="flex flex-col gap-2">
-																<Input
-																	id="ga-train-parquet"
-																	type="text"
-																	bind:value={gaParams["train-parquet"]}
-																	placeholder="data/train"
-																/>
-																<Button type="button" variant="outline" onclick={() => openParquetPicker("ga", "train-parquet")}>
-																	Browse
-																</Button>
-															</div>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-val-parquet">Val Parquet</Label>
-															<div class="flex flex-col gap-2">
-																<Input
-																	id="ga-val-parquet"
-																	type="text"
-																	bind:value={gaParams["val-parquet"]}
-																	placeholder="data/val"
-																/>
-																<Button type="button" variant="outline" onclick={() => openParquetPicker("ga", "val-parquet")}>
-																	Browse
-																</Button>
-															</div>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-test-parquet">Test Parquet</Label>
-															<div class="flex flex-col gap-2">
-																<Input
-																	id="ga-test-parquet"
-																	type="text"
-																	bind:value={gaParams["test-parquet"]}
-																	placeholder="data/test"
-																/>
-																<Button type="button" variant="outline" onclick={() => openParquetPicker("ga", "test-parquet")}>
-																	Browse
-																</Button>
-															</div>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-data-mode">Data Mode</Label>
-															<select
-																id="ga-data-mode"
-																bind:value={gaDataMode}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="windowed">Windowed</option>
-																<option value="full">Full file</option>
-															</select>
-														</div>
-														{#if gaDataMode === 'windowed'}
-															<div class="grid gap-2">
-																<Label for="ga-window">Window Size</Label>
-																<Input id="ga-window" type="number" min="1" bind:value={gaParams.window} />
-															</div>
-															<div class="grid gap-2">
-																<Label for="ga-step">Step Size</Label>
-																<Input id="ga-step" type="number" min="1" bind:value={gaParams.step} />
-															</div>
-														{/if}
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4" open>
-													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="ga-backend">Backend</Label>
-															<select
-																id="ga-backend"
-																bind:value={gaParams.backend}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="libtorch">libtorch</option>
-																<option value="burn">burn</option>
-																<option value="candle">candle</option>
-																<option value="mlx">mlx</option>
-															</select>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-device">Device</Label>
-															<select
-																id="ga-device"
-																bind:value={gaParams.device}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="auto">Auto</option>
-																<option value="cpu">CPU</option>
-																<option value="mps">MPS</option>
-																<option value="cuda">CUDA</option>
-															</select>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-batch-candidates">Batch Candidates</Label>
-															<Input
-																id="ga-batch-candidates"
-																type="number"
-																min="0"
-																bind:value={gaParams["batch-candidates"]}
-															/>
-															<p class="text-xs text-muted-foreground">0 uses auto batching.</p>
-														</div>
-														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-															<div class="font-medium uppercase tracking-wide text-foreground">Backend rollout status</div>
-															{#if gaParams.backend === 'libtorch'}
-																<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
-															{:else if gaParams.backend === 'burn'}
-																<div>`burn` is implemented for GA in this branch. Use `cpu` for the Burn CPU backend, enable the Burn CUDA Cargo feature on the Linux box when you want native CUDA, select `mps` on macOS when the burn-mlx toolchain is installed, and set `MIDAS_BURN_CPU_BACKEND=ndarray` only when you want the legacy CPU path.</div>
-															{:else if gaParams.backend === 'candle'}
-																<div>`candle` is implemented for GA in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
-															{:else}
-																<div>`mlx` is reserved for a separate runner path so Apple-dev and Linux-CUDA benchmarking can slot into the same workflow later.</div>
-															{/if}
-														</div>
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Evolution Settings</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="ga-generations">Generations</Label>
-															<Input id="ga-generations" type="number" min="1" bind:value={gaParams.generations} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-pop-size">Population Size</Label>
-															<Input id="ga-pop-size" type="number" min="1" bind:value={gaParams["pop-size"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-workers">Workers</Label>
-															<Input id="ga-workers" type="number" min="0" bind:value={gaParams.workers} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-elite-frac">Elite Fraction</Label>
-															<Input id="ga-elite-frac" type="number" step="0.01" min="0" max="1" bind:value={gaParams["elite-frac"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-mutation-sigma">Mutation Sigma</Label>
-															<Input id="ga-mutation-sigma" type="number" step="0.01" min="0" bind:value={gaParams["mutation-sigma"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-init-sigma">Init Sigma</Label>
-															<Input id="ga-init-sigma" type="number" step="0.01" min="0" bind:value={gaParams["init-sigma"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-eval-windows">Eval Windows</Label>
-															<Input id="ga-eval-windows" type="number" min="1" bind:value={gaParams["eval-windows"]} />
-														</div>
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="ga-hidden">Hidden Units</Label>
-															<Input id="ga-hidden" type="number" min="1" bind:value={gaParams.hidden} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-layers">Layers</Label>
-															<Input id="ga-layers" type="number" min="1" bind:value={gaParams.layers} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-initial-balance">Initial Balance</Label>
-															<Input id="ga-initial-balance" type="number" step="0.01" bind:value={gaParams["initial-balance"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-max-position">Max Position (0 = no cap)</Label>
-															<Input id="ga-max-position" type="number" min="0" bind:value={gaParams["max-position"]} />
-														</div>
-														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3">
-															<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Futures Presets (NinjaTrader)</div>
-															<div class="flex flex-wrap gap-2">
-																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("ga", "mes-micro")}>
-																	MES Micro
-																</Button>
-																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("ga", "es-mini")}>
-																	ES Mini
-																</Button>
-															</div>
-															<p class="text-xs text-muted-foreground">
-																MES uses $50 margin and 5x multiplier; ES uses $500 margin and 50x multiplier. Auto-close stays at 5 minutes before close.
-															</p>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-margin-mode">Margin Mode</Label>
-															<select
-																id="ga-margin-mode"
-																bind:value={gaParams["margin-mode"]}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="auto">Auto</option>
-																<option value="per-contract">Per-contract</option>
-																<option value="price">Price-based</option>
-															</select>
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-contract-multiplier">Contract Multiplier</Label>
-															<Input id="ga-contract-multiplier" type="number" step="0.01" min="0" bind:value={gaParams["contract-multiplier"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-margin-per-contract">Margin Per Contract</Label>
-															<Input id="ga-margin-per-contract" type="number" step="0.01" min="0" bind:value={gaParams["margin-per-contract"]} placeholder="auto from config" />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-w-pnl">Fitness Weight (PNL)</Label>
-															<Input id="ga-w-pnl" type="number" step="0.01" bind:value={gaParams["w-pnl"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-w-sortino">Fitness Weight (Sortino)</Label>
-															<Input id="ga-w-sortino" type="number" step="0.01" bind:value={gaParams["w-sortino"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-w-mdd">Fitness Weight (Max DD)</Label>
-															<Input id="ga-w-mdd" type="number" step="0.01" bind:value={gaParams["w-mdd"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-drawdown-penalty">Drawdown Penalty</Label>
-															<Input id="ga-drawdown-penalty" type="number" step="0.01" min="0" bind:value={gaParams["drawdown-penalty"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-drawdown-penalty-growth">Drawdown Penalty Growth</Label>
-															<Input id="ga-drawdown-penalty-growth" type="number" step="0.01" min="0" bind:value={gaParams["drawdown-penalty-growth"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-session-close-penalty">Session Close Penalty</Label>
-															<Input id="ga-session-close-penalty" type="number" step="0.01" min="0" bind:value={gaParams["session-close-penalty"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-selection-train-weight">Selection Weight (Train)</Label>
-															<Input id="ga-selection-train-weight" type="number" step="0.01" min="0" bind:value={gaParams["selection-train-weight"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-selection-eval-weight">Selection Weight (Eval)</Label>
-															<Input id="ga-selection-eval-weight" type="number" step="0.01" min="0" bind:value={gaParams["selection-eval-weight"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-selection-gap-penalty">Selection Gap Penalty</Label>
-															<Input id="ga-selection-gap-penalty" type="number" step="0.01" min="0" bind:value={gaParams["selection-gap-penalty"]} />
-														</div>
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Position Hold Penalties</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="ga-max-hold-bars-positive">Max Hold Bars (Profit)</Label>
-															<Input id="ga-max-hold-bars-positive" type="number" min="0" bind:value={gaParams["max-hold-bars-positive"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-max-hold-bars-drawdown">Max Hold Bars (Drawdown)</Label>
-															<Input id="ga-max-hold-bars-drawdown" type="number" min="0" bind:value={gaParams["max-hold-bars-drawdown"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-hold-duration-penalty">Hold Penalty</Label>
-															<Input id="ga-hold-duration-penalty" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-hold-duration-penalty-growth">Hold Penalty Growth</Label>
-															<Input id="ga-hold-duration-penalty-growth" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-growth"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-hold-duration-penalty-positive-scale">Hold Penalty Scale (Profit)</Label>
-															<Input id="ga-hold-duration-penalty-positive-scale" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-positive-scale"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
-															<Input id="ga-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={gaParams["hold-duration-penalty-negative-scale"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-flat-hold-penalty">Flat Hold Penalty</Label>
-															<Input id="ga-flat-hold-penalty" type="number" step="0.01" min="0" bind:value={gaParams["flat-hold-penalty"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-flat-hold-penalty-growth">Flat Hold Penalty Growth</Label>
-															<Input id="ga-flat-hold-penalty-growth" type="number" step="0.01" min="0" bind:value={gaParams["flat-hold-penalty-growth"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-max-flat-hold-bars">Max Flat Hold Bars</Label>
-															<Input id="ga-max-flat-hold-bars" type="number" min="0" bind:value={gaParams["max-flat-hold-bars"]} />
-														</div>
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Checkpoints</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="ga-outdir">Output Folder</Label>
-															<Input id="ga-outdir" type="text" bind:value={gaParams.outdir} placeholder="runs_ga" />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-save-top-n">Save Top N</Label>
-															<Input id="ga-save-top-n" type="number" min="0" bind:value={gaParams["save-top-n"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-save-every">Save Every (gens)</Label>
-															<Input id="ga-save-every" type="number" min="0" bind:value={gaParams["save-every"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="ga-checkpoint-every">Checkpoint Every (gens)</Label>
-															<Input id="ga-checkpoint-every" type="number" min="0" bind:value={gaParams["checkpoint-every"]} />
-														</div>
-													</div>
-												</details>
-											</div>
-										</form>
-									</Tabs.Content>
-
-									<Tabs.Content value="rl">
-										<form
-											class="space-y-4"
-											onsubmit={(event) => {
-												event.preventDefault();
-												startTraining('rl');
-											}}
-										>
-											<div class="space-y-4">
-												<details class="rounded-lg border bg-background/60 p-4" open>
-													<summary class="cursor-pointer text-sm font-semibold">Train Data</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-train-parquet">Train Parquet</Label>
-															<div class="flex flex-col gap-2">
-																<Input
-																	id="rl-train-parquet"
-																	type="text"
-																	bind:value={rlParams["train-parquet"]}
-																	placeholder="data/train"
-																/>
-																<Button type="button" variant="outline" onclick={() => openParquetPicker("rl", "train-parquet")}>
-																	Browse
-																</Button>
-															</div>
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-val-parquet">Val Parquet</Label>
-															<div class="flex flex-col gap-2">
-																<Input
-																	id="rl-val-parquet"
-																	type="text"
-																	bind:value={rlParams["val-parquet"]}
-																	placeholder="data/val"
-																/>
-																<Button type="button" variant="outline" onclick={() => openParquetPicker("rl", "val-parquet")}>
-																	Browse
-																</Button>
-															</div>
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-test-parquet">Test Parquet</Label>
-															<div class="flex flex-col gap-2">
-																<Input
-																	id="rl-test-parquet"
-																	type="text"
-																	bind:value={rlParams["test-parquet"]}
-																	placeholder="data/test"
-																/>
-																<Button type="button" variant="outline" onclick={() => openParquetPicker("rl", "test-parquet")}>
-																	Browse
-																</Button>
-															</div>
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-data-mode">Data Mode</Label>
-															<select
-																id="rl-data-mode"
-																bind:value={rlDataMode}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="windowed">Windowed</option>
-																<option value="full">Full file</option>
-															</select>
-														</div>
-														{#if rlDataMode === 'windowed'}
-															<div class="grid gap-2">
-																<Label for="rl-window">Window Size</Label>
-																<Input id="rl-window" type="number" min="1" bind:value={rlParams.window} />
-															</div>
-															<div class="grid gap-2">
-																<Label for="rl-step">Step Size</Label>
-																<Input id="rl-step" type="number" min="1" bind:value={rlParams.step} />
-															</div>
-														{/if}
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4" open>
-													<summary class="cursor-pointer text-sm font-semibold">Hardware</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-backend">Backend</Label>
-															<select
-																id="rl-backend"
-																bind:value={rlParams.backend}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="libtorch">libtorch</option>
-																<option value="burn">burn</option>
-																<option value="candle">candle</option>
-																<option value="mlx">mlx</option>
-															</select>
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-device">Device</Label>
-															<select
-																id="rl-device"
-																bind:value={rlParams.device}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="auto">Auto</option>
-																<option value="cpu">CPU</option>
-																<option value="mps">MPS</option>
-																<option value="cuda">CUDA</option>
-															</select>
-														</div>
-														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-															<div class="font-medium uppercase tracking-wide text-foreground">Backend rollout status</div>
-															{#if rlParams.backend === 'libtorch'}
-																<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
-															{:else if rlParams.backend === 'burn'}
-																<div>`burn` is implemented for GA in this branch, but the RL runner is still not implemented yet.</div>
-															{:else if rlParams.backend === 'candle'}
-																<div>`candle` is implemented for RL PPO and GRPO in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
-															{:else}
-																<div>`mlx` is reserved for a separate runner path so Apple-dev and Linux-CUDA benchmarking can slot into the same workflow later.</div>
-															{/if}
-														</div>
-											</div>
-										</details>
-
-										<details class="rounded-lg border bg-background/60 p-4" open>
-											<summary class="cursor-pointer text-sm font-semibold">Algorithm</summary>
-											<div class="mt-4 grid gap-4 md:grid-cols-2">
-												<div class="grid gap-2">
-													<Label for="rl-algorithm">RL Algorithm</Label>
-													<select
-														id="rl-algorithm"
-														bind:value={rlAlgorithm}
-														class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-													>
-														<option value="ppo">PPO (Proximal Policy Optimization)</option>
-														<option value="grpo">GRPO (Group Relative Policy Optimization)</option>
-													</select>
-													<p class="text-xs text-muted-foreground">
-														{rlAlgorithm === 'ppo' ? 'Uses actor-critic with value network' : 'Group-based, no value network required'}
-													</p>
-												</div>
-											</div>
-										</details>
-
-										{#if rlAlgorithm === 'ppo'}
-										<details class="rounded-lg border bg-background/60 p-4">
-											<summary class="cursor-pointer text-sm font-semibold">PPO Training</summary>
-											<div class="mt-4 grid gap-4 md:grid-cols-2">
-												<div class="grid gap-2">
-													<Label for="rl-epochs">Epochs</Label>
-													<Input id="rl-epochs" type="number" min="1" bind:value={rlParams.epochs} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-train-windows">Train Windows</Label>
-													<Input id="rl-train-windows" type="number" min="0" bind:value={rlParams["train-windows"]} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-ppo-epochs">PPO Epochs</Label>
-													<Input id="rl-ppo-epochs" type="number" min="1" bind:value={rlParams["ppo-epochs"]} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-eval-windows">Eval Windows</Label>
-													<Input id="rl-eval-windows" type="number" min="1" bind:value={rlParams["eval-windows"]} />
-												</div>
-											</div>
-										</details>
-										{/if}
-
-										{#if rlAlgorithm === 'grpo'}
-										<details class="rounded-lg border bg-background/60 p-4">
-											<summary class="cursor-pointer text-sm font-semibold">GRPO Training</summary>
-											<div class="mt-4 grid gap-4 md:grid-cols-2">
-												<div class="grid gap-2">
-													<Label for="rl-epochs">Epochs</Label>
-													<Input id="rl-epochs" type="number" min="1" bind:value={rlParams.epochs} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-train-windows">Train Windows</Label>
-													<Input id="rl-train-windows" type="number" min="0" bind:value={rlParams["train-windows"]} />
-												</div>
-												<div class="grid gap-2">
-															<Label for="rl-group-size">Group Size</Label>
-															<Input id="rl-group-size" type="number" min="2" bind:value={rlParams["group-size"]} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-eval-windows">Eval Windows</Label>
-													<Input id="rl-eval-windows" type="number" min="1" bind:value={rlParams["eval-windows"]} />
-												</div>
-											</div>
-										</details>
-										{/if}
-
-										<details class="rounded-lg border bg-background/60 p-4">
-											<summary class="cursor-pointer text-sm font-semibold">Optimization</summary>
-											<div class="mt-4 grid gap-4 md:grid-cols-2">
-												<div class="grid gap-2">
-													<Label for="rl-lr">Learning Rate</Label>
-													<Input id="rl-lr" type="number" step="0.0001" bind:value={rlParams.lr} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-gamma">Gamma</Label>
-													<Input id="rl-gamma" type="number" step="0.01" min="0" max="1" bind:value={rlParams.gamma} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-lam">Lambda</Label>
-													<Input id="rl-lam" type="number" step="0.01" min="0" max="1" bind:value={rlParams.lam} />
-												</div>
-												<div class="grid gap-2">
-													<Label for="rl-clip">Clip Range</Label>
-													<Input id="rl-clip" type="number" step="0.01" min="0" bind:value={rlParams.clip} />
-												</div>
-												{#if rlAlgorithm === 'ppo'}
-												<div class="grid gap-2">
-													<Label for="rl-vf-coef">Value Coef</Label>
-													<Input id="rl-vf-coef" type="number" step="0.01" min="0" bind:value={rlParams["vf-coef"]} />
-												</div>
-												{/if}
-												<div class="grid gap-2">
-													<Label for="rl-ent-coef">Entropy Coef</Label>
-													<Input id="rl-ent-coef" type="number" step="0.01" min="0" bind:value={rlParams["ent-coef"]} />
-												</div>
-											</div>
-										</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Model &amp; Fitness</summary>
-														<div class="mt-4 grid gap-4 md:grid-cols-2">
-															<div class="grid gap-2">
-																<Label for="rl-hidden">Hidden Units</Label>
-																<Input id="rl-hidden" type="number" min="1" bind:value={rlParams.hidden} />
-															</div>
-															<div class="grid gap-2">
-																<Label for="rl-layers">Layers</Label>
-																<Input id="rl-layers" type="number" min="1" bind:value={rlParams.layers} />
-															</div>
-															{#if rlParams.backend === 'candle' || rlParams.backend === 'libtorch'}
-															<div class="grid gap-2">
-																<Label for="rl-dropout">Dropout</Label>
-																<Input id="rl-dropout" type="number" min="0" max="0.95" step="0.05" bind:value={rlParams.dropout} />
-																<div class="text-xs text-muted-foreground">
-																	Libtorch and Candle only. Applied after each hidden-layer activation during training; eval and test disable it.
-																</div>
-															</div>
-															{/if}
-															<div class="grid gap-2">
-																<Label for="rl-initial-balance">Initial Balance</Label>
-																<Input id="rl-initial-balance" type="number" step="0.01" bind:value={rlParams["initial-balance"]} />
-															</div>
-														<div class="grid gap-2">
-															<Label for="rl-max-position">Max Position (0 = no cap)</Label>
-															<Input id="rl-max-position" type="number" min="0" bind:value={rlParams["max-position"]} />
-														</div>
-														<div class="grid gap-2 md:col-span-2 rounded-md border border-dashed p-3">
-															<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Futures Presets (NinjaTrader)</div>
-															<div class="flex flex-wrap gap-2">
-																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("rl", "mes-micro")}>
-																	MES Micro
-																</Button>
-																<Button type="button" size="sm" variant="outline" onclick={() => applyFuturesPreset("rl", "es-mini")}>
-																	ES Mini
-																</Button>
-															</div>
-															<p class="text-xs text-muted-foreground">
-																MES uses $50 margin and 5x multiplier; ES uses $500 margin and 50x multiplier. Auto-close stays at 5 minutes before close.
-															</p>
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-margin-mode">Margin Mode</Label>
-															<select
-																id="rl-margin-mode"
-																bind:value={rlParams["margin-mode"]}
-																class="border-input bg-background ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-															>
-																<option value="auto">Auto</option>
-																<option value="per-contract">Per-contract</option>
-																<option value="price">Price-based</option>
-															</select>
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-contract-multiplier">Contract Multiplier</Label>
-															<Input id="rl-contract-multiplier" type="number" step="0.01" min="0" bind:value={rlParams["contract-multiplier"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-margin-per-contract">Margin Per Contract</Label>
-															<Input id="rl-margin-per-contract" type="number" step="0.01" min="0" bind:value={rlParams["margin-per-contract"]} placeholder="auto from config" />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-w-pnl">Fitness Weight (PNL)</Label>
-															<Input id="rl-w-pnl" type="number" step="0.01" bind:value={rlParams["w-pnl"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-w-sortino">Fitness Weight (Sortino)</Label>
-															<Input id="rl-w-sortino" type="number" step="0.01" bind:value={rlParams["w-sortino"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-w-mdd">Fitness Weight (Max DD)</Label>
-															<Input id="rl-w-mdd" type="number" step="0.01" bind:value={rlParams["w-mdd"]} />
-														</div>
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Position Hold Penalties</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-max-hold-bars-positive">Max Hold Bars (Profit)</Label>
-															<Input id="rl-max-hold-bars-positive" type="number" min="0" bind:value={rlParams["max-hold-bars-positive"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-max-hold-bars-drawdown">Max Hold Bars (Drawdown)</Label>
-															<Input id="rl-max-hold-bars-drawdown" type="number" min="0" bind:value={rlParams["max-hold-bars-drawdown"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-hold-duration-penalty">Hold Penalty</Label>
-															<Input id="rl-hold-duration-penalty" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-hold-duration-penalty-growth">Hold Penalty Growth</Label>
-															<Input id="rl-hold-duration-penalty-growth" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty-growth"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-hold-duration-penalty-positive-scale">Hold Penalty Scale (Profit)</Label>
-															<Input id="rl-hold-duration-penalty-positive-scale" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty-positive-scale"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-hold-duration-penalty-negative-scale">Hold Penalty Scale (Loss)</Label>
-															<Input id="rl-hold-duration-penalty-negative-scale" type="number" step="0.01" min="0" bind:value={rlParams["hold-duration-penalty-negative-scale"]} />
-														</div>
-													</div>
-												</details>
-
-												<details class="rounded-lg border bg-background/60 p-4">
-													<summary class="cursor-pointer text-sm font-semibold">Output &amp; Checkpoints</summary>
-													<div class="mt-4 grid gap-4 md:grid-cols-2">
-														<div class="grid gap-2">
-															<Label for="rl-outdir">Output Folder</Label>
-															<Input id="rl-outdir" type="text" bind:value={rlParams.outdir} placeholder="runs_rl" />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-log-interval">Log Interval (epochs)</Label>
-															<Input id="rl-log-interval" type="number" min="1" bind:value={rlParams["log-interval"]} />
-														</div>
-														<div class="grid gap-2">
-															<Label for="rl-checkpoint-every">Checkpoint Every (epochs)</Label>
-															<Input id="rl-checkpoint-every" type="number" min="0" bind:value={rlParams["checkpoint-every"]} />
-														</div>
-													</div>
-												</details>
-											</div>
-										</form>
-									</Tabs.Content>
-								</Tabs.Root>
-							</div>
-
-							<div class="rounded-lg border bg-card/50 p-4 space-y-3">
-								<div class="flex items-center justify-between">
-									<div>
-										<div class="text-xs uppercase tracking-wide text-muted-foreground">Step 3</div>
-										<div class="text-sm font-semibold">Run training</div>
-									</div>
-									{#if training}
-										<Badge variant="outline" class="animate-pulse">Active</Badge>
-									{/if}
-								</div>
-								<div class="flex items-center gap-2 text-sm">
-									<input
-										id="live-log-updates"
-										type="checkbox"
-										class="h-4 w-4 rounded border-input"
-										bind:checked={liveLogUpdates}
-									/>
-									<Label for="live-log-updates">Live log updates</Label>
-								</div>
-								<p class="text-xs text-muted-foreground">
-									Disable to load logs only after training completes.
-								</p>
-								<Button
-									variant={training ? "destructive" : "default"}
-									onclick={toggleTraining}
-									class="w-full"
-									title={runTitle}
-									disabled={!training && !canStartTraining}
-								>
-									{runLabel}
-								</Button>
-								{#if startChoice === 'resume' && !trimmedCheckpoint}
-									<div class="text-xs text-muted-foreground">
-										Add a checkpoint path to resume training.
-									</div>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				</div>
-			{/if}
-		</div>
-	</aside>
-
-	<main class={`p-8 space-y-8 ${paramsCollapsed ? 'lg:ml-[120px]' : 'lg:ml-[360px]'}`}>
-		<div class="flex items-center gap-4">
-			<a href="/ga" class="text-sm text-muted-foreground hover:text-foreground">← Back to GA Analytics</a>
-			<h1 class="text-4xl font-bold tracking-tight">
-				Train {trainMode === 'ga' ? 'GA' : 'RL'} Model
-			</h1>
-		</div>
+	<main class={`p-8 space-y-8 ${paramsCollapsed ? "lg:ml-[120px]" : "lg:ml-[360px]"}`}>
+		<TrainPageHeader {trainMode} />
 
 		<div class="space-y-6">
-			<Card.Root>
-				<Card.Header class="flex flex-row items-center justify-between">
-					<Card.Title>Best Fitness by {logLabel}</Card.Title>
-					{#if training}
-						<Badge variant="outline" class="animate-pulse">Active</Badge>
-					{/if}
-				</Card.Header>
-				<Card.Content>
-					{#if fitnessSeries.length > 0}
-						<div class="h-[260px] min-h-[220px]">
-							<GaChart data={fitnessChartData} options={fitnessChartOptions} />
-						</div>
-					{:else}
-						<div class="h-[220px] flex items-center justify-center text-muted-foreground">
-							Waiting for the first {logLabel.toLowerCase()} results...
-						</div>
-					{/if}
-				</Card.Content>
-			</Card.Root>
-
-			<Card.Root>
-				<Card.Header class="flex flex-row items-center justify-between">
-					<Card.Title>Console Output</Card.Title>
-					{#if training}
-						<Badge variant="outline" class="animate-pulse">Active</Badge>
-					{/if}
-				</Card.Header>
-				<Card.Content>
-					<ScrollArea class="h-[260px] w-full bg-zinc-950 p-4 rounded-md border border-zinc-800 font-mono text-sm">
-						{#each consoleOutput as line}
-							<div class={line.type === 'stderr' || line.type === 'error' ? 'text-red-400' : line.type === 'system' ? 'text-blue-400' : 'text-zinc-300'}>
-								<span class="opacity-50 mr-2">[{new Date().toLocaleTimeString()}]</span>
-								{line.text}
-							</div>
-						{/each}
-						{#if consoleOutput.length === 0}
-							<div class="text-zinc-600 italic">No output yet. Start training to see logs.</div>
-						{/if}
-					</ScrollArea>
-				</Card.Content>
-			</Card.Root>
-
-			<Card.Root>
-				<Card.Header class="flex flex-row items-center justify-between">
-					<Card.Title>Diagnostics Output</Card.Title>
-					{#if diagnosticsLoading}
-						<Badge variant="outline" class="animate-pulse">Running</Badge>
-					{/if}
-				</Card.Header>
-				<Card.Content>
-					<ScrollArea class="h-[220px] w-full bg-zinc-950 p-4 rounded-md border border-zinc-800 font-mono text-sm">
-						{#if diagnosticsEnv}
-							<div class="text-zinc-400 whitespace-pre-wrap mb-3">
-{Object.entries(diagnosticsEnv)
-	.map(([key, value]) => `${key}=${value ?? ''}`)
-	.join('\n')}
-							</div>
-						{/if}
-						{#if diagnosticsError}
-							<div class="text-red-400 whitespace-pre-wrap">{diagnosticsError}</div>
-						{/if}
-						{#if diagnosticsOutput}
-							<div class="text-zinc-300 whitespace-pre-wrap">{diagnosticsOutput}</div>
-						{:else}
-							<div class="text-zinc-600 italic">Run diagnostics to see libtorch and MLX viability info. Candle GA and RL are already runnable from the main form.</div>
-						{/if}
-					</ScrollArea>
-				</Card.Content>
-			</Card.Root>
+			<TrainFitnessCard
+				{training}
+				{logLabel}
+				{fitnessSeries}
+				chartData={fitnessChartData}
+				chartOptions={fitnessChartOptions}
+			/>
+			<TrainConsoleCard {training} {consoleOutput} />
+			<TrainDiagnosticsCard
+				loading={diagnosticsLoading}
+				output={diagnosticsOutput}
+				error={diagnosticsError}
+				env={diagnosticsEnv}
+			/>
 		</div>
 	</main>
-	{#if fileBrowserOpen}
-		<div
-			class="fixed inset-0 z-50 flex items-center justify-center p-4"
-			role="dialog"
-			aria-modal="true"
-			aria-label="Select parquet file"
-		>
-			<button
-				type="button"
-				class="absolute inset-0 bg-black/40"
-				onclick={closeFileBrowser}
-				aria-label="Close file picker"
-			></button>
-			<div class="relative z-10 w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg">
-				<div class="flex items-start justify-between gap-4">
-					<div>
-						<div class="text-xs uppercase tracking-wide text-muted-foreground">{fileBrowserTitle}</div>
-						<div class="text-sm font-semibold">{fileBrowserDir || "Project root"}</div>
-						<div class="text-xs text-muted-foreground">
-							Allowed: {fileBrowserExtensions.map((ext) => `.${ext}`).join(", ")}
-						</div>
-					</div>
-					<Button type="button" variant="ghost" size="sm" onclick={closeFileBrowser}>
-						Close
-					</Button>
-				</div>
-				<div class="mt-3 flex items-center gap-2">
-					<Button type="button" variant="outline" size="sm" onclick={handleFileBrowserUp} disabled={fileBrowserParent === null}>
-						Up
-					</Button>
-					<div class="text-xs text-muted-foreground truncate">
-						{fileBrowserDir ? `/${fileBrowserDir}` : "/"}
-					</div>
-				</div>
 
-				{#if fileBrowserError}
-					<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-						{fileBrowserError}
-					</div>
-				{/if}
-
-				<div class="mt-3 max-h-[360px] overflow-auto rounded-lg border">
-					{#if fileBrowserLoading}
-						<div class="px-4 py-6 text-sm text-muted-foreground">Loading files...</div>
-					{:else if fileBrowserEntries.length === 0}
-						<div class="px-4 py-6 text-sm text-muted-foreground">No parquet files found here.</div>
-					{:else}
-						<div class="divide-y">
-							{#each fileBrowserEntries as entry}
-								<button
-									type="button"
-									class="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-muted/50"
-									onclick={() => handleFileEntry(entry)}
-								>
-									<span class="text-[11px] font-semibold uppercase text-muted-foreground">
-										{entry.kind === "dir" ? "Dir" : "File"}
-									</span>
-									<span class="text-sm">{entry.name}</span>
-								</button>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			</div>
-		</div>
-	{/if}
+	<TrainFileBrowserModal
+		open={fileBrowserOpen}
+		title={fileBrowserTitle}
+		dir={fileBrowserDir}
+		extensions={fileBrowserExtensions}
+		parent={fileBrowserParent}
+		entries={fileBrowserEntries}
+		loading={fileBrowserLoading}
+		error={fileBrowserError}
+		emptyMessage={fileBrowserEmptyMessage}
+		onClose={closeFileBrowser}
+		onUp={handleFileBrowserUp}
+		onSelect={handleFileEntry}
+	/>
 </div>
