@@ -52,7 +52,7 @@ backend-mlx = []
 
 [[bin]]
 name = "train_ga"
-path = "src/bin/train_ga.rs"
+path = "src/bin/train_ga/main.rs"
 
 [[bin]]
 name = "tch_mps_check"
