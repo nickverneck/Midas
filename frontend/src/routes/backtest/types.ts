@@ -1,5 +1,12 @@
 export type DatasetMode = "train" | "val" | "custom";
 export type BacktestView = "script" | "analyzer";
+export type DatasetPickerTarget = "script" | "analyzer";
+
+export type FileEntry = {
+	name: string;
+	path: string;
+	kind: "file" | "dir";
+};
 
 export type BacktestMetrics = {
 	total_reward: number;

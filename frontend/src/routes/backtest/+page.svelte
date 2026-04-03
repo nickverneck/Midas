@@ -1,79 +1,48 @@
 <script lang="ts">
-	import { Button } from "$lib/components/ui/button";
-	import AnalyzerEnvironmentCard from "./_components/AnalyzerEnvironmentCard.svelte";
-	import AnalyzerHeader from "./_components/AnalyzerHeader.svelte";
-	import BacktestEnvironmentCard from "./_components/BacktestEnvironmentCard.svelte";
-	import BacktestHero from "./_components/BacktestHero.svelte";
-	import DatasetCard from "./_components/DatasetCard.svelte";
-	import EquityCurveCard from "./_components/EquityCurveCard.svelte";
-	import ExitRangesCard from "./_components/ExitRangesCard.svelte";
-	import HeatmapCard from "./_components/HeatmapCard.svelte";
-	import PerformanceSnapshotCard from "./_components/PerformanceSnapshotCard.svelte";
-	import RunAnalyzerCard from "./_components/RunAnalyzerCard.svelte";
-	import RunBacktestCard from "./_components/RunBacktestCard.svelte";
+	import BacktestAnalyzerView from "./_components/BacktestAnalyzerView.svelte";
+	import BacktestFileBrowserModal from "./_components/BacktestFileBrowserModal.svelte";
+	import BacktestScriptView from "./_components/BacktestScriptView.svelte";
 	import SideMenu from "./_components/SideMenu.svelte";
-	import ScriptApiCard from "./_components/ScriptApiCard.svelte";
-	import ScriptEditorCard from "./_components/ScriptEditorCard.svelte";
-	import SelectionDetailsCard from "./_components/SelectionDetailsCard.svelte";
-	import SignalBuilderCard from "./_components/SignalBuilderCard.svelte";
-	import type { ChartConfiguration, ChartDataset } from "chart.js";
+	import {
+		ANALYZER_MAX_COMBOS,
+		axisValueKey,
+		buildEquityChartData,
+		buildFileBrowserUrl,
+		countRange,
+		createDefaultAnalyzerConfig,
+		createDefaultAnalyzerEnv,
+		createDefaultBacktestEnv,
+		createDefaultBacktestLimits,
+		demoEquitySeries,
+		demoMetrics,
+		equityChartOptions,
+		formatMetricValue,
+		formatRangePlaceholder,
+		heatmapColorForValue,
+		heatmapMetricOptions,
+		metricColorValue,
+		metricValue,
+		normalizeExtensions,
+		normalizeSweepParam,
+		presetDatasetPath,
+		sampleScript,
+		toHeatmapRangeValue,
+		toInteger,
+		toNumber,
+		validateAnalyzerIndicator
+	} from "./backtest";
 
 	import type {
 		AnalyzerCell,
-		AnalyzerConfig,
-		AnalyzerEnv,
 		AnalyzerMetrics,
 		AnalyzerResult,
 		BacktestView,
-		BacktestEnv,
-		BacktestLimits,
 		BacktestResult,
-		CrossAction,
 		DatasetMode,
-		IndicatorKind,
-		IndicatorSweepParam,
+		DatasetPickerTarget,
+		FileEntry,
 		NumericInput
 	} from "./types";
-
-	type FileEntry = {
-		name: string;
-		path: string;
-		kind: "file" | "dir";
-	};
-
-	type DatasetPickerTarget = "script" | "analyzer";
-
-	const sampleScript = `-- Example: EMA cross strategy
--- Return one of: "buy", "sell", "revert", "hold"
-
-local fast = 10
-local slow = 30
-
-function on_bar(ctx, bar)
-  local fast_ema = bar["ema_" .. fast]
-  local slow_ema = bar["ema_" .. slow]
-
-  if fast_ema == nil or slow_ema == nil then
-    return "hold"
-  end
-
-  if fast_ema ~= fast_ema or slow_ema ~= slow_ema then
-    return "hold"
-  end
-
-  if fast_ema > slow_ema then
-    if ctx.position <= 0 then
-      return ctx.position == 0 and "buy" or "revert"
-    end
-  else
-    if ctx.position >= 0 then
-      return ctx.position == 0 and "sell" or "revert"
-    end
-  end
-
-  return "hold"
-end
-`;
 
 	let activeView = $state<BacktestView>("script");
 	let menuCollapsed = $state(false);
@@ -105,47 +74,9 @@ end
 	let analyzerDatasetMode = $state<DatasetMode>("train");
 	let analyzerDatasetPath = $state("data/train/SPY0.parquet");
 
-	let analyzer = $state<AnalyzerConfig>({
-		indicatorA: {
-			kind: "ema" as IndicatorKind,
-			sweepParam: "period" as IndicatorSweepParam,
-			period: 10,
-			start: 5,
-			end: 20,
-			step: 1,
-			kamaFast: 2,
-			kamaSlow: 30,
-			almaOffset: 0.85,
-			almaSigma: 6
-		},
-		indicatorB: {
-			kind: "ema" as IndicatorKind,
-			sweepParam: "period" as IndicatorSweepParam,
-			period: 10,
-			start: 5,
-			end: 20,
-			step: 1,
-			kamaFast: 2,
-			kamaSlow: 30,
-			almaOffset: 0.85,
-			almaSigma: 6
-		},
-		buyAction: "crossover" as CrossAction,
-		sellAction: "crossunder" as CrossAction,
-		takeProfit: { enabled: false, start: 0.5, end: 2.0, step: 0.5 },
-		stopLoss: { enabled: false, start: 0.5, end: 2.0, step: 0.5 }
-	});
+	let analyzer = $state(createDefaultAnalyzerConfig());
 
-	let analyzerEnv = $state<AnalyzerEnv>({
-		initialBalance: 10_000,
-		maxPosition: 1,
-		commission: 1.6,
-		slippage: 0.25,
-		marginPerContract: 50,
-		marginMode: "per-contract",
-		contractMultiplier: 1.0,
-		enforceMargin: true
-	});
+	let analyzerEnv = $state(createDefaultAnalyzerEnv());
 
 	let heatmapMetric = $state<keyof AnalyzerMetrics>("fitness");
 	let heatmapRangeMin = $state<NumericInput>("");
@@ -154,70 +85,9 @@ end
 	let selectedStopLoss = $state<string | undefined>(undefined);
 	let selectedCell = $state<AnalyzerCell | null>(null);
 
-	const toNumber = (value: unknown) => {
-		if (value === null || value === undefined || value === "") return null;
-		const num = Number(value);
-		return Number.isFinite(num) ? num : null;
-	};
+	let env = $state(createDefaultBacktestEnv());
 
-	const toInteger = (value: unknown) => {
-		const num = toNumber(value);
-		if (num === null) return null;
-		return Number.isInteger(num) ? num : null;
-	};
-
-	const toHeatmapRangeValue = (value: unknown, metric: keyof AnalyzerMetrics) => {
-		const num = toNumber(value);
-		if (num === null) return null;
-		if (metric === "winRate") return num / 100;
-		return num;
-	};
-
-	const indicatorSweepParams = (kind: IndicatorKind): IndicatorSweepParam[] => {
-		switch (kind) {
-			case "kama":
-				return ["period", "fast", "slow"];
-			case "alma":
-				return ["period", "offset", "sigma"];
-			default:
-				return ["period"];
-		}
-	};
-
-	const normalizeSweepParam = (
-		kind: IndicatorKind,
-		param: IndicatorSweepParam | undefined
-	): IndicatorSweepParam => {
-		const allowed = indicatorSweepParams(kind);
-		if (param && allowed.includes(param)) return param;
-		return allowed[0];
-	};
-
-	const isIntegerSweepParam = (param: IndicatorSweepParam) =>
-		param === "period" || param === "fast" || param === "slow";
-
-	const countRange = (start: number | null, end: number | null, step: number | null) => {
-		if (start === null || end === null || step === null) return 0;
-		if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(step)) return 0;
-		if (step <= 0 || end < start) return 0;
-		return Math.floor((end - start) / step) + 1;
-	};
-
-	const normalizeExtensions = (extensions: string[]) =>
-		extensions.map((ext) => ext.replace(/^\./, "").toLowerCase());
-
-	const buildFileBrowserUrl = (dir: string, extensions: string[]) => {
-		const params = new URLSearchParams();
-		if (dir.trim() !== "") {
-			params.set("dir", dir);
-		}
-		const normalized = normalizeExtensions(extensions);
-		if (normalized.length > 0) {
-			params.set("ext", normalized.join(","));
-		}
-		const query = params.toString();
-		return query ? `/api/files?${query}` : "/api/files";
-	};
+	let limits = $state(createDefaultBacktestLimits());
 
 	const loadFileBrowser = async (dir: string, extensions: string[]) => {
 		const token = ++fileBrowserToken;
@@ -299,23 +169,6 @@ end
 		void loadFileBrowser(fileBrowserParent, fileBrowserExtensions);
 	};
 
-	let env = $state<BacktestEnv>({
-		initialBalance: 10_000,
-		maxPosition: 1,
-		commission: 1.6,
-		slippage: 0.25,
-		marginPerContract: 50,
-		marginMode: "per-contract",
-		contractMultiplier: 1.0,
-		enforceMargin: true
-	});
-
-	let limits = $state<BacktestLimits>({
-		memoryMb: 64,
-		instructionLimit: 5_000_000,
-		instructionInterval: 10_000
-	});
-
 	let numericEnv = $derived.by(() => ({
 		initialBalance: toNumber(env.initialBalance),
 		maxPosition: toNumber(env.maxPosition),
@@ -385,8 +238,6 @@ end
 
 	let canRun = $derived.by(() => !running && validationErrors.length === 0);
 
-	const ANALYZER_MAX_COMBOS = 20_000;
-
 	let numericAnalyzerEnv = $derived.by(() => ({
 		initialBalance: toNumber(analyzerEnv.initialBalance),
 		maxPosition: toNumber(analyzerEnv.maxPosition),
@@ -436,105 +287,6 @@ end
 		if (!trimmed) return true;
 		return !trimmed.endsWith(".parquet");
 	});
-
-	type ParsedIndicator = {
-		start: number | null;
-		end: number | null;
-		step: number | null;
-		period: number | null;
-		kamaFast: number | null;
-		kamaSlow: number | null;
-		almaOffset: number | null;
-		almaSigma: number | null;
-	};
-
-	const validateAnalyzerIndicator = (
-		label: "A" | "B",
-		kind: IndicatorKind,
-		sweepParam: IndicatorSweepParam,
-		parsed: ParsedIndicator
-	) => {
-		const errors: string[] = [];
-		const allowedSweepParams = indicatorSweepParams(kind);
-		if (!allowedSweepParams.includes(sweepParam)) {
-			errors.push(`Indicator ${label} sweep parameter is not valid for ${kind.toUpperCase()}.`);
-			return errors;
-		}
-
-		const { start, end, step } = parsed;
-		if (start === null || end === null || step === null) {
-			errors.push(`Indicator ${label} sweep range is incomplete.`);
-			return errors;
-		}
-		if (step <= 0 || end < start) {
-			errors.push(`Indicator ${label} sweep range must satisfy end >= start and step > 0.`);
-			return errors;
-		}
-		if (isIntegerSweepParam(sweepParam)) {
-			if (!Number.isInteger(start) || !Number.isInteger(end) || !Number.isInteger(step)) {
-				errors.push(`Indicator ${label} ${sweepParam} sweep values must be integers.`);
-			}
-			if (start <= 0) {
-				errors.push(`Indicator ${label} ${sweepParam} sweep values must be greater than 0.`);
-			}
-		} else if (sweepParam === "offset") {
-			if (start < 0 || end > 1) {
-				errors.push(`Indicator ${label} offset sweep must stay within [0, 1].`);
-			}
-		} else if (sweepParam === "sigma") {
-			if (start <= 0) {
-				errors.push(`Indicator ${label} sigma sweep values must be greater than 0.`);
-			}
-		}
-
-		if (kind !== "price" && sweepParam !== "period") {
-			if (parsed.period === null || !Number.isInteger(parsed.period) || parsed.period <= 0) {
-				errors.push(`Indicator ${label} fixed period must be an integer greater than 0.`);
-			}
-		}
-
-		if (kind === "kama") {
-			if (sweepParam !== "fast") {
-				if (
-					parsed.kamaFast === null ||
-					!Number.isInteger(parsed.kamaFast) ||
-					parsed.kamaFast <= 0
-				) {
-					errors.push(`Indicator ${label} fixed KAMA fast must be an integer greater than 0.`);
-				}
-			}
-			if (sweepParam !== "slow") {
-				if (
-					parsed.kamaSlow === null ||
-					!Number.isInteger(parsed.kamaSlow) ||
-					parsed.kamaSlow <= 0
-				) {
-					errors.push(`Indicator ${label} fixed KAMA slow must be an integer greater than 0.`);
-				}
-			}
-
-			const fastMax = sweepParam === "fast" ? end : parsed.kamaFast;
-			const slowMin = sweepParam === "slow" ? start : parsed.kamaSlow;
-			if (fastMax !== null && slowMin !== null && slowMin <= fastMax) {
-				errors.push(`Indicator ${label} KAMA requires slow > fast across the sweep.`);
-			}
-		}
-
-		if (kind === "alma") {
-			if (sweepParam !== "offset") {
-				if (parsed.almaOffset === null || parsed.almaOffset < 0 || parsed.almaOffset > 1) {
-					errors.push(`Indicator ${label} fixed ALMA offset must be within [0, 1].`);
-				}
-			}
-			if (sweepParam !== "sigma") {
-				if (parsed.almaSigma === null || parsed.almaSigma <= 0) {
-					errors.push(`Indicator ${label} fixed ALMA sigma must be greater than 0.`);
-				}
-			}
-		}
-
-		return errors;
-	};
 
 	let analyzerIndicatorAErrors = $derived.by(() =>
 		validateAnalyzerIndicator(
@@ -624,18 +376,16 @@ end
 	let analyzerCanRun = $derived.by(() => !analyzerRunning && analyzerValidationErrors.length === 0);
 
 	$effect(() => {
-		if (datasetMode === "train") {
-			datasetPath = "data/train/SPY0.parquet";
-		} else if (datasetMode === "val") {
-			datasetPath = "data/val/SPY.parquet";
+		const presetPath = presetDatasetPath(datasetMode);
+		if (presetPath) {
+			datasetPath = presetPath;
 		}
 	});
 
 	$effect(() => {
-		if (analyzerDatasetMode === "train") {
-			analyzerDatasetPath = "data/train/SPY0.parquet";
-		} else if (analyzerDatasetMode === "val") {
-			analyzerDatasetPath = "data/val/SPY.parquet";
+		const presetPath = presetDatasetPath(analyzerDatasetMode);
+		if (presetPath) {
+			analyzerDatasetPath = presetPath;
 		}
 	});
 
@@ -653,136 +403,10 @@ end
 		}
 	});
 
-	const demoEquitySeries = Array.from({ length: 140 }, (_, i) => {
-		const drift = i * 3.2;
-		const wave = Math.sin(i / 9) * 40;
-		return 10_000 + drift + wave;
-	});
-
-	const demoBaselineSeries = demoEquitySeries.map((v, i) => v - 120 + Math.cos(i / 11) * 25);
-
-	const demoMetrics = {
-		total_reward: 0,
-		net_pnl: 412.36,
-		ending_equity: 10_412.36,
-		sharpe: 1.48,
-		max_drawdown: 132.4,
-		profit_factor: 1.32,
-		win_rate: 0.54,
-		max_consecutive_losses: 4,
-		steps: 13_892
-	};
-
 	let equitySeries = $derived.by(() => runResult?.equity_curve ?? demoEquitySeries);
 	let activeMetrics = $derived.by(() => runResult?.metrics ?? demoMetrics);
 
-	let equityChartData = $derived.by(() => {
-		const datasets: ChartDataset<"line", number[]>[] = [
-			{
-				label: "Script",
-				data: equitySeries,
-				borderColor: "var(--color-chart-2)",
-				backgroundColor: "rgba(59, 130, 246, 0.12)",
-				fill: true,
-				borderWidth: 2,
-				tension: 0.25
-			}
-		];
-
-		if (!runResult) {
-			datasets.push({
-				label: "Model",
-				data: demoBaselineSeries,
-				borderColor: "var(--color-chart-4)",
-				backgroundColor: "transparent",
-				borderDash: [6, 4],
-				borderWidth: 2,
-				tension: 0.2
-			});
-		}
-
-		return {
-			labels: equitySeries.map((_, i) => i + 1),
-			datasets
-		};
-	});
-
-	const chartOptions = {
-		plugins: {
-			legend: {
-				display: true,
-				position: "bottom"
-			}
-		},
-		scales: {
-			x: {
-				display: false
-			},
-			y: {
-				ticks: {
-					callback: (value: string | number) => {
-						const numericValue = Number(value);
-						return Number.isFinite(numericValue)
-							? `$${numericValue.toLocaleString()}`
-							: String(value);
-					}
-				}
-			}
-		}
-	} satisfies ChartConfiguration<"line", number[], number>["options"];
-
-	const metricValue = (metrics: AnalyzerMetrics, metric: keyof AnalyzerMetrics) => {
-		switch (metric) {
-			case "netPnl":
-				return metrics.netPnl;
-			case "endingEquity":
-				return metrics.endingEquity;
-			case "sharpe":
-				return metrics.sharpe;
-			case "sortino":
-				return metrics.sortino;
-			case "maxDrawdown":
-				return metrics.maxDrawdown;
-			case "profitFactor":
-				return metrics.profitFactor;
-			case "winRate":
-				return metrics.winRate;
-			case "trades":
-				return metrics.trades;
-			case "fitness":
-				return metrics.fitness;
-			case "totalReward":
-				return metrics.totalReward;
-			case "steps":
-				return metrics.steps;
-			default:
-				return metrics.fitness;
-		}
-	};
-
-	const heatmapMetricOptions: { value: keyof AnalyzerMetrics; label: string }[] = [
-		{ value: "fitness", label: "Fitness" },
-		{ value: "netPnl", label: "Net PnL" },
-		{ value: "maxDrawdown", label: "Max Drawdown" },
-		{ value: "sortino", label: "Sortino" },
-		{ value: "sharpe", label: "Sharpe" },
-		{ value: "profitFactor", label: "Profit Factor" },
-		{ value: "winRate", label: "Win Rate" },
-		{ value: "trades", label: "Trades" }
-	];
-
-	const metricColorValue = (metrics: AnalyzerMetrics, metric: keyof AnalyzerMetrics) => {
-		const value = metricValue(metrics, metric);
-		if (metric === "maxDrawdown") return -value;
-		return value;
-	};
-
-	const formatMetricValue = (value: number, metric: keyof AnalyzerMetrics) => {
-		if (!Number.isFinite(value)) return "n/a";
-		if (metric === "winRate") return `${(value * 100).toFixed(1)}%`;
-		if (metric === "trades" || metric === "steps") return value.toLocaleString();
-		return value.toFixed(2);
-	};
+	let equityChartData = $derived.by(() => buildEquityChartData(equitySeries, !runResult));
 
 	let analyzerAxisA = $derived.by(() => analyzerResult?.axes.indicatorA.periods ?? []);
 	let analyzerAxisB = $derived.by(() => analyzerResult?.axes.indicatorB.periods ?? []);
@@ -813,8 +437,6 @@ end
 		return true;
 	};
 
-	const axisValueKey = (value: number) => (Number.isFinite(value) ? value.toFixed(6) : "nan");
-
 	let analyzerCellMap = $derived.by(() => {
 		const map = new Map<string, AnalyzerCell>();
 		for (const cell of filteredAnalyzerCells) {
@@ -833,13 +455,6 @@ end
 		if (min === max) return { min, max: min + 1 };
 		return { min, max };
 	});
-
-	const formatRangePlaceholder = (value: number, metric: keyof AnalyzerMetrics) => {
-		if (!Number.isFinite(value)) return "";
-		if (metric === "winRate") return (value * 100).toFixed(1);
-		if (metric === "trades" || metric === "steps") return Math.round(value).toString();
-		return value.toFixed(2);
-	};
 
 	let heatmapRangePlaceholder = $derived.by(() => ({
 		min: formatRangePlaceholder(heatmapMetricDomain.min, heatmapMetric),
@@ -860,12 +475,7 @@ end
 
 	const heatmapColor = (metrics: AnalyzerMetrics) => {
 		const value = metricColorValue(metrics, heatmapMetric);
-		if (!Number.isFinite(value)) return "hsl(0, 0%, 70%)";
-		const { min, max } = heatmapDomain;
-		const t = Math.min(1, Math.max(0, (value - min) / (max - min)));
-		const hue = 20 + 120 * t;
-		const lightness = 38 + 22 * t;
-		return `hsl(${hue}, 70%, ${lightness}%)`;
+		return heatmapColorForValue(value, heatmapDomain);
 	};
 
 	const findCell = (aPeriod: number, bPeriod: number) => {
@@ -1052,189 +662,92 @@ end
 		}`}
 	>
 		{#if activeView === "script"}
-			<section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-				<div class="lg:col-start-2">
-					<RunBacktestCard
-						{running}
-						{canRun}
-						{validationErrors}
-						{runError}
-						{runResult}
-						onRun={runBacktest}
-					/>
-				</div>
-				<div class="lg:col-start-1 lg:row-start-1">
-					<BacktestHero />
-				</div>
-			</section>
-
-			<section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-				<ScriptEditorCard bind:scriptText {sampleScript} {scriptInvalid} />
-				<div class="space-y-6">
-					<DatasetCard
-						title="Dataset"
-						description="Select the parquet slice to evaluate."
-						bind:datasetMode
-						bind:datasetPath
-						{datasetPathInvalid}
-						onBrowse={() => void openDatasetPicker("script")}
-					/>
-					<BacktestEnvironmentCard
-						{env}
-						{limits}
-						{invalidInitialBalance}
-						{invalidMaxPosition}
-						{invalidCommission}
-						{invalidSlippage}
-						{invalidMargin}
-						{invalidContractMultiplier}
-						{invalidMemory}
-						{invalidInstructionLimit}
-						{invalidInstructionInterval}
-					/>
-				</div>
-			</section>
-
-			<section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-				<EquityCurveCard {runResult} {equityChartData} {chartOptions} />
-				<div class="space-y-6">
-					<PerformanceSnapshotCard {activeMetrics} {runResult} />
-					<ScriptApiCard />
-				</div>
-			</section>
+			<BacktestScriptView
+				{running}
+				{canRun}
+				{validationErrors}
+				{runError}
+				{runResult}
+				onRun={runBacktest}
+				bind:scriptText
+				{sampleScript}
+				{scriptInvalid}
+				bind:datasetMode
+				bind:datasetPath
+				{datasetPathInvalid}
+				onBrowseDataset={() => void openDatasetPicker("script")}
+				{env}
+				{limits}
+				validation={{
+					invalidInitialBalance,
+					invalidMaxPosition,
+					invalidCommission,
+					invalidSlippage,
+					invalidMargin,
+					invalidContractMultiplier,
+					invalidMemory,
+					invalidInstructionLimit,
+					invalidInstructionInterval
+				}}
+				{activeMetrics}
+				{equityChartData}
+				chartOptions={equityChartOptions}
+			/>
 		{:else}
-			<section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-				<div class="lg:col-start-2">
-					<RunAnalyzerCard
-						{analyzerRunning}
-						{analyzerCanRun}
-						{analyzerCombos}
-						{analyzerResult}
-						{analyzerValidationErrors}
-						{analyzerError}
-						onRun={runAnalyzer}
-					/>
-				</div>
-				<div class="lg:col-start-1 lg:row-start-1">
-					<AnalyzerHeader />
-				</div>
-			</section>
-
-			<section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-				<div class="space-y-6">
-					<SignalBuilderCard {analyzer} />
-					<ExitRangesCard {analyzer} />
-				</div>
-				<div class="space-y-6">
-					<DatasetCard
-						title="Analyzer Dataset"
-						description="Select the parquet slice to evaluate."
-						bind:datasetMode={analyzerDatasetMode}
-						bind:datasetPath={analyzerDatasetPath}
-						datasetPathInvalid={analyzerDatasetPathInvalid}
-						onBrowse={() => void openDatasetPicker("analyzer")}
-					/>
-					<AnalyzerEnvironmentCard
-						{analyzerEnv}
-						{invalidAnalyzerInitialBalance}
-						{invalidAnalyzerMaxPosition}
-						{invalidAnalyzerCommission}
-						{invalidAnalyzerSlippage}
-						{invalidAnalyzerMargin}
-						{invalidAnalyzerContractMultiplier}
-					/>
-				</div>
-			</section>
-
-			<section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-				<HeatmapCard
-					{analyzerResult}
-					bind:heatmapMetric
-					{heatmapMetricOptions}
-					bind:selectedTakeProfit
-					bind:selectedStopLoss
-					bind:heatmapRangeMin
-					bind:heatmapRangeMax
-					heatmapRangePlaceholderMin={heatmapRangePlaceholder.min}
-					heatmapRangePlaceholderMax={heatmapRangePlaceholder.max}
-					{analyzerAxisA}
-					{analyzerAxisB}
-					{findCell}
-					{heatmapColor}
-					{metricValue}
-					{formatMetricValue}
-					{isHeatmapValueInRange}
-					bind:selectedCell
-				/>
-				<SelectionDetailsCard {selectedCell} {analyzerResult} {formatMetricValue} />
-			</section>
+			<BacktestAnalyzerView
+				{analyzerRunning}
+				{analyzerCanRun}
+				{analyzerCombos}
+				{analyzerResult}
+				{analyzerValidationErrors}
+				{analyzerError}
+				onRun={runAnalyzer}
+				{analyzer}
+				bind:datasetMode={analyzerDatasetMode}
+				bind:datasetPath={analyzerDatasetPath}
+				datasetPathInvalid={analyzerDatasetPathInvalid}
+				onBrowseDataset={() => void openDatasetPicker("analyzer")}
+				{analyzerEnv}
+				validation={{
+					invalidAnalyzerInitialBalance,
+					invalidAnalyzerMaxPosition,
+					invalidAnalyzerCommission,
+					invalidAnalyzerSlippage,
+					invalidAnalyzerMargin,
+					invalidAnalyzerContractMultiplier
+				}}
+				bind:heatmapMetric
+				{heatmapMetricOptions}
+				bind:selectedTakeProfit
+				bind:selectedStopLoss
+				bind:heatmapRangeMin
+				bind:heatmapRangeMax
+				heatmapRangePlaceholderMin={heatmapRangePlaceholder.min}
+				heatmapRangePlaceholderMax={heatmapRangePlaceholder.max}
+				{analyzerAxisA}
+				{analyzerAxisB}
+				{findCell}
+				{heatmapColor}
+				{metricValue}
+				{formatMetricValue}
+				{isHeatmapValueInRange}
+				bind:selectedCell
+			/>
 		{/if}
 	</main>
 </div>
 
-{#if fileBrowserOpen}
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center p-4"
-		role="dialog"
-		aria-modal="true"
-		aria-label="Select parquet file"
-	>
-		<button
-			type="button"
-			class="absolute inset-0 bg-black/40"
-			onclick={closeFileBrowser}
-			aria-label="Close file picker"
-		></button>
-		<div class="relative z-10 w-full max-w-2xl rounded-xl border bg-background p-4 shadow-lg">
-			<div class="flex items-start justify-between gap-4">
-				<div>
-					<div class="text-xs uppercase tracking-wide text-muted-foreground">{fileBrowserTitle}</div>
-					<div class="text-sm font-semibold">{fileBrowserDir || "Project root"}</div>
-					<div class="text-xs text-muted-foreground">
-						Allowed: {fileBrowserExtensions.map((ext) => `.${ext}`).join(", ")}
-					</div>
-				</div>
-				<Button type="button" variant="ghost" size="sm" onclick={closeFileBrowser}>
-					Close
-				</Button>
-			</div>
-			<div class="mt-3 flex items-center gap-2">
-				<Button type="button" variant="outline" size="sm" onclick={handleFileBrowserUp} disabled={fileBrowserParent === null}>
-					Up
-				</Button>
-				<div class="text-xs text-muted-foreground truncate">
-					{fileBrowserDir ? `/${fileBrowserDir}` : "/"}
-				</div>
-			</div>
-
-			{#if fileBrowserError}
-				<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-					{fileBrowserError}
-				</div>
-			{/if}
-
-			<div class="mt-3 max-h-[360px] overflow-auto rounded-lg border">
-				{#if fileBrowserLoading}
-					<div class="px-4 py-6 text-sm text-muted-foreground">Loading files...</div>
-				{:else if fileBrowserEntries.length === 0}
-					<div class="px-4 py-6 text-sm text-muted-foreground">No parquet files found here.</div>
-				{:else}
-					<div class="divide-y">
-						{#each fileBrowserEntries as entry}
-							<button
-								type="button"
-								class="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-muted/50"
-								onclick={() => handleFileEntry(entry)}
-							>
-								<span class="text-[11px] font-semibold uppercase text-muted-foreground">
-									{entry.kind === "dir" ? "Dir" : "File"}
-								</span>
-								<span class="text-sm">{entry.name}</span>
-							</button>
-						{/each}
-					</div>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
+<BacktestFileBrowserModal
+	open={fileBrowserOpen}
+	title={fileBrowserTitle}
+	dir={fileBrowserDir}
+	extensions={fileBrowserExtensions}
+	parent={fileBrowserParent}
+	entries={fileBrowserEntries}
+	loading={fileBrowserLoading}
+	error={fileBrowserError}
+	emptyMessage="No parquet files found here."
+	onClose={closeFileBrowser}
+	onUp={handleFileBrowserUp}
+	onSelect={handleFileEntry}
+/>
