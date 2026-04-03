@@ -12,12 +12,16 @@ use std::path::{Path, PathBuf};
 
 #[path = "train_rl/args.rs"]
 mod args;
+#[allow(dead_code)]
 #[path = "train_rl/candle.rs"]
 mod candle_backend;
+#[allow(dead_code)]
 #[path = "train_rl/common.rs"]
 mod common;
+#[allow(dead_code)]
 #[path = "train_rl/data.rs"]
 mod data;
+#[allow(dead_code)]
 #[path = "train_rl/metrics.rs"]
 mod metrics;
 
