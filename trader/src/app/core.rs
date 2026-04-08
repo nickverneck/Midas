@@ -1,5 +1,6 @@
 impl App {
     pub fn new(config: AppConfig) -> Self {
+        let session_stats_enabled = config.session_stats_enabled;
         let available_brokers = compiled_brokers().to_vec();
         let selected_broker = if available_brokers.contains(&config.broker) {
             config.broker
@@ -27,6 +28,7 @@ impl App {
             selected_contract: 0,
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
+            session_stats: SessionStatsState::new(session_stats_enabled),
             dashboard_visuals_enabled: false,
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,
@@ -61,6 +63,14 @@ impl App {
                 "Replay mode available from Login: local ES tick data can stream 1 Range or 1 Min bars."
             } else {
                 "Replay mode is only available on Tradovate builds with `--features replay`."
+            }
+            .to_string(),
+        );
+        app.push_log(
+            if app.session_stats.enabled {
+                "Session stats tracking enabled: F6 opens balance-delta stats and F5/Ctrl+S includes them in saved logs."
+            } else {
+                "Session stats tracking disabled by config; set `session_stats_enabled = true` or TRADER_SESSION_STATS_ENABLED=1 to enable it."
             }
             .to_string(),
         );
@@ -169,6 +179,7 @@ impl App {
                 self.push_log(format!("Loaded {} accounts", self.accounts.len()));
             }
             ServiceEvent::AccountSnapshotsLoaded(snapshots) => {
+                self.record_session_stats(&snapshots);
                 self.account_snapshots = snapshots;
             }
             ServiceEvent::ContractSearchResults { query, results } => {

@@ -44,6 +44,7 @@ pub struct App {
     selected_contract: usize,
     market: MarketSnapshot,
     logs: VecDeque<LogEntry>,
+    session_stats: SessionStatsState,
     dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
@@ -128,6 +129,7 @@ enum Screen {
     Strategy,
     Selection,
     Dashboard,
+    Stats,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -153,6 +155,7 @@ struct NumericInputState {
 
 include!("core.rs");
 include!("input.rs");
+include!("session_stats.rs");
 mod render;
 mod views;
 include!("state.rs");

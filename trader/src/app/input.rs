@@ -58,6 +58,11 @@ impl App {
                 self.focus = Focus::AccountList;
                 return;
             }
+            KeyCode::F(6) => {
+                self.screen = Screen::Stats;
+                self.focus = Focus::AccountList;
+                return;
+            }
             KeyCode::Esc => {
                 if self.screen == Screen::Login && self.available_brokers.len() > 1 {
                     self.screen = Screen::BrokerSelect;
@@ -82,6 +87,7 @@ impl App {
             Screen::Strategy => self.handle_strategy_key(key, cmd_tx),
             Screen::Selection => self.handle_selection_key(key, cmd_tx),
             Screen::Dashboard => self.handle_dashboard_key(key, cmd_tx),
+            Screen::Stats => self.handle_session_stats_key(key, cmd_tx),
         }
     }
 }

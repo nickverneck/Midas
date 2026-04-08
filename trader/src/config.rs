@@ -118,6 +118,7 @@ pub struct AppConfig {
     pub env: TradingEnvironment,
     pub auth_mode: AuthMode,
     pub log_mode: LogMode,
+    pub session_stats_enabled: bool,
     pub token_override: String,
     pub username: String,
     pub password: String,
@@ -146,6 +147,7 @@ impl Default for AppConfig {
             env: TradingEnvironment::Sim,
             auth_mode: AuthMode::TokenFile,
             log_mode: LogMode::Default,
+            session_stats_enabled: true,
             token_override: String::new(),
             username: String::new(),
             password: String::new(),
@@ -201,6 +203,12 @@ impl AppConfig {
         }
         if let Some(raw) = env_string_any(&["TRADER_LOG_MODE", "MIDAS_TUI_LOG_MODE"]) {
             self.log_mode = parse_log_mode(&raw)?;
+        }
+        if let Some(raw) = env_bool_any(&[
+            "TRADER_SESSION_STATS_ENABLED",
+            "MIDAS_TUI_SESSION_STATS_ENABLED",
+        ])? {
+            self.session_stats_enabled = raw;
         }
         if let Some(raw) = env_string_any(&["TRADER_TOKEN_OVERRIDE", "MIDAS_TUI_TOKEN_OVERRIDE"]) {
             self.token_override = raw;

@@ -5,6 +5,7 @@ mod chrome;
 mod dashboard;
 mod login;
 mod selection;
+mod session_stats;
 mod strategy;
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ impl App {
             Screen::Strategy => self.render_strategy_screen(frame, layout[1]),
             Screen::Selection => self.render_selection_screen(frame, layout[1]),
             Screen::Dashboard => self.render_dashboard(frame, layout[1]),
+            Screen::Stats => self.render_session_stats_screen(frame, layout[1]),
         }
         self.render_logs(frame, layout[2]);
     }

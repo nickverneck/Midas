@@ -59,6 +59,28 @@ fn account_snapshot(
     }
 }
 
+fn balance_snapshot(account_id: i64, account_name: &str, balance: f64) -> AccountSnapshot {
+    AccountSnapshot {
+        account_id,
+        account_name: account_name.to_string(),
+        balance: Some(balance),
+        cash_balance: Some(balance),
+        net_liq: Some(balance),
+        realized_pnl: None,
+        unrealized_pnl: None,
+        intraday_margin: None,
+        open_position_qty: None,
+        market_position_qty: None,
+        market_entry_price: None,
+        selected_contract_take_profit_price: None,
+        selected_contract_stop_price: None,
+        raw_account: None,
+        raw_risk: None,
+        raw_cash: None,
+        raw_positions: Vec::new(),
+    }
+}
+
 fn enable_tradovate_controls(app: &mut App) {
     app.selected_broker = BrokerKind::Tradovate;
     app.capabilities = BrokerCapabilities {
@@ -127,6 +149,17 @@ fn broker_picker_uses_arrow_keys_and_enter_to_open_login() {
     assert_eq!(app.screen, Screen::Login);
     assert_eq!(app.focus, Focus::Env);
     assert!(!app.awaiting_broker_selection());
+}
+
+#[test]
+fn f6_opens_session_stats_screen() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+
+    app.handle_key(key(KeyCode::F(6)), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Stats);
+    assert_eq!(app.focus, Focus::AccountList);
 }
 
 #[test]
@@ -293,6 +326,65 @@ fn execution_state_syncs_selected_account_index_from_engine() {
     app.handle_service_event(ServiceEvent::ExecutionState(snapshot), &cmd_tx);
 
     assert_eq!(app.selected_account, 1);
+}
+
+#[test]
+fn session_stats_track_wins_losses_and_flats_from_balance_deltas() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for balance in [1_000.0, 1_015.0, 1_005.0, 1_030.0, 1_030.0] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", balance)]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.account_id, 7);
+    assert_eq!(stats.sample_count, 5);
+    assert_eq!(stats.wins, 2);
+    assert_eq!(stats.losses, 1);
+    assert_eq!(stats.flat_moves, 1);
+    assert_eq!(stats.event_count(), 3);
+    assert_eq!(stats.avg_win(), Some(20.0));
+    assert_eq!(stats.max_win, Some(25.0));
+    assert_eq!(stats.avg_loss_signed(), Some(-10.0));
+    assert_eq!(stats.max_loss_signed(), Some(-10.0));
+    assert_eq!(stats.session_pnl(), 30.0);
+    assert_eq!(stats.win_rate(), Some(2.0 / 3.0));
+}
+
+#[test]
+fn persisted_log_body_includes_session_stats_summary_and_events() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_000.0)]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_015.0)]),
+        &cmd_tx,
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+
+    assert!(body.contains("[session_stats]"));
+    assert!(body.contains("enabled: true"));
+    assert!(body.contains("account_name: SIM"));
+    assert!(body.contains("session_pnl: +15.00"));
+    assert!(body.contains("delta=+15.00"));
 }
 
 #[test]
@@ -467,4 +559,20 @@ fn debug_log_events_are_filtered_by_log_mode() {
 
     assert_eq!(app.logs.len(), 1);
     assert_eq!(app.logs[0].message, "DEBUG: submit 42ms | order");
+}
+
+#[test]
+fn disabled_session_stats_screen_shows_enable_hint() {
+    let mut config = AppConfig::default();
+    config.session_stats_enabled = false;
+    let app = App::new(config);
+
+    let lines = app.selected_session_stats_lines();
+
+    assert!(lines[0].to_string().contains("disabled"));
+    assert!(
+        app.session_stats_overview_lines()
+            .iter()
+            .any(|line| line.to_string().contains("TRADER_SESSION_STATS_ENABLED=1"))
+    );
 }

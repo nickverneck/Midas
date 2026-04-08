@@ -269,12 +269,19 @@ impl App {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("session-{timestamp}.txt"));
 
+        let body = self.build_persisted_log_body(&timestamp);
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn build_persisted_log_body(&self, timestamp: &str) -> String {
         let screen = match self.screen {
             Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
             Screen::Selection => "Selection",
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",
+            Screen::Stats => "Stats",
         };
         let selected_account = self
             .accounts
@@ -302,14 +309,16 @@ impl App {
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
         body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
+        body.push_str(&self.session_stats_log_section());
+        body.push('\n');
+        body.push_str("[logs]\n");
 
         for entry in &self.logs {
             body.push_str(&entry.render_line());
             body.push('\n');
         }
 
-        std::fs::write(&path, body)?;
-        Ok(path)
+        body
     }
 
     fn clear_strategy_numeric_input(&mut self) {

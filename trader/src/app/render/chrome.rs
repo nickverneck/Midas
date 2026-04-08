@@ -13,38 +13,50 @@ impl App {
             Screen::Selection => "Selection",
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",
+            Screen::Stats => "Stats",
         };
         let help = match self.screen {
             Screen::BrokerSelect => {
-                "Up/Down/Left/Right choose broker | Enter open login/token options | F5/Ctrl+S save logs | q quit"
+                "Up/Down/Left/Right choose broker | Enter open login/token options | F6 stats | F5/Ctrl+S save logs | q quit"
             }
             Screen::Login => {
-                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | Esc broker picker | F5/Ctrl+S save logs | q quit"
+                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | F6 stats | Esc broker picker | F5/Ctrl+S save logs | q quit"
             }
             Screen::Selection => {
-                "F1 login | F3 strategy | F4 dashboard | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
+                "F1 login | F3 strategy | F4 dashboard | F6 stats | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
             }
             Screen::Strategy => {
-                "F1 login | F2 selection | F4 dashboard | Up/Down focus | Left/Right edit native strategy settings | F5/Ctrl+S save logs"
+                "F1 login | F2 selection | F4 dashboard | F6 stats | Up/Down focus | Left/Right edit native strategy settings | F5/Ctrl+S save logs"
             }
             Screen::Dashboard => {
                 if self.session_kind == SessionKind::Replay {
-                    "F1 login | F2 selection | F3 strategy | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | [/] replay speed | 0 realtime | F5/Ctrl+S save logs | q quit"
+                    "F1 login | F2 selection | F3 strategy | F6 stats | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | [/] replay speed | 0 realtime | F5/Ctrl+S save logs | q quit"
                 } else {
-                    "F1 login | F2 selection | F3 strategy | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
+                    "F1 login | F2 selection | F3 strategy | F6 stats | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
                 }
             }
+            Screen::Stats => {
+                "F1 login | F2 selection | F3 strategy | F4 dashboard | Up/Down choose account | Enter re-sync account | F5/Ctrl+S save logs | q quit"
+            }
         };
-        let titles = ["Broker", "Login", "Selection", "Strategy", "Dashboard"]
-            .into_iter()
-            .map(Line::from)
-            .collect::<Vec<_>>();
+        let titles = [
+            "Broker",
+            "Login",
+            "Selection",
+            "Strategy",
+            "Dashboard",
+            "Stats",
+        ]
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
         let selected_tab = match self.screen {
             Screen::BrokerSelect => 0,
             Screen::Login => 1,
             Screen::Selection => 2,
             Screen::Strategy => 3,
             Screen::Dashboard => 4,
+            Screen::Stats => 5,
         };
         let tabs = Tabs::new(titles)
             .select(selected_tab)
@@ -108,13 +120,16 @@ impl App {
             .rev()
             .map(Line::from)
             .collect::<Vec<_>>();
-        let logs = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Log [F5/Ctrl+S saves to .run/]"),
-            )
-            .wrap(Wrap { trim: true });
+        let logs =
+            Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(
+                    if self.session_stats.enabled {
+                        "Log [F5/Ctrl+S saves logs + stats to .run/]"
+                    } else {
+                        "Log [F5/Ctrl+S saves to .run/]"
+                    },
+                ))
+                .wrap(Wrap { trim: true });
         frame.render_widget(logs, area);
     }
 }

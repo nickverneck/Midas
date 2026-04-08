@@ -39,9 +39,11 @@ Notes:
 - `attach` reuses the existing engine socket and does not spawn a new engine.
 - `kill -c` and `killall -c` disarm the selected strategy, send a close on the selected market, wait for that selected market to go flat, and only then kill the engine process.
 - `TRADER_*` environment variables are preferred; legacy `MIDAS_TUI_*` variables still fall back where supported.
+- `session_stats_enabled = true` turns on the TUI-side session tracker shown on `F6`; set it to `false` or export `TRADER_SESSION_STATS_ENABLED=0` for a leaner session.
 
 Suggested config flow:
 1. Pick `broker = "tradovate"` or `broker = "ironbeam"` for single-broker builds. On dual-broker builds you can still switch from the broker selection screen.
 2. Start with token-file mode if you already have a valid bearer token, or switch to credentials mode to request and cache a new token.
 3. Select the account and instrument you want to watch or trade.
 4. Continue to strategy setup, then open the dashboard.
+5. Open `F6` to inspect balance-delta session stats such as wins, losses, avg/max win, avg/max loss, and the recent event log. `F5` / `Ctrl+S` saves those stats with the normal session log.

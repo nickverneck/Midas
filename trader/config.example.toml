@@ -2,6 +2,7 @@ broker = "tradovate"
 env = "sim"
 auth_mode = "token_file"
 log_mode = "default"
+session_stats_enabled = true
 
 token_override = ""
 username = ""
