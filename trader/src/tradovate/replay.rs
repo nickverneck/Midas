@@ -114,6 +114,7 @@ pub(crate) fn spawn_replay_market_task(
     cfg: AppConfig,
     contract: ContractSuggestion,
     bar_type: BarType,
+    candle_mode: CandleMode,
     broker_tx: UnboundedSender<BrokerCommand>,
     replay_speed_rx: tokio::sync::watch::Receiver<ReplaySpeed>,
     internal_tx: UnboundedSender<InternalEvent>,
@@ -125,7 +126,7 @@ pub(crate) fn spawn_replay_market_task(
             let _ = internal_tx.send(InternalEvent::Error(
                 "replay mode is not enabled in this build".to_string(),
             ));
-            let _ = bar_type;
+            let _ = (bar_type, candle_mode);
         })
     }
 
@@ -138,6 +139,7 @@ pub(crate) fn spawn_replay_market_task(
                 cfg,
                 contract,
                 bar_type,
+                candle_mode,
                 broker_tx,
                 &mut replay_speed_rx,
                 internal_tx.clone(),
@@ -285,6 +287,7 @@ async fn replay_market_worker_inner(
     cfg: AppConfig,
     contract: ContractSuggestion,
     bar_type: BarType,
+    candle_mode: CandleMode,
     broker_tx: UnboundedSender<BrokerCommand>,
     replay_speed_rx: &mut tokio::sync::watch::Receiver<ReplaySpeed>,
     internal_tx: UnboundedSender<InternalEvent>,
@@ -306,7 +309,8 @@ async fn replay_market_worker_inner(
     }
 
     let initial_status = format!(
-        "Replay {} loaded for {} ({}/{})",
+        "Replay {} {} loaded for {} ({}/{})",
+        candle_mode.label(),
         bar_type.label(),
         contract.name,
         history_loaded,
@@ -315,6 +319,7 @@ async fn replay_market_worker_inner(
     if let Some(update) = build_market_update(
         &contract,
         Some(replay.market_specs),
+        candle_mode,
         series.closed_bars.len(),
         0,
         initial_status,
@@ -342,7 +347,8 @@ async fn replay_market_worker_inner(
         series.push_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT);
         live_bars = live_bars.saturating_add(1);
         let status = format!(
-            "Replay {} streaming for {} ({}/{})",
+            "Replay {} {} streaming for {} ({}/{})",
+            candle_mode.label(),
             bar_type.label(),
             contract.name,
             history_loaded + live_bars,
@@ -351,6 +357,7 @@ async fn replay_market_worker_inner(
         if let Some(update) = build_market_update(
             &contract,
             Some(replay.market_specs),
+            candle_mode,
             series.closed_bars.len(),
             live_bars,
             status,

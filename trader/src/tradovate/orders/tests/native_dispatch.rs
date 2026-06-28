@@ -43,19 +43,21 @@ fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
 }
 
 #[test]
-fn native_strategy_entry_with_trailing_stop_uses_market_order_path() {
+fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.take_profit_ticks = 8.0;
     session.execution_config.native_ema.stop_loss_ticks = 8.0;
     session.execution_config.native_ema.use_trailing_stop = true;
+    session.execution_config.native_ema.trail_trigger_ticks = 4.0;
+    session.execution_config.native_ema.trail_offset_ticks = 2.0;
     session.market.tick_size = Some(0.25);
     let (broker_tx, mut broker_rx) = unbounded_channel();
 
     let outcome =
         dispatch_target_position_order(&mut session, &broker_tx, 1, true, "ema_cross signal")
-            .expect("trailing configs should fall back to market entry + managed protection");
+            .expect("trailing configs should use broker-native auto-trail brackets");
 
     assert!(matches!(
         outcome,
@@ -65,14 +67,90 @@ fn native_strategy_entry_with_trailing_stop_uses_market_order_path() {
     ));
 
     match broker_rx.try_recv().expect("broker command queued") {
-        BrokerCommand::MarketOrder { order, .. } => {
-            assert_eq!(order.target_qty, Some(1));
+        BrokerCommand::OrderStrategy { strategy, .. } => {
+            assert_eq!(strategy.target_qty, 1);
+            assert_eq!(strategy.entry_order_qty, 1);
             assert_eq!(
-                order.payload.get("action").and_then(Value::as_str),
+                strategy.payload.get("action").and_then(Value::as_str),
                 Some("Buy")
             );
+            let params: Value = serde_json::from_str(
+                strategy
+                    .payload
+                    .get("params")
+                    .and_then(Value::as_str)
+                    .expect("strategy params should be serialized JSON"),
+            )
+            .expect("strategy params should parse");
+            let bracket = params
+                .get("brackets")
+                .and_then(Value::as_array)
+                .and_then(|brackets| brackets.first())
+                .expect("strategy should include a bracket");
+            assert_eq!(
+                bracket.get("profitTarget").and_then(Value::as_f64),
+                Some(2.0)
+            );
+            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(-2.0));
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("trigger"))
+                    .and_then(Value::as_f64),
+                Some(1.0)
+            );
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("stopLoss"))
+                    .and_then(Value::as_f64),
+                Some(0.5)
+            );
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("freq"))
+                    .and_then(Value::as_f64),
+                Some(0.25)
+            );
         }
-        _ => panic!("expected market order command"),
+        _ => panic!("expected order strategy command"),
+    }
+}
+
+#[test]
+fn native_strategy_auto_trail_without_fixed_stop_uses_trail_offset_as_initial_stop() {
+    let mut session = test_session();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_ema.use_trailing_stop = true;
+    session.execution_config.native_ema.trail_trigger_ticks = 4.0;
+    session.execution_config.native_ema.trail_offset_ticks = 2.0;
+    session.market.tick_size = Some(0.25);
+    let (broker_tx, mut broker_rx) = unbounded_channel();
+
+    dispatch_target_position_order(&mut session, &broker_tx, 1, true, "ema_cross signal")
+        .expect("auto-trail-only configs should still use an order strategy");
+
+    match broker_rx.try_recv().expect("broker command queued") {
+        BrokerCommand::OrderStrategy { strategy, .. } => {
+            let params: Value = serde_json::from_str(
+                strategy
+                    .payload
+                    .get("params")
+                    .and_then(Value::as_str)
+                    .expect("strategy params should be serialized JSON"),
+            )
+            .expect("strategy params should parse");
+            let bracket = params
+                .get("brackets")
+                .and_then(Value::as_array)
+                .and_then(|brackets| brackets.first())
+                .expect("strategy should include a bracket");
+            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(-0.5));
+            assert!(bracket.get("autoTrail").is_some());
+        }
+        _ => panic!("expected order strategy command"),
     }
 }
 

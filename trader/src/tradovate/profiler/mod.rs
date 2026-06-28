@@ -93,6 +93,7 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
         harness.send(ServiceCommand::SubscribeBars {
             contract: selected_contract.clone(),
             bar_type: BarType::Range1,
+            candle_mode: CandleMode::Standard,
         })?;
         harness
             .wait_for(SUBSCRIBE_TIMEOUT, &mut attempts, |state, _| {

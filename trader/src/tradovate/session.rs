@@ -187,12 +187,18 @@ async fn ensure_background_tasks(
                 .as_ref()
                 .map(|s| s.bar_type)
                 .unwrap_or_default();
+            let candle_mode = state
+                .session
+                .as_ref()
+                .map(|s| s.candle_mode)
+                .unwrap_or_default();
             state.market_task = Some(tokio::spawn(market_data_worker(
                 cfg,
                 md_access_token,
                 contract,
                 market_specs,
                 bar_type,
+                candle_mode,
                 internal_tx.clone(),
             )));
         }

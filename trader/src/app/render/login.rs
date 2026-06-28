@@ -58,6 +58,7 @@ impl App {
                     let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
                         config: cfg,
                         bar_type: self.bar_type,
+                        candle_mode: self.candle_mode,
                     });
                     self.push_log("Replay mode requested".to_string());
                 }
@@ -103,6 +104,7 @@ impl App {
             | Focus::AccountList
             | Focus::InstrumentQuery
             | Focus::BarTypeToggle
+            | Focus::CandleModeToggle
             | Focus::ContractList => {}
         }
     }

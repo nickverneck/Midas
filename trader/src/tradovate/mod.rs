@@ -1,9 +1,9 @@
 use crate::broker::{
-    AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, ContractSuggestion,
-    ExecutionProbeManagedProtection, ExecutionProbeOrder, ExecutionProbeSnapshot,
-    InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
-    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
-    TradeMarkerSide, infer_session_profile,
+    AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, CandleMode,
+    ContractSuggestion, ExecutionProbeManagedProtection, ExecutionProbeOrder,
+    ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot,
+    ManualOrderAction, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
+    TradeMarker, TradeMarkerSide, infer_session_profile,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;

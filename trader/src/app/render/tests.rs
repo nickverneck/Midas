@@ -1,6 +1,6 @@
 use super::*;
 use crate::broker::{
-    AccountInfo, AccountSnapshot, BrokerCapabilities, BrokerKind, ContractSuggestion,
+    AccountInfo, AccountSnapshot, BrokerCapabilities, BrokerKind, CandleMode, ContractSuggestion,
     ManualOrderAction, ServiceEvent,
 };
 use crate::config::{AppConfig, LogMode};
@@ -172,6 +172,9 @@ fn selection_tab_order_reaches_bar_type_toggle() {
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+    assert_eq!(app.focus, Focus::CandleModeToggle);
+
+    app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
     assert_eq!(app.focus, Focus::InstrumentQuery);
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
@@ -196,6 +199,29 @@ fn bar_type_toggle_uses_arrow_keys_not_enter() {
 
     app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
     assert_eq!(app.bar_type, BarType::Minute1);
+    assert_eq!(app.focus, Focus::CandleModeToggle);
+}
+
+#[test]
+fn candle_mode_toggle_uses_arrow_keys_not_enter() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.focus = Focus::CandleModeToggle;
+
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+
+    app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(app.candle_mode, CandleMode::HeikinAshi);
+    assert_eq!(app.focus, Focus::CandleModeToggle);
+
+    app.handle_selection_key(key(KeyCode::Left), &cmd_tx);
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+    assert_eq!(app.focus, Focus::CandleModeToggle);
+
+    app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+    assert_eq!(app.focus, Focus::InstrumentQuery);
 }
 
 #[test]
@@ -461,10 +487,35 @@ fn contract_selection_syncs_selected_account_before_subscribe() {
 
     expect_select_account(&mut cmd_rx, 2);
     match cmd_rx.try_recv().expect("expected subscribe-bars command") {
-        ServiceCommand::SubscribeBars { contract, bar_type } => {
+        ServiceCommand::SubscribeBars {
+            contract,
+            bar_type,
+            candle_mode,
+        } => {
             assert_eq!(contract.id, 123);
             assert_eq!(contract.name, "ESM6");
             assert_eq!(bar_type, BarType::Minute1);
+            assert_eq!(candle_mode, CandleMode::Standard);
+        }
+        _ => panic!("expected subscribe-bars command"),
+    }
+}
+
+#[test]
+fn contract_selection_subscribes_with_selected_candle_mode() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.contract_results = vec![contract(123, "ESM6")];
+    app.candle_mode = CandleMode::HeikinAshi;
+    app.focus = Focus::ContractList;
+
+    app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected subscribe-bars command") {
+        ServiceCommand::SubscribeBars { candle_mode, .. } => {
+            assert_eq!(candle_mode, CandleMode::HeikinAshi);
         }
         _ => panic!("expected subscribe-bars command"),
     }
@@ -502,6 +553,9 @@ fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::CandleModeToggle);
+
+    app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
     assert_eq!(app.focus, Focus::InstrumentQuery);
 
     app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
@@ -509,7 +563,7 @@ fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
 }
 
 #[test]
-fn bar_type_enter_advances_to_query_without_toggling() {
+fn bar_type_enter_advances_to_candle_mode_without_toggling() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
     app.focus = Focus::BarTypeToggle;
@@ -517,7 +571,7 @@ fn bar_type_enter_advances_to_query_without_toggling() {
     app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
 
     assert_eq!(app.bar_type, BarType::Minute1);
-    assert_eq!(app.focus, Focus::InstrumentQuery);
+    assert_eq!(app.focus, Focus::CandleModeToggle);
 }
 
 #[test]

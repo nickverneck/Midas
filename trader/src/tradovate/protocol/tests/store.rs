@@ -211,6 +211,7 @@ fn build_snapshots_include_realized_pnl_and_protection_prices() {
     let market = MarketSnapshot {
         contract_id: Some(3570918),
         contract_name: Some("ESH6".to_string()),
+        candle_mode: CandleMode::Standard,
         bars: vec![Bar {
             ts_ns: 0,
             open: 4999.0,
@@ -302,6 +303,7 @@ fn replay_snapshots_mark_to_market_open_positions() {
     let market = MarketSnapshot {
         contract_id: Some(3570918),
         contract_name: Some("ESH6".to_string()),
+        candle_mode: CandleMode::Standard,
         bars: vec![Bar {
             ts_ns: 0,
             open: 5000.0,
@@ -373,6 +375,7 @@ fn replay_snapshots_roll_realized_pnl_into_balance() {
     let market = MarketSnapshot {
         contract_id: Some(3570918),
         contract_name: Some("ESH6".to_string()),
+        candle_mode: CandleMode::Standard,
         bars: vec![Bar {
             ts_ns: 0,
             open: 5002.0,

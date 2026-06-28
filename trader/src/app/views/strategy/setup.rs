@@ -267,7 +267,7 @@ impl App {
                 Line::from("Direct reversal is fastest."),
                 Line::from("Flatten > Confirm > Enter is safer."),
                 Line::from("CloseAll > Enter flattens the contract, then submits the reverse entry without waiting for position sync."),
-                Line::from("TP/SL/trailing stop sync in ticks."),
+                Line::from("TP/SL/trailing stop settings are in ticks."),
                 Line::from(format!(
                     "Auto-close flattens {}m before close.",
                     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END

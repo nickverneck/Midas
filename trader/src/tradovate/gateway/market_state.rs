@@ -1,4 +1,5 @@
 use super::*;
+use crate::broker::transform_bars_for_candle_mode;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LiveSeries {
@@ -10,6 +11,7 @@ pub(crate) struct LiveSeries {
 pub(crate) struct MarketUpdate {
     pub(crate) contract_id: i64,
     pub(crate) contract_name: String,
+    pub(crate) candle_mode: CandleMode,
     pub(crate) session_profile: Option<InstrumentSessionProfile>,
     pub(crate) value_per_point: Option<f64>,
     pub(crate) tick_size: Option<f64>,
@@ -102,6 +104,7 @@ pub(crate) fn display_market_snapshot(market: &MarketSnapshot) -> MarketSnapshot
     MarketSnapshot {
         contract_id: market.contract_id,
         contract_name: market.contract_name.clone(),
+        candle_mode: market.candle_mode,
         bars,
         trade_markers: market.trade_markers.clone(),
         session_profile: market.session_profile,
@@ -116,6 +119,7 @@ pub(crate) fn display_market_snapshot(market: &MarketSnapshot) -> MarketSnapshot
 pub(crate) fn build_market_update(
     contract: &ContractSuggestion,
     market_specs: Option<MarketSpecs>,
+    candle_mode: CandleMode,
     history_loaded: usize,
     live_bars: usize,
     status: String,
@@ -160,10 +164,12 @@ pub(crate) fn build_market_update(
     } else {
         None
     }?;
+    let bars = transform_market_bars_update(bars, candle_mode, series);
 
     Some(MarketUpdate {
         contract_id: contract.id,
         contract_name: contract.name.clone(),
+        candle_mode,
         session_profile: market_specs.and_then(|specs| specs.session_profile),
         value_per_point: market_specs.and_then(|specs| specs.value_per_point),
         tick_size: market_specs.and_then(|specs| specs.tick_size),
@@ -174,10 +180,49 @@ pub(crate) fn build_market_update(
     })
 }
 
+fn transform_market_bars_update(
+    update: MarketBarsUpdate,
+    candle_mode: CandleMode,
+    series: &LiveSeries,
+) -> MarketBarsUpdate {
+    match candle_mode {
+        CandleMode::Standard => update,
+        CandleMode::HeikinAshi => {
+            let transformed_closed =
+                transform_bars_for_candle_mode(&series.closed_bars, candle_mode);
+            let transformed_forming = series.forming_bar.as_ref().and_then(|forming_bar| {
+                let mut full_series = series.closed_bars.clone();
+                full_series.push(forming_bar.clone());
+                transform_bars_for_candle_mode(&full_series, candle_mode)
+                    .pop()
+                    .filter(|bar| bar.ts_ns == forming_bar.ts_ns)
+            });
+
+            match update {
+                MarketBarsUpdate::Snapshot { .. } => MarketBarsUpdate::Snapshot {
+                    closed_bars: transformed_closed,
+                    forming_bar: transformed_forming,
+                },
+                MarketBarsUpdate::Forming { forming_bar } => MarketBarsUpdate::Forming {
+                    forming_bar: transformed_forming.unwrap_or(forming_bar),
+                },
+                MarketBarsUpdate::Closed {
+                    closed_bar,
+                    forming_bar: _,
+                } => MarketBarsUpdate::Closed {
+                    closed_bar: transformed_closed.last().cloned().unwrap_or(closed_bar),
+                    forming_bar: transformed_forming,
+                },
+            }
+        }
+    }
+}
+
 pub(crate) fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpdate) -> bool {
     let prev_last_closed_ts = market_last_closed_ts(market);
     market.contract_id = Some(update.contract_id);
     market.contract_name = Some(update.contract_name);
+    market.candle_mode = update.candle_mode;
     market.session_profile = update.session_profile;
     market.value_per_point = update.value_per_point;
     market.tick_size = update.tick_size;

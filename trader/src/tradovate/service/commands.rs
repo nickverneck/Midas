@@ -14,7 +14,19 @@ pub(super) async fn handle_command(
         ServiceCommand::EnterReplayMode {
             config: cfg,
             bar_type,
-        } => enter_replay_mode(cfg, bar_type, state, event_tx, market_tx, internal_tx).await,
+            candle_mode,
+        } => {
+            enter_replay_mode(
+                cfg,
+                bar_type,
+                candle_mode,
+                state,
+                event_tx,
+                market_tx,
+                internal_tx,
+            )
+            .await
+        }
         ServiceCommand::ReplayState => replay_state(state, event_tx),
         ServiceCommand::SelectAccount { account_id } => {
             select_account(account_id, state, event_tx, internal_tx)
@@ -22,8 +34,21 @@ pub(super) async fn handle_command(
         ServiceCommand::SearchContracts { query, limit } => {
             search_contracts_command(query, limit, state, event_tx).await
         }
-        ServiceCommand::SubscribeBars { contract, bar_type } => {
-            subscribe_bars(contract, bar_type, state, event_tx, market_tx, internal_tx).await
+        ServiceCommand::SubscribeBars {
+            contract,
+            bar_type,
+            candle_mode,
+        } => {
+            subscribe_bars(
+                contract,
+                bar_type,
+                candle_mode,
+                state,
+                event_tx,
+                market_tx,
+                internal_tx,
+            )
+            .await
         }
         ServiceCommand::SetReplaySpeed { speed } => set_replay_speed(speed, state, event_tx),
         ServiceCommand::ManualOrder { action } => manual_order(action, state, event_tx),
@@ -120,6 +145,7 @@ async fn connect_live_session(
     state.user_task = Some(user_task);
     state.rest_probe_task = Some(rest_probe_task);
 
+    let candle_mode = cfg.candle_mode;
     state.session = Some(SessionState {
         cfg,
         session_kind: SessionKind::Live,
@@ -138,6 +164,7 @@ async fn connect_live_session(
         selected_account_id,
         selected_contract: None,
         bar_type: BarType::default(),
+        candle_mode,
         market: MarketSnapshot::default(),
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
@@ -153,6 +180,7 @@ async fn connect_live_session(
 async fn enter_replay_mode(
     cfg: AppConfig,
     bar_type: BarType,
+    candle_mode: CandleMode,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
@@ -197,6 +225,7 @@ async fn enter_replay_mode(
         selected_account_id,
         selected_contract: Some(contract.clone()),
         bar_type,
+        candle_mode,
         market: MarketSnapshot::default(),
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
@@ -227,6 +256,7 @@ async fn enter_replay_mode(
         cfg,
         contract,
         bar_type,
+        candle_mode,
         state.broker_tx.clone(),
         state.replay_speed_tx.subscribe(),
         internal_tx,
@@ -315,6 +345,7 @@ async fn search_contracts_command(
 async fn subscribe_bars(
     contract: ContractSuggestion,
     bar_type: BarType,
+    candle_mode: CandleMode,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
@@ -331,6 +362,7 @@ async fn subscribe_bars(
     session.selected_contract = Some(contract.clone());
     session.active_order_strategy = None;
     session.bar_type = bar_type;
+    session.candle_mode = candle_mode;
     session.execution_runtime.last_closed_bar_ts = None;
     session.execution_runtime.pending_target_qty = None;
     session.execution_runtime.reset_execution();
@@ -349,6 +381,7 @@ async fn subscribe_bars(
             cfg,
             contract,
             bar_type,
+            candle_mode,
             state.broker_tx.clone(),
             state.replay_speed_tx.subscribe(),
             internal_tx,
@@ -370,6 +403,7 @@ async fn subscribe_bars(
             contract,
             market_specs,
             bar_type,
+            candle_mode,
             internal_tx,
         )));
     }

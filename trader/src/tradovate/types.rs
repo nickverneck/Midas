@@ -67,6 +67,7 @@ struct SessionState {
     selected_account_id: Option<i64>,
     selected_contract: Option<ContractSuggestion>,
     bar_type: BarType,
+    candle_mode: CandleMode,
     market: MarketSnapshot,
     managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     active_order_strategy: Option<TrackedOrderStrategy>,

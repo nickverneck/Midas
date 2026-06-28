@@ -10,6 +10,7 @@ impl App {
             )),
             Line::from(format!("Accounts loaded: {}", self.accounts.len())),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
+            Line::from(format!("Candles: {}", self.candle_mode.label())),
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),
                 None => "Selected account: none".to_string(),
@@ -31,6 +32,7 @@ impl App {
             Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
+            Line::from(format!("Candles: {}", self.candle_mode.label())),
             Line::from(format!("Query: {}", self.instrument_query)),
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),

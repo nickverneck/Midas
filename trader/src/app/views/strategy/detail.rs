@@ -101,10 +101,7 @@ impl App {
                 Line::from(
                     "Chart labels TP*/SL* are projected from the native config until broker protection sync lands.",
                 ),
-                Line::from(format!(
-                    "Trailing updates follow the configured signal timing: {}.",
-                    self.strategy.native_signal_timing.label()
-                )),
+                Line::from("Trailing stop uses Tradovate broker auto-trail when enabled."),
                 Line::from(""),
                 Line::from(format!("Live status: {}", self.strategy_runtime_summary())),
                 Line::from(format!(

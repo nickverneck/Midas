@@ -36,6 +36,10 @@ impl App {
         self.selected_broker == BrokerKind::Tradovate
     }
 
+    fn broker_supports_heikin_ashi(&self) -> bool {
+        self.selected_broker == BrokerKind::Tradovate
+    }
+
     fn set_replay_speed(
         &mut self,
         cmd_tx: &UnboundedSender<ServiceCommand>,
@@ -143,6 +147,7 @@ impl App {
         vec![
             Focus::AccountList,
             Focus::BarTypeToggle,
+            Focus::CandleModeToggle,
             Focus::InstrumentQuery,
             Focus::ContractList,
         ]
@@ -307,6 +312,7 @@ impl App {
         body.push_str(&format!("selected_account: {selected_account}\n"));
         body.push_str(&format!("selected_contract: {selected_contract}\n"));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
+        body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
         body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
         body.push_str(&self.session_stats_log_section());
