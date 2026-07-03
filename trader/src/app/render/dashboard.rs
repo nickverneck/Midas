@@ -125,6 +125,7 @@ impl App {
         if bars.is_empty() {
             bars = source_bars.to_vec();
         }
+        let visible_start = source_bars.len().saturating_sub(bars.len());
 
         let points = bars
             .iter()
@@ -200,7 +201,12 @@ impl App {
             }
         }
         let overlay = self.dashboard_visuals_enabled.then(|| {
-            self.build_dashboard_visual_overlay(&bars, &buy_marker_points, &sell_marker_points)
+            self.build_dashboard_visual_overlay(
+                source_bars,
+                visible_start,
+                &buy_marker_points,
+                &sell_marker_points,
+            )
         });
         if let Some(overlay) = overlay.as_ref() {
             title.push_str(" | Visuals ");

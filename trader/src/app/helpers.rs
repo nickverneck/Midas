@@ -156,10 +156,11 @@ fn bool_label(value: bool) -> &'static str {
 
 fn append_overlay_series_segments(
     values: &[f64],
+    visible_start: usize,
     color: Color,
     segments: &mut Vec<OverlaySegment>,
 ) {
-    let mut previous = None;
+    let mut previous: Option<(f64, f64)> = None;
     for (idx, value) in values.iter().copied().enumerate() {
         if !value.is_finite() {
             previous = None;
@@ -167,10 +168,10 @@ fn append_overlay_series_segments(
         }
 
         let current = (idx as f64, value);
-        if let Some(start) = previous {
+        if let Some(start) = previous.filter(|_| idx > visible_start) {
             segments.push(OverlaySegment {
-                start,
-                end: current,
+                start: (start.0 - visible_start as f64, start.1),
+                end: (current.0 - visible_start as f64, current.1),
                 color,
             });
         }
@@ -466,6 +467,7 @@ impl App {
     fn build_dashboard_visual_overlay(
         &self,
         bars: &[crate::broker::Bar],
+        visible_start: usize,
         buy_marker_points: &[(f64, f64)],
         sell_marker_points: &[(f64, f64)],
     ) -> DashboardVisualOverlay {
@@ -497,16 +499,22 @@ impl App {
                 let slow = ema_series(&close, self.strategy.native_ema.slow_length.max(1));
                 append_overlay_series_segments(
                     &fast,
+                    visible_start,
                     Color::Cyan,
                     &mut overlay.indicator_segments,
                 );
                 append_overlay_series_segments(
                     &slow,
+                    visible_start,
                     Color::Yellow,
                     &mut overlay.indicator_segments,
                 );
 
-                for idx in 1..close.len() {
+                let warmup_bars = self.strategy.native_ema.warmup_bars();
+                for idx in visible_start.max(1)..close.len() {
+                    if idx + 1 < warmup_bars {
+                        continue;
+                    }
                     let prev_fast = fast[idx - 1];
                     let curr_fast = fast[idx];
                     let prev_slow = slow[idx - 1];
@@ -519,14 +527,29 @@ impl App {
                         continue;
                     }
 
-                    let center = (idx as f64, (curr_fast + curr_slow) / 2.0);
-                    if crossed_above(prev_fast, prev_slow, curr_fast, curr_slow) {
+                    let center = (
+                        (idx - visible_start) as f64,
+                        (curr_fast + curr_slow) / 2.0,
+                    );
+                    let bullish_cross = crossed_above(prev_fast, prev_slow, curr_fast, curr_slow);
+                    let bearish_cross = crossed_below(prev_fast, prev_slow, curr_fast, curr_slow);
+                    let show_bullish = if self.strategy.native_ema.inverted {
+                        bearish_cross
+                    } else {
+                        bullish_cross
+                    };
+                    let show_bearish = if self.strategy.native_ema.inverted {
+                        bullish_cross
+                    } else {
+                        bearish_cross
+                    };
+                    if show_bullish {
                         overlay.glyphs.push(OverlayGlyph {
                             center,
                             color: Color::Green,
                             kind: OverlayGlyphKind::BullishCross,
                         });
-                    } else if crossed_below(prev_fast, prev_slow, curr_fast, curr_slow) {
+                    } else if show_bearish {
                         overlay.glyphs.push(OverlayGlyph {
                             center,
                             color: Color::Red,
@@ -541,11 +564,12 @@ impl App {
                 let hma = zero_lag_hma_series(&close, self.strategy.native_hma.hma_length.max(1));
                 append_overlay_series_segments(
                     &hma,
+                    visible_start,
                     Color::Yellow,
                     &mut overlay.indicator_segments,
                 );
 
-                for idx in 1..close.len() {
+                for idx in visible_start.max(1)..close.len() {
                     let prev_close = close[idx - 1];
                     let curr_close = close[idx];
                     let prev_hma = hma[idx - 1];
@@ -558,7 +582,10 @@ impl App {
                         continue;
                     }
 
-                    let center = (idx as f64, (curr_close + curr_hma) / 2.0);
+                    let center = (
+                        (idx - visible_start) as f64,
+                        (curr_close + curr_hma) / 2.0,
+                    );
                     if crossed_above(prev_close, prev_hma, curr_close, curr_hma) {
                         overlay.glyphs.push(OverlayGlyph {
                             center,
