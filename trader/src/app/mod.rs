@@ -1,8 +1,8 @@
 use crate::broker::{
-    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
-    BrokerCapabilities, BrokerKind, CandleMode, ContractSuggestion, InstrumentSessionWindow,
-    LatencySnapshot, ManualOrderAction, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent,
-    SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
+    AccountInfo, AccountSnapshot, BarType, BrokerCapabilities, BrokerKind, CandleMode,
+    ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
+    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
+    TradeMarkerSide, compiled_brokers, default_broker,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategies::ema_cross::ema_series;
@@ -95,6 +95,8 @@ enum Focus {
     NativeStrategy,
     NativeSignalTiming,
     NativeReversalMode,
+    NativeBlockoutEnabled,
+    NativeBlockoutMinutes,
     HmaLength,
     HmaMinAngle,
     HmaAngleLookback,

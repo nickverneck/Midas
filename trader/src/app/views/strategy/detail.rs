@@ -58,8 +58,9 @@ impl App {
                     ),
                     Line::from("Inverted swaps buy/sell decisions before order routing."),
                     Line::from(format!(
-                        "Auto-close holds flat {}m before the inferred session close.",
-                        AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                        "Blockout: {} {:.0}m before the inferred session close.",
+                        bool_label(self.strategy.blockout_enabled),
+                        self.strategy.blockout_minutes_before_close
                     )),
                 ],
                 NativeStrategyKind::EmaCross => vec![
@@ -89,8 +90,9 @@ impl App {
                     Line::from("Sell: fast EMA crosses below slow EMA."),
                     Line::from("Inverted swaps buy/sell decisions before order routing."),
                     Line::from(format!(
-                        "Auto-close holds flat {}m before the inferred session close.",
-                        AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                        "Blockout: {} {:.0}m before the inferred session close.",
+                        bool_label(self.strategy.blockout_enabled),
+                        self.strategy.blockout_minutes_before_close
                     )),
                 ],
                 NativeStrategyKind::HmaCross => vec![
@@ -121,8 +123,9 @@ impl App {
                     Line::from("Sell: fast HMA crosses below slow HMA."),
                     Line::from("Inverted swaps buy/sell decisions before order routing."),
                     Line::from(format!(
-                        "Auto-close holds flat {}m before the inferred session close.",
-                        AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                        "Blockout: {} {:.0}m before the inferred session close.",
+                        bool_label(self.strategy.blockout_enabled),
+                        self.strategy.blockout_minutes_before_close
                     )),
                 ],
             };

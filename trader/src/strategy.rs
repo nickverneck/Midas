@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+pub const DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE: f64 = 45.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrategyKind {
     Native,
@@ -414,6 +416,8 @@ pub struct StrategyState {
     pub native_strategy: NativeStrategyKind,
     pub native_signal_timing: NativeSignalTiming,
     pub native_reversal_mode: NativeReversalMode,
+    pub blockout_enabled: bool,
+    pub blockout_minutes_before_close: f64,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
     pub native_hma_cross: HmaCrossConfig,
@@ -431,6 +435,10 @@ pub struct ExecutionStrategyConfig {
     pub native_signal_timing: NativeSignalTiming,
     #[serde(default = "default_native_reversal_mode")]
     pub native_reversal_mode: NativeReversalMode,
+    #[serde(default = "default_blockout_enabled")]
+    pub blockout_enabled: bool,
+    #[serde(default = "default_blockout_minutes_before_close")]
+    pub blockout_minutes_before_close: f64,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
     #[serde(default)]
@@ -451,6 +459,14 @@ fn default_native_reversal_mode() -> NativeReversalMode {
     NativeReversalMode::Direct
 }
 
+fn default_blockout_enabled() -> bool {
+    true
+}
+
+fn default_blockout_minutes_before_close() -> f64 {
+    DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE
+}
+
 impl Default for ExecutionStrategyConfig {
     fn default() -> Self {
         Self {
@@ -458,6 +474,8 @@ impl Default for ExecutionStrategyConfig {
             native_strategy: NativeStrategyKind::HmaAngle,
             native_signal_timing: NativeSignalTiming::ClosedBar,
             native_reversal_mode: NativeReversalMode::Direct,
+            blockout_enabled: true,
+            blockout_minutes_before_close: DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE,
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
@@ -514,6 +532,8 @@ impl StrategyState {
             native_strategy: NativeStrategyKind::HmaAngle,
             native_signal_timing: NativeSignalTiming::ClosedBar,
             native_reversal_mode: NativeReversalMode::Direct,
+            blockout_enabled: true,
+            blockout_minutes_before_close: DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE,
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
@@ -557,11 +577,13 @@ impl StrategyState {
     pub fn native_summary(&self) -> String {
         match self.native_strategy {
             NativeStrategyKind::HmaAngle => format!(
-                "{} | qty={} timing={} reversal={} len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} reversal={} blockout={}({:.0}m) len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaAngle.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
                 self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
                 self.native_hma.hma_length,
                 self.native_hma.min_angle,
                 self.native_hma.angle_lookback,
@@ -573,11 +595,13 @@ impl StrategyState {
                 self.native_hma.inverted,
             ),
             NativeStrategyKind::EmaCross => format!(
-                "{} | qty={} timing={} reversal={} fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::EmaCross.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
                 self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
                 self.native_ema.fast_length,
                 self.native_ema.slow_length,
                 self.native_ema.take_profit_ticks,
@@ -586,11 +610,13 @@ impl StrategyState {
                 self.native_ema.inverted,
             ),
             NativeStrategyKind::HmaCross => format!(
-                "{} | qty={} timing={} reversal={} fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaCross.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
                 self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
                 self.native_hma_cross.fast_length,
                 self.native_hma_cross.slow_length,
                 self.native_hma_cross.take_profit_ticks,
@@ -607,6 +633,8 @@ impl StrategyState {
             native_strategy: self.native_strategy,
             native_signal_timing: self.native_signal_timing,
             native_reversal_mode: self.native_reversal_mode,
+            blockout_enabled: self.blockout_enabled,
+            blockout_minutes_before_close: self.blockout_minutes_before_close,
             native_hma: self.native_hma.clone(),
             native_ema: self.native_ema.clone(),
             native_hma_cross: self.native_hma_cross.clone(),
@@ -619,6 +647,8 @@ impl StrategyState {
         self.native_strategy = config.native_strategy;
         self.native_signal_timing = config.native_signal_timing;
         self.native_reversal_mode = config.native_reversal_mode;
+        self.blockout_enabled = config.blockout_enabled;
+        self.blockout_minutes_before_close = config.blockout_minutes_before_close;
         self.native_hma = config.native_hma.clone();
         self.native_ema = config.native_ema.clone();
         self.native_hma_cross = config.native_hma_cross.clone();

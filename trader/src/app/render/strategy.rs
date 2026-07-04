@@ -62,6 +62,23 @@ impl App {
                 }
                 _ => {}
             },
+            Focus::NativeBlockoutEnabled => {
+                if toggle_bool(&mut self.strategy.blockout_enabled, key) {
+                    self.disarm_native_strategy(cmd_tx);
+                }
+            }
+            Focus::NativeBlockoutMinutes => {
+                if edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::NativeBlockoutMinutes,
+                    &mut self.strategy.blockout_minutes_before_close,
+                    key,
+                    0.0,
+                    5.0,
+                ) {
+                    self.disarm_native_strategy(cmd_tx);
+                }
+            }
             Focus::OrderQty => {
                 if edit_strategy_i32(
                     &mut self.strategy_numeric_input,

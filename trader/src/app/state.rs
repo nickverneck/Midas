@@ -107,6 +107,8 @@ impl App {
             order.push(Focus::NativeStrategy);
             order.push(Focus::NativeSignalTiming);
             order.push(Focus::NativeReversalMode);
+            order.push(Focus::NativeBlockoutEnabled);
+            order.push(Focus::NativeBlockoutMinutes);
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => order.extend([
                     Focus::HmaLength,
@@ -234,6 +236,7 @@ impl App {
                 | Focus::EmaStopLossTicks
                 | Focus::EmaTrailTriggerTicks
                 | Focus::EmaTrailOffsetTicks
+                | Focus::NativeBlockoutMinutes
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
                 | Focus::InstrumentQuery
@@ -395,7 +398,12 @@ impl App {
     fn session_window_at(&self, ts_ns: i64) -> Option<InstrumentSessionWindow> {
         self.market
             .session_profile
-            .map(|profile| profile.evaluate(ts_ns))
+            .map(|profile| {
+                profile.evaluate_with_blockout(
+                    ts_ns,
+                    self.strategy.blockout_minutes_before_close,
+                )
+            })
     }
 
     fn latest_session_window(&self) -> Option<InstrumentSessionWindow> {
@@ -404,6 +412,10 @@ impl App {
     }
 
     fn session_gate_summary(&self) -> String {
+        if !self.strategy.blockout_enabled {
+            return "blockout off".to_string();
+        }
+
         let Some(profile) = self.market.session_profile else {
             return "n/a".to_string();
         };
@@ -419,7 +431,7 @@ impl App {
             .minutes_to_close
             .map(|minutes| format!("{minutes:.0}m"))
             .unwrap_or_else(|| "n/a".to_string());
-        if window.hold_entries {
+        if self.strategy.blockout_enabled && window.hold_entries {
             format!(
                 "{} hold active; flattening before close ({} left)",
                 profile.label(),

@@ -442,10 +442,16 @@ fn session_window_at(
     session: &IronbeamSession,
     ts_ns: i64,
 ) -> Option<crate::broker::InstrumentSessionWindow> {
-    session
-        .market
-        .session_profile
-        .map(|profile| profile.evaluate(ts_ns))
+    if !session.execution_config.blockout_enabled {
+        return None;
+    }
+
+    session.market.session_profile.map(|profile| {
+        profile.evaluate_with_blockout(
+            ts_ns,
+            session.execution_config.blockout_minutes_before_close,
+        )
+    })
 }
 
 fn evaluate_active_execution_strategy(

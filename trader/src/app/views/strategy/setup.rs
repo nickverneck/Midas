@@ -34,6 +34,20 @@ impl App {
                 ),
                 self.focus == Focus::NativeReversalMode,
             ));
+            lines.push(styled_line(
+                format!("Blockout: {}", bool_label(self.strategy.blockout_enabled)),
+                self.focus == Focus::NativeBlockoutEnabled,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Blockout Minutes Before Close: {}",
+                    self.strategy_numeric_value(
+                        Focus::NativeBlockoutMinutes,
+                        format!("{:.0}", self.strategy.blockout_minutes_before_close),
+                    )
+                ),
+                self.focus == Focus::NativeBlockoutMinutes,
+            ));
 
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => {
@@ -297,10 +311,7 @@ impl App {
                 Line::from("Flatten > Confirm > Enter is safer."),
                 Line::from("CloseAll > Enter flattens the contract, then submits the reverse entry without waiting for position sync."),
                 Line::from("TP/SL/trailing stop settings are in ticks."),
-                Line::from(format!(
-                    "Auto-close flattens {}m before close.",
-                    AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
-                )),
+                Line::from("Blockout can flatten before close and hold until reopen."),
                 Line::from("Controls: Up/Down move, Left/Right edit."),
                 Line::from("Enter on Continue arms the strategy."),
             ]),

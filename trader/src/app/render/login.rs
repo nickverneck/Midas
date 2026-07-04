@@ -78,6 +78,8 @@ impl App {
             | Focus::NativeStrategy
             | Focus::NativeSignalTiming
             | Focus::NativeReversalMode
+            | Focus::NativeBlockoutEnabled
+            | Focus::NativeBlockoutMinutes
             | Focus::HmaLength
             | Focus::HmaMinAngle
             | Focus::HmaAngleLookback
