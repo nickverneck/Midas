@@ -133,24 +133,54 @@ pub(super) async fn maybe_run_execution_strategy(
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
         && session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
     {
+        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+            "strategy gate | {} | closed-bar timing waiting for next bar | last_bar_ts {} | actual_qty {} | pending_target {:?}",
+            active_native_slug(session),
+            last_strategy_ts,
+            actual_market_qty,
+            session.execution_runtime.pending_target_qty
+        )));
         return Ok(());
     }
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
-    let (signal_bar, signal, summary) = {
+    let (signal_bar, signal, summary, debug_summary) = {
         let bars = strategy_bars(session);
         let signal_bar = bars
             .last()
             .cloned()
             .context("latest Ironbeam strategy bar disappeared during evaluation")?;
-        let (signal, summary) = evaluate_active_execution_strategy(session, bars, current_qty);
-        (signal_bar, signal, summary)
+        let (signal, summary, debug_summary) =
+            evaluate_active_execution_strategy(session, bars, current_qty);
+        (signal_bar, signal, summary, debug_summary)
     };
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "strategy eval | {} | timing {} | bar_ts {} | actual_qty {} | effective_qty {} | {}",
+        active_native_slug(session),
+        active_signal_timing_label(session),
+        signal_bar.ts_ns,
+        actual_market_qty,
+        current_qty,
+        debug_summary
+    )));
 
     if let Some(window) = session_window_at(session, signal_bar.ts_ns)
         && window.hold_entries
     {
+        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+            "strategy gate | {} | session hold blocks entries | signal {} | bar_ts {} | session_open {} | minutes_to_close {} | actual_qty {} | effective_qty {}",
+            active_native_slug(session),
+            signal.label(),
+            signal_bar.ts_ns,
+            window.session_open,
+            window
+                .minutes_to_close
+                .map(|minutes| format!("{minutes:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            actual_market_qty,
+            current_qty
+        )));
         if actual_market_qty != 0 {
             match dispatch_target_position_order(
                 client,
@@ -205,12 +235,30 @@ pub(super) async fn maybe_run_execution_strategy(
     let Some(target_qty) =
         target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
     else {
+        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+            "strategy gate | {} | no target for signal {} | actual_qty {} | effective_qty {} | order_qty {} | {}",
+            active_native_slug(session),
+            signal.label(),
+            actual_market_qty,
+            current_qty,
+            session.execution_config.order_qty,
+            debug_summary
+        )));
         sync_execution_protection(client, session, latency, internal_tx, Some(&signal_bar)).await?;
         rebuild_account_snapshots(session);
         return Ok(());
     };
 
     if target_qty == current_qty {
+        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+            "strategy gate | {} | target already current | signal {} | target_qty {} | actual_qty {} | effective_qty {} | {}",
+            active_native_slug(session),
+            signal.label(),
+            target_qty,
+            actual_market_qty,
+            current_qty,
+            debug_summary
+        )));
         sync_execution_protection(client, session, latency, internal_tx, Some(&signal_bar)).await?;
         rebuild_account_snapshots(session);
         return Ok(());
@@ -243,6 +291,15 @@ pub(super) async fn maybe_run_execution_strategy(
     {
         OrderDispatchOutcome::NoOp { message } => {
             session.execution_runtime.last_summary = message.clone();
+            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                "strategy dispatch noop | {} | target_qty {} | actual_qty {} | effective_qty {} | message {} | {}",
+                active_native_slug(session),
+                target_qty,
+                actual_market_qty,
+                current_qty,
+                message,
+                debug_summary
+            )));
             let _ = event_tx.send(ServiceEvent::Status(message));
         }
         OrderDispatchOutcome::Queued { target_qty } => {
@@ -458,28 +515,37 @@ fn evaluate_active_execution_strategy(
     session: &IronbeamSession,
     bars: &[Bar],
     current_qty: i32,
-) -> (StrategySignal, String) {
+) -> (StrategySignal, String, String) {
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => {
             let evaluation = session
                 .execution_config
                 .native_hma
                 .evaluate(bars, side_from_signed_qty(current_qty));
-            (evaluation.signal, evaluation.summary())
+            let summary = evaluation.summary();
+            (evaluation.signal, summary.clone(), summary)
         }
         NativeStrategyKind::EmaCross => {
             let evaluation = session
                 .execution_config
                 .native_ema
                 .evaluate(bars, side_from_signed_qty(current_qty));
-            (evaluation.signal, evaluation.summary())
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
         }
         NativeStrategyKind::HmaCross => {
             let evaluation = session
                 .execution_config
                 .native_hma_cross
                 .evaluate(bars, side_from_signed_qty(current_qty));
-            (evaluation.signal, evaluation.summary())
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
         }
     }
 }
