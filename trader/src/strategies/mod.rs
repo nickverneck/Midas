@@ -1,5 +1,6 @@
 pub mod ema_cross;
 pub mod hma_angle;
+pub mod hma_cross;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionSide {

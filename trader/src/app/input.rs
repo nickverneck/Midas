@@ -32,6 +32,7 @@ impl App {
             let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
                 config: self.current_config(),
                 bar_type: self.bar_type,
+                candle_mode: self.candle_mode,
             });
             self.push_log("Replay mode requested".to_string());
             return;

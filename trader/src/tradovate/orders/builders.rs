@@ -4,6 +4,7 @@ fn current_native_fixed_take_profit_ticks(session: &SessionState) -> f64 {
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.take_profit_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.take_profit_ticks,
+        NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.take_profit_ticks,
     }
 }
 
@@ -18,13 +19,45 @@ fn current_native_fixed_stop_ticks(session: &SessionState) -> f64 {
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.stop_loss_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.stop_loss_ticks,
+        NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.stop_loss_ticks,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeAutoTrailOffsets {
+    stop_loss: f64,
+    trigger: f64,
+    freq: f64,
 }
 
 fn active_native_uses_trailing_stop(session: &SessionState) -> bool {
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.use_trailing_stop,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.use_trailing_stop,
+        NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.use_trailing_stop,
+    }
+}
+
+fn current_native_trail_trigger_ticks(session: &SessionState) -> f64 {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => session.execution_config.native_hma.trail_trigger_ticks,
+        NativeStrategyKind::EmaCross => session.execution_config.native_ema.trail_trigger_ticks,
+        NativeStrategyKind::HmaCross => {
+            session
+                .execution_config
+                .native_hma_cross
+                .trail_trigger_ticks
+        }
+    }
+}
+
+fn current_native_trail_offset_ticks(session: &SessionState) -> f64 {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => session.execution_config.native_hma.trail_offset_ticks,
+        NativeStrategyKind::EmaCross => session.execution_config.native_ema.trail_offset_ticks,
+        NativeStrategyKind::HmaCross => {
+            session.execution_config.native_hma_cross.trail_offset_ticks
+        }
     }
 }
 
@@ -63,11 +96,35 @@ pub(crate) fn native_order_strategy_enabled(session: &SessionState) -> bool {
     if session.execution_config.kind != StrategyKind::Native {
         return false;
     }
-    if active_native_uses_trailing_stop(session) {
-        return false;
-    }
-    current_native_fixed_take_profit_ticks(session) > 0.0
+    active_native_uses_trailing_stop(session)
+        || current_native_fixed_take_profit_ticks(session) > 0.0
         || current_native_fixed_stop_ticks(session) > 0.0
+}
+
+fn current_native_auto_trail_offsets(
+    session: &SessionState,
+) -> Result<Option<NativeAutoTrailOffsets>> {
+    if !active_native_uses_trailing_stop(session) {
+        return Ok(None);
+    }
+
+    let trigger_ticks = current_native_trail_trigger_ticks(session);
+    let offset_ticks = current_native_trail_offset_ticks(session);
+    if trigger_ticks <= 0.0 || offset_ticks <= 0.0 {
+        return Ok(None);
+    }
+
+    let tick_size = session
+        .market
+        .tick_size
+        .filter(|tick| tick.is_finite() && *tick > 0.0)
+        .context("order-strategy auto-trail requires a valid market tick size")?;
+
+    Ok(Some(NativeAutoTrailOffsets {
+        stop_loss: offset_ticks * tick_size,
+        trigger: trigger_ticks * tick_size,
+        freq: tick_size,
+    }))
 }
 
 pub(super) fn build_order_strategy_request(
@@ -83,8 +140,9 @@ pub(super) fn build_order_strategy_request(
 ) -> Result<PendingOrderStrategyTransition> {
     let take_profit_ticks = current_native_fixed_take_profit_ticks(session);
     let stop_loss_ticks = current_native_fixed_stop_ticks(session);
-    if take_profit_ticks <= 0.0 && stop_loss_ticks <= 0.0 {
-        bail!("order-strategy entry requires a fixed take-profit or stop-loss");
+    let auto_trail = current_native_auto_trail_offsets(session)?;
+    if take_profit_ticks <= 0.0 && stop_loss_ticks <= 0.0 && auto_trail.is_none() {
+        bail!("order-strategy entry requires a fixed take-profit, stop-loss, or auto-trail");
     }
     let take_profit_offset = current_native_fixed_take_profit_offset(session);
     let stop_loss_offset = current_native_fixed_stop_offset(session);
@@ -93,6 +151,8 @@ pub(super) fn build_order_strategy_request(
     {
         bail!("order-strategy entry requires a valid market tick size for TP/SL offsets");
     }
+    let bracket_stop_offset =
+        stop_loss_offset.or_else(|| auto_trail.map(|auto_trail| auto_trail.stop_loss));
     let bracket_qty = target_qty.abs().max(1);
     let mut bracket = json!({
         "qty": bracket_qty,
@@ -101,8 +161,15 @@ pub(super) fn build_order_strategy_request(
     if let Some(offset) = take_profit_offset {
         bracket["profitTarget"] = json!(signed_profit_target_offset(order_action, offset));
     }
-    if let Some(offset) = stop_loss_offset {
+    if let Some(offset) = bracket_stop_offset {
         bracket["stopLoss"] = json!(signed_stop_loss_offset(order_action, offset));
+    }
+    if let Some(auto_trail) = auto_trail {
+        bracket["autoTrail"] = json!({
+            "stopLoss": auto_trail.stop_loss,
+            "trigger": auto_trail.trigger,
+            "freq": auto_trail.freq,
+        });
     }
 
     let params = json!({
@@ -140,7 +207,7 @@ pub(super) fn build_order_strategy_request(
         take_profit_offset.map(|offset| price + signed_profit_target_offset(order_action, offset))
     });
     let stop_price = reference_price.and_then(|price| {
-        stop_loss_offset.map(|offset| price + signed_stop_loss_offset(order_action, offset))
+        bracket_stop_offset.map(|offset| price + signed_stop_loss_offset(order_action, offset))
     });
 
     Ok(PendingOrderStrategyTransition {

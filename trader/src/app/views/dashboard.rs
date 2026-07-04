@@ -27,6 +27,7 @@ impl App {
                 None => "Selected contract: none".to_string(),
             }),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
+            Line::from(format!("Candles: {}", self.candle_mode.label())),
             Line::from(format!("Session Gate: {}", self.session_gate_summary())),
             Line::from(format!(
                 "Chart Overlay: {}",

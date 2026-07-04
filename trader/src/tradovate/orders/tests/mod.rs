@@ -45,6 +45,7 @@ fn test_session() -> SessionState {
             raw: json!({}),
         }),
         bar_type: BarType::default(),
+        candle_mode: CandleMode::Standard,
         market: MarketSnapshot::default(),
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,

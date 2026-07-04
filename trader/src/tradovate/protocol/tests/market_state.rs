@@ -110,6 +110,7 @@ fn fallback_unrealized_pnl_uses_latest_close_and_value_per_point() {
     let market = MarketSnapshot {
         contract_id: Some(3570918),
         contract_name: Some("ESH6".to_string()),
+        candle_mode: CandleMode::Standard,
         bars: vec![Bar {
             ts_ns: 0,
             open: 6725.0,
@@ -199,6 +200,7 @@ fn build_market_update_emits_snapshot_then_forming_delta() {
     let initial = build_market_update(
         &contract,
         None,
+        CandleMode::Standard,
         series.closed_bars.len(),
         0,
         "status".to_string(),
@@ -221,6 +223,7 @@ fn build_market_update_emits_snapshot_then_forming_delta() {
     let update = build_market_update(
         &contract,
         None,
+        CandleMode::Standard,
         series.closed_bars.len(),
         0,
         "status".to_string(),
@@ -234,6 +237,74 @@ fn build_market_update_emits_snapshot_then_forming_delta() {
         update.bars,
         MarketBarsUpdate::Forming { forming_bar: ref bar } if bar == &forming_bar
     ));
+}
+
+#[test]
+fn build_market_update_applies_heikin_ashi_before_snapshot_consumers() {
+    let contract = ContractSuggestion {
+        id: 1,
+        name: "ESM6".to_string(),
+        description: String::new(),
+        raw: json!({}),
+    };
+    let mut series = LiveSeries::new();
+    series.closed_bars.push(Bar {
+        ts_ns: 1,
+        open: 10.0,
+        high: 14.0,
+        low: 8.0,
+        close: 12.0,
+    });
+    series.closed_bars.push(Bar {
+        ts_ns: 2,
+        open: 12.0,
+        high: 16.0,
+        low: 11.0,
+        close: 15.0,
+    });
+
+    let update = build_market_update(
+        &contract,
+        None,
+        CandleMode::HeikinAshi,
+        series.closed_bars.len(),
+        0,
+        "status".to_string(),
+        0,
+        None,
+        None,
+        &series,
+    )
+    .expect("initial heikin ashi snapshot should be emitted");
+
+    match update.bars {
+        MarketBarsUpdate::Snapshot {
+            closed_bars,
+            forming_bar,
+        } => {
+            assert_eq!(forming_bar, None);
+            assert_eq!(
+                closed_bars,
+                vec![
+                    Bar {
+                        ts_ns: 1,
+                        open: 11.0,
+                        high: 14.0,
+                        low: 8.0,
+                        close: 11.0,
+                    },
+                    Bar {
+                        ts_ns: 2,
+                        open: 11.0,
+                        high: 16.0,
+                        low: 11.0,
+                        close: 13.5,
+                    },
+                ]
+            );
+        }
+        _ => panic!("expected snapshot update"),
+    }
 }
 
 #[test]
@@ -277,6 +348,7 @@ fn apply_market_update_keeps_bars_incremental() {
     let initial = MarketUpdate {
         contract_id: 3570918,
         contract_name: "ESH6".to_string(),
+        candle_mode: CandleMode::Standard,
         session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
         value_per_point: Some(50.0),
         tick_size: Some(0.25),
@@ -296,6 +368,7 @@ fn apply_market_update_keeps_bars_incremental() {
     let next = MarketUpdate {
         contract_id: 3570918,
         contract_name: "ESH6".to_string(),
+        candle_mode: CandleMode::Standard,
         session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
         value_per_point: Some(50.0),
         tick_size: Some(0.25),
@@ -331,6 +404,7 @@ fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
     let update = MarketUpdate {
         contract_id: 3570918,
         contract_name: "ESH6".to_string(),
+        candle_mode: CandleMode::Standard,
         session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
         value_per_point: Some(50.0),
         tick_size: Some(0.25),

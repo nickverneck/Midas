@@ -20,8 +20,8 @@ use super::support::{
     FOLLOWUP_REFRESH_DELAY_MS, contract_session_profile, pick_number, pick_str, schedule_refresh,
 };
 use crate::broker::{
-    BarType, BrokerCapabilities, BrokerKind, LatencySnapshot, MarketSnapshot, ReplaySpeed,
-    ServiceCommand, ServiceEvent, SessionKind,
+    BarType, BrokerCapabilities, BrokerKind, CandleMode, LatencySnapshot, MarketSnapshot,
+    ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
 };
 use crate::strategy::ExecutionStateSnapshot;
 use anyhow::{Context, Result, bail};
@@ -203,11 +203,20 @@ async fn handle_command(
             let _ = event_tx.send(ServiceEvent::ContractSearchResults { query, results });
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
         }
-        ServiceCommand::SubscribeBars { contract, bar_type } => {
+        ServiceCommand::SubscribeBars {
+            contract,
+            bar_type,
+            candle_mode,
+        } => {
             let session = require_session_mut(state.session.as_mut())?;
             if bar_type != BarType::Minute1 {
                 let _ = event_tx.send(ServiceEvent::Status(
                     "Ironbeam currently supports 1-minute bars only; using 1 Min.".to_string(),
+                ));
+            }
+            if candle_mode != CandleMode::Standard {
+                let _ = event_tx.send(ServiceEvent::Status(
+                    "Ironbeam currently supports standard candles only; using OHLC.".to_string(),
                 ));
             }
 
@@ -238,6 +247,7 @@ async fn handle_command(
             session.market = MarketSnapshot {
                 contract_id: Some(contract.id),
                 contract_name: Some(contract.name.clone()),
+                candle_mode: CandleMode::Standard,
                 bars: Vec::new(),
                 trade_markers: selected_trade_markers(&session.account_state, &contract),
                 session_profile: Some(contract_session_profile(&contract)),

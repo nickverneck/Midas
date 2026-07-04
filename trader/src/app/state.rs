@@ -36,6 +36,10 @@ impl App {
         self.selected_broker == BrokerKind::Tradovate
     }
 
+    fn broker_supports_heikin_ashi(&self) -> bool {
+        self.selected_broker == BrokerKind::Tradovate
+    }
+
     fn set_replay_speed(
         &mut self,
         cmd_tx: &UnboundedSender<ServiceCommand>,
@@ -117,7 +121,7 @@ impl App {
                     Focus::HmaTrailTriggerTicks,
                     Focus::HmaTrailOffsetTicks,
                 ]),
-                NativeStrategyKind::EmaCross => order.extend([
+                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => order.extend([
                     Focus::EmaFastLength,
                     Focus::EmaSlowLength,
                     Focus::EmaInverted,
@@ -143,6 +147,7 @@ impl App {
         vec![
             Focus::AccountList,
             Focus::BarTypeToggle,
+            Focus::CandleModeToggle,
             Focus::InstrumentQuery,
             Focus::ContractList,
         ]
@@ -307,6 +312,7 @@ impl App {
         body.push_str(&format!("selected_account: {selected_account}\n"));
         body.push_str(&format!("selected_contract: {selected_contract}\n"));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
+        body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
         body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
         body.push_str(&self.session_stats_log_section());
@@ -498,6 +504,10 @@ impl App {
             NativeStrategyKind::EmaCross => {
                 self.strategy.native_ema.take_profit_offset(self.market.tick_size)?
             }
+            NativeStrategyKind::HmaCross => self
+                .strategy
+                .native_hma_cross
+                .take_profit_offset(self.market.tick_size)?,
         };
 
         Some(if signed_qty > 0 {
@@ -529,6 +539,16 @@ impl App {
                     .sync_position(&mut runtime, signed_qty, Some(entry_price));
                 self.strategy
                     .native_ema
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+            NativeStrategyKind::HmaCross => {
+                let mut runtime =
+                    crate::strategies::hma_cross::HmaCrossExecutionState::default();
+                self.strategy
+                    .native_hma_cross
+                    .sync_position(&mut runtime, signed_qty, Some(entry_price));
+                self.strategy
+                    .native_hma_cross
                     .current_effective_stop_price(&runtime, self.market.tick_size)
             }
         }

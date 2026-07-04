@@ -35,6 +35,7 @@ pub enum ServiceCommand {
     EnterReplayMode {
         config: AppConfig,
         bar_type: BarType,
+        candle_mode: CandleMode,
     },
     ReplayState,
     SelectAccount {
@@ -47,6 +48,7 @@ pub enum ServiceCommand {
     SubscribeBars {
         contract: ContractSuggestion,
         bar_type: BarType,
+        candle_mode: CandleMode,
     },
     SetReplaySpeed {
         speed: ReplaySpeed,
@@ -181,6 +183,134 @@ impl Default for BarType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandleMode {
+    Standard,
+    HeikinAshi,
+}
+
+impl CandleMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "OHLC",
+            Self::HeikinAshi => "Heikin Ashi",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Standard => Self::HeikinAshi,
+            Self::HeikinAshi => Self::Standard,
+        }
+    }
+}
+
+impl Default for CandleMode {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+pub fn transform_bars_for_candle_mode(bars: &[Bar], candle_mode: CandleMode) -> Vec<Bar> {
+    match candle_mode {
+        CandleMode::Standard => bars.to_vec(),
+        CandleMode::HeikinAshi => heikin_ashi_bars(bars),
+    }
+}
+
+fn heikin_ashi_bars(bars: &[Bar]) -> Vec<Bar> {
+    let mut transformed = Vec::with_capacity(bars.len());
+    let mut previous_open = None::<f64>;
+    let mut previous_close = None::<f64>;
+
+    for bar in bars {
+        let ha_close = (bar.open + bar.high + bar.low + bar.close) / 4.0;
+        let ha_open = match (previous_open, previous_close) {
+            (Some(open), Some(close)) => (open + close) / 2.0,
+            _ => (bar.open + bar.close) / 2.0,
+        };
+        let ha_high = bar.high.max(ha_open).max(ha_close);
+        let ha_low = bar.low.min(ha_open).min(ha_close);
+
+        transformed.push(Bar {
+            ts_ns: bar.ts_ns,
+            open: ha_open,
+            high: ha_high,
+            low: ha_low,
+            close: ha_close,
+        });
+
+        previous_open = Some(ha_open);
+        previous_close = Some(ha_close);
+    }
+
+    transformed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_candle_mode_preserves_raw_bars() {
+        let bars = vec![Bar {
+            ts_ns: 1,
+            open: 10.0,
+            high: 12.0,
+            low: 9.0,
+            close: 11.0,
+        }];
+
+        assert_eq!(
+            transform_bars_for_candle_mode(&bars, CandleMode::Standard),
+            bars
+        );
+    }
+
+    #[test]
+    fn heikin_ashi_candle_mode_transforms_ohlc_recursively() {
+        let bars = vec![
+            Bar {
+                ts_ns: 1,
+                open: 10.0,
+                high: 14.0,
+                low: 8.0,
+                close: 12.0,
+            },
+            Bar {
+                ts_ns: 2,
+                open: 12.0,
+                high: 16.0,
+                low: 11.0,
+                close: 15.0,
+            },
+        ];
+
+        let transformed = transform_bars_for_candle_mode(&bars, CandleMode::HeikinAshi);
+
+        assert_eq!(
+            transformed,
+            vec![
+                Bar {
+                    ts_ns: 1,
+                    open: 11.0,
+                    high: 14.0,
+                    low: 8.0,
+                    close: 11.0,
+                },
+                Bar {
+                    ts_ns: 2,
+                    open: 11.0,
+                    high: 16.0,
+                    low: 11.0,
+                    close: 13.5,
+                },
+            ]
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReplaySpeed {
     Realtime,
@@ -298,6 +428,7 @@ pub struct InstrumentSessionWindow {
 pub struct MarketSnapshot {
     pub contract_id: Option<i64>,
     pub contract_name: Option<String>,
+    pub candle_mode: CandleMode,
     pub bars: Vec<Bar>,
     pub trade_markers: Vec<TradeMarker>,
     pub session_profile: Option<InstrumentSessionProfile>,

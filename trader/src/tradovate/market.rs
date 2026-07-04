@@ -344,6 +344,7 @@ async fn market_data_worker(
     contract: ContractSuggestion,
     market_specs: Option<MarketSpecs>,
     bar_type: BarType,
+    candle_mode: CandleMode,
     internal_tx: UnboundedSender<InternalEvent>,
 ) {
     if let Err(err) = market_data_worker_inner(
@@ -352,6 +353,7 @@ async fn market_data_worker(
         contract,
         market_specs,
         bar_type,
+        candle_mode,
         internal_tx.clone(),
     )
     .await
@@ -366,6 +368,7 @@ async fn market_data_worker_inner(
     contract: ContractSuggestion,
     market_specs: Option<MarketSpecs>,
     bar_type: BarType,
+    candle_mode: CandleMode,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
@@ -514,9 +517,15 @@ async fn market_data_worker_inner(
                 if let Some(update) = build_market_update(
                     &contract,
                     market_specs,
+                    candle_mode,
                     series.closed_bars.len(),
                     live_bars,
-                    format!("Subscribed to {} bars for {}", bar_type.label(), contract.name),
+                    format!(
+                        "Subscribed to {} {} bars for {}",
+                        candle_mode.label(),
+                        bar_type.label(),
+                        contract.name
+                    ),
                     before_closed_len,
                     before_last_closed,
                     before_forming,

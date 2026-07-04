@@ -98,11 +98,11 @@ impl App {
                 Line::from(self.market.status.clone()),
                 Line::from("Select a contract to load history + live bars."),
             ])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("{} Market Data", self.bar_type.label())),
-            );
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "{} {} Market Data",
+                self.candle_mode.label(),
+                self.bar_type.label()
+            )));
             frame.render_widget(empty, area);
             return;
         }
@@ -125,6 +125,7 @@ impl App {
         if bars.is_empty() {
             bars = source_bars.to_vec();
         }
+        let visible_start = source_bars.len().saturating_sub(bars.len());
 
         let points = bars
             .iter()
@@ -139,12 +140,13 @@ impl App {
         let stop_price = trade_levels.stop_price;
         let mut chart_prices = bars.iter().map(|bar| bar.close).collect::<Vec<_>>();
         let bar_label = self.bar_type.label();
+        let candle_label = self.candle_mode.label();
         let mut title = match &self.market.contract_name {
             Some(name) => format!(
-                "{bar_label} Market Data [{}] hist={} live={}",
+                "{candle_label} {bar_label} Market Data [{}] hist={} live={}",
                 name, self.market.history_loaded, self.market.live_bars
             ),
-            None => format!("{bar_label} Market Data"),
+            None => format!("{candle_label} {bar_label} Market Data"),
         };
         let mut overlay_labels = Vec::new();
         if let Some(price) = entry_price {
@@ -199,7 +201,12 @@ impl App {
             }
         }
         let overlay = self.dashboard_visuals_enabled.then(|| {
-            self.build_dashboard_visual_overlay(&bars, &buy_marker_points, &sell_marker_points)
+            self.build_dashboard_visual_overlay(
+                source_bars,
+                visible_start,
+                &buy_marker_points,
+                &sell_marker_points,
+            )
         });
         if let Some(overlay) = overlay.as_ref() {
             title.push_str(" | Visuals ");
@@ -358,17 +365,17 @@ impl App {
 
         let x_span = (x_bounds[1] - x_bounds[0]).abs().max(1.0);
         let y_span = (y_bounds[1] - y_bounds[0]).abs().max(0.0001);
-        let dx = (x_span / 70.0).clamp(0.65, 2.5);
+        let dx = (x_span / 95.0).clamp(0.35, 1.35);
         let dy = (y_span / 35.0)
             .max(
                 self.market
                     .tick_size
                     .filter(|tick| tick.is_finite() && *tick > 0.0)
-                    .map(|tick| tick * 1.5)
-                    .unwrap_or(y_span / 90.0),
+                    .map(|tick| tick * 0.75)
+                    .unwrap_or(y_span / 140.0),
             )
-            .min(y_span / 8.0)
-            .max(y_span / 150.0);
+            .min(y_span / 16.0)
+            .max(y_span / 240.0);
         let glyph_canvas = Canvas::default()
             .marker(symbols::Marker::HalfBlock)
             .x_bounds(x_bounds)

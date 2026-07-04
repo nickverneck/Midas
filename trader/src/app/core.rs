@@ -1,6 +1,7 @@
 impl App {
     pub fn new(config: AppConfig) -> Self {
         let session_stats_enabled = config.session_stats_enabled;
+        let candle_mode = config.candle_mode;
         let available_brokers = compiled_brokers().to_vec();
         let selected_broker = if available_brokers.contains(&config.broker) {
             config.broker
@@ -24,6 +25,7 @@ impl App {
             selected_account: 0,
             instrument_query: String::new(),
             bar_type: BarType::default(),
+            candle_mode,
             contract_results: Vec::new(),
             selected_contract: 0,
             market: MarketSnapshot::default(),
@@ -96,6 +98,7 @@ impl App {
         cfg.cid = self.form.cid.clone();
         cfg.secret = self.form.secret.clone();
         cfg.token_path = self.form.token_path.clone().into();
+        cfg.candle_mode = self.candle_mode;
         cfg
     }
 
@@ -191,6 +194,9 @@ impl App {
                 ));
             }
             ServiceEvent::MarketSnapshot(snapshot) => {
+                if snapshot.contract_id.is_some() || !snapshot.bars.is_empty() {
+                    self.candle_mode = snapshot.candle_mode;
+                }
                 self.market = snapshot;
                 self.last_market_update_at = Some(Instant::now());
             }

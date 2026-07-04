@@ -22,6 +22,7 @@ heartbeat_ms = 2500
 contract_suggest_limit = 12
 time_in_force = "Day"
 order_qty = 1
+candle_mode = "standard"
 autoconnect = false
 replay_file_path = "trader/market replay/ES 06-26.Last.txt"
 replay_bar_interval_ms = 5

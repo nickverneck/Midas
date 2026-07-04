@@ -66,6 +66,7 @@ impl App {
                         let _ = cmd_tx.send(ServiceCommand::SubscribeBars {
                             contract,
                             bar_type: self.bar_type,
+                            candle_mode: self.candle_mode,
                         });
                         self.screen = Screen::Strategy;
                         self.focus = Focus::StrategyKind;
@@ -73,7 +74,7 @@ impl App {
                     return;
                 }
                 KeyCode::Left => {
-                    self.focus = Focus::BarTypeToggle;
+                    self.focus = Focus::CandleModeToggle;
                     return;
                 }
                 KeyCode::Right => {
@@ -88,7 +89,7 @@ impl App {
             Focus::InstrumentQuery => {
                 match key.code {
                     KeyCode::Up => {
-                        self.focus = Focus::BarTypeToggle;
+                        self.focus = Focus::CandleModeToggle;
                         return;
                     }
                     KeyCode::Down => {
@@ -96,7 +97,7 @@ impl App {
                         return;
                     }
                     KeyCode::Left => {
-                        self.focus = Focus::BarTypeToggle;
+                        self.focus = Focus::CandleModeToggle;
                         return;
                     }
                     KeyCode::Right => {
@@ -131,6 +132,33 @@ impl App {
                 }
                 KeyCode::Up => {
                     self.focus = Focus::AccountList;
+                    return;
+                }
+                KeyCode::Down => {
+                    self.focus = Focus::CandleModeToggle;
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.focus = Focus::CandleModeToggle;
+                    return;
+                }
+                _ => {}
+            },
+            Focus::CandleModeToggle => match key.code {
+                KeyCode::Left | KeyCode::Right => {
+                    if self.broker_supports_heikin_ashi() {
+                        self.candle_mode = self.candle_mode.toggle();
+                    } else {
+                        self.candle_mode = CandleMode::Standard;
+                        self.status = format!(
+                            "{} currently supports standard candles only.",
+                            self.selected_broker.label()
+                        );
+                    }
+                    return;
+                }
+                KeyCode::Up => {
+                    self.focus = Focus::BarTypeToggle;
                     return;
                 }
                 KeyCode::Down => {
@@ -238,7 +266,7 @@ impl App {
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(5),
+                Constraint::Length(6),
                 Constraint::Min(10),
                 Constraint::Length(8),
             ])
@@ -250,11 +278,15 @@ impl App {
                 self.focus == Focus::BarTypeToggle,
             ),
             styled_line(
+                format!("Candles: {}", self.candle_mode.label()),
+                self.focus == Focus::CandleModeToggle,
+            ),
+            styled_line(
                 format!("Query: {}", self.instrument_query),
                 self.focus == Focus::InstrumentQuery,
             ),
             Line::from(
-                "Choose bar type first with Left/Right, then Enter or Down to move into Query. Enter on Query searches. Enter on a result subscribes.",
+                "Use Left/Right on bar type and candles, Enter or Down advances. Enter on Query searches. Enter on a result subscribes.",
             ),
         ])
         .block(

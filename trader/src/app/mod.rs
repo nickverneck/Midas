@@ -1,12 +1,13 @@
 use crate::broker::{
     AUTO_CLOSE_MINUTES_BEFORE_SESSION_END, AccountInfo, AccountSnapshot, BarType,
-    BrokerCapabilities, BrokerKind, ContractSuggestion, InstrumentSessionWindow, LatencySnapshot,
-    ManualOrderAction, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
-    TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
+    BrokerCapabilities, BrokerKind, CandleMode, ContractSuggestion, InstrumentSessionWindow,
+    LatencySnapshot, ManualOrderAction, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent,
+    SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
+use crate::strategies::hma_cross::hma_series;
 use crate::strategy::{
     LuaSourceMode, NativeSignalTiming, NativeStrategyKind, StrategyKind, StrategyState,
 };
@@ -40,6 +41,7 @@ pub struct App {
     selected_account: usize,
     instrument_query: String,
     bar_type: BarType,
+    candle_mode: CandleMode,
     contract_results: Vec<ContractSuggestion>,
     selected_contract: usize,
     market: MarketSnapshot,
@@ -119,6 +121,7 @@ enum Focus {
     AccountList,
     InstrumentQuery,
     BarTypeToggle,
+    CandleModeToggle,
     ContractList,
 }
 

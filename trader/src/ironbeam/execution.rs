@@ -468,6 +468,13 @@ fn evaluate_active_execution_strategy(
                 .evaluate(bars, side_from_signed_qty(current_qty));
             (evaluation.signal, evaluation.summary())
         }
+        NativeStrategyKind::HmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_hma_cross
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (evaluation.signal, evaluation.summary())
+        }
     }
 }
 
@@ -514,6 +521,11 @@ fn sync_active_execution_position(
             signed_qty,
             entry_price,
         ),
+        NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.sync_position(
+            &mut session.execution_runtime.hma_cross_execution,
+            signed_qty,
+            entry_price,
+        ),
     }
 }
 
@@ -525,6 +537,10 @@ fn active_native_uses_protection(session: &IronbeamSession) -> bool {
         NativeStrategyKind::EmaCross => {
             session.execution_config.native_ema.uses_native_protection()
         }
+        NativeStrategyKind::HmaCross => session
+            .execution_config
+            .native_hma_cross
+            .uses_native_protection(),
     }
 }
 
@@ -538,6 +554,10 @@ fn take_profit_price(session: &IronbeamSession, entry_price: f64, signed_qty: i3
         NativeStrategyKind::EmaCross => session
             .execution_config
             .native_ema
+            .take_profit_offset(session.market.tick_size)?,
+        NativeStrategyKind::HmaCross => session
+            .execution_config
+            .native_hma_cross
             .take_profit_offset(session.market.tick_size)?,
     };
     Some(match side {
@@ -583,6 +603,25 @@ fn combined_stop_price(session: &mut IronbeamSession, trailing_bar: Option<&Bar>
                 .native_ema
                 .current_effective_stop_price(
                     &session.execution_runtime.ema_execution,
+                    session.market.tick_size,
+                )
+        }
+        NativeStrategyKind::HmaCross => {
+            if let Some(bar) = trailing_bar {
+                let _ = session
+                    .execution_config
+                    .native_hma_cross
+                    .desired_trailing_stop_price(
+                        &mut session.execution_runtime.hma_cross_execution,
+                        bar,
+                        session.market.tick_size,
+                    );
+            }
+            session
+                .execution_config
+                .native_hma_cross
+                .current_effective_stop_price(
+                    &session.execution_runtime.hma_cross_execution,
                     session.market.tick_size,
                 )
         }

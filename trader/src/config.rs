@@ -1,4 +1,4 @@
-use crate::broker::{BrokerKind, default_broker, supports_broker};
+use crate::broker::{BrokerKind, CandleMode, default_broker, supports_broker};
 use anyhow::{Context, Result, bail};
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,7 @@ pub struct AppConfig {
     pub contract_suggest_limit: usize,
     pub time_in_force: String,
     pub order_qty: i32,
+    pub candle_mode: CandleMode,
     pub autoconnect: bool,
     pub replay_file_path: PathBuf,
     pub replay_bar_interval_ms: u64,
@@ -164,6 +165,7 @@ impl Default for AppConfig {
             contract_suggest_limit: 12,
             time_in_force: "Day".to_string(),
             order_qty: 1,
+            candle_mode: CandleMode::Standard,
             autoconnect: false,
             replay_file_path: PathBuf::from("trader/market replay/ES 06-26.Last.txt"),
             replay_bar_interval_ms: 5,
@@ -266,6 +268,9 @@ impl AppConfig {
         if let Some(raw) = env_parse_any::<i32>(&["TRADER_ORDER_QTY", "MIDAS_TUI_ORDER_QTY"])? {
             self.order_qty = raw;
         }
+        if let Some(raw) = env_string_any(&["TRADER_CANDLE_MODE", "MIDAS_TUI_CANDLE_MODE"]) {
+            self.candle_mode = parse_candle_mode(&raw)?;
+        }
         if let Some(raw) = env_bool_any(&["TRADER_AUTOCONNECT", "MIDAS_TUI_AUTOCONNECT"])? {
             self.autoconnect = raw;
         }
@@ -347,6 +352,16 @@ fn parse_log_mode(raw: &str) -> Result<LogMode> {
         "default" | "normal" => Ok(LogMode::Default),
         "debug" | "verbose" => Ok(LogMode::Debug),
         other => bail!("invalid log mode `{other}`"),
+    }
+}
+
+fn parse_candle_mode(raw: &str) -> Result<CandleMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "standard" | "ohlc" | "regular" => Ok(CandleMode::Standard),
+        "heikin_ashi" | "heikin-ashi" | "heikin" | "heiken_ashi" | "heiken-ashi" | "heiken" => {
+            Ok(CandleMode::HeikinAshi)
+        }
+        other => bail!("invalid candle_mode `{other}`"),
     }
 }
 
