@@ -400,7 +400,11 @@ impl InstrumentSessionProfile {
         }
     }
 
-    pub fn evaluate(self, ts_ns: i64) -> InstrumentSessionWindow {
+    pub fn evaluate_with_blockout(
+        self,
+        ts_ns: i64,
+        blockout_minutes_before_close: f64,
+    ) -> InstrumentSessionWindow {
         if ts_ns <= 0 {
             return InstrumentSessionWindow {
                 session_open: true,
@@ -410,9 +414,10 @@ impl InstrumentSessionProfile {
         }
 
         let dt_et = DateTime::<Utc>::from_timestamp_nanos(ts_ns).with_timezone(&New_York);
+        let blockout_minutes_before_close = blockout_minutes_before_close.max(0.0);
         match self {
-            Self::FuturesGlobex => futures_globex_window(dt_et),
-            Self::EquityRth => equity_rth_window(dt_et),
+            Self::FuturesGlobex => futures_globex_window(dt_et, blockout_minutes_before_close),
+            Self::EquityRth => equity_rth_window(dt_et, blockout_minutes_before_close),
         }
     }
 }
@@ -538,8 +543,6 @@ pub struct ExecutionProbeManagedProtection {
     pub stop_cl_ord_id: Option<String>,
 }
 
-pub const AUTO_CLOSE_MINUTES_BEFORE_SESSION_END: f64 = 15.0;
-
 pub fn infer_session_profile(product: &Value) -> InstrumentSessionProfile {
     match product
         .get("productType")
@@ -554,7 +557,10 @@ pub fn infer_session_profile(product: &Value) -> InstrumentSessionProfile {
     }
 }
 
-fn futures_globex_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWindow {
+fn futures_globex_window(
+    dt_et: DateTime<chrono_tz::Tz>,
+    blockout_minutes_before_close: f64,
+) -> InstrumentSessionWindow {
     let hour = fractional_hour(&dt_et);
     let session_open = match dt_et.weekday() {
         Weekday::Sun => hour >= 18.0,
@@ -582,7 +588,7 @@ fn futures_globex_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWin
     let close_at = new_york_close(close_date, 17, 0, 0);
     let minutes_to_close = close_at.map(|close| minutes_until(dt_et, close));
     let hold_entries = minutes_to_close
-        .map(|minutes| minutes <= AUTO_CLOSE_MINUTES_BEFORE_SESSION_END)
+        .map(|minutes| minutes <= blockout_minutes_before_close)
         .unwrap_or(false);
 
     InstrumentSessionWindow {
@@ -592,7 +598,10 @@ fn futures_globex_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWin
     }
 }
 
-fn equity_rth_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWindow {
+fn equity_rth_window(
+    dt_et: DateTime<chrono_tz::Tz>,
+    blockout_minutes_before_close: f64,
+) -> InstrumentSessionWindow {
     let hour = fractional_hour(&dt_et);
     let session_open = matches!(
         dt_et.weekday(),
@@ -611,7 +620,7 @@ fn equity_rth_window(dt_et: DateTime<chrono_tz::Tz>) -> InstrumentSessionWindow 
     let close_at = new_york_close(dt_et.date_naive(), 16, 0, 0);
     let minutes_to_close = close_at.map(|close| minutes_until(dt_et, close));
     let hold_entries = minutes_to_close
-        .map(|minutes| minutes <= AUTO_CLOSE_MINUTES_BEFORE_SESSION_END)
+        .map(|minutes| minutes <= blockout_minutes_before_close)
         .unwrap_or(false);
 
     InstrumentSessionWindow {

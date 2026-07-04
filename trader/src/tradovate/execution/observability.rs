@@ -236,10 +236,16 @@ pub(crate) fn session_window_at(
     session: &SessionState,
     ts_ns: i64,
 ) -> Option<InstrumentSessionWindow> {
-    session
-        .market
-        .session_profile
-        .map(|profile| profile.evaluate(ts_ns))
+    if !session.execution_config.blockout_enabled {
+        return None;
+    }
+
+    session.market.session_profile.map(|profile| {
+        profile.evaluate_with_blockout(
+            ts_ns,
+            session.execution_config.blockout_minutes_before_close,
+        )
+    })
 }
 
 pub(crate) fn selected_contract_position<'a>(session: &'a SessionState) -> Option<&'a Value> {

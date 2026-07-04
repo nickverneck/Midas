@@ -197,6 +197,8 @@ impl App {
             | Focus::HmaInverted
             | Focus::NativeSignalTiming
             | Focus::NativeReversalMode
+            | Focus::NativeBlockoutEnabled
+            | Focus::NativeBlockoutMinutes
             | Focus::HmaTakeProfitTicks
             | Focus::HmaStopLossTicks
             | Focus::HmaTrailingStop

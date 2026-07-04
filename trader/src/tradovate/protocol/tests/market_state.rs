@@ -456,8 +456,8 @@ fn futures_globex_preclose_window_holds_entries() {
         .single()
         .unwrap()
         .with_timezone(&Utc);
-    let window =
-        InstrumentSessionProfile::FuturesGlobex.evaluate(dt.timestamp_nanos_opt().unwrap());
+    let window = InstrumentSessionProfile::FuturesGlobex
+        .evaluate_with_blockout(dt.timestamp_nanos_opt().unwrap(), 15.0);
 
     assert!(window.session_open);
     assert!(window.hold_entries);
@@ -471,8 +471,8 @@ fn futures_globex_daily_break_holds_until_reopen() {
         .single()
         .unwrap()
         .with_timezone(&Utc);
-    let window =
-        InstrumentSessionProfile::FuturesGlobex.evaluate(dt.timestamp_nanos_opt().unwrap());
+    let window = InstrumentSessionProfile::FuturesGlobex
+        .evaluate_with_blockout(dt.timestamp_nanos_opt().unwrap(), 15.0);
 
     assert!(!window.session_open);
     assert!(window.hold_entries);
@@ -486,8 +486,8 @@ fn futures_globex_reopens_after_break() {
         .single()
         .unwrap()
         .with_timezone(&Utc);
-    let window =
-        InstrumentSessionProfile::FuturesGlobex.evaluate(dt.timestamp_nanos_opt().unwrap());
+    let window = InstrumentSessionProfile::FuturesGlobex
+        .evaluate_with_blockout(dt.timestamp_nanos_opt().unwrap(), 15.0);
 
     assert!(window.session_open);
     assert!(!window.hold_entries);
@@ -501,7 +501,8 @@ fn equity_rth_preclose_window_holds_entries() {
         .single()
         .unwrap()
         .with_timezone(&Utc);
-    let window = InstrumentSessionProfile::EquityRth.evaluate(dt.timestamp_nanos_opt().unwrap());
+    let window = InstrumentSessionProfile::EquityRth
+        .evaluate_with_blockout(dt.timestamp_nanos_opt().unwrap(), 15.0);
 
     assert!(window.session_open);
     assert!(window.hold_entries);

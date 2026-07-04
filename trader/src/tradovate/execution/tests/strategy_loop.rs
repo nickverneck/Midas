@@ -1,5 +1,30 @@
 use super::*;
 
+fn et_ts_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+    chrono_tz::America::New_York
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .unwrap()
+        .timestamp_nanos_opt()
+        .unwrap()
+}
+
+fn seed_long_position(session: &mut SessionState) {
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": 1,
+                "avgPrice": 5000.0
+            }),
+        )]),
+    );
+}
+
 #[test]
 fn strategy_loop_does_not_disarm_on_transient_oversize_with_live_strategy_path() {
     let mut session = test_session();
@@ -62,6 +87,90 @@ fn strategy_loop_does_not_disarm_on_transient_oversize_with_live_strategy_path()
             .execution_runtime
             .last_summary
             .contains("Waiting for broker sync")
+    );
+}
+
+#[test]
+fn strategy_blockout_flattens_inside_configured_preclose_window() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let bar_ts = et_ts_ns(2026, 3, 9, 16, 20);
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.blockout_enabled = true;
+    session.execution_config.blockout_minutes_before_close = 45.0;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(bar_ts - 60_000_000_000);
+    session.market.session_profile = Some(InstrumentSessionProfile::FuturesGlobex);
+    session.market.history_loaded = 1;
+    session.market.bars = vec![Bar {
+        ts_ns: bar_ts,
+        open: 5000.0,
+        high: 5001.0,
+        low: 4999.0,
+        close: 5000.0,
+    }];
+    seed_long_position(&mut session);
+
+    maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("blockout should flatten open position");
+
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(0));
+    assert!(
+        session
+            .execution_runtime
+            .last_summary
+            .contains("Session hold active")
+    );
+    match broker_rx.try_recv().expect("flatten command queued") {
+        BrokerCommand::LiquidatePosition { liquidation, .. } => {
+            assert_eq!(liquidation.target_qty, Some(0));
+            assert_eq!(liquidation.contract_name, "ESH6");
+        }
+        BrokerCommand::MarketOrder { order, .. } => {
+            assert_eq!(order.target_qty, Some(0));
+            assert_eq!(order.contract_name, "ESH6");
+            assert_eq!(order.order_action, "Sell");
+            assert_eq!(order.order_qty, 1);
+        }
+        _ => panic!("expected liquidation command"),
+    }
+}
+
+#[test]
+fn disabled_strategy_blockout_does_not_flatten_preclose_position() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let bar_ts = et_ts_ns(2026, 3, 9, 16, 20);
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.blockout_enabled = false;
+    session.execution_config.blockout_minutes_before_close = 45.0;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(bar_ts - 60_000_000_000);
+    session.market.session_profile = Some(InstrumentSessionProfile::FuturesGlobex);
+    session.market.history_loaded = 1;
+    session.market.bars = vec![Bar {
+        ts_ns: bar_ts,
+        open: 5000.0,
+        high: 5001.0,
+        low: 4999.0,
+        close: 5000.0,
+    }];
+    seed_long_position(&mut session);
+
+    maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("disabled blockout should allow strategy evaluation");
+
+    assert_eq!(session.execution_runtime.pending_target_qty, None);
+    assert!(broker_rx.try_recv().is_err(), "no flatten should be queued");
+    assert!(
+        !session
+            .execution_runtime
+            .last_summary
+            .contains("Session hold active")
     );
 }
 
