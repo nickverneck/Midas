@@ -150,9 +150,10 @@ fn handle_broker_order_ack(
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
     let debug_message = format!(
-        "submit {}{} | {}",
+        "submit {}{} | endpoint {} | {}",
         format_debug_latency_ms(ack.submit_rtt_ms),
         debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+        ack.endpoint,
         ack.message
     );
     let _ = event_tx.send(ServiceEvent::Status(ack.message));
@@ -202,14 +203,14 @@ fn handle_broker_order_failed(
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | {}",
-            failure.message
+            "submit stale | endpoint {} | {}",
+            failure.endpoint, failure.message
         )));
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | {}",
-            failure.message
+            "submit failed | endpoint {} | {}",
+            failure.endpoint, failure.message
         )));
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
@@ -247,9 +248,10 @@ fn handle_order_strategy_ack(
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
     let debug_message = format!(
-        "submit {}{} | {}",
+        "submit {}{} | endpoint {} | {}",
         format_debug_latency_ms(ack.submit_rtt_ms),
         debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+        ack.endpoint,
         ack.message
     );
     let _ = event_tx.send(ServiceEvent::Status(ack.message));
@@ -297,14 +299,14 @@ fn handle_order_strategy_failed(
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | {}",
-            failure.message
+            "submit stale | endpoint {} | {}",
+            failure.endpoint, failure.message
         )));
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | {}",
-            failure.message
+            "submit failed | endpoint {} | {}",
+            failure.endpoint, failure.message
         )));
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
@@ -341,6 +343,10 @@ fn handle_protection_sync_applied(
     if let Some(message) = ack.message {
         let _ = event_tx.send(ServiceEvent::Status(message));
     }
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "protection sync applied | endpoint {}",
+        ack.endpoint
+    )));
     Ok(())
 }
 
@@ -361,6 +367,10 @@ fn handle_protection_sync_failed(
         }
     }
     request_snapshot_refresh(state, &internal_tx);
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "protection sync failed | endpoint {} | {}",
+        failure.endpoint, failure.message
+    )));
     let _ = event_tx.send(ServiceEvent::Error(failure.message));
     Ok(())
 }

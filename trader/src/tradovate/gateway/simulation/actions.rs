@@ -10,6 +10,7 @@ impl ReplayBrokerState {
         order: PendingMarketOrder,
     ) -> std::result::Result<Vec<InternalEvent>, BrokerOrderFailure> {
         let fill_price = order.reference_price.ok_or_else(|| BrokerOrderFailure {
+            endpoint: "replay/order/placeorder",
             cl_ord_id: order.cl_ord_id.clone(),
             message: format!(
                 "replay order rejected: no market price is available for {}",
@@ -105,6 +106,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::BrokerOrderAck(BrokerOrderAck {
+                endpoint: "replay/order/placeorder",
                 cl_ord_id: order.cl_ord_id,
                 order_id: Some(order_id),
                 submit_rtt_ms: 0,
@@ -121,6 +123,7 @@ impl ReplayBrokerState {
         let fill_price = liquidation
             .reference_price
             .ok_or_else(|| BrokerOrderFailure {
+                endpoint: "replay/order/liquidateposition",
                 cl_ord_id: liquidation.request_id.clone(),
                 message: format!(
                     "replay close rejected: no market price is available for {}",
@@ -194,6 +197,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::BrokerOrderAck(BrokerOrderAck {
+                endpoint: "replay/order/liquidateposition",
                 cl_ord_id: liquidation.request_id.clone(),
                 order_id: Some(order_id),
                 submit_rtt_ms: 0,
@@ -215,6 +219,7 @@ impl ReplayBrokerState {
         let mut liquidation_message = None;
         for event in self.simulate_liquidation(liquidation).map_err(|failure| {
             BrokerOrderStrategyFailure {
+                endpoint: failure.endpoint,
                 uuid: strategy.uuid.clone(),
                 message: failure.message,
                 target_qty: strategy.target_qty,
@@ -260,6 +265,7 @@ impl ReplayBrokerState {
         let fill_price = strategy
             .reference_price
             .ok_or_else(|| BrokerOrderStrategyFailure {
+                endpoint: "replay/orderStrategy/startorderstrategy",
                 uuid: strategy.uuid.clone(),
                 message: format!(
                     "replay strategy rejected: no market price is available for {}",
@@ -464,6 +470,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::OrderStrategyAck(BrokerOrderStrategyAck {
+                endpoint: "replay/orderStrategy/startorderstrategy",
                 uuid: strategy.uuid,
                 order_strategy_id: Some(order_strategy_id),
                 submit_rtt_ms: 0,
@@ -481,13 +488,17 @@ impl ReplayBrokerState {
     ) -> std::result::Result<Vec<InternalEvent>, ProtectionSyncFailure> {
         let mut next_state = sync.next_state;
         let mut envelopes = Vec::new();
+        let endpoint: &'static str;
         match sync.operation {
             ProtectionSyncOperation::Clear { cancel_order_ids } => {
+                endpoint = "replay/order/cancelorder";
                 envelopes.extend(self.cancel_orders(&cancel_order_ids));
             }
             ProtectionSyncOperation::ModifyStop { payload } => {
+                endpoint = "replay/order/modifyorder";
                 let Some(order_id) = json_i64(&payload, "orderId") else {
                     return Err(ProtectionSyncFailure {
+                        endpoint,
                         message: format!(
                             "native protection sync failed for {} on {}: modify replay payload missing orderId",
                             sync.contract_name, sync.account_name
@@ -496,6 +507,7 @@ impl ReplayBrokerState {
                 };
                 let Some(active) = self.active_orders.get_mut(&order_id) else {
                     return Err(ProtectionSyncFailure {
+                        endpoint,
                         message: format!(
                             "native protection sync failed for {} on {}: replay stop order {order_id} was not found",
                             sync.contract_name, sync.account_name
@@ -524,6 +536,7 @@ impl ReplayBrokerState {
                 envelopes.extend(self.cancel_orders(&cancel_order_ids));
                 match request {
                     ProtectionPlaceRequest::TakeProfit { payload } => {
+                        endpoint = "replay/order/placeorder";
                         let order_id = self.next_order_id();
                         let entity =
                             working_order_entity(order_id, sync.key.contract_id, &payload, None);
@@ -545,6 +558,7 @@ impl ReplayBrokerState {
                         });
                     }
                     ProtectionPlaceRequest::StopLoss { payload } => {
+                        endpoint = "replay/order/placeorder";
                         let order_id = self.next_order_id();
                         let entity =
                             working_order_entity(order_id, sync.key.contract_id, &payload, None);
@@ -566,6 +580,7 @@ impl ReplayBrokerState {
                         });
                     }
                     ProtectionPlaceRequest::Oco { payload } => {
+                        endpoint = "replay/order/placeOCO";
                         let tp_order_id = self.next_order_id();
                         let tp_entity =
                             working_order_entity(tp_order_id, sync.key.contract_id, &payload, None);
@@ -617,6 +632,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::ProtectionSyncApplied(ProtectionSyncAck {
+                endpoint,
                 key: sync.key,
                 message: sync.message,
                 next_state,

@@ -117,6 +117,7 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
 
     handle_internal(
         InternalEvent::BrokerOrderFailed(BrokerOrderFailure {
+            endpoint: "orderStrategy/interruptorderstrategy",
             cl_ord_id: "midas-stale-direct-reversal".to_string(),
             message: format!(
                 "strategy {stale_strategy_id} was already inactive; waiting for broker sync before retrying the reversal"

@@ -130,6 +130,7 @@ pub(crate) struct PendingOrderStrategyTransition {
 }
 
 pub(crate) struct BrokerOrderAck {
+    pub(crate) endpoint: &'static str,
     pub(crate) cl_ord_id: String,
     pub(crate) order_id: Option<i64>,
     pub(crate) submit_rtt_ms: u64,
@@ -137,6 +138,7 @@ pub(crate) struct BrokerOrderAck {
 }
 
 pub(crate) struct BrokerOrderFailure {
+    pub(crate) endpoint: &'static str,
     pub(crate) cl_ord_id: String,
     pub(crate) message: String,
     pub(crate) target_qty: Option<i32>,
@@ -144,6 +146,7 @@ pub(crate) struct BrokerOrderFailure {
 }
 
 pub(crate) struct BrokerOrderStrategyAck {
+    pub(crate) endpoint: &'static str,
     pub(crate) uuid: String,
     pub(crate) order_strategy_id: Option<i64>,
     pub(crate) submit_rtt_ms: u64,
@@ -153,6 +156,7 @@ pub(crate) struct BrokerOrderStrategyAck {
 }
 
 pub(crate) struct BrokerOrderStrategyFailure {
+    pub(crate) endpoint: &'static str,
     pub(crate) uuid: String,
     pub(crate) message: String,
     pub(crate) target_qty: i32,
@@ -200,12 +204,14 @@ pub(crate) enum ProtectionPlaceRequest {
 }
 
 pub(crate) struct ProtectionSyncAck {
+    pub(crate) endpoint: &'static str,
     pub(crate) key: StrategyProtectionKey,
     pub(crate) message: Option<String>,
     pub(crate) next_state: Option<ManagedProtectionOrders>,
 }
 
 pub(crate) struct ProtectionSyncFailure {
+    pub(crate) endpoint: &'static str,
     pub(crate) message: String,
 }
 

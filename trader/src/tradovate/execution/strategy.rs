@@ -82,6 +82,24 @@ pub(crate) fn pending_target_has_live_broker_path(session: &SessionState) -> boo
     selected_contract_has_live_broker_path(session)
 }
 
+fn emit_pending_target_gate_debug(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: &SessionState,
+    source: &str,
+    pending_target_qty: i32,
+    actual_qty: i32,
+    reached: bool,
+    overshot: bool,
+    has_live_broker_path: bool,
+    waiting_for_position_sync: bool,
+) {
+    let effective_qty = effective_market_position_qty(session);
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "strategy pending target gate | {source} | pending target {pending_target_qty} | actual {actual_qty} | effective {effective_qty} | reached {reached} | overshot {overshot} | live broker path {has_live_broker_path} | waiting position sync {waiting_for_position_sync} | {}",
+        execution_observability_context(session)
+    )));
+}
+
 pub(crate) fn should_wait_for_automated_position_sync(
     session: &SessionState,
     pending_target_qty: i32,
@@ -446,6 +464,20 @@ pub(crate) fn handle_execution_account_sync(
         // so the strategy can correct on the next bar.
         let overshot =
             (pending > 0 && actual_qty > pending) || (pending < 0 && actual_qty < pending);
+        let has_live_broker_path = pending_target_has_live_broker_path(session);
+        let waiting_for_position_sync = !has_live_broker_path
+            && should_wait_for_automated_position_sync(session, pending, actual_qty);
+        emit_pending_target_gate_debug(
+            event_tx,
+            session,
+            "account sync",
+            pending,
+            actual_qty,
+            reached,
+            overshot,
+            has_live_broker_path,
+            waiting_for_position_sync,
+        );
         if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
             force_reevaluate_pending_window(session);
@@ -468,8 +500,8 @@ pub(crate) fn handle_execution_account_sync(
                 session.execution_runtime.last_summary = next_summary;
                 runtime_changed = true;
             }
-        } else if pending != 0 && !pending_target_has_live_broker_path(session) {
-            if should_wait_for_automated_position_sync(session, pending, actual_qty) {
+        } else if pending != 0 && !has_live_broker_path {
+            if waiting_for_position_sync {
                 let next_summary = format!(
                     "Waiting for position sync after automated order settle (actual {actual_qty}, pending target {pending})."
                 );
@@ -586,6 +618,24 @@ pub(crate) fn maybe_run_execution_strategy(
         let reached = pending_target_qty == actual_market_qty;
         let overshot = (pending_target_qty > 0 && actual_market_qty > pending_target_qty)
             || (pending_target_qty < 0 && actual_market_qty < pending_target_qty);
+        let has_live_broker_path = pending_target_has_live_broker_path(session);
+        let waiting_for_position_sync = !has_live_broker_path
+            && should_wait_for_automated_position_sync(
+                session,
+                pending_target_qty,
+                actual_market_qty,
+            );
+        emit_pending_target_gate_debug(
+            event_tx,
+            session,
+            "strategy loop",
+            pending_target_qty,
+            actual_market_qty,
+            reached,
+            overshot,
+            has_live_broker_path,
+            waiting_for_position_sync,
+        );
         if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
             force_reevaluate_pending_window(session);
@@ -604,12 +654,8 @@ pub(crate) fn maybe_run_execution_strategy(
             );
             session.execution_runtime.last_summary = next_summary;
             emit_execution_state(event_tx, session);
-        } else if pending_target_qty != 0 && !pending_target_has_live_broker_path(session) {
-            if should_wait_for_automated_position_sync(
-                session,
-                pending_target_qty,
-                actual_market_qty,
-            ) {
+        } else if pending_target_qty != 0 && !has_live_broker_path {
+            if waiting_for_position_sync {
                 let next_summary = format!(
                     "Waiting for position sync after automated order settle (actual {actual_market_qty}, pending target {pending_target_qty})."
                 );

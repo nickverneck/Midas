@@ -403,11 +403,19 @@ pub(crate) fn execution_observability_context(session: &SessionState) -> String 
             active_linked_order_count(session, key.account_id, key.contract_id, strategy_id)
         })
         .unwrap_or_default();
+    let tracker_within_broker_grace = session
+        .order_latency_tracker
+        .as_ref()
+        .and_then(|tracker| tracker.order_strategy_id)
+        .is_some_and(|order_strategy_id| {
+            tracker_within_broker_path_grace(session, order_strategy_id)
+        });
 
     format!(
-        "pending target {} | tracker {} | tracked strategy {} ({} active linked) | broker strategy {} ({} active linked) | managed {}",
+        "pending target {} | tracker {} | tracker within broker grace {} | tracked strategy {} ({} active linked) | broker strategy {} ({} active linked) | managed {}",
         pending_target,
         format_selected_tracker_state(session),
+        tracker_within_broker_grace,
         tracked_strategy_id
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
