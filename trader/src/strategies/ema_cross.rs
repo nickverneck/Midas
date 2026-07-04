@@ -33,8 +33,19 @@ impl Default for EmaCrossConfig {
 pub struct EmaCrossEvaluation {
     pub signal: StrategySignal,
     pub latest_close: Option<f64>,
+    pub previous_fast_ema: Option<f64>,
+    pub previous_slow_ema: Option<f64>,
     pub fast_ema: Option<f64>,
     pub slow_ema: Option<f64>,
+    pub bars_len: usize,
+    pub warmup_bars: usize,
+    pub current_side: Option<PositionSide>,
+    pub inverted: bool,
+    pub raw_buy_signal: bool,
+    pub raw_sell_signal: bool,
+    pub effective_buy_signal: bool,
+    pub effective_sell_signal: bool,
+    pub hold_reason: Option<&'static str>,
 }
 
 impl EmaCrossEvaluation {
@@ -50,6 +61,29 @@ impl EmaCrossEvaluation {
             parts.push(format!("Slow EMA: {:.2}", slow));
         }
         parts.join(" | ")
+    }
+
+    pub fn debug_summary(&self) -> String {
+        format!(
+            "Signal: {} | reason: {} | bars: {}/{} | side: {:?} | inverted: {} | close: {} | prev_fast: {} | prev_slow: {} | fast: {} | slow: {} | delta: {}->{} | raw_cross buy={} sell={} | effective_cross buy={} sell={}",
+            self.signal.label(),
+            self.hold_reason.unwrap_or("signal_ready"),
+            self.bars_len,
+            self.warmup_bars,
+            self.current_side,
+            self.inverted,
+            fmt_price(self.latest_close),
+            fmt_price(self.previous_fast_ema),
+            fmt_price(self.previous_slow_ema),
+            fmt_price(self.fast_ema),
+            fmt_price(self.slow_ema),
+            fmt_delta(self.previous_fast_ema, self.previous_slow_ema),
+            fmt_delta(self.fast_ema, self.slow_ema),
+            self.raw_buy_signal,
+            self.raw_sell_signal,
+            self.effective_buy_signal,
+            self.effective_sell_signal
+        )
     }
 }
 
@@ -82,8 +116,19 @@ impl EmaCrossConfig {
             return EmaCrossEvaluation {
                 signal: StrategySignal::Hold,
                 latest_close: None,
+                previous_fast_ema: None,
+                previous_slow_ema: None,
                 fast_ema: None,
                 slow_ema: None,
+                bars_len: bars.len(),
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("no_bars"),
             };
         };
 
@@ -91,8 +136,19 @@ impl EmaCrossConfig {
             return EmaCrossEvaluation {
                 signal: StrategySignal::Hold,
                 latest_close: Some(last_bar.close),
+                previous_fast_ema: None,
+                previous_slow_ema: None,
                 fast_ema: None,
                 slow_ema: None,
+                bars_len: bars.len(),
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("warming_up"),
             };
         }
 
@@ -115,23 +171,64 @@ impl EmaCrossConfig {
             return EmaCrossEvaluation {
                 signal: StrategySignal::Hold,
                 latest_close: Some(last_bar.close),
+                previous_fast_ema: fast
+                    .get(prev_idx)
+                    .copied()
+                    .filter(|value| value.is_finite()),
+                previous_slow_ema: slow
+                    .get(prev_idx)
+                    .copied()
+                    .filter(|value| value.is_finite()),
                 fast_ema: fast.get(idx).copied().filter(|value| value.is_finite()),
                 slow_ema: slow.get(idx).copied().filter(|value| value.is_finite()),
+                bars_len: bars.len(),
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("non_finite_indicator"),
             };
         }
 
-        let mut buy_signal = prev_fast <= prev_slow && curr_fast > curr_slow;
-        let mut sell_signal = prev_fast >= prev_slow && curr_fast < curr_slow;
+        let raw_buy_signal = prev_fast <= prev_slow && curr_fast > curr_slow;
+        let raw_sell_signal = prev_fast >= prev_slow && curr_fast < curr_slow;
+        let mut buy_signal = raw_buy_signal;
+        let mut sell_signal = raw_sell_signal;
         if self.inverted {
             std::mem::swap(&mut buy_signal, &mut sell_signal);
         }
 
         let signal = resolve_signal(buy_signal, sell_signal, current_side);
+        let hold_reason = if signal != StrategySignal::Hold {
+            None
+        } else if buy_signal && current_side == Some(PositionSide::Long) {
+            Some("buy_cross_already_long")
+        } else if sell_signal && current_side == Some(PositionSide::Short) {
+            Some("sell_cross_already_short")
+        } else if !buy_signal && !sell_signal {
+            Some("no_effective_cross")
+        } else {
+            Some("hold")
+        };
         EmaCrossEvaluation {
             signal,
             latest_close: Some(last_bar.close),
+            previous_fast_ema: Some(prev_fast),
+            previous_slow_ema: Some(prev_slow),
             fast_ema: Some(curr_fast),
             slow_ema: Some(curr_slow),
+            bars_len: bars.len(),
+            warmup_bars: self.warmup_bars(),
+            current_side,
+            inverted: self.inverted,
+            raw_buy_signal,
+            raw_sell_signal,
+            effective_buy_signal: buy_signal,
+            effective_sell_signal: sell_signal,
+            hold_reason,
         }
     }
 
@@ -318,6 +415,19 @@ fn signed_qty_to_side(signed_qty: i32) -> Option<PositionSide> {
         Some(PositionSide::Short)
     } else {
         None
+    }
+}
+
+fn fmt_price(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn fmt_delta(fast: Option<f64>, slow: Option<f64>) -> String {
+    match (fast, slow) {
+        (Some(fast), Some(slow)) => format!("{:.6}", fast - slow),
+        _ => "n/a".to_string(),
     }
 }
 
