@@ -121,7 +121,7 @@ impl App {
                     Focus::HmaTrailTriggerTicks,
                     Focus::HmaTrailOffsetTicks,
                 ]),
-                NativeStrategyKind::EmaCross => order.extend([
+                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => order.extend([
                     Focus::EmaFastLength,
                     Focus::EmaSlowLength,
                     Focus::EmaInverted,
@@ -504,6 +504,10 @@ impl App {
             NativeStrategyKind::EmaCross => {
                 self.strategy.native_ema.take_profit_offset(self.market.tick_size)?
             }
+            NativeStrategyKind::HmaCross => self
+                .strategy
+                .native_hma_cross
+                .take_profit_offset(self.market.tick_size)?,
         };
 
         Some(if signed_qty > 0 {
@@ -535,6 +539,16 @@ impl App {
                     .sync_position(&mut runtime, signed_qty, Some(entry_price));
                 self.strategy
                     .native_ema
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+            NativeStrategyKind::HmaCross => {
+                let mut runtime =
+                    crate::strategies::hma_cross::HmaCrossExecutionState::default();
+                self.strategy
+                    .native_hma_cross
+                    .sync_position(&mut runtime, signed_qty, Some(entry_price));
+                self.strategy
+                    .native_hma_cross
                     .current_effective_stop_price(&runtime, self.market.tick_size)
             }
         }

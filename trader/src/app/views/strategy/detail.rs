@@ -93,6 +93,38 @@ impl App {
                         AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
                     )),
                 ],
+                NativeStrategyKind::HmaCross => vec![
+                    Line::from("HMA Crossover Strategy"),
+                    Line::from(format!("Type: {}", NativeStrategyKind::HmaCross.label())),
+                    Line::from(format!(
+                        "Params: fast={} slow={}",
+                        self.strategy.native_hma_cross.fast_length,
+                        self.strategy.native_hma_cross.slow_length,
+                    )),
+                    Line::from(format!(
+                        "Flags: inverted={} trailing={} timing={} reversal={}",
+                        bool_label(self.strategy.native_hma_cross.inverted),
+                        bool_label(self.strategy.native_hma_cross.use_trailing_stop),
+                        self.strategy.native_signal_timing.label(),
+                        self.strategy.native_reversal_mode.label(),
+                    )),
+                    Line::from(format!(
+                        "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
+                        self.strategy.native_hma_cross.take_profit_ticks,
+                        self.strategy.native_hma_cross.stop_loss_ticks,
+                        self.strategy.native_hma_cross.trail_trigger_ticks,
+                        self.strategy.native_hma_cross.trail_offset_ticks,
+                    )),
+                    Line::from(""),
+                    Line::from("Signal logic"),
+                    Line::from("Buy: fast HMA crosses above slow HMA."),
+                    Line::from("Sell: fast HMA crosses below slow HMA."),
+                    Line::from("Inverted swaps buy/sell decisions before order routing."),
+                    Line::from(format!(
+                        "Auto-close holds flat {}m before the inferred session close.",
+                        AUTO_CLOSE_MINUTES_BEFORE_SESSION_END
+                    )),
+                ],
             };
             lines.extend([
                 Line::from(

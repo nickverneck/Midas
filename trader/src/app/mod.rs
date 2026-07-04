@@ -7,6 +7,7 @@ use crate::broker::{
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
+use crate::strategies::hma_cross::hma_series;
 use crate::strategy::{
     LuaSourceMode, NativeSignalTiming, NativeStrategyKind, StrategyKind, StrategyState,
 };

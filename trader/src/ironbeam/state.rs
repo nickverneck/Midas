@@ -4,6 +4,7 @@ use crate::broker::{
 use crate::config::AppConfig;
 use crate::strategies::ema_cross::EmaCrossExecutionState;
 use crate::strategies::hma_angle::HmaAngleExecutionState;
+use crate::strategies::hma_cross::HmaCrossExecutionState;
 use crate::strategy::{ExecutionRuntimeSnapshot, ExecutionStrategyConfig};
 use reqwest::Client;
 use serde_json::Value;
@@ -56,6 +57,7 @@ pub(super) struct ExecutionRuntimeState {
     pub(super) last_summary: String,
     pub(super) hma_execution: HmaAngleExecutionState,
     pub(super) ema_execution: EmaCrossExecutionState,
+    pub(super) hma_cross_execution: HmaCrossExecutionState,
 }
 
 impl ExecutionRuntimeState {
@@ -72,6 +74,7 @@ impl ExecutionRuntimeState {
         self.pending_reversal_entry = None;
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
+        self.hma_cross_execution = HmaCrossExecutionState::default();
     }
 
     pub(super) fn set_pending_target(&mut self, target_qty: Option<i32>) {

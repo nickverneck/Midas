@@ -1,5 +1,6 @@
 use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
+use crate::strategies::hma_cross::HmaCrossConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -42,6 +43,7 @@ impl StrategyKind {
 pub enum NativeStrategyKind {
     HmaAngle,
     EmaCross,
+    HmaCross,
 }
 
 impl NativeStrategyKind {
@@ -49,6 +51,7 @@ impl NativeStrategyKind {
         match self {
             Self::HmaAngle => "HMA Angle",
             Self::EmaCross => "EMA Crossover",
+            Self::HmaCross => "HMA Crossover",
         }
     }
 
@@ -56,18 +59,24 @@ impl NativeStrategyKind {
         match self {
             Self::HmaAngle => "hma_angle",
             Self::EmaCross => "ema_cross",
+            Self::HmaCross => "hma_cross",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             Self::HmaAngle => Self::EmaCross,
-            Self::EmaCross => Self::HmaAngle,
+            Self::EmaCross => Self::HmaCross,
+            Self::HmaCross => Self::HmaAngle,
         }
     }
 
     pub fn prev(self) -> Self {
-        self.next()
+        match self {
+            Self::HmaAngle => Self::HmaCross,
+            Self::EmaCross => Self::HmaAngle,
+            Self::HmaCross => Self::EmaCross,
+        }
     }
 }
 
@@ -407,6 +416,7 @@ pub struct StrategyState {
     pub native_reversal_mode: NativeReversalMode,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
+    pub native_hma_cross: HmaCrossConfig,
     pub order_qty: i32,
     pub lua_source_mode: LuaSourceMode,
     pub lua_file_path: String,
@@ -423,6 +433,8 @@ pub struct ExecutionStrategyConfig {
     pub native_reversal_mode: NativeReversalMode,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
+    #[serde(default)]
+    pub native_hma_cross: HmaCrossConfig,
     #[serde(default = "default_order_qty")]
     pub order_qty: i32,
 }
@@ -448,6 +460,7 @@ impl Default for ExecutionStrategyConfig {
             native_reversal_mode: NativeReversalMode::Direct,
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
+            native_hma_cross: HmaCrossConfig::default(),
             order_qty: 1,
         }
     }
@@ -503,6 +516,7 @@ impl StrategyState {
             native_reversal_mode: NativeReversalMode::Direct,
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
+            native_hma_cross: HmaCrossConfig::default(),
             order_qty: 1,
             lua_source_mode: LuaSourceMode::Editor,
             lua_file_path: String::new(),
@@ -571,6 +585,19 @@ impl StrategyState {
                 self.native_ema.use_trailing_stop,
                 self.native_ema.inverted,
             ),
+            NativeStrategyKind::HmaCross => format!(
+                "{} | qty={} timing={} reversal={} fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                NativeStrategyKind::HmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_reversal_mode.label(),
+                self.native_hma_cross.fast_length,
+                self.native_hma_cross.slow_length,
+                self.native_hma_cross.take_profit_ticks,
+                self.native_hma_cross.stop_loss_ticks,
+                self.native_hma_cross.use_trailing_stop,
+                self.native_hma_cross.inverted,
+            ),
         }
     }
 
@@ -582,6 +609,7 @@ impl StrategyState {
             native_reversal_mode: self.native_reversal_mode,
             native_hma: self.native_hma.clone(),
             native_ema: self.native_ema.clone(),
+            native_hma_cross: self.native_hma_cross.clone(),
             order_qty: self.order_qty,
         }
     }
@@ -593,6 +621,7 @@ impl StrategyState {
         self.native_reversal_mode = config.native_reversal_mode;
         self.native_hma = config.native_hma.clone();
         self.native_ema = config.native_ema.clone();
+        self.native_hma_cross = config.native_hma_cross.clone();
         self.order_qty = config.order_qty;
     }
 }

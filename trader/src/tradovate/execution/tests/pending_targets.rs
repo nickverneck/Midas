@@ -288,6 +288,107 @@ fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace(
 }
 
 #[test]
+fn strategy_loop_rechecks_latest_bar_when_pending_target_reaches_with_live_broker_path() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_ema.fast_length = 2;
+    session.execution_config.native_ema.slow_length = 4;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.pending_target_qty = Some(-1);
+    session.execution_runtime.last_closed_bar_ts = Some(5);
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 8.0, 12.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+        })
+        .collect();
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": -1,
+                "netPrice": 5000.0
+            }),
+        )]),
+    );
+    let key = StrategyProtectionKey {
+        account_id: 42,
+        contract_id: 3570918,
+    };
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key,
+        order_strategy_id: 77,
+        target_qty: -1,
+    });
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            1001,
+            json!({
+                "id": 1001,
+                "accountId": 42,
+                "contractId": 3570918,
+                "ordStatus": "Working"
+            }),
+        )]),
+    );
+    session.user_store.order_strategy_links.insert(
+        1,
+        json!({
+            "id": 1,
+            "orderStrategyId": 77,
+            "orderId": 1001
+        }),
+    );
+
+    maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("settled pending target should not hide the latest crossover");
+
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+    let mut saw_buy = false;
+    while let Ok(command) = broker_rx.try_recv() {
+        match command {
+            BrokerCommand::MarketOrder { order, .. } => {
+                assert_eq!(order.target_qty, Some(1));
+                assert_eq!(order.order_qty, 2);
+                assert_eq!(order.order_action, "Buy");
+                saw_buy = true;
+            }
+            BrokerCommand::OrderStrategy { strategy, .. } => {
+                assert_eq!(strategy.target_qty, 1);
+                assert_eq!(strategy.entry_order_qty, 2);
+                assert_eq!(strategy.order_action, "Buy");
+                saw_buy = true;
+            }
+            BrokerCommand::LiquidateThenOrderStrategy { strategy, .. } => {
+                assert_eq!(strategy.target_qty, 1);
+                assert_eq!(strategy.entry_order_qty, 2);
+                assert_eq!(strategy.order_action, "Buy");
+                saw_buy = true;
+            }
+            BrokerCommand::NativeProtection { .. } => {}
+            BrokerCommand::LiquidatePosition { .. } => {}
+            #[cfg(feature = "replay")]
+            BrokerCommand::ReplayBar { .. } => {}
+        }
+    }
+    assert!(saw_buy, "buy reversal should be queued");
+}
+
+#[test]
 fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_expires() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();

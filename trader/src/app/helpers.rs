@@ -458,6 +458,7 @@ impl App {
         match self.strategy.kind {
             StrategyKind::Native => match self.strategy.native_strategy {
                 NativeStrategyKind::EmaCross => "on | EMA fast/slow + fills".to_string(),
+                NativeStrategyKind::HmaCross => "on | HMA fast/slow + fills".to_string(),
                 NativeStrategyKind::HmaAngle => "on | HMA cross map + fills".to_string(),
             },
             _ => "on | fills only".to_string(),
@@ -560,6 +561,72 @@ impl App {
 
                 overlay.label = "ema".to_string();
             }
+            NativeStrategyKind::HmaCross => {
+                let fast = hma_series(&close, self.strategy.native_hma_cross.fast_length.max(1));
+                let slow = hma_series(&close, self.strategy.native_hma_cross.slow_length.max(1));
+                append_overlay_series_segments(
+                    &fast,
+                    visible_start,
+                    Color::Cyan,
+                    &mut overlay.indicator_segments,
+                );
+                append_overlay_series_segments(
+                    &slow,
+                    visible_start,
+                    Color::Yellow,
+                    &mut overlay.indicator_segments,
+                );
+
+                let warmup_bars = self.strategy.native_hma_cross.warmup_bars();
+                for idx in visible_start.max(1)..close.len() {
+                    if idx + 1 < warmup_bars {
+                        continue;
+                    }
+                    let prev_fast = fast[idx - 1];
+                    let curr_fast = fast[idx];
+                    let prev_slow = slow[idx - 1];
+                    let curr_slow = slow[idx];
+                    if !prev_fast.is_finite()
+                        || !curr_fast.is_finite()
+                        || !prev_slow.is_finite()
+                        || !curr_slow.is_finite()
+                    {
+                        continue;
+                    }
+
+                    let center = (
+                        (idx - visible_start) as f64,
+                        (curr_fast + curr_slow) / 2.0,
+                    );
+                    let bullish_cross = crossed_above(prev_fast, prev_slow, curr_fast, curr_slow);
+                    let bearish_cross = crossed_below(prev_fast, prev_slow, curr_fast, curr_slow);
+                    let show_bullish = if self.strategy.native_hma_cross.inverted {
+                        bearish_cross
+                    } else {
+                        bullish_cross
+                    };
+                    let show_bearish = if self.strategy.native_hma_cross.inverted {
+                        bullish_cross
+                    } else {
+                        bearish_cross
+                    };
+                    if show_bullish {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Green,
+                            kind: OverlayGlyphKind::BullishCross,
+                        });
+                    } else if show_bearish {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Red,
+                            kind: OverlayGlyphKind::BearishCross,
+                        });
+                    }
+                }
+
+                overlay.label = "hma x".to_string();
+            }
             NativeStrategyKind::HmaAngle => {
                 let hma = zero_lag_hma_series(&close, self.strategy.native_hma.hma_length.max(1));
                 append_overlay_series_segments(
@@ -618,67 +685,51 @@ impl App {
         let (x, y) = glyph.center;
         match glyph.kind {
             OverlayGlyphKind::BuyMarker => {
-                ctx.draw(&CanvasLine {
-                    x1: x - dx,
-                    y1: y - dy,
-                    x2: x,
-                    y2: y,
-                    color: glyph.color,
-                });
-                ctx.draw(&CanvasLine {
-                    x1: x + dx,
-                    y1: y - dy,
-                    x2: x,
-                    y2: y,
-                    color: glyph.color,
-                });
-                ctx.draw(&CanvasLine {
-                    x1: x,
-                    y1: y,
-                    x2: x,
-                    y2: y + dy * 0.7,
-                    color: glyph.color,
-                });
+                draw_triangle_glyph(ctx, x, y, dx, dy, true, glyph.color);
             }
             OverlayGlyphKind::SellMarker => {
-                ctx.draw(&CanvasLine {
-                    x1: x - dx,
-                    y1: y + dy,
-                    x2: x,
-                    y2: y,
-                    color: glyph.color,
-                });
-                ctx.draw(&CanvasLine {
-                    x1: x + dx,
-                    y1: y + dy,
-                    x2: x,
-                    y2: y,
-                    color: glyph.color,
-                });
-                ctx.draw(&CanvasLine {
-                    x1: x,
-                    y1: y,
-                    x2: x,
-                    y2: y - dy * 0.7,
-                    color: glyph.color,
-                });
+                draw_triangle_glyph(ctx, x, y, dx, dy, false, glyph.color);
             }
-            OverlayGlyphKind::BullishCross | OverlayGlyphKind::BearishCross => {
-                ctx.draw(&CanvasLine {
-                    x1: x - dx,
-                    y1: y - dy,
-                    x2: x + dx,
-                    y2: y + dy,
-                    color: glyph.color,
-                });
-                ctx.draw(&CanvasLine {
-                    x1: x - dx,
-                    y1: y + dy,
-                    x2: x + dx,
-                    y2: y - dy,
-                    color: glyph.color,
-                });
+            OverlayGlyphKind::BullishCross => {
+                draw_triangle_glyph(ctx, x, y, dx, dy, true, glyph.color);
+            }
+            OverlayGlyphKind::BearishCross => {
+                draw_triangle_glyph(ctx, x, y, dx, dy, false, glyph.color);
             }
         }
     }
+}
+
+fn draw_triangle_glyph(
+    ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    x: f64,
+    y: f64,
+    dx: f64,
+    dy: f64,
+    points_up: bool,
+    color: Color,
+) {
+    let apex_y = if points_up { y + dy } else { y - dy };
+    let base_y = if points_up { y - dy } else { y + dy };
+    ctx.draw(&CanvasLine {
+        x1: x - dx,
+        y1: base_y,
+        x2: x,
+        y2: apex_y,
+        color,
+    });
+    ctx.draw(&CanvasLine {
+        x1: x,
+        y1: apex_y,
+        x2: x + dx,
+        y2: base_y,
+        color,
+    });
+    ctx.draw(&CanvasLine {
+        x1: x - dx,
+        y1: base_y,
+        x2: x + dx,
+        y2: base_y,
+        color,
+    });
 }

@@ -125,14 +125,27 @@ pub(crate) fn clear_stale_pending_target(
     session.execution_runtime.last_summary = format!(
         "Pending target {pending} cleared: broker has no active order path and position is still {actual_qty}; re-evaluating."
     );
-    session.execution_runtime.last_closed_bar_ts =
-        latest_strategy_bar_ts(session).map(|last_strategy_ts| last_strategy_ts.saturating_sub(1));
+    force_reevaluate_pending_window(session);
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Pending target {pending} cleared: broker has no active order path; re-evaluating."
     )));
     let _ = event_tx.send(ServiceEvent::DebugLog(format!(
         "pending target cleared | target {pending} | actual {actual_qty} | broker has no active order path | {observability}"
     )));
+}
+
+fn force_reevaluate_pending_window(session: &mut SessionState) {
+    let Some(latest_strategy_ts) = latest_strategy_bar_ts(session) else {
+        return;
+    };
+    if session
+        .execution_runtime
+        .last_closed_bar_ts
+        .is_some_and(|last_seen| last_seen < latest_strategy_ts)
+    {
+        return;
+    }
+    session.execution_runtime.last_closed_bar_ts = Some(latest_strategy_ts.saturating_sub(1));
 }
 
 pub(crate) fn evaluate_active_execution_strategy(
@@ -155,7 +168,69 @@ pub(crate) fn evaluate_active_execution_strategy(
                 .evaluate(bars, side_from_signed_qty(current_qty));
             (evaluation.signal, evaluation.summary())
         }
+        NativeStrategyKind::HmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_hma_cross
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (evaluation.signal, evaluation.summary())
+        }
     }
+}
+
+pub(crate) fn evaluate_active_execution_strategy_since(
+    session: &SessionState,
+    bars: &[Bar],
+    current_qty: i32,
+    after_ts: Option<i64>,
+) -> (Bar, StrategySignal, String) {
+    if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
+        let signal_bar = bars
+            .last()
+            .expect("strategy bars must not be empty")
+            .clone();
+        let (signal, summary) = evaluate_active_execution_strategy(session, bars, current_qty);
+        return (signal_bar, signal, summary);
+    }
+
+    let current_side = side_from_signed_qty(current_qty);
+    let start_idx = after_ts
+        .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
+        .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let mut latest = None;
+    for idx in start_idx..bars.len() {
+        let window = &bars[..=idx];
+        let signal_bar = bars[idx].clone();
+        let (signal, summary) = match session.execution_config.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                let evaluation = session
+                    .execution_config
+                    .native_hma
+                    .evaluate(window, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::EmaCross => {
+                let evaluation = session
+                    .execution_config
+                    .native_ema
+                    .evaluate(window, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::HmaCross => {
+                let evaluation = session
+                    .execution_config
+                    .native_hma_cross
+                    .evaluate(window, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+        };
+        if signal != StrategySignal::Hold {
+            latest = Some((signal_bar, signal, summary));
+        } else if latest.is_none() {
+            latest = Some((signal_bar, signal, summary));
+        }
+    }
+    latest.expect("strategy bars must not be empty")
 }
 
 pub(crate) fn target_qty_for_signal(
@@ -373,6 +448,7 @@ pub(crate) fn handle_execution_account_sync(
             (pending > 0 && actual_qty > pending) || (pending < 0 && actual_qty < pending);
         if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
+            force_reevaluate_pending_window(session);
             if continue_staged_reversal(session, broker_tx, event_tx, actual_qty)? {
                 runtime_changed = true;
             } else {
@@ -507,7 +583,28 @@ pub(crate) fn maybe_run_execution_strategy(
     }
 
     if let Some(pending_target_qty) = session.execution_runtime.pending_target_qty {
-        if pending_target_qty != 0 && !pending_target_has_live_broker_path(session) {
+        let reached = pending_target_qty == actual_market_qty;
+        let overshot = (pending_target_qty > 0 && actual_market_qty > pending_target_qty)
+            || (pending_target_qty < 0 && actual_market_qty < pending_target_qty);
+        if reached || overshot {
+            session.execution_runtime.pending_target_qty = None;
+            force_reevaluate_pending_window(session);
+            let next_summary = if reached {
+                format!("Position confirmed at target {actual_market_qty}; re-evaluating.")
+            } else {
+                format!(
+                    "Position at {actual_market_qty} (target was {pending_target_qty}); re-evaluating."
+                )
+            };
+            emit_execution_transition_debug(
+                event_tx,
+                session,
+                &next_summary,
+                "execution pending target settled",
+            );
+            session.execution_runtime.last_summary = next_summary;
+            emit_execution_state(event_tx, session);
+        } else if pending_target_qty != 0 && !pending_target_has_live_broker_path(session) {
             if should_wait_for_automated_position_sync(
                 session,
                 pending_target_qty,
@@ -530,19 +627,20 @@ pub(crate) fn maybe_run_execution_strategy(
             clear_stale_pending_target(session, pending_target_qty, actual_market_qty, event_tx);
             emit_execution_state(event_tx, session);
             return Ok(());
+        } else {
+            let next_summary = format!(
+                "Waiting for prior automated order to settle (actual {actual_market_qty}, pending target {pending_target_qty})."
+            );
+            emit_execution_transition_debug(
+                event_tx,
+                session,
+                &next_summary,
+                "execution pending target wait",
+            );
+            session.execution_runtime.last_summary = next_summary;
+            emit_execution_state(event_tx, session);
+            return Ok(());
         }
-        let next_summary = format!(
-            "Waiting for prior automated order to settle (actual {actual_market_qty}, pending target {pending_target_qty})."
-        );
-        emit_execution_transition_debug(
-            event_tx,
-            session,
-            &next_summary,
-            "execution pending target wait",
-        );
-        session.execution_runtime.last_summary = next_summary;
-        emit_execution_state(event_tx, session);
-        return Ok(());
     }
 
     if selected_managed_protection_waiting_for_position_sync(session) {
@@ -586,17 +684,16 @@ pub(crate) fn maybe_run_execution_strategy(
     {
         return Ok(());
     }
+    let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
     let (signal_bar, signal, summary) = {
         let bars = strategy_bars(session);
-        let signal_bar = bars
-            .last()
-            .cloned()
-            .context("latest strategy bar disappeared during strategy evaluation")?;
-        let (signal, summary) = evaluate_active_execution_strategy(session, bars, current_qty);
-        (signal_bar, signal, summary)
+        if bars.is_empty() {
+            bail!("latest strategy bar disappeared during strategy evaluation");
+        }
+        evaluate_active_execution_strategy_since(session, bars, current_qty, previous_strategy_ts)
     };
 
     if let Some(window) = session_window_at(session, signal_bar.ts_ns) {
@@ -689,9 +786,10 @@ pub(crate) fn maybe_run_execution_strategy(
     }
 
     let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Strategy {} signal: {} (qty {} -> {})",
+        "Strategy {} signal: {} on {} (qty {} -> {})",
         active_native_slug(session),
         signal.label(),
+        active_signal_timing_label(session),
         current_qty,
         target_qty
     )));
@@ -713,9 +811,10 @@ pub(crate) fn maybe_run_execution_strategy(
     }
 
     let reason = format!(
-        "{} {} | {}",
+        "{} {} on {} | {}",
         active_native_slug(session),
         signal.label(),
+        active_signal_timing_label(session),
         summary
     );
     let signal_context = PendingSignalLatencyContext {

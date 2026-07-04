@@ -186,84 +186,162 @@ impl App {
                 }
             }
             Focus::EmaFastLength => {
-                if edit_strategy_usize(
-                    &mut self.strategy_numeric_input,
-                    Focus::EmaFastLength,
-                    &mut self.strategy.native_ema.fast_length,
-                    key,
-                    1,
-                    1,
-                ) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaFastLength,
+                        &mut self.strategy.native_hma_cross.fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    _ => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaFastLength,
+                        &mut self.strategy.native_ema.fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaSlowLength => {
-                if edit_strategy_usize(
-                    &mut self.strategy_numeric_input,
-                    Focus::EmaSlowLength,
-                    &mut self.strategy.native_ema.slow_length,
-                    key,
-                    1,
-                    1,
-                ) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaSlowLength,
+                        &mut self.strategy.native_hma_cross.slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    _ => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaSlowLength,
+                        &mut self.strategy.native_ema.slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaInverted => {
-                if toggle_bool(&mut self.strategy.native_ema.inverted, key) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => {
+                        toggle_bool(&mut self.strategy.native_hma_cross.inverted, key)
+                    }
+                    _ => toggle_bool(&mut self.strategy.native_ema.inverted, key),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTakeProfitTicks => {
-                if edit_strategy_float(
-                    &mut self.strategy_numeric_input,
-                    Focus::EmaTakeProfitTicks,
-                    &mut self.strategy.native_ema.take_profit_ticks,
-                    key,
-                    0.0,
-                    1.0,
-                ) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTakeProfitTicks,
+                        &mut self.strategy.native_hma_cross.take_profit_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    _ => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTakeProfitTicks,
+                        &mut self.strategy.native_ema.take_profit_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaStopLossTicks => {
-                if edit_strategy_float(
-                    &mut self.strategy_numeric_input,
-                    Focus::EmaStopLossTicks,
-                    &mut self.strategy.native_ema.stop_loss_ticks,
-                    key,
-                    0.0,
-                    1.0,
-                ) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaStopLossTicks,
+                        &mut self.strategy.native_hma_cross.stop_loss_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    _ => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaStopLossTicks,
+                        &mut self.strategy.native_ema.stop_loss_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTrailingStop => {
-                if toggle_bool(&mut self.strategy.native_ema.use_trailing_stop, key) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => {
+                        toggle_bool(&mut self.strategy.native_hma_cross.use_trailing_stop, key)
+                    }
+                    _ => toggle_bool(&mut self.strategy.native_ema.use_trailing_stop, key),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTrailTriggerTicks => {
-                if edit_strategy_float(
-                    &mut self.strategy_numeric_input,
-                    Focus::EmaTrailTriggerTicks,
-                    &mut self.strategy.native_ema.trail_trigger_ticks,
-                    key,
-                    0.0,
-                    1.0,
-                ) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailTriggerTicks,
+                        &mut self.strategy.native_hma_cross.trail_trigger_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    _ => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailTriggerTicks,
+                        &mut self.strategy.native_ema.trail_trigger_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::EmaTrailOffsetTicks => {
-                if edit_strategy_float(
-                    &mut self.strategy_numeric_input,
-                    Focus::EmaTrailOffsetTicks,
-                    &mut self.strategy.native_ema.trail_offset_ticks,
-                    key,
-                    0.0,
-                    1.0,
-                ) {
+                let changed = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailOffsetTicks,
+                        &mut self.strategy.native_hma_cross.trail_offset_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    _ => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailOffsetTicks,
+                        &mut self.strategy.native_ema.trail_offset_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                };
+                if changed {
                     self.disarm_native_strategy(cmd_tx);
                 }
             }

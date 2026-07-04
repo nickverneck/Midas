@@ -8,6 +8,7 @@ use crate::broker::{
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;
 use crate::strategies::hma_angle::HmaAngleExecutionState;
+use crate::strategies::hma_cross::HmaCrossExecutionState;
 use crate::strategies::{StrategySignal, side_from_signed_qty};
 use crate::strategy::{
     ExecutionRuntimeSnapshot, ExecutionStateSnapshot, ExecutionStrategyConfig, NativeReversalMode,

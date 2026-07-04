@@ -139,32 +139,64 @@ impl App {
                         self.focus == Focus::HmaTrailOffsetTicks,
                     ));
                 }
-                NativeStrategyKind::EmaCross => {
+                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
+                    let (
+                        label,
+                        fast_length,
+                        slow_length,
+                        inverted,
+                        take_profit_ticks,
+                        stop_loss_ticks,
+                        use_trailing_stop,
+                        trail_trigger_ticks,
+                        trail_offset_ticks,
+                    ) = match self.strategy.native_strategy {
+                        NativeStrategyKind::EmaCross => (
+                            "EMA",
+                            self.strategy.native_ema.fast_length,
+                            self.strategy.native_ema.slow_length,
+                            self.strategy.native_ema.inverted,
+                            self.strategy.native_ema.take_profit_ticks,
+                            self.strategy.native_ema.stop_loss_ticks,
+                            self.strategy.native_ema.use_trailing_stop,
+                            self.strategy.native_ema.trail_trigger_ticks,
+                            self.strategy.native_ema.trail_offset_ticks,
+                        ),
+                        NativeStrategyKind::HmaCross => (
+                            "HMA",
+                            self.strategy.native_hma_cross.fast_length,
+                            self.strategy.native_hma_cross.slow_length,
+                            self.strategy.native_hma_cross.inverted,
+                            self.strategy.native_hma_cross.take_profit_ticks,
+                            self.strategy.native_hma_cross.stop_loss_ticks,
+                            self.strategy.native_hma_cross.use_trailing_stop,
+                            self.strategy.native_hma_cross.trail_trigger_ticks,
+                            self.strategy.native_hma_cross.trail_offset_ticks,
+                        ),
+                        NativeStrategyKind::HmaAngle => unreachable!(),
+                    };
                     lines.push(styled_line(
                         format!(
-                            "Fast EMA Length: {}",
+                            "Fast {label} Length: {}",
                             self.strategy_numeric_value(
                                 Focus::EmaFastLength,
-                                self.strategy.native_ema.fast_length.to_string(),
+                                fast_length.to_string(),
                             )
                         ),
                         self.focus == Focus::EmaFastLength,
                     ));
                     lines.push(styled_line(
                         format!(
-                            "Slow EMA Length: {}",
+                            "Slow {label} Length: {}",
                             self.strategy_numeric_value(
                                 Focus::EmaSlowLength,
-                                self.strategy.native_ema.slow_length.to_string(),
+                                slow_length.to_string(),
                             )
                         ),
                         self.focus == Focus::EmaSlowLength,
                     ));
                     lines.push(styled_line(
-                        format!(
-                            "Inverted: {}",
-                            bool_label(self.strategy.native_ema.inverted)
-                        ),
+                        format!("Inverted: {}", bool_label(inverted)),
                         self.focus == Focus::EmaInverted,
                     ));
                     lines.push(styled_line(
@@ -172,7 +204,7 @@ impl App {
                             "Take Profit Ticks: {}",
                             self.strategy_numeric_value(
                                 Focus::EmaTakeProfitTicks,
-                                format!("{:.0}", self.strategy.native_ema.take_profit_ticks),
+                                format!("{:.0}", take_profit_ticks),
                             )
                         ),
                         self.focus == Focus::EmaTakeProfitTicks,
@@ -182,16 +214,13 @@ impl App {
                             "Stop Loss Ticks: {}",
                             self.strategy_numeric_value(
                                 Focus::EmaStopLossTicks,
-                                format!("{:.0}", self.strategy.native_ema.stop_loss_ticks),
+                                format!("{:.0}", stop_loss_ticks),
                             )
                         ),
                         self.focus == Focus::EmaStopLossTicks,
                     ));
                     lines.push(styled_line(
-                        format!(
-                            "Trailing Stop: {}",
-                            bool_label(self.strategy.native_ema.use_trailing_stop)
-                        ),
+                        format!("Trailing Stop: {}", bool_label(use_trailing_stop)),
                         self.focus == Focus::EmaTrailingStop,
                     ));
                     lines.push(styled_line(
@@ -199,7 +228,7 @@ impl App {
                             "Trail Trigger Ticks: {}",
                             self.strategy_numeric_value(
                                 Focus::EmaTrailTriggerTicks,
-                                format!("{:.0}", self.strategy.native_ema.trail_trigger_ticks),
+                                format!("{:.0}", trail_trigger_ticks),
                             )
                         ),
                         self.focus == Focus::EmaTrailTriggerTicks,
@@ -209,7 +238,7 @@ impl App {
                             "Trail Offset Ticks: {}",
                             self.strategy_numeric_value(
                                 Focus::EmaTrailOffsetTicks,
-                                format!("{:.0}", self.strategy.native_ema.trail_offset_ticks),
+                                format!("{:.0}", trail_offset_ticks),
                             )
                         ),
                         self.focus == Focus::EmaTrailOffsetTicks,

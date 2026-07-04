@@ -446,5 +446,9 @@ pub(crate) fn active_native_uses_protection(session: &SessionState) -> bool {
         NativeStrategyKind::EmaCross => {
             session.execution_config.native_ema.uses_native_protection()
         }
+        NativeStrategyKind::HmaCross => session
+            .execution_config
+            .native_hma_cross
+            .uses_native_protection(),
     }
 }

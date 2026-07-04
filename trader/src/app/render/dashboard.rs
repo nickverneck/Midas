@@ -365,17 +365,17 @@ impl App {
 
         let x_span = (x_bounds[1] - x_bounds[0]).abs().max(1.0);
         let y_span = (y_bounds[1] - y_bounds[0]).abs().max(0.0001);
-        let dx = (x_span / 70.0).clamp(0.65, 2.5);
+        let dx = (x_span / 95.0).clamp(0.35, 1.35);
         let dy = (y_span / 35.0)
             .max(
                 self.market
                     .tick_size
                     .filter(|tick| tick.is_finite() && *tick > 0.0)
-                    .map(|tick| tick * 1.5)
-                    .unwrap_or(y_span / 90.0),
+                    .map(|tick| tick * 0.75)
+                    .unwrap_or(y_span / 140.0),
             )
-            .min(y_span / 8.0)
-            .max(y_span / 150.0);
+            .min(y_span / 16.0)
+            .max(y_span / 240.0);
         let glyph_canvas = Canvas::default()
             .marker(symbols::Marker::HalfBlock)
             .x_bounds(x_bounds)

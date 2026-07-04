@@ -95,6 +95,7 @@ struct ExecutionRuntimeState {
     last_summary: String,
     hma_execution: HmaAngleExecutionState,
     ema_execution: EmaCrossExecutionState,
+    hma_cross_execution: HmaCrossExecutionState,
 }
 
 impl ExecutionRuntimeState {
@@ -111,6 +112,7 @@ impl ExecutionRuntimeState {
         self.pending_reversal_entry = None;
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
+        self.hma_cross_execution = HmaCrossExecutionState::default();
     }
 }
 
