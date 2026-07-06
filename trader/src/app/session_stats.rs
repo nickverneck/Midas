@@ -17,10 +17,67 @@ impl SessionStatSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionTradeSide {
+    Long,
+    Short,
+    Flat,
+    Unknown,
+}
+
+impl SessionTradeSide {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Long => "long",
+            Self::Short => "short",
+            Self::Flat => "flat",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn from_signed_qty(qty: Option<f64>) -> Self {
+        let Some(qty) = qty.filter(|value| value.is_finite()) else {
+            return Self::Unknown;
+        };
+        if qty > 0.0 {
+            Self::Long
+        } else if qty < 0.0 {
+            Self::Short
+        } else {
+            Self::Flat
+        }
+    }
+
+    fn non_flat(self) -> Option<Self> {
+        matches!(self, Self::Long | Self::Short).then_some(self)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionSideDeltaStats {
+    events: usize,
+    wins: usize,
+    losses: usize,
+    pnl: f64,
+}
+
+impl SessionSideDeltaStats {
+    fn record(&mut self, delta: f64) {
+        self.events += 1;
+        self.pnl += delta;
+        if delta > 0.0 {
+            self.wins += 1;
+        } else {
+            self.losses += 1;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SessionBalanceEvent {
     recorded_at_utc: chrono::DateTime<chrono::Utc>,
     source: SessionStatSource,
+    side: SessionTradeSide,
     previous_value: f64,
     current_value: f64,
     delta: f64,
@@ -39,6 +96,7 @@ struct AccountSessionStats {
     sample_count: usize,
     start_value: f64,
     current_value: f64,
+    last_position_side: SessionTradeSide,
     last_delta: Option<f64>,
     wins: usize,
     losses: usize,
@@ -47,6 +105,10 @@ struct AccountSessionStats {
     gross_losses: f64,
     max_win: Option<f64>,
     max_loss: Option<f64>,
+    long_side: SessionSideDeltaStats,
+    short_side: SessionSideDeltaStats,
+    flat_side: SessionSideDeltaStats,
+    unknown_side: SessionSideDeltaStats,
     events: Vec<SessionBalanceEvent>,
 }
 
@@ -72,6 +134,7 @@ impl AccountSessionStats {
             sample_count: 1,
             start_value: value,
             current_value: value,
+            last_position_side: session_trade_side_from_snapshot(snapshot),
             last_delta: None,
             wins: 0,
             losses: 0,
@@ -80,6 +143,10 @@ impl AccountSessionStats {
             gross_losses: 0.0,
             max_win: None,
             max_loss: None,
+            long_side: SessionSideDeltaStats::default(),
+            short_side: SessionSideDeltaStats::default(),
+            flat_side: SessionSideDeltaStats::default(),
+            unknown_side: SessionSideDeltaStats::default(),
             events: Vec::new(),
         }
     }
@@ -100,11 +167,14 @@ impl AccountSessionStats {
         self.session_kind = session_kind;
         self.last_updated_at_utc = captured_at_utc;
         self.sample_count += 1;
+        let previous_position_side = self.last_position_side;
+        let current_position_side = session_trade_side_from_snapshot(snapshot);
 
         if self.source != source {
             self.source = source;
             self.current_value = value;
             self.last_delta = None;
+            self.last_position_side = current_position_side;
             return;
         }
 
@@ -113,19 +183,24 @@ impl AccountSessionStats {
             self.current_value = value;
             self.last_delta = Some(0.0);
             self.flat_moves += 1;
+            self.last_position_side = current_position_side;
             return;
         }
 
         let previous_value = self.current_value;
+        let side = session_trade_side_for_delta(source, previous_position_side, current_position_side);
         self.current_value = value;
         self.last_delta = Some(delta);
+        self.last_position_side = current_position_side;
         self.events.push(SessionBalanceEvent {
             recorded_at_utc: captured_at_utc,
             source,
+            side,
             previous_value,
             current_value: value,
             delta,
         });
+        self.side_stats_mut(side).record(delta);
 
         if delta > 0.0 {
             self.wins += 1;
@@ -189,6 +264,24 @@ impl AccountSessionStats {
     fn event_count(&self) -> usize {
         self.events.len()
     }
+
+    fn side_stats(&self, side: SessionTradeSide) -> &SessionSideDeltaStats {
+        match side {
+            SessionTradeSide::Long => &self.long_side,
+            SessionTradeSide::Short => &self.short_side,
+            SessionTradeSide::Flat => &self.flat_side,
+            SessionTradeSide::Unknown => &self.unknown_side,
+        }
+    }
+
+    fn side_stats_mut(&mut self, side: SessionTradeSide) -> &mut SessionSideDeltaStats {
+        match side {
+            SessionTradeSide::Long => &mut self.long_side,
+            SessionTradeSide::Short => &mut self.short_side,
+            SessionTradeSide::Flat => &mut self.flat_side,
+            SessionTradeSide::Unknown => &mut self.unknown_side,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +323,27 @@ fn tracked_balance_value(snapshot: &AccountSnapshot) -> Option<(SessionStatSourc
         })
         .or_else(|| snapshot.net_liq.map(|value| (SessionStatSource::NetLiq, value)))?;
     value.is_finite().then_some((source, value))
+}
+
+fn session_trade_side_from_snapshot(snapshot: &AccountSnapshot) -> SessionTradeSide {
+    SessionTradeSide::from_signed_qty(snapshot.market_position_qty)
+}
+
+fn session_trade_side_for_delta(
+    source: SessionStatSource,
+    previous_side: SessionTradeSide,
+    current_side: SessionTradeSide,
+) -> SessionTradeSide {
+    match source {
+        SessionStatSource::Balance | SessionStatSource::CashBalance => previous_side
+            .non_flat()
+            .or_else(|| current_side.non_flat())
+            .unwrap_or(current_side),
+        SessionStatSource::NetLiq => current_side
+            .non_flat()
+            .or_else(|| previous_side.non_flat())
+            .unwrap_or(current_side),
+    }
 }
 
 fn format_percent(value: Option<f64>) -> String {
@@ -372,6 +486,26 @@ impl App {
             body.push_str(&format!("wins: {}\n", stats.wins));
             body.push_str(&format!("losses: {}\n", stats.losses));
             body.push_str(&format!("flats: {}\n", stats.flat_moves));
+            for side in [
+                SessionTradeSide::Long,
+                SessionTradeSide::Short,
+                SessionTradeSide::Flat,
+                SessionTradeSide::Unknown,
+            ] {
+                let side_stats = stats.side_stats(side);
+                body.push_str(&format!("{}_events: {}\n", side.label(), side_stats.events));
+                body.push_str(&format!(
+                    "{}_pnl: {}\n",
+                    side.label(),
+                    format_signed_money(Some(side_stats.pnl))
+                ));
+                body.push_str(&format!("{}_wins: {}\n", side.label(), side_stats.wins));
+                body.push_str(&format!(
+                    "{}_losses: {}\n",
+                    side.label(),
+                    side_stats.losses
+                ));
+            }
             body.push_str(&format!("start_value: {:.2}\n", stats.start_value));
             body.push_str(&format!("current_value: {:.2}\n", stats.current_value));
             body.push_str(&format!(
@@ -405,9 +539,10 @@ impl App {
             } else {
                 for event in &stats.events {
                     body.push_str(&format!(
-                        "  {} source={} prev={:.2} current={:.2} delta={}\n",
+                        "  {} source={} side={} prev={:.2} current={:.2} delta={}\n",
                         event.recorded_at_utc.to_rfc3339(),
                         event.source.label(),
+                        event.side.label(),
                         event.previous_value,
                         event.current_value,
                         format_signed_money(Some(event.delta)),

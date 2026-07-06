@@ -81,6 +81,18 @@ fn balance_snapshot(account_id: i64, account_name: &str, balance: f64) -> Accoun
     }
 }
 
+fn balance_snapshot_with_position(
+    account_id: i64,
+    account_name: &str,
+    balance: f64,
+    market_position_qty: f64,
+) -> AccountSnapshot {
+    let mut snapshot = balance_snapshot(account_id, account_name, balance);
+    snapshot.open_position_qty = Some(market_position_qty);
+    snapshot.market_position_qty = Some(market_position_qty);
+    snapshot
+}
+
 fn enable_tradovate_controls(app: &mut App) {
     app.selected_broker = BrokerKind::Tradovate;
     app.capabilities = BrokerCapabilities {
@@ -385,6 +397,73 @@ fn session_stats_track_wins_losses_and_flats_from_balance_deltas() {
     assert_eq!(stats.max_loss_signed(), Some(-10.0));
     assert_eq!(stats.session_pnl(), 30.0);
     assert_eq!(stats.win_rate(), Some(2.0 / 3.0));
+}
+
+#[test]
+fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.0, 1.0),
+        balance_snapshot_with_position(7, "SIM", 1_015.0, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_015.0, -1.0),
+        balance_snapshot_with_position(7, "SIM", 1_005.0, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.long_side.events, 1);
+    assert_eq!(stats.long_side.wins, 1);
+    assert_eq!(stats.long_side.losses, 0);
+    assert_eq!(stats.long_side.pnl, 15.0);
+    assert_eq!(stats.short_side.events, 1);
+    assert_eq!(stats.short_side.wins, 0);
+    assert_eq!(stats.short_side.losses, 1);
+    assert_eq!(stats.short_side.pnl, -10.0);
+    assert_eq!(stats.events[0].side, SessionTradeSide::Long);
+    assert_eq!(stats.events[1].side, SessionTradeSide::Short);
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| { line.contains("Side PnL: Long +15.00 (1/0)  Short -10.00 (0/1)") })
+    );
+
+    let event_lines = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(event_lines.iter().any(|line| line.contains("balance long")));
+    assert!(
+        event_lines
+            .iter()
+            .any(|line| line.contains("balance short"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("long_events: 1"));
+    assert!(body.contains("long_pnl: +15.00"));
+    assert!(body.contains("short_events: 1"));
+    assert!(body.contains("short_pnl: -10.00"));
+    assert!(body.contains("side=long"));
+    assert!(body.contains("side=short"));
 }
 
 #[test]

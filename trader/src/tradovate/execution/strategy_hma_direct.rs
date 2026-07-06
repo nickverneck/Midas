@@ -1,16 +1,6 @@
 use super::*;
 
-pub(crate) fn handle_simple_execution_account_sync(
-    session: &mut SessionState,
-    event_tx: &UnboundedSender<ServiceEvent>,
-) {
-    let actual_qty = selected_market_position_qty(session);
-    let actual_entry = selected_market_entry_price(session);
-    sync_active_execution_position(session, actual_qty, actual_entry);
-    emit_execution_state(event_tx, session);
-}
-
-pub(crate) fn maybe_run_simple_execution_strategy(
+pub(crate) fn maybe_run_hma_direct_execution_strategy(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
     event_tx: &UnboundedSender<ServiceEvent>,
@@ -19,9 +9,17 @@ pub(crate) fn maybe_run_simple_execution_strategy(
         return Ok(());
     }
 
+    if session.execution_config.native_strategy != NativeStrategyKind::HmaCross {
+        session.execution_runtime.last_summary =
+            "HMA Direct path only supports HMA Crossover; falling back to no-op.".to_string();
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    let actual_qty = selected_market_position_qty(session);
     let Some(last_strategy_ts) = latest_strategy_bar_ts(session) else {
         session.execution_runtime.last_summary = format!(
-            "Simple diagnostic {} armed; waiting for first {}.",
+            "HMA Direct {} armed; waiting for first {}.",
             active_native_label(session),
             active_signal_timing_label(session)
         );
@@ -34,46 +32,48 @@ pub(crate) fn maybe_run_simple_execution_strategy(
         if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
             && session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
         {
-            let hma_debug =
-                if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
-                    format!(
-                        " | {}",
-                        hma_cross_market_debug(session, selected_market_position_qty(session))
-                    )
-                } else {
-                    String::new()
-                };
             let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-                "simple strategy gate | {} | closed-bar timing waiting for next bar | last_bar_ts {}{}",
-                active_native_slug(session),
+                "hma direct gate | closed-bar timing waiting for new closed bar or revised fingerprint | last_bar_ts {} | latest_fp {:?} | {}",
                 last_strategy_ts,
-                hma_debug
+                latest_fingerprint,
+                hma_cross_market_debug(session, actual_qty)
             )));
             return Ok(());
         }
         session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
     }
-    let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
-    let actual_qty = selected_market_position_qty(session);
     let actual_entry = selected_market_entry_price(session);
     sync_active_execution_position(session, actual_qty, actual_entry);
 
-    let (signal_bar, signal, summary) = {
-        let bars = strategy_bars(session);
-        if bars.is_empty() {
-            bail!("latest strategy bar disappeared during simple strategy evaluation");
-        }
-        evaluate_active_execution_strategy_since(session, bars, actual_qty, previous_strategy_ts)
-    };
-    session.execution_runtime.last_summary = format!("Simple diagnostic: {summary}");
+    let bars = strategy_bars(session).to_vec();
+    if bars.is_empty() {
+        bail!("latest strategy bar disappeared during HMA direct evaluation");
+    }
+    let signal_bar = bars
+        .last()
+        .expect("checked non-empty strategy bars")
+        .clone();
+    let config = session.execution_config.native_hma_cross.clone();
+    let evaluation = config.evaluate_current_cross(
+        &mut session.execution_runtime.hma_cross_execution,
+        &bars,
+        side_from_signed_qty(actual_qty),
+    );
+    let signal = evaluation.signal;
+    let summary = format!(
+        "{} | {}",
+        evaluation.summary(),
+        hma_cross_market_debug(session, actual_qty)
+    );
+    session.execution_runtime.last_summary = format!("HMA Direct: {summary}");
 
     let Some(target_qty) =
         target_qty_for_signal(signal, actual_qty, session.execution_config.order_qty)
     else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "simple strategy eval | {} | signal {} | no target | bar_ts {} | actual_qty {} | {}",
+            "hma direct eval | {} | signal {} | no target | bar_ts {} | actual_qty {} | {}",
             active_native_slug(session),
             signal.label(),
             signal_bar.ts_ns,
@@ -87,7 +87,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     let delta = target_qty.saturating_sub(actual_qty);
     if delta == 0 {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "simple strategy eval | {} | signal {} | target already actual | target_qty {} | bar_ts {} | actual_qty {} | {}",
+            "hma direct eval | {} | signal {} | target already actual | target_qty {} | bar_ts {} | actual_qty {} | {}",
             active_native_slug(session),
             signal.label(),
             target_qty,
@@ -101,7 +101,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
 
     let account_id = session
         .selected_account_id
-        .context("select an account before sending simple diagnostic orders")?;
+        .context("select an account before sending HMA direct orders")?;
     let account = session
         .accounts
         .iter()
@@ -111,12 +111,12 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     let contract = session
         .selected_contract
         .clone()
-        .context("select a contract before sending simple diagnostic orders")?;
+        .context("select a contract before sending HMA direct orders")?;
 
     let order_action = if delta > 0 { "Buy" } else { "Sell" };
     let order_qty = delta.unsigned_abs() as i32;
     let reason = format!(
-        "simple diagnostic {} {} on {} | actual {} -> target {} | {}",
+        "hma direct {} {} on {} | actual {} -> target {} | {}",
         active_native_slug(session),
         signal.label(),
         active_signal_timing_label(session),
@@ -127,7 +127,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     session.pending_signal_context = Some(PendingSignalLatencyContext {
         started_at: time::Instant::now(),
         description: format!(
-            "simple {} {} (qty {} -> {})",
+            "hma direct {} {} (qty {} -> {})",
             active_native_slug(session),
             signal.label(),
             actual_qty,
@@ -140,7 +140,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
         &contract,
         order_action,
         order_qty,
-        "Simple Strategy",
+        "HMA Direct Strategy",
         true,
         Some(&reason),
         Some(target_qty),
@@ -150,7 +150,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     enqueue_market_order(session, broker_tx, order)?;
     session.execution_runtime.pending_target_qty = Some(target_qty);
     let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "simple strategy dispatch | {} | endpoint order/placeorder | signal {} | bar_ts {} | actual_qty {} | target_qty {} | order_action {} | order_qty {} | submit_in_flight ignored | pending_target overwritten | {}",
+        "hma direct dispatch | {} | endpoint order/placeorder | signal {} | bar_ts {} | actual_qty {} | target_qty {} | order_action {} | order_qty {} | submit_in_flight ignored | pending_target overwritten | {}",
         active_native_slug(session),
         signal.label(),
         signal_bar.ts_ns,
@@ -161,7 +161,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
         summary
     )));
     let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Simple strategy {} signal: {} {} (qty {} -> {})",
+        "HMA direct {} signal: {} {} (qty {} -> {})",
         active_native_slug(session),
         order_action,
         order_qty,
@@ -170,4 +170,46 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     )));
     emit_execution_state(event_tx, session);
     Ok(())
+}
+
+pub(crate) fn hma_cross_market_debug(session: &SessionState, actual_qty: i32) -> String {
+    let closed_len = session.market.history_loaded.min(session.market.bars.len());
+    let market_len = session.market.bars.len();
+    let closed_ts = closed_bars(session).last().map(|bar| bar.ts_ns);
+    let forming_ts = session.market.bars.get(closed_len).map(|bar| bar.ts_ns);
+    let current_side = side_from_signed_qty(actual_qty);
+    let closed_summary = session
+        .execution_config
+        .native_hma_cross
+        .evaluate(closed_bars(session), current_side)
+        .summary();
+    let forming_summary = if forming_ts.is_some() {
+        session
+            .execution_config
+            .native_hma_cross
+            .evaluate(&session.market.bars, current_side)
+            .summary()
+    } else {
+        "no forming bar".to_string()
+    };
+
+    format!(
+        "closed_len {closed_len} | market_bars {market_len} | closed_ts {:?} | forming_ts {:?} | stored_side {} | stored_delta {} | closed_eval [{}] | forming_preview [{}]",
+        closed_ts,
+        forming_ts,
+        session
+            .execution_runtime
+            .hma_cross_execution
+            .last_observed_side
+            .map(|side| side.label())
+            .unwrap_or("unset"),
+        session
+            .execution_runtime
+            .hma_cross_execution
+            .last_observed_delta
+            .map(|delta| format!("{delta:.4}"))
+            .unwrap_or_else(|| "unset".to_string()),
+        closed_summary,
+        forming_summary
+    )
 }

@@ -25,6 +25,22 @@ fn seed_long_position(session: &mut SessionState) {
     );
 }
 
+fn seed_short_position(session: &mut SessionState) {
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": -1,
+                "avgPrice": 5000.0
+            }),
+        )]),
+    );
+}
+
 #[test]
 fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() {
     let mut session = test_session();
@@ -40,7 +56,7 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
     session.execution_runtime.last_closed_bar_ts = Some(5);
     session.order_submit_in_flight = true;
     session.market.history_loaded = 7;
-    session.market.bars = [10.0, 10.0, 10.0, 10.0, 8.0, 12.0, 12.0]
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0]
         .into_iter()
         .enumerate()
         .map(|(idx, close)| Bar {
@@ -68,7 +84,12 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
     maybe_run_simple_execution_strategy(&mut session, &broker_tx, &event_tx)
         .expect("simple path should bypass pending and in-flight gates");
 
-    assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+    assert_eq!(
+        session.execution_runtime.pending_target_qty,
+        Some(1),
+        "{}",
+        session.execution_runtime.last_summary
+    );
     let command = broker_rx
         .try_recv()
         .expect("simple path should queue a market order");
@@ -140,6 +161,140 @@ fn simple_strategy_rechecks_revised_closed_bar_with_same_timestamp() {
         }
         _ => panic!("expected market order from revised-bar sell signal"),
     }
+}
+
+#[test]
+fn hma_direct_path_executes_current_closed_bar_cross() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::HmaDirect;
+    session.execution_config.native_hma_cross.fast_length = 2;
+    session.execution_config.native_hma_cross.slow_length = 4;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(6);
+    session
+        .execution_runtime
+        .hma_cross_execution
+        .last_observed_side = Some(crate::strategies::hma_cross::HmaCrossSide::Below);
+    session
+        .execution_runtime
+        .hma_cross_execution
+        .last_observed_bar_ts = Some(6);
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+        })
+        .collect();
+    seed_short_position(&mut session);
+    let precheck = session.execution_config.native_hma_cross.evaluate(
+        &session.market.bars,
+        Some(crate::strategies::PositionSide::Short),
+    );
+    assert!(
+        precheck
+            .fast_hma
+            .zip(precheck.slow_hma)
+            .is_some_and(|(fast, slow)| fast > slow),
+        "{}",
+        precheck.summary()
+    );
+
+    maybe_run_hma_direct_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("HMA direct should queue current-bar crossover");
+
+    assert_eq!(
+        session.execution_runtime.pending_target_qty,
+        Some(1),
+        "{}",
+        session.execution_runtime.last_summary
+    );
+    match broker_rx
+        .try_recv()
+        .expect("HMA direct should queue a buy reversal")
+    {
+        BrokerCommand::MarketOrder { order, .. } => {
+            assert_eq!(order.target_qty, Some(1));
+            assert_eq!(order.order_qty, 2);
+            assert_eq!(order.order_action, "Buy");
+        }
+        _ => panic!("expected market order from HMA direct buy signal"),
+    }
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("hma direct dispatch")
+                && message.contains("Prior HMA Side: fast<slow")
+                && message.contains("HMA Side: fast>slow")
+    )));
+}
+
+#[test]
+fn hma_direct_path_does_not_enter_from_stale_cross_state() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::HmaDirect;
+    session.execution_config.native_hma_cross.fast_length = 2;
+    session.execution_config.native_hma_cross.slow_length = 4;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(7);
+    session
+        .execution_runtime
+        .hma_cross_execution
+        .last_observed_side = Some(crate::strategies::hma_cross::HmaCrossSide::Below);
+    session
+        .execution_runtime
+        .hma_cross_execution
+        .last_observed_bar_ts = Some(5);
+    session.market.history_loaded = 8;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0, 13.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+        })
+        .collect();
+    seed_short_position(&mut session);
+
+    maybe_run_hma_direct_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("HMA direct should evaluate stale crossover state without ordering");
+
+    assert_eq!(
+        session.execution_runtime.pending_target_qty, None,
+        "{}",
+        session.execution_runtime.last_summary
+    );
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "stale crossover state should not queue an order"
+    );
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("hma direct eval")
+                && message.contains("signal Hold")
+                && message.contains("Prior HMA Side: unset")
+    )));
 }
 
 #[test]

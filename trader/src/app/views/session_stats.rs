@@ -95,6 +95,25 @@ impl App {
                 "Wins: {}  Losses: {}  Flats: {}",
                 stats.wins, stats.losses, stats.flat_moves
             )),
+            Line::from(vec![
+                Span::raw("Side PnL: Long "),
+                Span::styled(
+                    format_signed_money(Some(stats.long_side.pnl)),
+                    pnl_style(Some(stats.long_side.pnl)),
+                ),
+                Span::raw(format!(
+                    " ({}/{})  Short ",
+                    stats.long_side.wins, stats.long_side.losses
+                )),
+                Span::styled(
+                    format_signed_money(Some(stats.short_side.pnl)),
+                    pnl_style(Some(stats.short_side.pnl)),
+                ),
+                Span::raw(format!(
+                    " ({}/{})",
+                    stats.short_side.wins, stats.short_side.losses
+                )),
+            ]),
             Line::from(format!(
                 "Win Rate: {}  Profit Factor: {}",
                 format_percent(stats.win_rate()),
@@ -158,9 +177,10 @@ impl App {
             .take(limit)
             .map(|event| {
                 Line::from(format!(
-                    "{} {} {:.2} -> {:.2} ({})",
+                    "{} {} {} {:.2} -> {:.2} ({})",
                     format_session_stats_timestamp(event.recorded_at_utc, false),
                     event.source.label(),
+                    event.side.label(),
                     event.previous_value,
                     event.current_value,
                     format_signed_money(Some(event.delta)),

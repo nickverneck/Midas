@@ -108,6 +108,7 @@ impl NativeSignalTiming {
 pub enum NativeExecutionPath {
     Guarded,
     SimpleDiagnostic,
+    HmaDirect,
 }
 
 impl NativeExecutionPath {
@@ -115,13 +116,15 @@ impl NativeExecutionPath {
         match self {
             Self::Guarded => "Guarded",
             Self::SimpleDiagnostic => "Simple Diagnostic",
+            Self::HmaDirect => "HMA Direct",
         }
     }
 
     pub fn toggle(self) -> Self {
         match self {
             Self::Guarded => Self::SimpleDiagnostic,
-            Self::SimpleDiagnostic => Self::Guarded,
+            Self::SimpleDiagnostic => Self::HmaDirect,
+            Self::HmaDirect => Self::Guarded,
         }
     }
 }
