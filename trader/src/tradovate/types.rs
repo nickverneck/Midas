@@ -35,6 +35,14 @@ struct TokenBundle {
     user_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenFileSnapshot {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+    content_hash: u64,
+}
+
 struct ServiceState {
     client: Client,
     broker_tx: UnboundedSender<BrokerCommand>,
@@ -54,6 +62,7 @@ struct SessionState {
     session_kind: SessionKind,
     replay_enabled: bool,
     tokens: TokenBundle,
+    token_file_snapshot: Option<TokenFileSnapshot>,
     accounts: Vec<AccountInfo>,
     request_tx: UnboundedSender<UserSocketCommand>,
     execution_config: ExecutionStrategyConfig,

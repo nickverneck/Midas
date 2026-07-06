@@ -20,15 +20,7 @@ async fn authenticate(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
 
     match cfg.auth_mode {
         AuthMode::TokenFile => {
-            let tokens = load_token_file(&cfg.token_path)
-                .or_else(|_| load_token_file(&cfg.session_cache_path))
-                .with_context(|| {
-                    format!(
-                        "load token from {} or {}",
-                        cfg.token_path.display(),
-                        cfg.session_cache_path.display()
-                    )
-                })?;
+            let tokens = load_runtime_token_bundle(cfg)?.tokens;
             let user_name = fetch_auth_me(client, &cfg.env, &tokens.access_token)
                 .await
                 .ok()
@@ -80,6 +72,51 @@ fn load_token_file(path: &Path) -> Result<TokenBundle> {
             .get("name")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+    })
+}
+
+fn load_token_file_with_snapshot(path: &Path) -> Result<RuntimeTokenBundle> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("read token file {}", path.display()))?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse token JSON {}", path.display()))?;
+    let access_token = parsed
+        .get("token")
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("accessToken").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .filter(|token| !token.trim().is_empty())
+        .context("token JSON missing token/accessToken")?;
+    let md_access_token = parsed
+        .get("mdAccessToken")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .filter(|token| !token.trim().is_empty())
+        .unwrap_or_else(|| access_token.clone());
+    let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+
+    Ok(RuntimeTokenBundle {
+        tokens: TokenBundle {
+            access_token,
+            md_access_token,
+            expiration_time: parsed
+                .get("expirationTime")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            user_id: parsed.get("userId").and_then(Value::as_i64),
+            user_name: parsed
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        },
+        file_snapshot: Some(TokenFileSnapshot {
+            path: path.to_path_buf(),
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+            content_hash: hasher.finish(),
+        }),
     })
 }
 

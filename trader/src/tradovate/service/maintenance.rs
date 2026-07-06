@@ -12,21 +12,30 @@ pub(super) async fn maintain_session(
         return Ok(());
     }
 
-    let refresh_action = next_token_maintenance_action(&session.cfg, &session.tokens)?;
+    let refresh_action = next_token_maintenance_action(
+        &session.cfg,
+        &session.tokens,
+        session.token_file_snapshot.as_ref(),
+    )?;
     let mut forced_restart = false;
     let mut status_message = None;
 
     if let Some(action) = refresh_action {
+        let reloaded_from_file = matches!(action, TokenMaintenanceAction::ReloadTokenFile(_));
         let next_tokens = match action {
-            TokenMaintenanceAction::RefreshCredentials => {
-                request_access_token(&state.client, &session.cfg).await?
-            }
-            TokenMaintenanceAction::ReloadTokenFile => load_runtime_token_bundle(&session.cfg)?,
+            TokenMaintenanceAction::RefreshCredentials => RuntimeTokenBundle {
+                tokens: request_access_token(&state.client, &session.cfg).await?,
+                file_snapshot: session.token_file_snapshot.clone(),
+            },
+            TokenMaintenanceAction::ReloadTokenFile(loaded) => loaded,
         };
 
         if let Some(session) = state.session.as_mut() {
-            if token_bundle_changed(&session.tokens, &next_tokens) {
-                session.tokens = next_tokens;
+            if token_bundle_changed(&session.tokens, &next_tokens.tokens)
+                || session.token_file_snapshot != next_tokens.file_snapshot
+            {
+                session.tokens = next_tokens.tokens;
+                session.token_file_snapshot = next_tokens.file_snapshot;
                 save_token_cache(&session.cfg.session_cache_path, &session.tokens)?;
                 refresh_session_state(&state.client, session, event_tx).await?;
                 if let Some(task) = state.user_task.take() {
@@ -39,14 +48,10 @@ pub(super) async fn maintain_session(
                     task.abort();
                 }
                 forced_restart = true;
-                status_message = Some(match action {
-                    TokenMaintenanceAction::RefreshCredentials => {
-                        "Session token refreshed; reconnecting background streams.".to_string()
-                    }
-                    TokenMaintenanceAction::ReloadTokenFile => {
-                        "Session token reloaded from file; reconnecting background streams."
-                            .to_string()
-                    }
+                status_message = Some(if reloaded_from_file {
+                    "Session token reloaded from file; reconnecting background streams.".to_string()
+                } else {
+                    "Session token refreshed; reconnecting background streams.".to_string()
                 });
             }
         }

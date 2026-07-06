@@ -98,6 +98,13 @@ async fn connect_live_session(
     )));
 
     let tokens = authenticate(&state.client, &cfg).await?;
+    let token_file_snapshot = if matches!(cfg.auth_mode, AuthMode::TokenFile) {
+        load_runtime_token_bundle(&cfg)
+            .ok()
+            .and_then(|loaded| loaded.file_snapshot)
+    } else {
+        None
+    };
     save_token_cache(&cfg.session_cache_path, &tokens)?;
 
     let _ = event_tx.send(ServiceEvent::Connected {
@@ -151,6 +158,7 @@ async fn connect_live_session(
         session_kind: SessionKind::Live,
         replay_enabled: false,
         tokens,
+        token_file_snapshot,
         accounts,
         request_tx,
         execution_config: ExecutionStrategyConfig::default(),
@@ -212,6 +220,7 @@ async fn enter_replay_mode(
             user_id: None,
             user_name: Some("Replay".to_string()),
         },
+        token_file_snapshot: None,
         accounts: accounts.clone(),
         request_tx,
         execution_config: ExecutionStrategyConfig::default(),

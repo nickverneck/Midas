@@ -177,6 +177,7 @@ fn handle_broker_order_failed(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let mut stale_interrupt_recovered = false;
+    let mut observability_context = None;
     if let Some(session) = state.session.as_mut() {
         session.order_submit_in_flight = false;
         if session
@@ -206,24 +207,40 @@ fn handle_broker_order_failed(
                 }
             }
         }
+        observability_context = Some(execution_observability_context(session));
     }
 
+    let debug_message =
+        format_broker_order_failure_debug(&failure, observability_context.as_deref());
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | endpoint {} | {}",
-            failure.endpoint, failure.message
+            "submit stale | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | endpoint {} | {}",
-            failure.endpoint, failure.message
+            "submit failed | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
 
     Ok(())
+}
+
+fn format_broker_order_failure_debug(
+    failure: &BrokerOrderFailure,
+    observability_context: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "endpoint {} | clOrdId {} | target {:?} | {}",
+        failure.endpoint, failure.cl_ord_id, failure.target_qty, failure.message
+    );
+    if let Some(context) = observability_context {
+        message.push_str(" | ");
+        message.push_str(context);
+    }
+    message
 }
 
 fn handle_order_strategy_ack(
@@ -275,6 +292,7 @@ fn handle_order_strategy_failed(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let mut stale_interrupt_recovered = false;
+    let mut observability_context = None;
     if let Some(session) = state.session.as_mut() {
         session.order_submit_in_flight = false;
         if session
@@ -302,24 +320,40 @@ fn handle_order_strategy_failed(
             session.execution_runtime.last_summary = failure.message.clone();
             emit_execution_state(event_tx, session);
         }
+        observability_context = Some(execution_observability_context(session));
     }
 
+    let debug_message =
+        format_order_strategy_failure_debug(&failure, observability_context.as_deref());
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | endpoint {} | {}",
-            failure.endpoint, failure.message
+            "submit stale | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | endpoint {} | {}",
-            failure.endpoint, failure.message
+            "submit failed | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
 
     Ok(())
+}
+
+fn format_order_strategy_failure_debug(
+    failure: &BrokerOrderStrategyFailure,
+    observability_context: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "endpoint {} | uuid {} | target {} | {}",
+        failure.endpoint, failure.uuid, failure.target_qty, failure.message
+    );
+    if let Some(context) = observability_context {
+        message.push_str(" | ");
+        message.push_str(context);
+    }
+    message
 }
 
 fn handle_protection_sync_applied(

@@ -23,6 +23,7 @@ fn test_session() -> SessionState {
             user_id: None,
             user_name: None,
         },
+        token_file_snapshot: None,
         accounts: vec![AccountInfo {
             id: 42,
             name: "SIM".to_string(),

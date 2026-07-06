@@ -1,12 +1,19 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+struct RuntimeTokenBundle {
+    tokens: TokenBundle,
+    file_snapshot: Option<TokenFileSnapshot>,
+}
+
+#[derive(Debug, Clone)]
 enum TokenMaintenanceAction {
     RefreshCredentials,
-    ReloadTokenFile,
+    ReloadTokenFile(RuntimeTokenBundle),
 }
 
 fn next_token_maintenance_action(
     cfg: &AppConfig,
     tokens: &TokenBundle,
+    token_file_snapshot: Option<&TokenFileSnapshot>,
 ) -> Result<Option<TokenMaintenanceAction>> {
     if empty_as_none(&cfg.token_override).is_some() {
         return Ok(None);
@@ -22,8 +29,10 @@ fn next_token_maintenance_action(
         }
         AuthMode::TokenFile => {
             let loaded = load_runtime_token_bundle(cfg)?;
-            if token_bundle_changed(tokens, &loaded) {
-                Ok(Some(TokenMaintenanceAction::ReloadTokenFile))
+            if token_bundle_changed(tokens, &loaded.tokens)
+                || token_file_snapshot_changed(token_file_snapshot, &loaded)
+            {
+                Ok(Some(TokenMaintenanceAction::ReloadTokenFile(loaded)))
             } else {
                 Ok(None)
             }
@@ -31,9 +40,9 @@ fn next_token_maintenance_action(
     }
 }
 
-fn load_runtime_token_bundle(cfg: &AppConfig) -> Result<TokenBundle> {
-    load_token_file(&cfg.token_path)
-        .or_else(|_| load_token_file(&cfg.session_cache_path))
+fn load_runtime_token_bundle(cfg: &AppConfig) -> Result<RuntimeTokenBundle> {
+    load_token_file_with_snapshot(&cfg.token_path)
+        .or_else(|_| load_token_file_with_snapshot(&cfg.session_cache_path))
         .with_context(|| {
             format!(
                 "load token from {} or {}",
@@ -41,6 +50,13 @@ fn load_runtime_token_bundle(cfg: &AppConfig) -> Result<TokenBundle> {
                 cfg.session_cache_path.display()
             )
         })
+}
+
+fn token_file_snapshot_changed(
+    current: Option<&TokenFileSnapshot>,
+    loaded: &RuntimeTokenBundle,
+) -> bool {
+    loaded.file_snapshot.as_ref() != current
 }
 
 fn token_refresh_due(tokens: &TokenBundle, now: DateTime<Utc>) -> bool {
