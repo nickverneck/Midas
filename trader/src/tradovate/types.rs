@@ -90,6 +90,7 @@ struct PendingNativeReversalEntry {
 struct ExecutionRuntimeState {
     armed: bool,
     last_closed_bar_ts: Option<i64>,
+    last_closed_bar_fingerprint: Option<u64>,
     pending_target_qty: Option<i32>,
     pending_reversal_entry: Option<PendingNativeReversalEntry>,
     last_summary: String,

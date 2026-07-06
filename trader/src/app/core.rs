@@ -30,6 +30,7 @@ impl App {
             selected_contract: 0,
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
+            persisted_logs: VecDeque::new(),
             session_stats: SessionStatsState::new(session_stats_enabled),
             dashboard_visuals_enabled: false,
             strategy_runtime: StrategyRuntimeState::default(),

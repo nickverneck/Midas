@@ -225,6 +225,18 @@ pub(crate) fn latest_strategy_bar_ts(session: &SessionState) -> Option<i64> {
     strategy_bars(session).last().map(|bar| bar.ts_ns)
 }
 
+pub(crate) fn latest_strategy_bar_fingerprint(session: &SessionState) -> Option<u64> {
+    strategy_bars(session).last().map(bar_fingerprint)
+}
+
+pub(crate) fn bar_fingerprint(bar: &Bar) -> u64 {
+    let mut fingerprint = bar.ts_ns as u64;
+    for value in [bar.open, bar.high, bar.low, bar.close] {
+        fingerprint = fingerprint.rotate_left(13) ^ value.to_bits();
+    }
+    fingerprint
+}
+
 pub(crate) fn active_signal_timing_label(session: &SessionState) -> &'static str {
     match session.execution_config.native_signal_timing {
         NativeSignalTiming::ClosedBar => "closed bar",

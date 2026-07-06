@@ -164,6 +164,7 @@ fn force_reevaluate_pending_window(session: &mut SessionState) {
         return;
     }
     session.execution_runtime.last_closed_bar_ts = Some(latest_strategy_ts.saturating_sub(1));
+    session.execution_runtime.last_closed_bar_fingerprint = None;
 }
 
 pub(crate) fn evaluate_active_execution_strategy(
@@ -367,6 +368,7 @@ pub(crate) fn arm_execution_strategy(session: &mut SessionState) {
     if session.execution_config.kind != StrategyKind::Native {
         session.execution_runtime.armed = false;
         session.execution_runtime.last_closed_bar_ts = None;
+        session.execution_runtime.last_closed_bar_fingerprint = None;
         session.execution_runtime.last_summary =
             "Selected strategy is not an armed native runtime.".to_string();
         return;
@@ -374,6 +376,8 @@ pub(crate) fn arm_execution_strategy(session: &mut SessionState) {
 
     session.execution_runtime.armed = true;
     session.execution_runtime.last_closed_bar_ts = latest_strategy_bar_ts(session);
+    session.execution_runtime.last_closed_bar_fingerprint =
+        latest_strategy_bar_fingerprint(session);
     session.execution_runtime.last_summary =
         if session.execution_runtime.last_closed_bar_ts.is_some() {
             format!(
@@ -397,6 +401,7 @@ pub(crate) fn disarm_execution_strategy(session: &mut SessionState, reason: Stri
     session.execution_runtime.armed = false;
     session.execution_runtime.pending_target_qty = None;
     session.execution_runtime.last_closed_bar_ts = None;
+    session.execution_runtime.last_closed_bar_fingerprint = None;
     session.execution_runtime.reset_execution();
     session.execution_runtime.last_summary = reason;
 }
@@ -716,6 +721,8 @@ pub(crate) fn maybe_run_execution_strategy(
 
     if session.execution_runtime.last_closed_bar_ts.is_none() {
         session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
+        session.execution_runtime.last_closed_bar_fingerprint =
+            latest_strategy_bar_fingerprint(session);
         session.execution_runtime.last_summary = format!(
             "Native {} anchored to current {}; waiting for next update.",
             active_native_label(session),
@@ -725,10 +732,14 @@ pub(crate) fn maybe_run_execution_strategy(
         return Ok(());
     }
 
-    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
-        && session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
-    {
-        return Ok(());
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+        let latest_fingerprint = latest_strategy_bar_fingerprint(session);
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
+            && session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
+        {
+            return Ok(());
+        }
+        session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
     }
     let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);

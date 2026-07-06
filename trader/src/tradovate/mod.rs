@@ -11,8 +11,8 @@ use crate::strategies::hma_angle::HmaAngleExecutionState;
 use crate::strategies::hma_cross::HmaCrossExecutionState;
 use crate::strategies::{StrategySignal, side_from_signed_qty};
 use crate::strategy::{
-    ExecutionRuntimeSnapshot, ExecutionStateSnapshot, ExecutionStrategyConfig, NativeReversalMode,
-    NativeSignalTiming, NativeStrategyKind, StrategyKind,
+    ExecutionRuntimeSnapshot, ExecutionStateSnapshot, ExecutionStrategyConfig, NativeExecutionPath,
+    NativeReversalMode, NativeSignalTiming, NativeStrategyKind, StrategyKind,
 };
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
@@ -51,12 +51,12 @@ pub use self::service::service_loop;
 use execution::*;
 use gateway::*;
 use orders::{
-    MarketOrderDispatchOutcome, cancel_order_by_id, cancel_orders_by_id,
-    collect_live_protection_orders, dispatch_manual_order,
+    MarketOrderDispatchOutcome, build_market_order_request, cancel_order_by_id,
+    cancel_orders_by_id, collect_live_protection_orders, dispatch_manual_order,
     dispatch_profile_legacy_order_strategy_target, dispatch_target_position_order,
-    interrupt_order_strategy_by_id, native_order_strategy_enabled, recover_live_protection_order,
-    refresh_managed_protection_order_ids, request_order_json, selected_strategy_key,
-    sync_native_protection, sync_native_protection_target,
+    enqueue_market_order, interrupt_order_strategy_by_id, native_order_strategy_enabled,
+    recover_live_protection_order, refresh_managed_protection_order_ids, request_order_json,
+    selected_strategy_key, sync_native_protection, sync_native_protection_target,
 };
 pub use profiler::{SwipeProfileOptions, run_swipe_profile};
 

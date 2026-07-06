@@ -90,7 +90,11 @@ fn handle_user_entities(
                 session.market.trade_markers.clone(),
             ));
         }
-        handle_execution_account_sync(session, &broker_tx, event_tx)?;
+        if session.execution_config.native_execution_path == NativeExecutionPath::SimpleDiagnostic {
+            handle_simple_execution_account_sync(session, event_tx);
+        } else {
+            handle_execution_account_sync(session, &broker_tx, event_tx)?;
+        }
     }
     request_snapshot_refresh(state, &internal_tx);
     if latency_changed {
@@ -114,7 +118,11 @@ fn handle_market_update(
     let (display_snapshot, closed_bar_advanced) = {
         let session = state.session.as_mut().expect("checked session above");
         let closed_bar_advanced = apply_market_update(&mut session.market, update);
-        maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
+        if session.execution_config.native_execution_path == NativeExecutionPath::SimpleDiagnostic {
+            maybe_run_simple_execution_strategy(session, &broker_tx, event_tx)?;
+        } else {
+            maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
+        }
         (
             display_market_snapshot(&session.market),
             closed_bar_advanced,

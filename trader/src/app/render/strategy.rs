@@ -51,6 +51,14 @@ impl App {
                 }
                 _ => {}
             },
+            Focus::NativeExecutionPath => match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.strategy.native_execution_path =
+                        self.strategy.native_execution_path.toggle();
+                    self.disarm_native_strategy(cmd_tx);
+                }
+                _ => {}
+            },
             Focus::NativeReversalMode => match key.code {
                 KeyCode::Left => {
                     self.strategy.native_reversal_mode = self.strategy.native_reversal_mode.prev();

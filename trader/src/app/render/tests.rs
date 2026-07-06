@@ -578,6 +578,7 @@ fn bar_type_enter_advances_to_candle_mode_without_toggling() {
 fn push_log_records_wall_time_and_elapsed_delta() {
     let mut app = App::new(AppConfig::default());
     app.logs.clear();
+    app.persisted_logs.clear();
     app.last_log_at = None;
 
     app.push_log("first event".to_string());
@@ -585,6 +586,7 @@ fn push_log_records_wall_time_and_elapsed_delta() {
     app.push_log("second event".to_string());
 
     assert_eq!(app.logs.len(), 2);
+    assert_eq!(app.persisted_logs.len(), 2);
     assert_eq!(app.logs[0].elapsed_since_previous, None);
     assert!(app.logs[1].elapsed_since_previous.is_some());
     assert!(app.logs[0].render_line().contains("first event"));
@@ -594,16 +596,47 @@ fn push_log_records_wall_time_and_elapsed_delta() {
 }
 
 #[test]
+fn persisted_logs_keep_more_entries_than_ui_logs() {
+    let mut app = App::new(AppConfig::default());
+    app.logs.clear();
+    app.persisted_logs.clear();
+    app.last_log_at = None;
+
+    for idx in 0..(UI_LOG_ENTRY_LIMIT + 5) {
+        app.push_log(format!("event {idx}"));
+    }
+
+    assert_eq!(app.logs.len(), UI_LOG_ENTRY_LIMIT);
+    assert_eq!(
+        app.logs.front().map(|entry| entry.message.as_str()),
+        Some("event 5")
+    );
+    assert_eq!(app.persisted_logs.len(), UI_LOG_ENTRY_LIMIT + 5);
+    assert_eq!(
+        app.persisted_logs
+            .front()
+            .map(|entry| entry.message.as_str()),
+        Some("event 0")
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("event 0"));
+    assert!(body.contains("event 204"));
+}
+
+#[test]
 fn debug_log_events_are_filtered_by_log_mode() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
     app.logs.clear();
+    app.persisted_logs.clear();
 
     app.handle_service_event(
         ServiceEvent::DebugLog("submit 42ms | order".to_string()),
         &cmd_tx,
     );
     assert!(app.logs.is_empty());
+    assert!(app.persisted_logs.is_empty());
 
     app.form.log_mode = LogMode::Debug;
     app.handle_service_event(
@@ -612,6 +645,7 @@ fn debug_log_events_are_filtered_by_log_mode() {
     );
 
     assert_eq!(app.logs.len(), 1);
+    assert_eq!(app.persisted_logs.len(), 1);
     assert_eq!(app.logs[0].message, "DEBUG: submit 42ms | order");
 }
 

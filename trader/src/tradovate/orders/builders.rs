@@ -230,7 +230,7 @@ pub(super) fn build_order_strategy_request(
     })
 }
 
-pub(super) fn build_market_order_request(
+pub(crate) fn build_market_order_request(
     session: &mut SessionState,
     account: &AccountInfo,
     contract: &ContractSuggestion,

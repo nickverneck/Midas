@@ -106,6 +106,7 @@ impl App {
         if self.strategy.kind == StrategyKind::Native {
             order.push(Focus::NativeStrategy);
             order.push(Focus::NativeSignalTiming);
+            order.push(Focus::NativeExecutionPath);
             order.push(Focus::NativeReversalMode);
             order.push(Focus::NativeBlockoutEnabled);
             order.push(Focus::NativeBlockoutMinutes);
@@ -245,14 +246,19 @@ impl App {
 
     fn push_log(&mut self, message: String) {
         let now = std::time::Instant::now();
-        while self.logs.len() >= 200 {
-            self.logs.pop_front();
-        }
-        self.logs.push_back(LogEntry {
+        let entry = LogEntry {
             timestamp: chrono::Local::now(),
             elapsed_since_previous: self.last_log_at.map(|last| now.duration_since(last)),
             message,
-        });
+        };
+        while self.logs.len() >= UI_LOG_ENTRY_LIMIT {
+            self.logs.pop_front();
+        }
+        while self.persisted_logs.len() >= PERSISTED_LOG_ENTRY_LIMIT {
+            self.persisted_logs.pop_front();
+        }
+        self.logs.push_back(entry.clone());
+        self.persisted_logs.push_back(entry);
         self.last_log_at = Some(now);
     }
 
@@ -322,7 +328,7 @@ impl App {
         body.push('\n');
         body.push_str("[logs]\n");
 
-        for entry in &self.logs {
+        for entry in &self.persisted_logs {
             body.push_str(&entry.render_line());
             body.push('\n');
         }

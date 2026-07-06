@@ -26,6 +26,123 @@ fn seed_long_position(session: &mut SessionState) {
 }
 
 #[test]
+fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::SimpleDiagnostic;
+    session.execution_config.native_ema.fast_length = 2;
+    session.execution_config.native_ema.slow_length = 4;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.pending_target_qty = Some(-1);
+    session.execution_runtime.last_closed_bar_ts = Some(5);
+    session.order_submit_in_flight = true;
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 8.0, 12.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+        })
+        .collect();
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": -1,
+                "netPrice": 5000.0
+            }),
+        )]),
+    );
+
+    maybe_run_simple_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("simple path should bypass pending and in-flight gates");
+
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+    let command = broker_rx
+        .try_recv()
+        .expect("simple path should queue a market order");
+    match command {
+        BrokerCommand::MarketOrder { order, .. } => {
+            assert_eq!(order.target_qty, Some(1));
+            assert_eq!(order.order_qty, 2);
+            assert_eq!(order.order_action, "Buy");
+            assert!(order.interrupt_order_strategy_id.is_none());
+            assert!(order.cancel_order_ids.is_empty());
+        }
+        _ => panic!("simple path should only queue a market order"),
+    }
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("simple strategy dispatch")
+                && message.contains("submit_in_flight ignored")
+    )));
+}
+
+#[test]
+fn simple_strategy_rechecks_revised_closed_bar_with_same_timestamp() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::SimpleDiagnostic;
+    session.execution_config.native_ema.fast_length = 2;
+    session.execution_config.native_ema.slow_length = 4;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(6);
+    let old_last_bar = Bar {
+        ts_ns: 6,
+        open: 12.0,
+        high: 12.5,
+        low: 11.5,
+        close: 12.0,
+    };
+    session.execution_runtime.last_closed_bar_fingerprint = Some(bar_fingerprint(&old_last_bar));
+    session.market.history_loaded = 6;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 12.0, 8.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+        })
+        .collect();
+    seed_long_position(&mut session);
+
+    maybe_run_simple_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("same-timestamp bar revision should be evaluated");
+
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(-1));
+    match broker_rx
+        .try_recv()
+        .expect("revised closed bar should queue a sell")
+    {
+        BrokerCommand::MarketOrder { order, .. } => {
+            assert_eq!(order.target_qty, Some(-1));
+            assert_eq!(order.order_qty, 2);
+            assert_eq!(order.order_action, "Sell");
+        }
+        _ => panic!("expected market order from revised-bar sell signal"),
+    }
+}
+
+#[test]
 fn strategy_loop_does_not_disarm_on_transient_oversize_with_live_strategy_path() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();

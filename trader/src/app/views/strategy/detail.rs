@@ -34,11 +34,12 @@ impl App {
                         self.strategy.native_hma.bars_required_to_trade
                     )),
                     Line::from(format!(
-                        "Flags: longs_only={} inverted={} trailing={} timing={} reversal={}",
+                        "Flags: longs_only={} inverted={} trailing={} timing={} path={} reversal={}",
                         bool_label(self.strategy.native_hma.longs_only),
                         bool_label(self.strategy.native_hma.inverted),
                         bool_label(self.strategy.native_hma.use_trailing_stop),
                         self.strategy.native_signal_timing.label(),
+                        self.strategy.native_execution_path.label(),
                         self.strategy.native_reversal_mode.label(),
                     )),
                     Line::from(format!(
@@ -71,10 +72,11 @@ impl App {
                         self.strategy.native_ema.fast_length, self.strategy.native_ema.slow_length,
                     )),
                     Line::from(format!(
-                        "Flags: inverted={} trailing={} timing={} reversal={}",
+                        "Flags: inverted={} trailing={} timing={} path={} reversal={}",
                         bool_label(self.strategy.native_ema.inverted),
                         bool_label(self.strategy.native_ema.use_trailing_stop),
                         self.strategy.native_signal_timing.label(),
+                        self.strategy.native_execution_path.label(),
                         self.strategy.native_reversal_mode.label(),
                     )),
                     Line::from(format!(
@@ -104,10 +106,11 @@ impl App {
                         self.strategy.native_hma_cross.slow_length,
                     )),
                     Line::from(format!(
-                        "Flags: inverted={} trailing={} timing={} reversal={}",
+                        "Flags: inverted={} trailing={} timing={} path={} reversal={}",
                         bool_label(self.strategy.native_hma_cross.inverted),
                         bool_label(self.strategy.native_hma_cross.use_trailing_stop),
                         self.strategy.native_signal_timing.label(),
+                        self.strategy.native_execution_path.label(),
                         self.strategy.native_reversal_mode.label(),
                     )),
                     Line::from(format!(

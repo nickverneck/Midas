@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn enqueue_market_order(
+pub(crate) fn enqueue_market_order(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
     order: PendingMarketOrder,

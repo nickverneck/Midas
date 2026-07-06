@@ -77,6 +77,7 @@ impl App {
             | Focus::OrderQty
             | Focus::NativeStrategy
             | Focus::NativeSignalTiming
+            | Focus::NativeExecutionPath
             | Focus::NativeReversalMode
             | Focus::NativeBlockoutEnabled
             | Focus::NativeBlockoutMinutes

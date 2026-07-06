@@ -29,6 +29,13 @@ impl App {
             ));
             lines.push(styled_line(
                 format!(
+                    "Execution Path: {}",
+                    self.strategy.native_execution_path.label()
+                ),
+                self.focus == Focus::NativeExecutionPath,
+            ));
+            lines.push(styled_line(
+                format!(
                     "Reversal Mode: {}",
                     self.strategy.native_reversal_mode.label()
                 ),

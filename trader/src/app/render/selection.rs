@@ -196,6 +196,7 @@ impl App {
             | Focus::HmaLongsOnly
             | Focus::HmaInverted
             | Focus::NativeSignalTiming
+            | Focus::NativeExecutionPath
             | Focus::NativeReversalMode
             | Focus::NativeBlockoutEnabled
             | Focus::NativeBlockoutMinutes

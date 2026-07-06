@@ -105,6 +105,28 @@ impl NativeSignalTiming {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeExecutionPath {
+    Guarded,
+    SimpleDiagnostic,
+}
+
+impl NativeExecutionPath {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Guarded => "Guarded",
+            Self::SimpleDiagnostic => "Simple Diagnostic",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Guarded => Self::SimpleDiagnostic,
+            Self::SimpleDiagnostic => Self::Guarded,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NativeReversalMode {
     Direct,
     FlattenConfirmEnter,
@@ -415,6 +437,7 @@ pub struct StrategyState {
     pub kind: StrategyKind,
     pub native_strategy: NativeStrategyKind,
     pub native_signal_timing: NativeSignalTiming,
+    pub native_execution_path: NativeExecutionPath,
     pub native_reversal_mode: NativeReversalMode,
     pub blockout_enabled: bool,
     pub blockout_minutes_before_close: f64,
@@ -433,6 +456,8 @@ pub struct ExecutionStrategyConfig {
     pub native_strategy: NativeStrategyKind,
     #[serde(default = "default_native_signal_timing")]
     pub native_signal_timing: NativeSignalTiming,
+    #[serde(default = "default_native_execution_path")]
+    pub native_execution_path: NativeExecutionPath,
     #[serde(default = "default_native_reversal_mode")]
     pub native_reversal_mode: NativeReversalMode,
     #[serde(default = "default_blockout_enabled")]
@@ -455,6 +480,10 @@ fn default_native_signal_timing() -> NativeSignalTiming {
     NativeSignalTiming::ClosedBar
 }
 
+fn default_native_execution_path() -> NativeExecutionPath {
+    NativeExecutionPath::Guarded
+}
+
 fn default_native_reversal_mode() -> NativeReversalMode {
     NativeReversalMode::Direct
 }
@@ -473,6 +502,7 @@ impl Default for ExecutionStrategyConfig {
             kind: StrategyKind::Native,
             native_strategy: NativeStrategyKind::HmaAngle,
             native_signal_timing: NativeSignalTiming::ClosedBar,
+            native_execution_path: NativeExecutionPath::Guarded,
             native_reversal_mode: NativeReversalMode::Direct,
             blockout_enabled: true,
             blockout_minutes_before_close: DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE,
@@ -531,6 +561,7 @@ impl StrategyState {
             kind: StrategyKind::Native,
             native_strategy: NativeStrategyKind::HmaAngle,
             native_signal_timing: NativeSignalTiming::ClosedBar,
+            native_execution_path: NativeExecutionPath::Guarded,
             native_reversal_mode: NativeReversalMode::Direct,
             blockout_enabled: true,
             blockout_minutes_before_close: DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE,
@@ -577,10 +608,11 @@ impl StrategyState {
     pub fn native_summary(&self) -> String {
         match self.native_strategy {
             NativeStrategyKind::HmaAngle => format!(
-                "{} | qty={} timing={} reversal={} blockout={}({:.0}m) len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} path={} reversal={} blockout={}({:.0}m) len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaAngle.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
+                self.native_execution_path.label(),
                 self.native_reversal_mode.label(),
                 self.blockout_enabled,
                 self.blockout_minutes_before_close,
@@ -595,10 +627,11 @@ impl StrategyState {
                 self.native_hma.inverted,
             ),
             NativeStrategyKind::EmaCross => format!(
-                "{} | qty={} timing={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::EmaCross.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
+                self.native_execution_path.label(),
                 self.native_reversal_mode.label(),
                 self.blockout_enabled,
                 self.blockout_minutes_before_close,
@@ -610,10 +643,11 @@ impl StrategyState {
                 self.native_ema.inverted,
             ),
             NativeStrategyKind::HmaCross => format!(
-                "{} | qty={} timing={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaCross.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
+                self.native_execution_path.label(),
                 self.native_reversal_mode.label(),
                 self.blockout_enabled,
                 self.blockout_minutes_before_close,
@@ -632,6 +666,7 @@ impl StrategyState {
             kind: self.kind,
             native_strategy: self.native_strategy,
             native_signal_timing: self.native_signal_timing,
+            native_execution_path: self.native_execution_path,
             native_reversal_mode: self.native_reversal_mode,
             blockout_enabled: self.blockout_enabled,
             blockout_minutes_before_close: self.blockout_minutes_before_close,
@@ -646,6 +681,7 @@ impl StrategyState {
         self.kind = config.kind;
         self.native_strategy = config.native_strategy;
         self.native_signal_timing = config.native_signal_timing;
+        self.native_execution_path = config.native_execution_path;
         self.native_reversal_mode = config.native_reversal_mode;
         self.blockout_enabled = config.blockout_enabled;
         self.blockout_minutes_before_close = config.blockout_minutes_before_close;

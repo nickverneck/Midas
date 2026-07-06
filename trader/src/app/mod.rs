@@ -25,6 +25,9 @@ use std::collections::VecDeque;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
+const UI_LOG_ENTRY_LIMIT: usize = 200;
+const PERSISTED_LOG_ENTRY_LIMIT: usize = 10_000;
+
 pub struct App {
     base_config: AppConfig,
     available_brokers: Vec<BrokerKind>,
@@ -46,6 +49,7 @@ pub struct App {
     selected_contract: usize,
     market: MarketSnapshot,
     logs: VecDeque<LogEntry>,
+    persisted_logs: VecDeque<LogEntry>,
     session_stats: SessionStatsState,
     dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,
@@ -94,6 +98,7 @@ enum Focus {
     OrderQty,
     NativeStrategy,
     NativeSignalTiming,
+    NativeExecutionPath,
     NativeReversalMode,
     NativeBlockoutEnabled,
     NativeBlockoutMinutes,
