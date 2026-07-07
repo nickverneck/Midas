@@ -164,7 +164,7 @@ struct TrackedOrderStrategy {
     target_qty: i32,
 }
 
-const TOKEN_REFRESH_LEAD_SECS: i64 = 300;
+const TOKEN_REFRESH_LEAD_SECS: i64 = 900;
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 const ENGINE_MARKET_BAR_LIMIT: usize = 4_096;
 const UI_MARKET_BAR_LIMIT: usize = 256;

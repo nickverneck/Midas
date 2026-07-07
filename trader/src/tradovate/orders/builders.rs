@@ -151,8 +151,8 @@ pub(super) fn build_order_strategy_request(
     {
         bail!("order-strategy entry requires a valid market tick size for TP/SL offsets");
     }
-    let bracket_stop_offset =
-        stop_loss_offset.or_else(|| auto_trail.map(|auto_trail| auto_trail.stop_loss));
+    let bracket_stop_offset = stop_loss_offset
+        .or_else(|| auto_trail.map(|auto_trail| auto_trail.trigger + auto_trail.stop_loss));
     let bracket_qty = target_qty.abs().max(1);
     let mut bracket = json!({
         "qty": bracket_qty,

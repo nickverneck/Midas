@@ -140,6 +140,14 @@ impl App {
                     "Chart labels TP*/SL* are projected from the native config until broker protection sync lands.",
                 ),
                 Line::from("Trailing stop uses Tradovate broker auto-trail when enabled."),
+            ]);
+            if let Some(auto_trail) = self.displayed_auto_trail() {
+                lines.push(Line::from(format_auto_trail_preview(auto_trail)));
+                if let Some(live_line) = format_auto_trail_live(auto_trail) {
+                    lines.push(Line::from(live_line));
+                }
+            }
+            lines.extend([
                 Line::from(""),
                 Line::from(format!("Live status: {}", self.strategy_runtime_summary())),
                 Line::from(format!(

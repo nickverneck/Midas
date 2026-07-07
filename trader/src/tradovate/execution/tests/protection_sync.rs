@@ -46,6 +46,45 @@ fn sync_execution_protection_waits_for_hydrating_order_strategy_before_ack() {
 }
 
 #[test]
+fn trailing_only_native_auto_trail_does_not_queue_software_protection() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
+    session.execution_config.native_hma_cross.take_profit_ticks = 0.0;
+    session.execution_config.native_hma_cross.stop_loss_ticks = 0.0;
+    session.execution_config.native_hma_cross.use_trailing_stop = true;
+    session
+        .execution_config
+        .native_hma_cross
+        .trail_trigger_ticks = 6.0;
+    session.execution_config.native_hma_cross.trail_offset_ticks = 5.0;
+    session.execution_runtime.armed = true;
+    session.market.tick_size = Some(0.25);
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": 1,
+                "netPrice": 7576.75
+            }),
+        )]),
+    );
+
+    sync_execution_protection(&mut session, &broker_tx, None)
+        .expect("trailing-only broker-native auto-trail should not queue software protection");
+
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "software protection must not synthesize a stop when Stop Loss Ticks is zero"
+    );
+}
+
+#[test]
 fn direct_reversal_syncs_native_protection_at_net_position_size() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -267,6 +267,13 @@ impl App {
                 }
             }
 
+            if let Some(auto_trail) = self.displayed_auto_trail() {
+                lines.push(Line::from(format_auto_trail_preview(auto_trail)));
+                if let Some(live_line) = format_auto_trail_live(auto_trail) {
+                    lines.push(Line::from(live_line));
+                }
+            }
+
             lines.push(Line::from(
                 "Type numbers or use Left/Right for numeric fields. Left/Right/Enter toggles timing and reversal mode. Zero TP/SL disables them.",
             ));

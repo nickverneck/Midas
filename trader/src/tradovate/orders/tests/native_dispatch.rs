@@ -82,6 +82,13 @@ fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
                     .expect("strategy params should be serialized JSON"),
             )
             .expect("strategy params should parse");
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("orderType"))
+                    .and_then(Value::as_str),
+                Some("Market")
+            );
             let bracket = params
                 .get("brackets")
                 .and_then(Value::as_array)
@@ -119,7 +126,7 @@ fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
 }
 
 #[test]
-fn native_strategy_auto_trail_without_fixed_stop_uses_trail_offset_as_initial_stop() {
+fn native_strategy_auto_trail_without_fixed_stop_sends_required_initial_stop_leg() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -147,7 +154,21 @@ fn native_strategy_auto_trail_without_fixed_stop_uses_trail_offset_as_initial_st
                 .and_then(Value::as_array)
                 .and_then(|brackets| brackets.first())
                 .expect("strategy should include a bracket");
-            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(-0.5));
+            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(-1.5));
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("trigger"))
+                    .and_then(Value::as_f64),
+                Some(1.0)
+            );
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("stopLoss"))
+                    .and_then(Value::as_f64),
+                Some(0.5)
+            );
             assert!(bracket.get("autoTrail").is_some());
         }
         _ => panic!("expected order strategy command"),

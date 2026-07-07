@@ -6,7 +6,7 @@ struct RuntimeTokenBundle {
 
 #[derive(Debug, Clone)]
 enum TokenMaintenanceAction {
-    RefreshCredentials,
+    RenewAccessToken,
     ReloadTokenFile(RuntimeTokenBundle),
 }
 
@@ -15,24 +15,29 @@ fn next_token_maintenance_action(
     tokens: &TokenBundle,
     token_file_snapshot: Option<&TokenFileSnapshot>,
 ) -> Result<Option<TokenMaintenanceAction>> {
+    let now = Utc::now();
     if empty_as_none(&cfg.token_override).is_some() {
-        return Ok(None);
+        return if token_refresh_due(tokens, now) {
+            Ok(Some(TokenMaintenanceAction::RenewAccessToken))
+        } else {
+            Ok(None)
+        };
     }
 
     match cfg.auth_mode {
         AuthMode::Credentials => {
-            if token_refresh_due(tokens, Utc::now()) {
-                Ok(Some(TokenMaintenanceAction::RefreshCredentials))
+            if token_refresh_due(tokens, now) {
+                Ok(Some(TokenMaintenanceAction::RenewAccessToken))
             } else {
                 Ok(None)
             }
         }
         AuthMode::TokenFile => {
             let loaded = load_runtime_token_bundle(cfg)?;
-            if token_bundle_changed(tokens, &loaded.tokens)
-                || token_file_snapshot_changed(token_file_snapshot, &loaded)
-            {
+            if token_file_snapshot_changed(token_file_snapshot, &loaded) {
                 Ok(Some(TokenMaintenanceAction::ReloadTokenFile(loaded)))
+            } else if token_refresh_due(tokens, now) {
+                Ok(Some(TokenMaintenanceAction::RenewAccessToken))
             } else {
                 Ok(None)
             }
@@ -105,6 +110,34 @@ fn token_bundle_changed(current: &TokenBundle, next: &TokenBundle) -> bool {
         || current.expiration_time != next.expiration_time
         || current.user_id != next.user_id
         || current.user_name != next.user_name
+}
+
+fn token_stream_restart_reason(
+    current: &TokenBundle,
+    next: &TokenBundle,
+    now: DateTime<Utc>,
+) -> Option<&'static str> {
+    if current
+        .user_id
+        .zip(next.user_id)
+        .is_some_and(|(current_user, next_user)| current_user != next_user)
+    {
+        return Some("token user changed");
+    }
+    if current
+        .user_name
+        .as_deref()
+        .zip(next.user_name.as_deref())
+        .is_some_and(|(current_user, next_user)| current_user != next_user)
+    {
+        return Some("token user changed");
+    }
+
+    if token_expires_at(current).is_some_and(|expires_at| expires_at <= now) {
+        return Some("current token expired");
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -258,4 +291,127 @@ fn shutdown_tasks(state: &mut ServiceState) {
         task.abort();
     }
     state.replay = None;
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn token_bundle(access: &str, md: &str, expires_at: DateTime<Utc>) -> TokenBundle {
+        TokenBundle {
+            access_token: access.to_string(),
+            md_access_token: md.to_string(),
+            expiration_time: Some(expires_at.to_rfc3339()),
+            user_id: Some(42),
+            user_name: Some("SIM".to_string()),
+        }
+    }
+
+    #[test]
+    fn valid_token_rotation_does_not_require_stream_restart() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let current = token_bundle("old-access", "old-md", now + chrono::Duration::hours(1));
+        let next = token_bundle("new-access", "new-md", now + chrono::Duration::hours(2));
+
+        assert_eq!(token_stream_restart_reason(&current, &next, now), None);
+    }
+
+    #[test]
+    fn expired_current_token_requires_stream_restart() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let current = token_bundle("old-access", "old-md", now - chrono::Duration::seconds(1));
+        let next = token_bundle("new-access", "new-md", now + chrono::Duration::hours(2));
+
+        assert_eq!(
+            token_stream_restart_reason(&current, &next, now),
+            Some("current token expired")
+        );
+    }
+
+    #[test]
+    fn changed_token_user_requires_stream_restart() {
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let current = token_bundle("old-access", "old-md", now + chrono::Duration::hours(1));
+        let mut next = token_bundle("new-access", "new-md", now + chrono::Duration::hours(2));
+        next.user_id = Some(99);
+
+        assert_eq!(
+            token_stream_restart_reason(&current, &next, now),
+            Some("token user changed")
+        );
+    }
+
+    #[test]
+    fn credentials_maintenance_renews_instead_of_reauthenticating() {
+        let mut cfg = AppConfig {
+            auth_mode: AuthMode::Credentials,
+            ..AppConfig::default()
+        };
+        cfg.token_override.clear();
+        let tokens = token_bundle("access", "md", Utc::now() + chrono::Duration::seconds(30));
+
+        let action = next_token_maintenance_action(&cfg, &tokens, None)
+            .expect("credentials maintenance should be evaluated");
+
+        assert!(matches!(
+            action,
+            Some(TokenMaintenanceAction::RenewAccessToken)
+        ));
+    }
+
+    #[test]
+    fn token_override_maintenance_renews_current_token_when_due() {
+        let mut cfg = AppConfig {
+            token_override: "configured-token".to_string(),
+            ..AppConfig::default()
+        };
+        cfg.auth_mode = AuthMode::TokenFile;
+        let tokens = token_bundle("access", "md", Utc::now() + chrono::Duration::seconds(30));
+
+        let action = next_token_maintenance_action(&cfg, &tokens, None)
+            .expect("override maintenance should be evaluated");
+
+        assert!(matches!(
+            action,
+            Some(TokenMaintenanceAction::RenewAccessToken)
+        ));
+    }
+
+    #[test]
+    fn token_file_maintenance_renews_current_token_when_file_unchanged_and_due() {
+        let unique = format!(
+            "trader-token-renew-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let token_path = std::env::temp_dir().join(unique);
+        let cache_path = token_path.with_extension("cache.json");
+        let expires_at = Utc::now() + chrono::Duration::seconds(30);
+
+        std::fs::write(
+            &token_path,
+            format!(
+                r#"{{"token":"same-token","accessToken":"same-token","mdAccessToken":"same-md","expirationTime":"{}"}}"#,
+                expires_at.to_rfc3339()
+            ),
+        )
+        .expect("write token file");
+
+        let mut cfg = AppConfig::default();
+        cfg.auth_mode = AuthMode::TokenFile;
+        cfg.token_path = token_path.clone();
+        cfg.session_cache_path = cache_path;
+
+        let loaded = load_runtime_token_bundle(&cfg).expect("load token file");
+        let action =
+            next_token_maintenance_action(&cfg, &loaded.tokens, loaded.file_snapshot.as_ref())
+                .expect("unchanged due token file should be evaluated");
+
+        assert!(matches!(
+            action,
+            Some(TokenMaintenanceAction::RenewAccessToken)
+        ));
+
+        let _ = std::fs::remove_file(&token_path);
+    }
 }

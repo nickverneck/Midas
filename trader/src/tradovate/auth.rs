@@ -185,6 +185,49 @@ async fn request_access_token(client: &Client, cfg: &AppConfig) -> Result<TokenB
     })
 }
 
+async fn renew_access_token(
+    client: &Client,
+    env: &TradingEnvironment,
+    current: &TokenBundle,
+) -> Result<TokenBundle> {
+    let url = format!("{}/auth/renewAccessToken", env.rest_url());
+    let response = client
+        .get(url)
+        .bearer_auth(&current.access_token)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("renew access token failed ({status}): {body}");
+    }
+
+    let parsed: AccessTokenResponse =
+        serde_json::from_str(&body).context("parse renew access token response")?;
+    if let Some(error_text) = parsed.error_text.as_deref() {
+        if !error_text.trim().is_empty() {
+            bail!("renew access token rejected: {error_text}");
+        }
+    }
+
+    let access_token = parsed
+        .access_token
+        .filter(|token| !token.trim().is_empty())
+        .context("missing accessToken in renew response")?;
+    let md_access_token = parsed
+        .md_access_token
+        .filter(|token| !token.trim().is_empty())
+        .unwrap_or_else(|| current.md_access_token.clone());
+
+    Ok(TokenBundle {
+        access_token,
+        md_access_token,
+        expiration_time: parsed.expiration_time,
+        user_id: parsed.user_id.or(current.user_id),
+        user_name: parsed.name.or_else(|| current.user_name.clone()),
+    })
+}
+
 async fn fetch_auth_me(client: &Client, env: &TradingEnvironment, token: &str) -> Result<Value> {
     let url = format!("{}/auth/me", env.rest_url());
     let response = client.get(url).bearer_auth(token).send().await?;

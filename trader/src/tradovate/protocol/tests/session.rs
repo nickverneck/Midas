@@ -19,8 +19,10 @@ fn token_refresh_due_uses_jwt_exp_when_expiration_time_missing() {
         user_name: Some("demo".to_string()),
     };
 
-    let now = DateTime::<Utc>::from_timestamp(1_773_436_044 - 60, 0).unwrap();
-    assert!(token_refresh_due(&tokens, now));
+    let before_refresh_window = DateTime::<Utc>::from_timestamp(1_773_436_044 - 901, 0).unwrap();
+    let inside_refresh_window = DateTime::<Utc>::from_timestamp(1_773_436_044 - 900, 0).unwrap();
+    assert!(!token_refresh_due(&tokens, before_refresh_window));
+    assert!(token_refresh_due(&tokens, inside_refresh_window));
 }
 
 #[test]
@@ -44,7 +46,7 @@ fn token_file_maintenance_reloads_on_external_rewrite() {
 
     std::fs::write(
         &token_path,
-        r#"{"token":"same-token","accessToken":"same-token","mdAccessToken":"same-md","expirationTime":"2026-07-06T15:45:46Z"}"#,
+        r#"{"token":"same-token","accessToken":"same-token","mdAccessToken":"same-md","expirationTime":"2099-07-06T15:45:46Z"}"#,
     )
     .expect("write initial token file");
 
@@ -66,7 +68,7 @@ fn token_file_maintenance_reloads_on_external_rewrite() {
   "token": "same-token",
   "accessToken": "same-token",
   "mdAccessToken": "same-md",
-  "expirationTime": "2026-07-06T15:45:46Z"
+  "expirationTime": "2099-07-06T15:45:46Z"
 }"#,
     )
     .expect("rewrite token file");

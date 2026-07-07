@@ -7,6 +7,18 @@ struct DisplayedTradeLevels {
     stop_price_projected: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DisplayedAutoTrail {
+    trigger_ticks: f64,
+    offset_ticks: f64,
+    initial_stop_ticks_from_entry: f64,
+    first_stop_ticks_from_entry: f64,
+    has_fixed_stop: bool,
+    initial_stop_price: Option<f64>,
+    trigger_price: Option<f64>,
+    first_stop_price: Option<f64>,
+}
+
 impl LogEntry {
     fn render_line(&self) -> String {
         format!(
@@ -374,6 +386,33 @@ impl App {
         ));
     }
 
+    fn active_native_requires_guarded_path(&self) -> bool {
+        if self.strategy.kind != StrategyKind::Native {
+            return false;
+        }
+        if self.strategy.native_reversal_mode != NativeReversalMode::Direct {
+            return true;
+        }
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
+            NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
+            NativeStrategyKind::HmaCross => {
+                self.strategy.native_hma_cross.uses_native_protection()
+            }
+        }
+    }
+
+    fn normalize_native_execution_path_before_arm(&mut self) -> Option<&'static str> {
+        if !self.active_native_requires_guarded_path()
+            || self.strategy.native_execution_path == NativeExecutionPath::Guarded
+        {
+            return None;
+        }
+        let previous = self.strategy.native_execution_path.label();
+        self.strategy.native_execution_path = NativeExecutionPath::Guarded;
+        Some(previous)
+    }
+
     fn disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
@@ -387,6 +426,11 @@ impl App {
     fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
+        }
+        if let Some(previous_path) = self.normalize_native_execution_path_before_arm() {
+            self.push_log(format!(
+                "Execution Path switched to Guarded before arming; {previous_path} ignores broker protection or non-direct reversal settings."
+            ));
         }
         self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::ArmExecutionStrategy);
@@ -508,6 +552,88 @@ impl App {
         }
 
         levels
+    }
+
+    fn displayed_auto_trail(&self) -> Option<DisplayedAutoTrail> {
+        if self.strategy.kind != StrategyKind::Native {
+            return None;
+        }
+
+        let (use_trailing_stop, trigger_ticks, offset_ticks, stop_loss_ticks) =
+            match self.strategy.native_strategy {
+                NativeStrategyKind::HmaAngle => (
+                    self.strategy.native_hma.use_trailing_stop,
+                    self.strategy.native_hma.trail_trigger_ticks,
+                    self.strategy.native_hma.trail_offset_ticks,
+                    self.strategy.native_hma.stop_loss_ticks,
+                ),
+                NativeStrategyKind::EmaCross => (
+                    self.strategy.native_ema.use_trailing_stop,
+                    self.strategy.native_ema.trail_trigger_ticks,
+                    self.strategy.native_ema.trail_offset_ticks,
+                    self.strategy.native_ema.stop_loss_ticks,
+                ),
+                NativeStrategyKind::HmaCross => (
+                    self.strategy.native_hma_cross.use_trailing_stop,
+                    self.strategy.native_hma_cross.trail_trigger_ticks,
+                    self.strategy.native_hma_cross.trail_offset_ticks,
+                    self.strategy.native_hma_cross.stop_loss_ticks,
+                ),
+            };
+        if !use_trailing_stop || trigger_ticks <= 0.0 || offset_ticks <= 0.0 {
+            return None;
+        }
+
+        let has_fixed_stop = stop_loss_ticks > 0.0;
+        let initial_stop_distance_ticks = if has_fixed_stop {
+            stop_loss_ticks
+        } else {
+            trigger_ticks + offset_ticks
+        };
+        let initial_stop_ticks_from_entry = -initial_stop_distance_ticks;
+        let first_stop_ticks_from_entry = trigger_ticks - offset_ticks;
+        let (initial_stop_price, trigger_price, first_stop_price) = self
+            .market
+            .tick_size
+            .filter(|tick| tick.is_finite() && *tick > 0.0)
+            .and_then(|tick_size| {
+                let entry_price = self
+                    .selected_snapshot()
+                    .and_then(|snapshot| snapshot.market_entry_price)
+                    .filter(|price| price.is_finite())?;
+                let signed_qty = self
+                    .selected_snapshot()
+                    .and_then(|snapshot| snapshot.market_position_qty)
+                    .map(|qty| qty.round() as i32)
+                    .filter(|qty| *qty != 0)?;
+                let direction = if signed_qty > 0 { 1.0 } else { -1.0 };
+                Some((
+                    entry_price + direction * initial_stop_ticks_from_entry * tick_size,
+                    entry_price + direction * trigger_ticks * tick_size,
+                    entry_price + direction * first_stop_ticks_from_entry * tick_size,
+                ))
+            })
+            .map_or(
+                (None, None, None),
+                |(initial_stop_price, trigger_price, first_stop_price)| {
+                    (
+                        Some(initial_stop_price),
+                        Some(trigger_price),
+                        Some(first_stop_price),
+                    )
+                },
+            );
+
+        Some(DisplayedAutoTrail {
+            trigger_ticks,
+            offset_ticks,
+            initial_stop_ticks_from_entry,
+            first_stop_ticks_from_entry,
+            has_fixed_stop,
+            initial_stop_price,
+            trigger_price,
+            first_stop_price,
+        })
     }
 
     fn projected_native_take_profit_price(&self, entry_price: f64, signed_qty: i32) -> Option<f64> {

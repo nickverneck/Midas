@@ -5,7 +5,8 @@ use crate::broker::{
 };
 use crate::config::{AppConfig, LogMode};
 use crate::strategy::{
-    ExecutionStateSnapshot, NativeReversalMode, NativeStrategyKind, StrategyKind,
+    ExecutionStateSnapshot, NativeExecutionPath, NativeReversalMode, NativeStrategyKind,
+    StrategyKind,
 };
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -614,6 +615,39 @@ fn strategy_continue_syncs_selected_account_before_arming() {
     expect_select_account(&mut cmd_rx, 2);
     match cmd_rx.try_recv().expect("expected config command") {
         ServiceCommand::SetExecutionStrategyConfig(_) => {}
+        _ => panic!("expected execution-config command"),
+    }
+    match cmd_rx.try_recv().expect("expected arm command") {
+        ServiceCommand::ArmExecutionStrategy => {}
+        _ => panic!("expected arm-execution command"),
+    }
+}
+
+#[test]
+fn strategy_continue_forces_guarded_when_settings_need_order_strategy_path() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.focus = Focus::StrategyContinue;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::HmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::HmaDirect;
+    app.strategy.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    app.strategy.native_hma_cross.use_trailing_stop = true;
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(config.native_execution_path, NativeExecutionPath::Guarded);
+            assert_eq!(
+                config.native_reversal_mode,
+                NativeReversalMode::CloseAllEnter
+            );
+            assert!(config.native_hma_cross.use_trailing_stop);
+        }
         _ => panic!("expected execution-config command"),
     }
     match cmd_rx.try_recv().expect("expected arm command") {

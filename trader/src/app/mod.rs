@@ -9,7 +9,8 @@ use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategies::hma_cross::hma_series;
 use crate::strategy::{
-    LuaSourceMode, NativeSignalTiming, NativeStrategyKind, StrategyKind, StrategyState,
+    LuaSourceMode, NativeExecutionPath, NativeReversalMode, NativeSignalTiming, NativeStrategyKind,
+    StrategyKind, StrategyState,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;

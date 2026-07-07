@@ -42,6 +42,56 @@ fn format_money(value: Option<f64>) -> String {
     }
 }
 
+fn format_tick_value(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn format_signed_tick_value(value: f64) -> String {
+    if value > 0.0 {
+        format!("+{}", format_tick_value(value))
+    } else {
+        format_tick_value(value)
+    }
+}
+
+fn format_auto_trail_preview(auto_trail: DisplayedAutoTrail) -> String {
+    let initial_stop = if auto_trail.has_fixed_stop {
+        format!(
+            "fixed SL {} ticks",
+            format_signed_tick_value(auto_trail.initial_stop_ticks_from_entry)
+        )
+    } else {
+        format!(
+            "broker initial SL {} ticks",
+            format_signed_tick_value(auto_trail.initial_stop_ticks_from_entry)
+        )
+    };
+    format!(
+        "Auto Trail Preview: {}; arms after +{} ticks; first trail {} ticks from entry",
+        initial_stop,
+        format_tick_value(auto_trail.trigger_ticks),
+        format_signed_tick_value(auto_trail.first_stop_ticks_from_entry),
+    )
+}
+
+fn format_auto_trail_live(auto_trail: DisplayedAutoTrail) -> Option<String> {
+    Some(format!(
+        "Auto Trail Live: initial stop {}; arm at {}; first trail {}",
+        format_money(auto_trail.initial_stop_price),
+        format_money(auto_trail.trigger_price),
+        format_money(auto_trail.first_stop_price),
+    ))
+    .filter(|_| {
+        auto_trail.initial_stop_price.is_some()
+            && auto_trail.trigger_price.is_some()
+            && auto_trail.first_stop_price.is_some()
+    })
+}
+
 fn format_signed_money(value: Option<f64>) -> String {
     match value {
         Some(value) if value > 0.0 => format!("+{value:.2}"),

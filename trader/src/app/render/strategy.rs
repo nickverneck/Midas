@@ -415,6 +415,12 @@ impl App {
                         "Strategy selected: {}",
                         self.strategy.summary_label()
                     ));
+                    if self.strategy.kind == StrategyKind::Native {
+                        self.push_log(format!(
+                            "Strategy config: {}",
+                            self.strategy.native_summary()
+                        ));
+                    }
                 }
             }
             Focus::Env
