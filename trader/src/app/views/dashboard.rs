@@ -2,16 +2,19 @@ use super::super::*;
 
 impl App {
     pub(in crate::app) fn dashboard_summary_lines(&self) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = vec![
             Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Broker: {}", self.selected_broker.label())),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!("Mode: {}", self.session_kind.label())),
-            Line::from(if self.session_kind == SessionKind::Replay {
-                format!("Replay Speed: {}", self.replay_speed.label())
-            } else {
-                "Replay Speed: inactive".to_string()
-            }),
+        ];
+        if self.session_kind == SessionKind::Replay {
+            lines.push(Line::from(format!(
+                "Replay Speed: {}",
+                self.replay_speed.label()
+            )));
+        }
+        lines.extend([
             Line::from(format!(
                 "Strategy Status: {}",
                 self.strategy_runtime_summary()
@@ -59,7 +62,8 @@ impl App {
                 "Market Update Age: {}",
                 format_age_ms(self.market_update_age_ms())
             )),
-        ]
+        ]);
+        lines
     }
 
     pub(in crate::app) fn stats_lines(&self) -> Vec<Line<'static>> {

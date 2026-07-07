@@ -528,6 +528,37 @@ fn dashboard_visual_toggle_updates_state_without_sending_commands() {
 }
 
 #[test]
+fn dashboard_summary_hides_replay_speed_in_live_mode() {
+    let mut app = App::new(AppConfig::default());
+    app.session_kind = SessionKind::Live;
+
+    let lines = app
+        .dashboard_summary_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line == "Mode: Live"));
+    assert!(!lines.iter().any(|line| line.contains("Replay Speed")));
+}
+
+#[test]
+fn dashboard_summary_shows_replay_speed_in_replay_mode() {
+    let mut app = App::new(AppConfig::default());
+    app.session_kind = SessionKind::Replay;
+    app.replay_speed = ReplaySpeed::X5;
+
+    let lines = app
+        .dashboard_summary_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line == "Mode: Replay"));
+    assert!(lines.iter().any(|line| line == "Replay Speed: 5x"));
+}
+
+#[test]
 fn replay_speed_hotkeys_send_replay_only_commands() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
