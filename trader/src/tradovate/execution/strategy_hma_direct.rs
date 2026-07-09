@@ -28,26 +28,23 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
     };
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
-        let latest_fingerprint = latest_strategy_bar_fingerprint(session);
-        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
-            && session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
-        {
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
             let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-                "hma direct gate | closed-bar timing waiting for new closed bar or revised fingerprint | last_bar_ts {} | latest_fp {:?} | {}",
+                "hma direct gate | closed-bar timing waiting for new signal bar | last_bar_ts {} | {}",
                 last_strategy_ts,
-                latest_fingerprint,
                 hma_cross_market_debug(session, actual_qty)
             )));
             return Ok(());
         }
-        session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
+        session.execution_runtime.last_closed_bar_fingerprint =
+            latest_strategy_bar_fingerprint(session);
     }
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let actual_entry = selected_market_entry_price(session);
     sync_active_execution_position(session, actual_qty, actual_entry);
 
-    let bars = strategy_bars(session).to_vec();
+    let bars = signal_evaluation_bars(session).to_vec();
     if bars.is_empty() {
         bail!("latest strategy bar disappeared during HMA direct evaluation");
     }
@@ -95,6 +92,27 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             actual_qty,
             summary
         )));
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
+        && session.execution_runtime.last_dispatched_signal_bar_ts == Some(signal_bar.ts_ns)
+    {
+        session.execution_runtime.last_summary = format!(
+            "HMA direct signal on closed bar {} already dispatched; waiting for a new signal bar.",
+            signal_bar.ts_ns
+        );
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if entry_signal_consumed_while_flat(session, signal, actual_qty) {
+        session.execution_runtime.last_summary = format!(
+            "HMA direct {} entry side already dispatched while flat; waiting for the opposite entry signal before another {}.",
+            signal.label(),
+            signal.label()
+        );
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -149,6 +167,7 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
     );
     enqueue_market_order(session, broker_tx, order)?;
     session.execution_runtime.pending_target_qty = Some(target_qty);
+    mark_closed_bar_signal_dispatched(session, signal_bar.ts_ns, signal);
     let _ = event_tx.send(ServiceEvent::DebugLog(format!(
         "hma direct dispatch | {} | endpoint order/placeorder | signal {} | bar_ts {} | actual_qty {} | target_qty {} | order_action {} | order_qty {} | submit_in_flight ignored | pending_target overwritten | {}",
         active_native_slug(session),

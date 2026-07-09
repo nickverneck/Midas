@@ -82,6 +82,33 @@ pub(crate) fn pending_target_has_live_broker_path(session: &SessionState) -> boo
     selected_contract_has_live_broker_path(session)
 }
 
+fn selected_contract_position_qty(session: &SessionState) -> Option<i32> {
+    let account_id = session.selected_account_id?;
+    let contract = session.selected_contract.as_ref()?;
+    session
+        .user_store
+        .contract_position_qty(account_id, contract)
+        .map(|qty| qty.round() as i32)
+}
+
+fn flat_broker_path_should_wait(session: &SessionState) -> bool {
+    if !selected_contract_has_live_broker_path(session) {
+        return false;
+    }
+    if selected_contract_position_qty(session) != Some(0) {
+        return true;
+    }
+    if session.order_submit_in_flight || session.protection_sync_in_flight {
+        return true;
+    }
+    session
+        .order_latency_tracker
+        .as_ref()
+        .is_some_and(|tracker| {
+            tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_POSITION_SYNC_GRACE_MS
+        })
+}
+
 fn emit_pending_target_gate_debug(
     event_tx: &UnboundedSender<ServiceEvent>,
     session: &SessionState,
@@ -153,6 +180,10 @@ pub(crate) fn clear_stale_pending_target(
 }
 
 fn force_reevaluate_pending_window(session: &mut SessionState) {
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+        return;
+    }
+
     let Some(latest_strategy_ts) = latest_strategy_bar_ts(session) else {
         return;
     };
@@ -269,6 +300,37 @@ pub(crate) fn target_qty_for_signal(
                 None
             }
         }
+    }
+}
+
+pub(crate) fn entry_signal_consumed_while_flat(
+    session: &SessionState,
+    signal: StrategySignal,
+    current_qty: i32,
+) -> bool {
+    session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
+        && current_qty == 0
+        && matches!(
+            signal,
+            StrategySignal::EnterLong | StrategySignal::EnterShort
+        )
+        && session.execution_runtime.last_dispatched_entry_signal == Some(signal)
+}
+
+pub(crate) fn mark_closed_bar_signal_dispatched(
+    session: &mut SessionState,
+    signal_bar_ts: i64,
+    signal: StrategySignal,
+) {
+    if session.execution_config.native_signal_timing != NativeSignalTiming::ClosedBar {
+        return;
+    }
+    session.execution_runtime.last_dispatched_signal_bar_ts = Some(signal_bar_ts);
+    if matches!(
+        signal,
+        StrategySignal::EnterLong | StrategySignal::EnterShort
+    ) {
+        session.execution_runtime.last_dispatched_entry_signal = Some(signal);
     }
 }
 
@@ -447,7 +509,7 @@ pub(crate) fn handle_execution_account_sync(
         && session.execution_config.kind == StrategyKind::Native
         && actual_qty == 0
         && session.execution_runtime.pending_target_qty.is_none()
-        && selected_contract_has_live_broker_path(session)
+        && flat_broker_path_should_wait(session)
     {
         let next_summary =
             "Waiting for broker sync: flat position reported while an order path is still active."
@@ -603,7 +665,7 @@ pub(crate) fn maybe_run_execution_strategy(
 
     if actual_market_qty == 0
         && session.execution_runtime.pending_target_qty.is_none()
-        && selected_contract_has_live_broker_path(session)
+        && flat_broker_path_should_wait(session)
     {
         let next_summary =
             "Waiting for broker sync: flat position reported while an order path is still active."
@@ -733,27 +795,29 @@ pub(crate) fn maybe_run_execution_strategy(
     }
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
-        let latest_fingerprint = latest_strategy_bar_fingerprint(session);
-        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
-            && session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
-        {
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
             return Ok(());
         }
-        session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
+        session.execution_runtime.last_closed_bar_fingerprint =
+            latest_strategy_bar_fingerprint(session);
     }
     let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
     let (signal_bar, signal, summary) = {
-        let bars = strategy_bars(session);
+        let bars = signal_evaluation_bars(session);
         if bars.is_empty() {
             bail!("latest strategy bar disappeared during strategy evaluation");
         }
         evaluate_active_execution_strategy_since(session, bars, current_qty, previous_strategy_ts)
     };
+    let protection_bar = strategy_bars(session)
+        .last()
+        .cloned()
+        .unwrap_or_else(|| signal_bar.clone());
 
-    if let Some(window) = session_window_at(session, signal_bar.ts_ns) {
+    if let Some(window) = session_window_at(session, protection_bar.ts_ns) {
         if window.hold_entries {
             if actual_market_qty != 0 {
                 if !native_order_strategy_enabled(session) {
@@ -812,7 +876,7 @@ pub(crate) fn maybe_run_execution_strategy(
                 return Ok(());
             }
 
-            sync_execution_protection(session, broker_tx, Some(&signal_bar))?;
+            sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
             session.execution_runtime.last_summary = if window.session_open {
                 format!(
                     "Session hold active; no new entries with {:.0}m to close.",
@@ -831,13 +895,36 @@ pub(crate) fn maybe_run_execution_strategy(
     let Some(target_qty) =
         target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
     else {
-        sync_execution_protection(session, broker_tx, Some(&signal_bar))?;
+        sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
         emit_execution_state(event_tx, session);
         return Ok(());
     };
 
     if target_qty == current_qty {
-        sync_execution_protection(session, broker_tx, Some(&signal_bar))?;
+        sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
+        && session.execution_runtime.last_dispatched_signal_bar_ts == Some(signal_bar.ts_ns)
+    {
+        session.execution_runtime.last_summary = format!(
+            "Signal on closed bar {} already dispatched; waiting for a new signal bar.",
+            signal_bar.ts_ns
+        );
+        sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if entry_signal_consumed_while_flat(session, signal, current_qty) {
+        session.execution_runtime.last_summary = format!(
+            "{} entry side already dispatched while flat; waiting for the opposite entry signal before another {}.",
+            signal.label(),
+            signal.label()
+        );
+        sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -904,6 +991,7 @@ pub(crate) fn maybe_run_execution_strategy(
         }
         MarketOrderDispatchOutcome::Queued { target_qty } => {
             session.execution_runtime.pending_target_qty = target_qty;
+            mark_closed_bar_signal_dispatched(session, signal_bar.ts_ns, signal);
         }
     }
     emit_execution_state(event_tx, session);

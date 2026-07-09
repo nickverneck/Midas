@@ -224,12 +224,19 @@ pub(super) fn dispatch_native_order_strategy_target(
         });
     }
 
-    let interrupt_order_strategy_id = if current_qty != 0 {
+    let flat_stale_order_strategy_id = if current_qty == 0 {
         selected_active_order_strategy_id(session).filter(|order_strategy_id| {
             strategy_has_live_broker_path(session, strategy_key, *order_strategy_id)
         })
     } else {
         None
+    };
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session).filter(|order_strategy_id| {
+            strategy_has_live_broker_path(session, strategy_key, *order_strategy_id)
+        })
+    } else {
+        flat_stale_order_strategy_id
     };
     if current_qty != 0 && !is_reversal && interrupt_order_strategy_id.is_none() {
         return Ok(MarketOrderDispatchOutcome::NoOp {
@@ -240,6 +247,8 @@ pub(super) fn dispatch_native_order_strategy_target(
         });
     }
     let detached = if current_qty != 0 {
+        detach_strategy_protection_for_selected(session)?
+    } else if flat_stale_order_strategy_id.is_some() {
         detach_strategy_protection_for_selected(session)?
     } else {
         DetachedStrategyProtection {

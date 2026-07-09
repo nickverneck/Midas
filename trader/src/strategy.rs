@@ -440,6 +440,7 @@ pub struct StrategyState {
     pub kind: StrategyKind,
     pub native_strategy: NativeStrategyKind,
     pub native_signal_timing: NativeSignalTiming,
+    pub native_signal_delay_bars: usize,
     pub native_execution_path: NativeExecutionPath,
     pub native_reversal_mode: NativeReversalMode,
     pub blockout_enabled: bool,
@@ -459,6 +460,8 @@ pub struct ExecutionStrategyConfig {
     pub native_strategy: NativeStrategyKind,
     #[serde(default = "default_native_signal_timing")]
     pub native_signal_timing: NativeSignalTiming,
+    #[serde(default = "default_native_signal_delay_bars")]
+    pub native_signal_delay_bars: usize,
     #[serde(default = "default_native_execution_path")]
     pub native_execution_path: NativeExecutionPath,
     #[serde(default = "default_native_reversal_mode")]
@@ -483,6 +486,10 @@ fn default_native_signal_timing() -> NativeSignalTiming {
     NativeSignalTiming::ClosedBar
 }
 
+fn default_native_signal_delay_bars() -> usize {
+    0
+}
+
 fn default_native_execution_path() -> NativeExecutionPath {
     NativeExecutionPath::Guarded
 }
@@ -505,6 +512,7 @@ impl Default for ExecutionStrategyConfig {
             kind: StrategyKind::Native,
             native_strategy: NativeStrategyKind::HmaAngle,
             native_signal_timing: NativeSignalTiming::ClosedBar,
+            native_signal_delay_bars: 0,
             native_execution_path: NativeExecutionPath::Guarded,
             native_reversal_mode: NativeReversalMode::Direct,
             blockout_enabled: true,
@@ -564,6 +572,7 @@ impl StrategyState {
             kind: StrategyKind::Native,
             native_strategy: NativeStrategyKind::HmaAngle,
             native_signal_timing: NativeSignalTiming::ClosedBar,
+            native_signal_delay_bars: 0,
             native_execution_path: NativeExecutionPath::Guarded,
             native_reversal_mode: NativeReversalMode::Direct,
             blockout_enabled: true,
@@ -611,10 +620,11 @@ impl StrategyState {
     pub fn native_summary(&self) -> String {
         match self.native_strategy {
             NativeStrategyKind::HmaAngle => format!(
-                "{} | qty={} timing={} path={} reversal={} blockout={}({:.0}m) len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) len={} angle={:.1} lookback={} bars_required={} longs_only={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaAngle.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
                 self.native_execution_path.label(),
                 self.native_reversal_mode.label(),
                 self.blockout_enabled,
@@ -630,10 +640,11 @@ impl StrategyState {
                 self.native_hma.inverted,
             ),
             NativeStrategyKind::EmaCross => format!(
-                "{} | qty={} timing={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::EmaCross.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
                 self.native_execution_path.label(),
                 self.native_reversal_mode.label(),
                 self.blockout_enabled,
@@ -646,10 +657,11 @@ impl StrategyState {
                 self.native_ema.inverted,
             ),
             NativeStrategyKind::HmaCross => format!(
-                "{} | qty={} timing={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} tp={:.0} sl={:.0} trail={} inverted={}",
                 NativeStrategyKind::HmaCross.label(),
                 self.order_qty,
                 self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
                 self.native_execution_path.label(),
                 self.native_reversal_mode.label(),
                 self.blockout_enabled,
@@ -669,6 +681,7 @@ impl StrategyState {
             kind: self.kind,
             native_strategy: self.native_strategy,
             native_signal_timing: self.native_signal_timing,
+            native_signal_delay_bars: self.native_signal_delay_bars,
             native_execution_path: self.native_execution_path,
             native_reversal_mode: self.native_reversal_mode,
             blockout_enabled: self.blockout_enabled,
@@ -684,6 +697,7 @@ impl StrategyState {
         self.kind = config.kind;
         self.native_strategy = config.native_strategy;
         self.native_signal_timing = config.native_signal_timing;
+        self.native_signal_delay_bars = config.native_signal_delay_bars;
         self.native_execution_path = config.native_execution_path;
         self.native_reversal_mode = config.native_reversal_mode;
         self.blockout_enabled = config.blockout_enabled;

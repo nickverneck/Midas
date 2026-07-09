@@ -135,13 +135,16 @@ pub(crate) fn extract_account_id(entity_type: &str, value: &Value) -> Option<i64
     if entity_type.eq_ignore_ascii_case("account") {
         return json_i64(value, "id");
     }
-    json_i64(value, "accountId")
+    let account_id = json_i64(value, "accountId")
         .or_else(|| {
             value
                 .get("account")
                 .and_then(|account| account.get("id"))
                 .and_then(Value::as_i64)
         })
-        .or_else(|| value.get("account").and_then(Value::as_i64))
-        .or_else(|| json_i64(value, "id"))
+        .or_else(|| value.get("account").and_then(Value::as_i64));
+    if account_id.is_some() || entity_type.eq_ignore_ascii_case("fill") {
+        return account_id;
+    }
+    account_id.or_else(|| json_i64(value, "id"))
 }

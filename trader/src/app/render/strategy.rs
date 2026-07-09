@@ -51,6 +51,18 @@ impl App {
                 }
                 _ => {}
             },
+            Focus::NativeSignalDelayBars => {
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::NativeSignalDelayBars,
+                    &mut self.strategy.native_signal_delay_bars,
+                    key,
+                    0,
+                    1,
+                ) {
+                    self.disarm_native_strategy(cmd_tx);
+                }
+            }
             Focus::NativeExecutionPath => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_execution_path =

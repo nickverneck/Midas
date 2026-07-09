@@ -221,12 +221,26 @@ pub(crate) fn strategy_bars(session: &SessionState) -> &[Bar] {
     }
 }
 
+pub(crate) fn signal_delay_bars(session: &SessionState) -> usize {
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+        session.execution_config.native_signal_delay_bars
+    } else {
+        0
+    }
+}
+
+pub(crate) fn signal_evaluation_bars(session: &SessionState) -> &[Bar] {
+    let bars = strategy_bars(session);
+    let eligible_len = bars.len().saturating_sub(signal_delay_bars(session));
+    &bars[..eligible_len]
+}
+
 pub(crate) fn latest_strategy_bar_ts(session: &SessionState) -> Option<i64> {
-    strategy_bars(session).last().map(|bar| bar.ts_ns)
+    signal_evaluation_bars(session).last().map(|bar| bar.ts_ns)
 }
 
 pub(crate) fn latest_strategy_bar_fingerprint(session: &SessionState) -> Option<u64> {
-    strategy_bars(session).last().map(bar_fingerprint)
+    signal_evaluation_bars(session).last().map(bar_fingerprint)
 }
 
 pub(crate) fn bar_fingerprint(bar: &Bar) -> u64 {

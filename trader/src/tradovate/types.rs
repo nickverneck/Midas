@@ -100,6 +100,8 @@ struct ExecutionRuntimeState {
     armed: bool,
     last_closed_bar_ts: Option<i64>,
     last_closed_bar_fingerprint: Option<u64>,
+    last_dispatched_signal_bar_ts: Option<i64>,
+    last_dispatched_entry_signal: Option<StrategySignal>,
     pending_target_qty: Option<i32>,
     pending_reversal_entry: Option<PendingNativeReversalEntry>,
     last_summary: String,
@@ -120,6 +122,8 @@ impl ExecutionRuntimeState {
 
     fn reset_execution(&mut self) {
         self.pending_reversal_entry = None;
+        self.last_dispatched_signal_bar_ts = None;
+        self.last_dispatched_entry_signal = None;
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
         self.hma_cross_execution = HmaCrossExecutionState::default();

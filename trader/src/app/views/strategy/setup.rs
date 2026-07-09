@@ -29,6 +29,16 @@ impl App {
             ));
             lines.push(styled_line(
                 format!(
+                    "Signal Delay Bars: {}",
+                    self.strategy_numeric_value(
+                        Focus::NativeSignalDelayBars,
+                        self.strategy.native_signal_delay_bars.to_string(),
+                    )
+                ),
+                self.focus == Focus::NativeSignalDelayBars,
+            ));
+            lines.push(styled_line(
+                format!(
                     "Execution Path: {}",
                     self.strategy.native_execution_path.label()
                 ),
@@ -321,6 +331,7 @@ impl App {
         match self.strategy.kind {
             StrategyKind::Native => lines.extend([
                 Line::from("Native can run on closed bars or live bars."),
+                Line::from("Closed-bar delay waits extra completed bars before entry."),
                 Line::from("Direct reversal is fastest."),
                 Line::from("Flatten > Confirm > Enter is safer."),
                 Line::from("CloseAll > Enter flattens the contract, then submits the reverse entry without waiting for position sync."),

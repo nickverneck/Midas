@@ -36,7 +36,7 @@ fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
 
     assert_eq!(session.execution_runtime.pending_target_qty, None);
     assert!(session.order_latency_tracker.is_none());
-    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(99));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(100));
     assert!(
         session
             .execution_runtime
@@ -95,7 +95,7 @@ fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
 
     assert_eq!(session.execution_runtime.pending_target_qty, None);
     assert!(session.order_latency_tracker.is_none());
-    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(199));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(200));
     assert!(
         session
             .execution_runtime
@@ -435,7 +435,7 @@ fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_ex
         .expect("stale market-order pending target should eventually clear");
 
     assert_eq!(session.execution_runtime.pending_target_qty, None);
-    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(329));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(330));
     assert!(
         session
             .execution_runtime

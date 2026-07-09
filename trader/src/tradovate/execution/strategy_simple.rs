@@ -30,10 +30,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     };
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
-        let latest_fingerprint = latest_strategy_bar_fingerprint(session);
-        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
-            && session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
-        {
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
             let hma_debug =
                 if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
                     format!(
@@ -51,7 +48,8 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             )));
             return Ok(());
         }
-        session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
+        session.execution_runtime.last_closed_bar_fingerprint =
+            latest_strategy_bar_fingerprint(session);
     }
     let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
@@ -61,7 +59,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     sync_active_execution_position(session, actual_qty, actual_entry);
 
     let (signal_bar, signal, summary) = {
-        let bars = strategy_bars(session);
+        let bars = signal_evaluation_bars(session);
         if bars.is_empty() {
             bail!("latest strategy bar disappeared during simple strategy evaluation");
         }
@@ -95,6 +93,27 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             actual_qty,
             summary
         )));
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
+        && session.execution_runtime.last_dispatched_signal_bar_ts == Some(signal_bar.ts_ns)
+    {
+        session.execution_runtime.last_summary = format!(
+            "Simple diagnostic signal on closed bar {} already dispatched; waiting for a new signal bar.",
+            signal_bar.ts_ns
+        );
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    if entry_signal_consumed_while_flat(session, signal, actual_qty) {
+        session.execution_runtime.last_summary = format!(
+            "Simple diagnostic {} entry side already dispatched while flat; waiting for the opposite entry signal before another {}.",
+            signal.label(),
+            signal.label()
+        );
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -149,6 +168,7 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     );
     enqueue_market_order(session, broker_tx, order)?;
     session.execution_runtime.pending_target_qty = Some(target_qty);
+    mark_closed_bar_signal_dispatched(session, signal_bar.ts_ns, signal);
     let _ = event_tx.send(ServiceEvent::DebugLog(format!(
         "simple strategy dispatch | {} | endpoint order/placeorder | signal {} | bar_ts {} | actual_qty {} | target_qty {} | order_action {} | order_qty {} | submit_in_flight ignored | pending_target overwritten | {}",
         active_native_slug(session),

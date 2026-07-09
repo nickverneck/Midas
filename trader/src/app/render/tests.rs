@@ -15,6 +15,12 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn line_span_with_fg(line: &Line<'_>, content: &str, color: Color) -> bool {
+    line.spans
+        .iter()
+        .any(|span| span.content.as_ref() == content && span.style.fg == Some(color))
+}
+
 fn account(id: i64, name: &str) -> AccountInfo {
     AccountInfo {
         id,
@@ -446,17 +452,28 @@ fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
             .any(|line| { line.contains("Side PnL: Long +15.00 (1/0)  Short -10.00 (0/1)") })
     );
 
-    let event_lines = app
-        .session_stats_event_lines(8)
-        .into_iter()
+    let event_lines = app.session_stats_event_lines(8);
+    let long_event_line = event_lines
+        .iter()
+        .find(|line| line.to_string().contains("balance long"))
+        .expect("expected long balance event line");
+    let short_event_line = event_lines
+        .iter()
+        .find(|line| line.to_string().contains("balance short"))
+        .expect("expected short balance event line");
+    assert!(line_span_with_fg(long_event_line, "long", Color::Cyan));
+    assert!(line_span_with_fg(long_event_line, "1015.00", Color::Green));
+    assert!(line_span_with_fg(long_event_line, "+15.00", Color::Green));
+    assert!(line_span_with_fg(short_event_line, "short", Color::Magenta));
+    assert!(line_span_with_fg(short_event_line, "1005.00", Color::Red));
+    assert!(line_span_with_fg(short_event_line, "-10.00", Color::Red));
+
+    let event_text = event_lines
+        .iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>();
-    assert!(event_lines.iter().any(|line| line.contains("balance long")));
-    assert!(
-        event_lines
-            .iter()
-            .any(|line| line.contains("balance short"))
-    );
+    assert!(event_text.iter().any(|line| line.contains("balance long")));
+    assert!(event_text.iter().any(|line| line.contains("balance short")));
 
     let body = app.build_persisted_log_body("20260403T120000Z");
     assert!(body.contains("long_events: 1"));

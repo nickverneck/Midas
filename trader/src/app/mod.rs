@@ -99,6 +99,7 @@ enum Focus {
     OrderQty,
     NativeStrategy,
     NativeSignalTiming,
+    NativeSignalDelayBars,
     NativeExecutionPath,
     NativeReversalMode,
     NativeBlockoutEnabled,

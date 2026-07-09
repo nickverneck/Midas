@@ -46,7 +46,7 @@ fn update_latency_from_envelope(
             true
         }
         "fill" => {
-            if !tracker_matches_entity(tracker, &envelope.entity) || tracker.fill_recorded {
+            if !tracker_matches_fill_entity(tracker, &envelope.entity) || tracker.fill_recorded {
                 return false;
             }
             tracker.fill_recorded = true;
@@ -62,8 +62,20 @@ fn update_latency_from_envelope(
 }
 
 fn tracker_matches_entity(tracker: &mut OrderLatencyTracker, entity: &Value) -> bool {
-    let entity_cl_ord_id = entity.get("clOrdId").and_then(Value::as_str);
     let entity_order_id = json_i64(entity, "orderId").or_else(|| json_i64(entity, "id"));
+    tracker_matches_entity_order_id(tracker, entity, entity_order_id)
+}
+
+fn tracker_matches_fill_entity(tracker: &mut OrderLatencyTracker, entity: &Value) -> bool {
+    tracker_matches_entity_order_id(tracker, entity, json_i64(entity, "orderId"))
+}
+
+fn tracker_matches_entity_order_id(
+    tracker: &mut OrderLatencyTracker,
+    entity: &Value,
+    entity_order_id: Option<i64>,
+) -> bool {
+    let entity_cl_ord_id = entity.get("clOrdId").and_then(Value::as_str);
     let entity_order_strategy_id = json_i64(entity, "orderStrategyId");
 
     if let Some(expected_strategy_id) = tracker.order_strategy_id {
@@ -91,6 +103,27 @@ fn tracker_matches_entity(tracker: &mut OrderLatencyTracker, entity: &Value) -> 
     false
 }
 
+fn fill_matches_active_latency_tracker(session: &SessionState, fill: &Value) -> bool {
+    let Some(tracker) = session.order_latency_tracker.as_ref() else {
+        return false;
+    };
+    let entity_cl_ord_id = fill.get("clOrdId").and_then(Value::as_str);
+    let entity_order_id = json_i64(fill, "orderId");
+    let entity_order_strategy_id = json_i64(fill, "orderStrategyId");
+
+    if let Some(expected_strategy_id) = tracker.order_strategy_id {
+        if entity_order_strategy_id == Some(expected_strategy_id) {
+            return true;
+        }
+    }
+    if let Some(expected_order_id) = tracker.order_id {
+        if entity_order_id == Some(expected_order_id) {
+            return true;
+        }
+    }
+    entity_cl_ord_id.is_some_and(|value| value == tracker.cl_ord_id)
+}
+
 fn record_trade_marker(session: &mut SessionState, marker: TradeMarker) -> bool {
     if let Some(fill_id) = marker.fill_id {
         if session
@@ -111,11 +144,106 @@ fn record_trade_marker(session: &mut SessionState, marker: TradeMarker) -> bool 
     true
 }
 
+fn fill_debug_detail(session: &SessionState, marker: &TradeMarker, fill: &Value) -> String {
+    let side = match marker.side {
+        TradeMarkerSide::Buy => "Buy",
+        TradeMarkerSide::Sell => "Sell",
+    };
+    let contract = marker
+        .contract_name
+        .clone()
+        .or_else(|| {
+            marker
+                .contract_id
+                .map(|contract_id| format!("contract {contract_id}"))
+        })
+        .unwrap_or_else(|| "selected contract".to_string());
+    let mut parts = vec![format!(
+        "{side} {} {contract} @ {:.2}",
+        marker.qty, marker.price
+    )];
+
+    if let Some(fill_id) = marker.fill_id {
+        parts.push(format!("fill {fill_id}"));
+    }
+    if let Some(order_id) = json_i64(fill, "orderId") {
+        parts.push(format!("order {order_id}"));
+    }
+    if let Some(order_strategy_id) = json_i64(fill, "orderStrategyId") {
+        parts.push(format!("strategy {order_strategy_id}"));
+    }
+    if let Some(cl_ord_id) = fill.get("clOrdId").and_then(Value::as_str) {
+        parts.push(format!("clOrdId {cl_ord_id}"));
+    }
+
+    if let Some(account_id) = marker.account_id {
+        let account_label = session
+            .accounts
+            .iter()
+            .find(|account| account.id == account_id)
+            .map(|account| format!("{} ({account_id})", account.name))
+            .unwrap_or_else(|| account_id.to_string());
+        parts.push(format!("account {account_label}"));
+    }
+    if let Some(contract_id) = marker.contract_id {
+        parts.push(format!("contractId {contract_id}"));
+    }
+
+    if let Some(fee) = pick_number(
+        fill,
+        &[
+            "commission",
+            "commissions",
+            "fee",
+            "fees",
+            "totalFees",
+            "clearingFee",
+            "exchangeFee",
+        ],
+    ) {
+        parts.push(format!("fee {}", format_signed_money(fee)));
+    }
+    if let Some(pnl) = pick_number(
+        fill,
+        &[
+            "pnl",
+            "Pnl",
+            "profitLoss",
+            "profitAndLoss",
+            "realizedPnl",
+            "realizedPnL",
+            "netPnl",
+        ],
+    ) {
+        parts.push(format!("pnl {}", format_signed_money(pnl)));
+    }
+    if let Some(source) = fill.get("source").and_then(Value::as_str) {
+        parts.push(format!("source {source}"));
+    }
+    parts.push(format!("ts_ns {}", marker.ts_ns));
+
+    parts.join(" | ")
+}
+
+fn format_signed_money(value: f64) -> String {
+    if value.is_sign_negative() {
+        format!("{value:.2}")
+    } else {
+        format!("+{value:.2}")
+    }
+}
+
 fn trade_marker_from_fill(session: &SessionState, fill: &Value) -> Option<TradeMarker> {
     let fill_id = extract_entity_id(fill)?;
-    let account_id = extract_account_id("fill", fill)?;
     let order_id = json_i64(fill, "orderId");
-    let order = order_id.and_then(|order_id| session.user_store.find_order(account_id, order_id));
+    let fill_account_id = extract_account_id("fill", fill);
+    let order_match = find_order_for_fill(session, fill_account_id, order_id);
+    let account_id = fill_account_id
+        .or_else(|| order_match.map(|(account_id, _)| account_id))
+        .or_else(|| {
+            fill_matches_active_latency_tracker(session, fill).then_some(session.selected_account_id)?
+        })?;
+    let order = order_match.map(|(_, order)| order);
     let side = order
         .and_then(trade_side_from_order)
         .or_else(|| trade_side_from_fill(fill))?;
@@ -153,6 +281,24 @@ fn trade_marker_from_fill(session: &SessionState, fill: &Value) -> Option<TradeM
         qty,
         side,
     })
+}
+
+fn find_order_for_fill<'a>(
+    session: &'a SessionState,
+    account_id: Option<i64>,
+    order_id: Option<i64>,
+) -> Option<(i64, &'a Value)> {
+    let order_id = order_id?;
+    if let Some(account_id) = account_id {
+        if let Some(order) = session.user_store.find_order(account_id, order_id) {
+            return Some((account_id, order));
+        }
+    }
+    session
+        .user_store
+        .orders
+        .iter()
+        .find_map(|(account_id, orders)| orders.get(&order_id).map(|order| (*account_id, order)))
 }
 
 fn trade_side_from_order(order: &Value) -> Option<TradeMarkerSide> {

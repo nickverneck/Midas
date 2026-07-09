@@ -118,6 +118,7 @@ impl App {
         if self.strategy.kind == StrategyKind::Native {
             order.push(Focus::NativeStrategy);
             order.push(Focus::NativeSignalTiming);
+            order.push(Focus::NativeSignalDelayBars);
             order.push(Focus::NativeExecutionPath);
             order.push(Focus::NativeReversalMode);
             order.push(Focus::NativeBlockoutEnabled);
@@ -250,6 +251,7 @@ impl App {
                 | Focus::EmaTrailTriggerTicks
                 | Focus::EmaTrailOffsetTicks
                 | Focus::NativeBlockoutMinutes
+                | Focus::NativeSignalDelayBars
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
                 | Focus::InstrumentQuery

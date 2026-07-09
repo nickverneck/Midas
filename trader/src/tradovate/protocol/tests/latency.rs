@@ -211,7 +211,11 @@ fn trade_marker_from_fill_uses_order_action_for_side_and_contract() {
             user_name: None,
         },
         token_file_snapshot: None,
-        accounts: Vec::new(),
+        accounts: vec![AccountInfo {
+            id: 42,
+            name: "SIM".to_string(),
+            raw: json!({}),
+        }],
         request_tx,
         execution_config: ExecutionStrategyConfig::default(),
         execution_runtime: ExecutionRuntimeState::default(),
@@ -234,8 +238,13 @@ fn trade_marker_from_fill_uses_order_action_for_side_and_contract() {
         "id": 501,
         "accountId": 42,
         "orderId": 77,
+        "orderStrategyId": 880,
+        "clOrdId": "midas-fill-detail",
         "price": 5000.25,
         "qty": 1,
+        "commission": -0.91,
+        "realizedPnl": 5.34,
+        "source": "live",
         "timestamp": "2026-03-15T13:45:00Z"
     });
 
@@ -248,6 +257,138 @@ fn trade_marker_from_fill_uses_order_action_for_side_and_contract() {
     assert_eq!(marker.side, TradeMarkerSide::Sell);
     assert_eq!(marker.price, 5000.25);
     assert_eq!(marker.qty, 1);
+
+    let detail = fill_debug_detail(&session, &marker, &fill);
+    assert!(detail.contains("Sell 1 ESH6 @ 5000.25"), "{detail}");
+    assert!(detail.contains("fill 501"), "{detail}");
+    assert!(detail.contains("order 77"), "{detail}");
+    assert!(detail.contains("strategy 880"), "{detail}");
+    assert!(detail.contains("clOrdId midas-fill-detail"), "{detail}");
+    assert!(detail.contains("account SIM (42)"), "{detail}");
+    assert!(detail.contains("contractId 3570918"), "{detail}");
+    assert!(detail.contains("fee -0.91"), "{detail}");
+    assert!(detail.contains("pnl +5.34"), "{detail}");
+}
+
+#[test]
+fn trade_marker_from_sparse_fill_uses_tracked_order_account_without_id_fallback() {
+    let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut user_store = UserSyncStore::default();
+    user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "action": "Buy",
+                "contractId": 3570918,
+                "symbol": "ESH6"
+            }),
+        )]),
+    );
+    let session = SessionState {
+        cfg: AppConfig::default(),
+        session_kind: SessionKind::Live,
+        replay_enabled: false,
+        tokens: TokenBundle {
+            access_token: "access".to_string(),
+            md_access_token: "md".to_string(),
+            expiration_time: None,
+            user_id: None,
+            user_name: None,
+        },
+        token_file_snapshot: None,
+        accounts: Vec::new(),
+        request_tx,
+        execution_config: ExecutionStrategyConfig::default(),
+        execution_runtime: ExecutionRuntimeState::default(),
+        pending_signal_context: None,
+        order_latency_tracker: Some(OrderLatencyTracker {
+            started_at: time::Instant::now(),
+            signal_started_at: None,
+            signal_context: None,
+            cl_ord_id: "midas-sparse-fill".to_string(),
+            strategy_owned_protection: false,
+            order_id: Some(77),
+            order_strategy_id: None,
+            seen_recorded: false,
+            exec_report_recorded: false,
+            fill_recorded: false,
+        }),
+        order_submit_in_flight: false,
+        protection_sync_in_flight: false,
+        pending_protection_sync: None,
+        user_store,
+        selected_account_id: Some(42),
+        selected_contract: None,
+        bar_type: BarType::default(),
+        candle_mode: CandleMode::Standard,
+        market: MarketSnapshot::default(),
+        managed_protection: BTreeMap::new(),
+        active_order_strategy: None,
+        next_strategy_order_nonce: 1,
+    };
+    let fill = json!({
+        "id": 501,
+        "orderId": 77,
+        "price": 5000.25,
+        "qty": 1,
+        "timestamp": "2026-03-15T13:45:00Z"
+    });
+
+    let marker = trade_marker_from_fill(&session, &fill).expect("fill marker should resolve");
+
+    assert_eq!(marker.fill_id, Some(501));
+    assert_eq!(marker.account_id, Some(42));
+    assert!(fill_matches_active_latency_tracker(&session, &fill));
+}
+
+#[test]
+fn historical_fill_without_account_id_does_not_use_fill_id_as_account_id() {
+    let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let session = SessionState {
+        cfg: AppConfig::default(),
+        session_kind: SessionKind::Live,
+        replay_enabled: false,
+        tokens: TokenBundle {
+            access_token: "access".to_string(),
+            md_access_token: "md".to_string(),
+            expiration_time: None,
+            user_id: None,
+            user_name: None,
+        },
+        token_file_snapshot: None,
+        accounts: Vec::new(),
+        request_tx,
+        execution_config: ExecutionStrategyConfig::default(),
+        execution_runtime: ExecutionRuntimeState::default(),
+        pending_signal_context: None,
+        order_latency_tracker: None,
+        order_submit_in_flight: false,
+        protection_sync_in_flight: false,
+        pending_protection_sync: None,
+        user_store: UserSyncStore::default(),
+        selected_account_id: Some(42),
+        selected_contract: None,
+        bar_type: BarType::default(),
+        candle_mode: CandleMode::Standard,
+        market: MarketSnapshot::default(),
+        managed_protection: BTreeMap::new(),
+        active_order_strategy: None,
+        next_strategy_order_nonce: 1,
+    };
+    let fill = json!({
+        "id": 501,
+        "orderId": 77,
+        "price": 5000.25,
+        "qty": 1,
+        "timestamp": "2026-03-15T13:45:00Z"
+    });
+
+    assert_eq!(extract_account_id("fill", &fill), None);
+    assert!(!fill_matches_active_latency_tracker(&session, &fill));
+    assert!(trade_marker_from_fill(&session, &fill).is_none());
 }
 
 #[test]

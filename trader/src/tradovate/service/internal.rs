@@ -82,7 +82,17 @@ fn handle_user_entities(
                 continue;
             }
             if let Some(marker) = trade_marker_from_fill(session, &envelope.entity) {
-                trade_markers_changed |= record_trade_marker(session, marker);
+                let emit_fill_detail =
+                    fill_matches_active_latency_tracker(session, &envelope.entity);
+                let fill_detail =
+                    emit_fill_detail.then(|| fill_debug_detail(session, &marker, &envelope.entity));
+                if record_trade_marker(session, marker) {
+                    trade_markers_changed = true;
+                    if let Some(detail) = fill_detail {
+                        let _ = event_tx
+                            .send(ServiceEvent::DebugLog(format!("fill detail | {detail}")));
+                    }
+                }
             }
         }
         if trade_markers_changed {

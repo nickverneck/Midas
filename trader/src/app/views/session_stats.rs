@@ -176,16 +176,32 @@ impl App {
             .rev()
             .take(limit)
             .map(|event| {
-                Line::from(format!(
-                    "{} {} {} {:.2} -> {:.2} ({})",
-                    format_session_stats_timestamp(event.recorded_at_utc, false),
-                    event.source.label(),
-                    event.side.label(),
-                    event.previous_value,
-                    event.current_value,
-                    format_signed_money(Some(event.delta)),
-                ))
+                let delta_style = pnl_style(Some(event.delta));
+                Line::from(vec![
+                    Span::raw(format!(
+                        "{} {} ",
+                        format_session_stats_timestamp(event.recorded_at_utc, false),
+                        event.source.label(),
+                    )),
+                    Span::styled(
+                        event.side.label().to_string(),
+                        session_trade_side_style(event.side),
+                    ),
+                    Span::raw(format!(" {:.2} -> ", event.previous_value)),
+                    Span::styled(format!("{:.2}", event.current_value), delta_style),
+                    Span::raw(" ("),
+                    Span::styled(format_signed_money(Some(event.delta)), delta_style),
+                    Span::raw(")"),
+                ])
             })
             .collect()
+    }
+}
+
+fn session_trade_side_style(side: SessionTradeSide) -> Style {
+    match side {
+        SessionTradeSide::Long => Style::default().fg(Color::Cyan),
+        SessionTradeSide::Short => Style::default().fg(Color::Magenta),
+        SessionTradeSide::Flat | SessionTradeSide::Unknown => Style::default(),
     }
 }
