@@ -104,14 +104,6 @@ fn extract_response_entities(payload: &Value) -> Vec<EntityEnvelope> {
     out
 }
 
-pub(crate) fn known_order_id(value: &Value, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|key| json_i64(value, key))
-}
-
-pub(crate) fn first_known_order_id(value: &Value) -> Option<i64> {
-    known_order_id(value, &["orderId", "id", "otherId", "stopOrderId"])
-}
-
 pub(crate) fn order_is_active(order: &Value) -> bool {
     let Some(status) = order
         .get("ordStatus")

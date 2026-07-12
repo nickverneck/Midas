@@ -262,7 +262,7 @@ pub(crate) async fn submit_native_protection_via_gateway(
     request_tx: &UnboundedSender<UserSocketCommand>,
     sync: PendingProtectionSync,
 ) -> Result<ProtectionSyncAck, ProtectionSyncFailure> {
-    let mut next_state = sync.next_state;
+    let next_state = sync.next_state;
     let failure_message = |endpoint: &'static str, err: anyhow::Error| ProtectionSyncFailure {
         endpoint,
         message: format!(
@@ -280,59 +280,6 @@ pub(crate) async fn submit_native_protection_via_gateway(
                 endpoint: "order/cancelorder",
                 key: sync.key,
                 message: if cleared { sync.message } else { None },
-                next_state,
-            })
-        }
-        ProtectionSyncOperation::ModifyStop { payload } => {
-            if let Err(err) = request_order_json(request_tx, "order/modifyorder", &payload).await {
-                return Err(failure_message("order/modifyorder", err));
-            }
-            Ok(ProtectionSyncAck {
-                endpoint: "order/modifyorder",
-                key: sync.key,
-                message: sync.message,
-                next_state,
-            })
-        }
-        ProtectionSyncOperation::Replace {
-            cancel_order_ids,
-            request,
-        } => {
-            let _ = match cancel_orders_by_id(request_tx, &cancel_order_ids).await {
-                Ok(cancelled) => cancelled,
-                Err(err) => return Err(failure_message("order/cancelorder", err)),
-            };
-            let (endpoint, payload, place_kind) = match &request {
-                ProtectionPlaceRequest::TakeProfit { payload } => {
-                    ("order/placeorder", payload, "tp")
-                }
-                ProtectionPlaceRequest::StopLoss { payload } => ("order/placeorder", payload, "sl"),
-                ProtectionPlaceRequest::Oco { payload } => ("order/placeOCO", payload, "oco"),
-            };
-            let parsed = match request_order_json(request_tx, endpoint, payload).await {
-                Ok(parsed) => parsed,
-                Err(err) => return Err(failure_message(endpoint, err)),
-            };
-
-            if let Some(state) = next_state.as_mut() {
-                match place_kind {
-                    "tp" => {
-                        state.take_profit_order_id = first_known_order_id(&parsed);
-                    }
-                    "sl" => {
-                        state.stop_order_id = first_known_order_id(&parsed);
-                    }
-                    _ => {
-                        state.take_profit_order_id = first_known_order_id(&parsed);
-                        state.stop_order_id = known_order_id(&parsed, &["otherId", "stopOrderId"]);
-                    }
-                }
-            }
-
-            Ok(ProtectionSyncAck {
-                endpoint,
-                key: sync.key,
-                message: sync.message,
                 next_state,
             })
         }

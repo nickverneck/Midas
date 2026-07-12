@@ -388,12 +388,9 @@ impl App {
         ));
     }
 
-    fn active_native_requires_guarded_path(&self) -> bool {
+    fn active_native_uses_broker_owned_protection(&self) -> bool {
         if self.strategy.kind != StrategyKind::Native {
             return false;
-        }
-        if self.strategy.native_reversal_mode != NativeReversalMode::Direct {
-            return true;
         }
         match self.strategy.native_strategy {
             NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
@@ -402,6 +399,23 @@ impl App {
                 self.strategy.native_hma_cross.uses_native_protection()
             }
         }
+    }
+
+    fn active_native_requires_guarded_path(&self) -> bool {
+        self.strategy.kind == StrategyKind::Native
+            && (self.strategy.native_reversal_mode != NativeReversalMode::Direct
+                || self.active_native_uses_broker_owned_protection())
+    }
+
+    fn normalize_native_reversal_mode_before_arm(&mut self) -> Option<&'static str> {
+        if !self.active_native_uses_broker_owned_protection()
+            || self.strategy.native_reversal_mode != NativeReversalMode::Direct
+        {
+            return None;
+        }
+        let previous = self.strategy.native_reversal_mode.label();
+        self.strategy.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+        Some(previous)
     }
 
     fn normalize_native_execution_path_before_arm(&mut self) -> Option<&'static str> {
@@ -428,6 +442,11 @@ impl App {
     fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
+        }
+        if let Some(previous_mode) = self.normalize_native_reversal_mode_before_arm() {
+            self.push_log(format!(
+                "Reversal Mode switched to CloseAll > Enter before arming; {previous_mode} cannot attach broker-owned TP/SL/trailing protection."
+            ));
         }
         if let Some(previous_path) = self.normalize_native_execution_path_before_arm() {
             self.push_log(format!(

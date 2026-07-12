@@ -185,22 +185,7 @@ pub(crate) struct PendingProtectionSync {
 }
 
 pub(crate) enum ProtectionSyncOperation {
-    Clear {
-        cancel_order_ids: Vec<i64>,
-    },
-    ModifyStop {
-        payload: Value,
-    },
-    Replace {
-        cancel_order_ids: Vec<i64>,
-        request: ProtectionPlaceRequest,
-    },
-}
-
-pub(crate) enum ProtectionPlaceRequest {
-    TakeProfit { payload: Value },
-    StopLoss { payload: Value },
-    Oco { payload: Value },
+    Clear { cancel_order_ids: Vec<i64> },
 }
 
 pub(crate) struct ProtectionSyncAck {

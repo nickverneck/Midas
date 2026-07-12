@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) use serde_json::{Value, json};
+pub(super) use serde_json::json;
 pub(super) use std::collections::BTreeMap;
 
 mod account_sync;

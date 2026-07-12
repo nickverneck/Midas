@@ -153,8 +153,6 @@ struct ManagedProtectionOrders {
     signed_qty: i32,
     take_profit_price: Option<f64>,
     stop_price: Option<f64>,
-    last_requested_take_profit_price: Option<f64>,
-    last_requested_stop_price: Option<f64>,
     take_profit_cl_ord_id: Option<String>,
     stop_cl_ord_id: Option<String>,
     take_profit_order_id: Option<i64>,

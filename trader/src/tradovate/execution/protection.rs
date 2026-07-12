@@ -110,8 +110,6 @@ pub(crate) fn hydrate_selected_order_strategy_protection(session: &mut SessionSt
             signed_qty,
             take_profit_price,
             stop_price,
-            last_requested_take_profit_price: take_profit_price,
-            last_requested_stop_price: stop_price,
             take_profit_cl_ord_id,
             stop_cl_ord_id,
             take_profit_order_id,
@@ -279,144 +277,32 @@ pub(crate) fn sync_active_execution_position(
     }
 }
 
-pub(crate) fn take_profit_price(
-    session: &SessionState,
-    entry_price: f64,
-    signed_qty: i32,
-) -> Option<f64> {
-    let side = side_from_signed_qty(signed_qty)?;
-    let offset = match session.execution_config.native_strategy {
-        NativeStrategyKind::HmaAngle => session
-            .execution_config
-            .native_hma
-            .take_profit_offset(session.market.tick_size)?,
-        NativeStrategyKind::EmaCross => session
-            .execution_config
-            .native_ema
-            .take_profit_offset(session.market.tick_size)?,
-        NativeStrategyKind::HmaCross => session
-            .execution_config
-            .native_hma_cross
-            .take_profit_offset(session.market.tick_size)?,
-    };
-
-    Some(match side {
-        crate::strategies::PositionSide::Long => entry_price + offset,
-        crate::strategies::PositionSide::Short => entry_price - offset,
-    })
-}
-
-pub(crate) fn combined_stop_price(
-    session: &mut SessionState,
-    trailing_bar: Option<&Bar>,
-) -> Option<f64> {
-    match session.execution_config.native_strategy {
-        NativeStrategyKind::HmaAngle => {
-            if let Some(bar) = trailing_bar {
-                let _ = session
-                    .execution_config
-                    .native_hma
-                    .desired_trailing_stop_price(
-                        &mut session.execution_runtime.hma_execution,
-                        bar,
-                        session.market.tick_size,
-                    );
-            }
-            session
-                .execution_config
-                .native_hma
-                .current_effective_stop_price(
-                    &session.execution_runtime.hma_execution,
-                    session.market.tick_size,
-                )
-        }
-        NativeStrategyKind::EmaCross => {
-            if let Some(bar) = trailing_bar {
-                let _ = session
-                    .execution_config
-                    .native_ema
-                    .desired_trailing_stop_price(
-                        &mut session.execution_runtime.ema_execution,
-                        bar,
-                        session.market.tick_size,
-                    );
-            }
-            session
-                .execution_config
-                .native_ema
-                .current_effective_stop_price(
-                    &session.execution_runtime.ema_execution,
-                    session.market.tick_size,
-                )
-        }
-        NativeStrategyKind::HmaCross => {
-            if let Some(bar) = trailing_bar {
-                let _ = session
-                    .execution_config
-                    .native_hma_cross
-                    .desired_trailing_stop_price(
-                        &mut session.execution_runtime.hma_cross_execution,
-                        bar,
-                        session.market.tick_size,
-                    );
-            }
-            session
-                .execution_config
-                .native_hma_cross
-                .current_effective_stop_price(
-                    &session.execution_runtime.hma_cross_execution,
-                    session.market.tick_size,
-                )
-        }
-    }
-}
-
 pub(crate) fn sync_execution_protection(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
-    trailing_bar: Option<&Bar>,
+    _trailing_bar: Option<&Bar>,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
-        return Ok(());
-    }
-    if !active_native_uses_protection(session) {
-        return Ok(());
-    }
-    if session.execution_runtime.pending_target_qty.is_some() {
-        return Ok(());
-    }
-    if should_wait_for_strategy_owned_protection(session) {
         return Ok(());
     }
 
     let signed_qty = selected_market_position_qty(session);
     let entry_price = selected_market_entry_price(session);
     sync_active_execution_position(session, signed_qty, entry_price);
-    let reason = if signed_qty == 0 {
-        format!("{} flat", active_native_slug(session))
-    } else if trailing_bar.is_some() {
-        format!("{} bar sync", active_native_slug(session))
-    } else {
-        format!("{} position sync", active_native_slug(session))
-    };
 
-    let (take_profit_price, stop_price) = if signed_qty == 0 {
-        (None, None)
-    } else if let Some(entry_price) = entry_price {
-        (
-            take_profit_price(session, entry_price, signed_qty),
-            combined_stop_price(session, trailing_bar),
-        )
-    } else {
-        return Ok(());
-    };
+    if signed_qty == 0 {
+        return sync_native_protection(
+            session,
+            broker_tx,
+            0,
+            None,
+            None,
+            &format!("{} flat", active_native_slug(session)),
+        );
+    }
 
-    sync_native_protection(
-        session,
-        broker_tx,
-        signed_qty,
-        take_profit_price,
-        stop_price,
-        &reason,
-    )
+    // Tradovate native automation owns TP, SL, and auto-trail through
+    // orderStrategy/startorderstrategy. Do not synthesize or modify a separate
+    // app-managed OCO/stop after the entry fills.
+    Ok(())
 }

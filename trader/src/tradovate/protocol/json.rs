@@ -38,14 +38,6 @@ pub(crate) fn with_cl_ord_id(mut payload: Value, cl_ord_id: Option<&str>) -> Val
     payload
 }
 
-pub(crate) fn prices_match(lhs: Option<f64>, rhs: Option<f64>) -> bool {
-    match (lhs, rhs) {
-        (Some(a), Some(b)) => (a - b).abs() <= 1e-9,
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 pub(crate) fn empty_as_none(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

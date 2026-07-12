@@ -539,13 +539,14 @@ fn sync_native_protection_command(
 }
 
 fn set_execution_strategy_config(
-    config: ExecutionStrategyConfig,
+    mut config: ExecutionStrategyConfig,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
 ) -> Result<()> {
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };
+    normalize_broker_owned_protection_config(&mut config);
     if session.execution_config != config {
         session.execution_config = config;
         if session.execution_runtime.armed {
@@ -559,6 +560,24 @@ fn set_execution_strategy_config(
         emit_execution_state(event_tx, session);
     }
     Ok(())
+}
+
+fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig) {
+    if config.kind != StrategyKind::Native {
+        return;
+    }
+
+    let uses_protection = match config.native_strategy {
+        NativeStrategyKind::HmaAngle => config.native_hma.uses_native_protection(),
+        NativeStrategyKind::EmaCross => config.native_ema.uses_native_protection(),
+        NativeStrategyKind::HmaCross => config.native_hma_cross.uses_native_protection(),
+    };
+    if uses_protection && config.native_reversal_mode == NativeReversalMode::Direct {
+        config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    }
+    if uses_protection || config.native_reversal_mode != NativeReversalMode::Direct {
+        config.native_execution_path = NativeExecutionPath::Guarded;
+    }
 }
 
 fn arm_execution_strategy_command(

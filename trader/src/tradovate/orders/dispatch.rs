@@ -126,9 +126,13 @@ pub(super) fn dispatch_native_order_strategy_target(
 
     let is_reversal =
         current_qty != 0 && target_qty != 0 && current_qty.signum() != target_qty.signum();
-    if is_reversal
-        && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenConfirmEnter
-    {
+    // Protected Tradovate reversals must open the new side through
+    // startorderstrategy so TP, SL, and auto-trail remain broker-owned.
+    let reversal_mode = match session.execution_config.native_reversal_mode {
+        NativeReversalMode::Direct => NativeReversalMode::CloseAllEnter,
+        mode => mode,
+    };
+    if is_reversal && reversal_mode == NativeReversalMode::FlattenConfirmEnter {
         let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
         if interrupt_order_strategy_id.is_none() {
             return Ok(MarketOrderDispatchOutcome::NoOp {
@@ -169,10 +173,8 @@ pub(super) fn dispatch_native_order_strategy_target(
         });
     }
 
-    if is_reversal
-        && session.execution_config.native_reversal_mode == NativeReversalMode::CloseAllEnter
-    {
-        let _detached = detach_strategy_protection_for_selected(session)?;
+    if is_reversal && reversal_mode == NativeReversalMode::CloseAllEnter {
+        let detached = detach_strategy_protection_for_selected(session)?;
         let liquidation = build_liquidation_request(
             session,
             &account,
@@ -180,7 +182,7 @@ pub(super) fn dispatch_native_order_strategy_target(
             true,
             Some(target_qty),
             None,
-            Vec::new(),
+            detached.cancel_order_ids,
         );
         let order_action = if target_qty > 0 { "Buy" } else { "Sell" };
         let strategy = build_order_strategy_request(
@@ -195,30 +197,6 @@ pub(super) fn dispatch_native_order_strategy_target(
             Vec::new(),
         )?;
         enqueue_liquidation_then_order_strategy(session, broker_tx, liquidation, strategy)?;
-        return Ok(MarketOrderDispatchOutcome::Queued {
-            target_qty: Some(target_qty),
-        });
-    }
-
-    if is_reversal && session.execution_config.native_reversal_mode == NativeReversalMode::Direct {
-        let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
-        let detached = detach_strategy_protection_for_selected(session)?;
-        let order_action = if delta > 0 { "Buy" } else { "Sell" };
-        let order_qty = delta.unsigned_abs() as i32;
-        let order = build_market_order_request(
-            session,
-            &account,
-            &contract,
-            order_action,
-            order_qty,
-            "Strategy",
-            true,
-            Some(reason),
-            Some(target_qty),
-            interrupt_order_strategy_id,
-            detached.cancel_order_ids,
-        );
-        enqueue_market_order(session, broker_tx, order)?;
         return Ok(MarketOrderDispatchOutcome::Queued {
             target_qty: Some(target_qty),
         });

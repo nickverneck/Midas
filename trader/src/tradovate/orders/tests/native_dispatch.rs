@@ -176,7 +176,7 @@ fn native_strategy_auto_trail_without_fixed_stop_sends_required_initial_stop_leg
 }
 
 #[test]
-fn automated_reversal_uses_market_order_path_for_direct_mode() {
+fn protected_direct_reversal_uses_closeall_then_broker_strategy() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -198,27 +198,34 @@ fn automated_reversal_uses_market_order_path_for_direct_mode() {
 
     let outcome =
         dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
-            .expect("non-flat direct reversal should queue a market order");
+            .expect("protected direct reversal should queue close-all then order strategy");
 
     match outcome {
         MarketOrderDispatchOutcome::Queued {
             target_qty: Some(-1),
         } => match broker_rx.try_recv().expect("broker command queued") {
-            BrokerCommand::MarketOrder { order, .. } => {
-                assert_eq!(order.interrupt_order_strategy_id, None);
-                assert!(order.cancel_order_ids.is_empty());
-                assert_eq!(order.target_qty, Some(-1));
-                assert_eq!(order.order_qty, 2);
-                assert_eq!(order.order_action, "Sell");
+            BrokerCommand::LiquidateThenOrderStrategy {
+                liquidation,
+                strategy,
+                ..
+            } => {
+                assert_eq!(liquidation.target_qty, Some(-1));
+                assert!(liquidation.cancel_order_ids.is_empty());
+                assert_eq!(strategy.target_qty, -1);
+                assert_eq!(strategy.entry_order_qty, 1);
+                assert_eq!(
+                    strategy.payload.get("action").and_then(Value::as_str),
+                    Some("Sell")
+                );
             }
-            _ => panic!("expected market order command"),
+            _ => panic!("expected close-all plus order strategy command"),
         },
         _ => panic!("expected queued direct reversal"),
     }
 }
 
 #[test]
-fn automated_reversal_interrupts_live_order_strategy_path() {
+fn protected_reversal_clears_live_strategy_orders_before_broker_strategy_entry() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -268,7 +275,7 @@ fn automated_reversal_interrupts_live_order_strategy_path() {
 
     let outcome =
         dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
-            .expect("live reversal should interrupt the previous strategy path");
+            .expect("live reversal should clear old orders before broker strategy entry");
 
     assert!(matches!(
         outcome,
@@ -278,19 +285,23 @@ fn automated_reversal_interrupts_live_order_strategy_path() {
     ));
 
     match broker_rx.try_recv().expect("broker command queued") {
-        BrokerCommand::MarketOrder { order, .. } => {
-            assert_eq!(order.interrupt_order_strategy_id, Some(77));
-            assert_eq!(order.cancel_order_ids, vec![1001]);
-            assert_eq!(order.target_qty, Some(-1));
-            assert_eq!(order.order_qty, 2);
-            assert_eq!(order.order_action, "Sell");
+        BrokerCommand::LiquidateThenOrderStrategy {
+            liquidation,
+            strategy,
+            ..
+        } => {
+            assert_eq!(liquidation.interrupt_order_strategy_id, None);
+            assert_eq!(liquidation.cancel_order_ids, vec![1001]);
+            assert_eq!(liquidation.target_qty, Some(-1));
+            assert_eq!(strategy.target_qty, -1);
+            assert_eq!(strategy.entry_order_qty, 1);
         }
-        _ => panic!("expected market order command"),
+        _ => panic!("expected close-all plus order strategy command"),
     }
 }
 
 #[test]
-fn automated_reversal_cancels_orphan_native_protection_when_strategy_path_missing() {
+fn protected_reversal_cancels_orphan_app_protection_before_broker_strategy_entry() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -335,14 +346,18 @@ fn automated_reversal_cancels_orphan_native_protection_when_strategy_path_missin
     ));
 
     match broker_rx.try_recv().expect("broker command queued") {
-        BrokerCommand::MarketOrder { order, .. } => {
-            assert_eq!(order.interrupt_order_strategy_id, None);
-            assert_eq!(order.cancel_order_ids, vec![1001]);
-            assert_eq!(order.target_qty, Some(-1));
-            assert_eq!(order.order_qty, 2);
-            assert_eq!(order.order_action, "Sell");
+        BrokerCommand::LiquidateThenOrderStrategy {
+            liquidation,
+            strategy,
+            ..
+        } => {
+            assert_eq!(liquidation.interrupt_order_strategy_id, None);
+            assert_eq!(liquidation.cancel_order_ids, vec![1001]);
+            assert_eq!(liquidation.target_qty, Some(-1));
+            assert_eq!(strategy.target_qty, -1);
+            assert_eq!(strategy.entry_order_qty, 1);
         }
-        _ => panic!("expected market order command"),
+        _ => panic!("expected close-all plus order strategy command"),
     }
 }
 
@@ -500,7 +515,7 @@ fn automated_reversal_closeall_mode_queues_liquidation_then_entry_strategy() {
         } => {
             assert_eq!(liquidation.target_qty, Some(-1));
             assert_eq!(liquidation.interrupt_order_strategy_id, None);
-            assert!(liquidation.cancel_order_ids.is_empty());
+            assert_eq!(liquidation.cancel_order_ids, vec![1001]);
             assert_eq!(
                 liquidation
                     .payload

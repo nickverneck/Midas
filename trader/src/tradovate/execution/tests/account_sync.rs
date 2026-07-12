@@ -183,8 +183,6 @@ fn broker_sync_wait_logs_once_with_observability_context() {
             signed_qty: -2,
             take_profit_price: Some(4998.0),
             stop_price: Some(5002.0),
-            last_requested_take_profit_price: Some(4998.0),
-            last_requested_stop_price: Some(5002.0),
             take_profit_cl_ord_id: Some("midas-tp".to_string()),
             stop_cl_ord_id: Some("midas-sl".to_string()),
             take_profit_order_id: Some(1002),

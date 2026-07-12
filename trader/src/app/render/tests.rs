@@ -705,6 +705,39 @@ fn strategy_continue_forces_guarded_when_settings_need_order_strategy_path() {
 }
 
 #[test]
+fn strategy_continue_forces_closeall_when_protection_needs_broker_owned_reversal() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.focus = Focus::StrategyContinue;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(config.native_execution_path, NativeExecutionPath::Guarded);
+            assert_eq!(
+                config.native_reversal_mode,
+                NativeReversalMode::CloseAllEnter
+            );
+            assert_eq!(config.native_ema.take_profit_ticks, 8.0);
+        }
+        _ => panic!("expected execution-config command"),
+    }
+    match cmd_rx.try_recv().expect("expected arm command") {
+        ServiceCommand::ArmExecutionStrategy => {}
+        _ => panic!("expected arm-execution command"),
+    }
+}
+
+#[test]
 fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();

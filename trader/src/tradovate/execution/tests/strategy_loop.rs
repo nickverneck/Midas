@@ -982,8 +982,6 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             signed_qty: -1,
             take_profit_price: Some(4997.5),
             stop_price: Some(5002.5),
-            last_requested_take_profit_price: Some(4997.5),
-            last_requested_stop_price: Some(5002.5),
             take_profit_cl_ord_id: Some("midas-short-tp".to_string()),
             stop_cl_ord_id: Some("midas-short-sl".to_string()),
             take_profit_order_id: Some(1001),

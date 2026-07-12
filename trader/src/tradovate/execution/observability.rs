@@ -477,20 +477,3 @@ pub(crate) fn active_native_slug(session: &SessionState) -> &'static str {
 pub(crate) fn active_native_label(session: &SessionState) -> &'static str {
     session.execution_config.native_strategy.label()
 }
-
-pub(crate) fn active_native_uses_protection(session: &SessionState) -> bool {
-    match session.execution_config.native_strategy {
-        NativeStrategyKind::HmaAngle => {
-            session.execution_config.native_hma.take_profit_ticks > 0.0
-                || session.execution_config.native_hma.stop_loss_ticks > 0.0
-        }
-        NativeStrategyKind::EmaCross => {
-            session.execution_config.native_ema.take_profit_ticks > 0.0
-                || session.execution_config.native_ema.stop_loss_ticks > 0.0
-        }
-        NativeStrategyKind::HmaCross => {
-            session.execution_config.native_hma_cross.take_profit_ticks > 0.0
-                || session.execution_config.native_hma_cross.stop_loss_ticks > 0.0
-        }
-    }
-}

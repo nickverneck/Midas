@@ -26,8 +26,6 @@ fn execution_state_snapshot_includes_selected_protection_prices() {
             signed_qty: 1,
             take_profit_price: Some(6662.5),
             stop_price: Some(6659.0),
-            last_requested_take_profit_price: Some(6662.5),
-            last_requested_stop_price: Some(6659.0),
             take_profit_cl_ord_id: None,
             stop_cl_ord_id: None,
             take_profit_order_id: None,
