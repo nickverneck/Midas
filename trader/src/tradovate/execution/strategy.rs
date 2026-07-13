@@ -165,6 +165,7 @@ pub(crate) fn clear_stale_pending_target(
 ) {
     let observability = execution_observability_context(session);
     session.execution_runtime.pending_target_qty = None;
+    session.execution_runtime.pending_closeall_reversal_entry = None;
     session.pending_signal_context = None;
     session.order_latency_tracker = None;
     session.execution_runtime.last_summary = format!(
@@ -177,6 +178,103 @@ pub(crate) fn clear_stale_pending_target(
     let _ = event_tx.send(ServiceEvent::DebugLog(format!(
         "pending target cleared | target {pending} | actual {actual_qty} | broker has no active order path | {observability}"
     )));
+}
+
+fn recover_closeall_reversal_if_flat(
+    session: &mut SessionState,
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    event_tx: &UnboundedSender<ServiceEvent>,
+    pending: i32,
+    actual_qty: i32,
+) -> Result<bool> {
+    let Some(reversal) = session
+        .execution_runtime
+        .pending_closeall_reversal_entry
+        .clone()
+    else {
+        return Ok(false);
+    };
+    if pending != reversal.target_qty || actual_qty != 0 {
+        return Ok(false);
+    }
+
+    session.execution_runtime.pending_target_qty = None;
+    session.execution_runtime.pending_closeall_reversal_entry = None;
+    session.pending_signal_context = None;
+    session.order_latency_tracker = None;
+
+    let recovery_reason = format!(
+        "{} | closeall reversal recovered from flat after broker path cleared",
+        reversal.reason
+    );
+    let dispatch_outcome = dispatch_target_position_order(
+        session,
+        broker_tx,
+        reversal.target_qty,
+        true,
+        &recovery_reason,
+    )?;
+    match dispatch_outcome {
+        MarketOrderDispatchOutcome::NoOp { message } => {
+            session.execution_runtime.last_summary = message.clone();
+            let _ = event_tx.send(ServiceEvent::Status(message));
+        }
+        MarketOrderDispatchOutcome::Queued { target_qty } => {
+            session.execution_runtime.pending_target_qty = target_qty;
+            let next_summary = format!(
+                "CloseAll reversal recovered flat; submitting broker-owned entry to {}.",
+                reversal.target_qty
+            );
+            session.execution_runtime.last_summary = next_summary.clone();
+            emit_execution_transition_debug(
+                event_tx,
+                session,
+                &next_summary,
+                "execution closeall reversal recovery",
+            );
+        }
+    }
+    emit_execution_state(event_tx, session);
+    Ok(true)
+}
+
+fn closeall_reversal_entry_resolved_flat(
+    session: &SessionState,
+    pending: i32,
+    actual_qty: i32,
+) -> bool {
+    let Some(reversal) = session
+        .execution_runtime
+        .pending_closeall_reversal_entry
+        .as_ref()
+    else {
+        return false;
+    };
+    if pending != reversal.target_qty || actual_qty != 0 {
+        return false;
+    }
+
+    let Some(tracker) = session.order_latency_tracker.as_ref() else {
+        return false;
+    };
+    if !tracker.fill_recorded {
+        return false;
+    }
+
+    let Some(key) = selected_strategy_key(session).ok() else {
+        return false;
+    };
+    if let Some(order_strategy_id) = tracker.order_strategy_id {
+        if strategy_has_live_broker_path(session, key, order_strategy_id) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    !active_order_strategy_matches_selected(session).is_some_and(|tracked| {
+        strategy_has_live_broker_path(session, key, tracked.order_strategy_id)
+    })
 }
 
 fn force_reevaluate_pending_window(session: &mut SessionState) {
@@ -283,6 +381,88 @@ pub(crate) fn evaluate_active_execution_strategy_since(
     latest.expect("strategy bars must not be empty")
 }
 
+pub(crate) fn evaluate_active_execution_strategy_since_mut(
+    session: &mut SessionState,
+    bars: &[Bar],
+    current_qty: i32,
+    after_ts: Option<i64>,
+) -> (Bar, StrategySignal, String) {
+    if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
+        let signal_bar = bars
+            .last()
+            .expect("strategy bars must not be empty")
+            .clone();
+        let current_side = side_from_signed_qty(current_qty);
+        let (signal, summary) = match session.execution_config.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                let evaluation = session
+                    .execution_config
+                    .native_hma
+                    .evaluate(bars, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::EmaCross => {
+                let evaluation = session
+                    .execution_config
+                    .native_ema
+                    .evaluate(bars, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::HmaCross => {
+                let config = session.execution_config.native_hma_cross.clone();
+                let evaluation = config.evaluate_current_cross(
+                    &mut session.execution_runtime.hma_cross_execution,
+                    bars,
+                    current_side,
+                );
+                (evaluation.signal, evaluation.summary())
+            }
+        };
+        return (signal_bar, signal, summary);
+    }
+
+    let current_side = side_from_signed_qty(current_qty);
+    let start_idx = after_ts
+        .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
+        .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let mut latest = None;
+    for idx in start_idx..bars.len() {
+        let window = &bars[..=idx];
+        let signal_bar = bars[idx].clone();
+        let (signal, summary) = match session.execution_config.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                let evaluation = session
+                    .execution_config
+                    .native_hma
+                    .evaluate(window, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::EmaCross => {
+                let evaluation = session
+                    .execution_config
+                    .native_ema
+                    .evaluate(window, current_side);
+                (evaluation.signal, evaluation.summary())
+            }
+            NativeStrategyKind::HmaCross => {
+                let config = session.execution_config.native_hma_cross.clone();
+                let evaluation = config.evaluate_current_cross(
+                    &mut session.execution_runtime.hma_cross_execution,
+                    window,
+                    current_side,
+                );
+                (evaluation.signal, evaluation.summary())
+            }
+        };
+        if signal != StrategySignal::Hold {
+            latest = Some((signal_bar, signal, summary));
+        } else if latest.is_none() {
+            latest = Some((signal_bar, signal, summary));
+        }
+    }
+    latest.expect("strategy bars must not be empty")
+}
+
 pub(crate) fn target_qty_for_signal(
     signal: StrategySignal,
     current_qty: i32,
@@ -332,6 +512,67 @@ pub(crate) fn mark_closed_bar_signal_dispatched(
     ) {
         session.execution_runtime.last_dispatched_entry_signal = Some(signal);
     }
+}
+
+fn closed_bar_signal_already_dispatched(session: &SessionState, signal_bar_ts: i64) -> bool {
+    session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
+        && session.execution_runtime.last_dispatched_signal_bar_ts == Some(signal_bar_ts)
+}
+
+fn seed_hma_cross_observed_side(session: &mut SessionState) {
+    if session.execution_config.kind != StrategyKind::Native
+        || session.execution_config.native_strategy != NativeStrategyKind::HmaCross
+    {
+        return;
+    }
+
+    let bars = signal_evaluation_bars(session).to_vec();
+    if bars.is_empty() {
+        return;
+    }
+    let current_side = side_from_signed_qty(effective_market_position_qty(session));
+    let config = session.execution_config.native_hma_cross.clone();
+    let _ = config.evaluate_current_cross(
+        &mut session.execution_runtime.hma_cross_execution,
+        &bars,
+        current_side,
+    );
+}
+
+fn guarded_strategy_eval_context(session: &SessionState, actual_qty: i32) -> String {
+    let mut context = execution_observability_context(session);
+    if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
+        context.push_str(" | ");
+        context.push_str(&hma_cross_market_debug(session, actual_qty));
+    }
+    context
+}
+
+fn emit_guarded_strategy_eval_debug(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: &SessionState,
+    decision: &str,
+    signal: StrategySignal,
+    signal_bar_ts: i64,
+    actual_qty: i32,
+    effective_qty: i32,
+    target_qty: Option<i32>,
+    summary: &str,
+) {
+    let target_qty = target_qty
+        .map(|qty| qty.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "strategy eval | {} | {decision} | signal {} | bar_ts {} | actual_qty {} | effective_qty {} | target_qty {} | {} | {}",
+        active_native_slug(session),
+        signal.label(),
+        signal_bar_ts,
+        actual_qty,
+        effective_qty,
+        target_qty,
+        summary,
+        guarded_strategy_eval_context(session, actual_qty)
+    )));
 }
 
 pub(crate) fn continue_staged_reversal(
@@ -440,6 +681,7 @@ pub(crate) fn arm_execution_strategy(session: &mut SessionState) {
     session.execution_runtime.last_closed_bar_ts = latest_strategy_bar_ts(session);
     session.execution_runtime.last_closed_bar_fingerprint =
         latest_strategy_bar_fingerprint(session);
+    seed_hma_cross_observed_side(session);
     session.execution_runtime.last_summary =
         if session.execution_runtime.last_closed_bar_ts.is_some() {
             format!(
@@ -545,8 +787,14 @@ pub(crate) fn handle_execution_account_sync(
             has_live_broker_path,
             waiting_for_position_sync,
         );
-        if reached || overshot {
+        if closeall_reversal_entry_resolved_flat(session, pending, actual_qty) {
+            if recover_closeall_reversal_if_flat(session, broker_tx, event_tx, pending, actual_qty)?
+            {
+                runtime_changed = true;
+            }
+        } else if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
+            session.execution_runtime.pending_closeall_reversal_entry = None;
             force_reevaluate_pending_window(session);
             if continue_staged_reversal(session, broker_tx, event_tx, actual_qty)? {
                 runtime_changed = true;
@@ -579,6 +827,10 @@ pub(crate) fn handle_execution_account_sync(
                     "execution market position sync wait",
                 );
                 session.execution_runtime.last_summary = next_summary;
+                runtime_changed = true;
+            } else if recover_closeall_reversal_if_flat(
+                session, broker_tx, event_tx, pending, actual_qty,
+            )? {
                 runtime_changed = true;
             } else {
                 clear_stale_pending_target(session, pending, actual_qty, event_tx);
@@ -703,8 +955,19 @@ pub(crate) fn maybe_run_execution_strategy(
             has_live_broker_path,
             waiting_for_position_sync,
         );
-        if reached || overshot {
+        if closeall_reversal_entry_resolved_flat(session, pending_target_qty, actual_market_qty) {
+            if recover_closeall_reversal_if_flat(
+                session,
+                broker_tx,
+                event_tx,
+                pending_target_qty,
+                actual_market_qty,
+            )? {
+                return Ok(());
+            }
+        } else if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
+            session.execution_runtime.pending_closeall_reversal_entry = None;
             force_reevaluate_pending_window(session);
             let next_summary = if reached {
                 format!("Position confirmed at target {actual_market_qty}; re-evaluating.")
@@ -734,6 +997,16 @@ pub(crate) fn maybe_run_execution_strategy(
                 );
                 session.execution_runtime.last_summary = next_summary;
                 emit_execution_state(event_tx, session);
+                return Ok(());
+            }
+
+            if recover_closeall_reversal_if_flat(
+                session,
+                broker_tx,
+                event_tx,
+                pending_target_qty,
+                actual_market_qty,
+            )? {
                 return Ok(());
             }
 
@@ -785,6 +1058,7 @@ pub(crate) fn maybe_run_execution_strategy(
         session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
         session.execution_runtime.last_closed_bar_fingerprint =
             latest_strategy_bar_fingerprint(session);
+        seed_hma_cross_observed_side(session);
         session.execution_runtime.last_summary = format!(
             "Native {} anchored to current {}; waiting for next update.",
             active_native_label(session),
@@ -795,22 +1069,55 @@ pub(crate) fn maybe_run_execution_strategy(
     }
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+        let latest_fingerprint = latest_strategy_bar_fingerprint(session);
         if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
-            return Ok(());
+            if session.execution_config.native_strategy != NativeStrategyKind::HmaCross
+                || session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
+            {
+                let reason =
+                    if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
+                        "closed-bar fingerprint unchanged"
+                    } else {
+                        "closed-bar timing waiting for next bar"
+                    };
+                let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                    "strategy gate | {} | {reason} | last_bar_ts {} | fingerprint {:?} | actual_qty {} | {}",
+                    active_native_slug(session),
+                    last_strategy_ts,
+                    latest_fingerprint,
+                    actual_market_qty,
+                    guarded_strategy_eval_context(session, actual_market_qty)
+                )));
+                return Ok(());
+            }
+
+            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                "strategy closed-bar revision | {} | same timestamp fingerprint changed | bar_ts {} | previous_fingerprint {:?} | latest_fingerprint {:?} | actual_qty {} | {}",
+                active_native_slug(session),
+                last_strategy_ts,
+                session.execution_runtime.last_closed_bar_fingerprint,
+                latest_fingerprint,
+                actual_market_qty,
+                guarded_strategy_eval_context(session, actual_market_qty)
+            )));
         }
-        session.execution_runtime.last_closed_bar_fingerprint =
-            latest_strategy_bar_fingerprint(session);
+        session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
     }
     let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
     let (signal_bar, signal, summary) = {
-        let bars = signal_evaluation_bars(session);
+        let bars = signal_evaluation_bars(session).to_vec();
         if bars.is_empty() {
             bail!("latest strategy bar disappeared during strategy evaluation");
         }
-        evaluate_active_execution_strategy_since(session, bars, current_qty, previous_strategy_ts)
+        evaluate_active_execution_strategy_since_mut(
+            session,
+            &bars,
+            current_qty,
+            previous_strategy_ts,
+        )
     };
     let protection_bar = strategy_bars(session)
         .last()
@@ -820,6 +1127,17 @@ pub(crate) fn maybe_run_execution_strategy(
     if let Some(window) = session_window_at(session, protection_bar.ts_ns) {
         if window.hold_entries {
             if actual_market_qty != 0 {
+                emit_guarded_strategy_eval_debug(
+                    event_tx,
+                    session,
+                    "session hold flattening position",
+                    signal,
+                    signal_bar.ts_ns,
+                    actual_market_qty,
+                    current_qty,
+                    Some(0),
+                    &summary,
+                );
                 if !native_order_strategy_enabled(session) {
                     sync_native_protection(
                         session,
@@ -876,6 +1194,17 @@ pub(crate) fn maybe_run_execution_strategy(
                 return Ok(());
             }
 
+            emit_guarded_strategy_eval_debug(
+                event_tx,
+                session,
+                "session hold blocked entries",
+                signal,
+                signal_bar.ts_ns,
+                actual_market_qty,
+                current_qty,
+                target_qty_for_signal(signal, current_qty, session.execution_config.order_qty),
+                &summary,
+            );
             sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
             session.execution_runtime.last_summary = if window.session_open {
                 format!(
@@ -895,23 +1224,54 @@ pub(crate) fn maybe_run_execution_strategy(
     let Some(target_qty) =
         target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
     else {
+        emit_guarded_strategy_eval_debug(
+            event_tx,
+            session,
+            "no target",
+            signal,
+            signal_bar.ts_ns,
+            actual_market_qty,
+            current_qty,
+            None,
+            &summary,
+        );
         sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
         emit_execution_state(event_tx, session);
         return Ok(());
     };
 
     if target_qty == current_qty {
+        emit_guarded_strategy_eval_debug(
+            event_tx,
+            session,
+            "target already current",
+            signal,
+            signal_bar.ts_ns,
+            actual_market_qty,
+            current_qty,
+            Some(target_qty),
+            &summary,
+        );
         sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
         emit_execution_state(event_tx, session);
         return Ok(());
     }
 
-    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
-        && session.execution_runtime.last_dispatched_signal_bar_ts == Some(signal_bar.ts_ns)
-    {
+    if closed_bar_signal_already_dispatched(session, signal_bar.ts_ns) {
         session.execution_runtime.last_summary = format!(
             "Signal on closed bar {} already dispatched; waiting for a new signal bar.",
             signal_bar.ts_ns
+        );
+        emit_guarded_strategy_eval_debug(
+            event_tx,
+            session,
+            "closed-bar already dispatched",
+            signal,
+            signal_bar.ts_ns,
+            actual_market_qty,
+            current_qty,
+            Some(target_qty),
+            &summary,
         );
         sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
         emit_execution_state(event_tx, session);
@@ -924,10 +1284,33 @@ pub(crate) fn maybe_run_execution_strategy(
             signal.label(),
             signal.label()
         );
+        emit_guarded_strategy_eval_debug(
+            event_tx,
+            session,
+            "flat entry side already consumed",
+            signal,
+            signal_bar.ts_ns,
+            actual_market_qty,
+            current_qty,
+            Some(target_qty),
+            &summary,
+        );
         sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
         emit_execution_state(event_tx, session);
         return Ok(());
     }
+
+    emit_guarded_strategy_eval_debug(
+        event_tx,
+        session,
+        "dispatching",
+        signal,
+        signal_bar.ts_ns,
+        actual_market_qty,
+        current_qty,
+        Some(target_qty),
+        &summary,
+    );
 
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Strategy {} signal: {} on {} (qty {} -> {})",

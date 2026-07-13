@@ -161,61 +161,6 @@ pub(crate) fn clear_selected_order_strategy_state(session: &mut SessionState) {
     session.managed_protection.remove(&key);
 }
 
-pub(crate) fn should_wait_for_strategy_owned_protection(session: &SessionState) -> bool {
-    if !native_order_strategy_enabled(session) || selected_market_position_qty(session) == 0 {
-        return false;
-    }
-
-    if session
-        .order_latency_tracker
-        .as_ref()
-        .is_some_and(|tracker| {
-            tracker.strategy_owned_protection
-                && tracker.started_at.elapsed().as_millis() <= ORDER_STRATEGY_POSITION_SYNC_GRACE_MS
-        })
-    {
-        return true;
-    }
-
-    // Tradovate demo/live can leave orderStrategyLink/list empty even while the
-    // broker-native TP/SL bracket is active. In that case, keep waiting only if
-    // the selected contract still shows working protective orders. A stale
-    // orderStrategy record without any live child orders should not block native
-    // protection sync after a market-delta reversal.
-    selected_contract_has_active_protective_orders(session)
-}
-
-pub(crate) fn selected_contract_has_active_protective_orders(session: &SessionState) -> bool {
-    let Some(key) = selected_strategy_key(session).ok() else {
-        return false;
-    };
-    session
-        .user_store
-        .orders
-        .get(&key.account_id)
-        .into_iter()
-        .flat_map(|orders| orders.values())
-        .any(|order| {
-            order_is_active(order)
-                && order_contract_id(order) == Some(key.contract_id)
-                && matches!(
-                    order_type(order)
-                        .as_deref()
-                        .map(|order_type| order_type.to_ascii_lowercase()),
-                    Some(ref order_type)
-                        if matches!(
-                            order_type.as_str(),
-                            "limit"
-                                | "mit"
-                                | "stop"
-                                | "stoplimit"
-                                | "trailingstop"
-                                | "trailingstoplimit"
-                        )
-                )
-        })
-}
-
 pub(crate) fn selected_managed_protection_waiting_for_position_sync(
     session: &mut SessionState,
 ) -> bool {

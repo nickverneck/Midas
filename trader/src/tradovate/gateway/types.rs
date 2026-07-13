@@ -31,7 +31,6 @@ pub(crate) struct OrderLatencyTracker {
     pub(crate) signal_started_at: Option<time::Instant>,
     pub(crate) signal_context: Option<String>,
     pub(crate) cl_ord_id: String,
-    pub(crate) strategy_owned_protection: bool,
     pub(crate) order_id: Option<i64>,
     pub(crate) order_strategy_id: Option<i64>,
     pub(crate) seen_recorded: bool,

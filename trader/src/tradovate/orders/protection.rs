@@ -191,28 +191,9 @@ fn detach_strategy_protection_by_key(
 
     let session = &*session;
 
-    let linked_ids: Vec<i64> = if selected_strategy_key(session).ok() == Some(key) {
-        selected_active_order_strategy_id(session)
-            .into_iter()
-            .flat_map(|order_strategy_id| {
-                session
-                    .user_store
-                    .linked_strategy_orders(key.account_id, order_strategy_id)
-                    .into_iter()
-            })
-            .filter(|order| {
-                order_is_active(order) && order_contract_id(order) == Some(key.contract_id)
-            })
-            .filter_map(extract_entity_id)
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Collect ALL active strategy orders for this contract from the user store.
-    // This catches orphaned orders whose IDs we never captured from the OCO
-    // placement response (the stop leg ID often arrives later via WebSocket).
-    let orphan_ids: Vec<i64> = session
+    // Only app-created protection is cancelable here. Broker-owned
+    // orderStrategy child orders must be left for Tradovate to manage.
+    let mut cancel_order_ids: Vec<i64> = session
         .user_store
         .orders
         .get(&key.account_id)
@@ -226,27 +207,54 @@ fn detach_strategy_protection_by_key(
                     .and_then(Value::as_str)
                     .is_some_and(|id| id.starts_with("midas-"))
         })
-        .filter_map(|(id, _)| Some(*id))
+        .filter_map(|(id, order)| (!order_belongs_to_strategy(session, *id, order)).then_some(*id))
         .collect();
 
-    let mut cancel_order_ids = linked_ids;
-    for order_id in orphan_ids {
-        if !cancel_order_ids.contains(&order_id) {
-            cancel_order_ids.push(order_id);
-        }
-    }
     if let Some(state) = existing.as_ref() {
-        for order_id in [state.stop_order_id, state.take_profit_order_id]
-            .into_iter()
-            .flatten()
+        if state
+            .stop_cl_ord_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("midas-"))
+            && !state
+                .stop_order_id
+                .is_some_and(|order_id| order_id_belongs_to_strategy(session, order_id))
         {
-            if !cancel_order_ids.contains(&order_id) {
-                cancel_order_ids.push(order_id);
-            }
+            push_unique_order_id(&mut cancel_order_ids, state.stop_order_id);
+        }
+        if state
+            .take_profit_cl_ord_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("midas-"))
+            && !state
+                .take_profit_order_id
+                .is_some_and(|order_id| order_id_belongs_to_strategy(session, order_id))
+        {
+            push_unique_order_id(&mut cancel_order_ids, state.take_profit_order_id);
         }
     }
 
     DetachedStrategyProtection { cancel_order_ids }
+}
+
+fn order_belongs_to_strategy(session: &SessionState, order_id: i64, order: &Value) -> bool {
+    json_i64(order, "orderStrategyId").is_some() || order_id_belongs_to_strategy(session, order_id)
+}
+
+fn order_id_belongs_to_strategy(session: &SessionState, order_id: i64) -> bool {
+    session
+        .user_store
+        .order_strategy_links
+        .values()
+        .any(|link| json_i64(link, "orderId") == Some(order_id))
+}
+
+fn push_unique_order_id(cancel_order_ids: &mut Vec<i64>, order_id: Option<i64>) {
+    let Some(order_id) = order_id else {
+        return;
+    };
+    if !cancel_order_ids.contains(&order_id) {
+        cancel_order_ids.push(order_id);
+    }
 }
 
 pub(crate) fn collect_live_protection_orders(

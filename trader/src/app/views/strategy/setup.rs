@@ -66,6 +66,7 @@ impl App {
                 self.focus == Focus::NativeBlockoutMinutes,
             ));
 
+            let show_protection_controls = self.native_protection_controls_visible();
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => {
                     lines.push(styled_line(
@@ -122,53 +123,55 @@ impl App {
                         ),
                         self.focus == Focus::HmaInverted,
                     ));
-                    lines.push(styled_line(
-                        format!(
-                            "Take Profit Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::HmaTakeProfitTicks,
-                                format!("{:.0}", self.strategy.native_hma.take_profit_ticks),
-                            )
-                        ),
-                        self.focus == Focus::HmaTakeProfitTicks,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Stop Loss Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::HmaStopLossTicks,
-                                format!("{:.0}", self.strategy.native_hma.stop_loss_ticks),
-                            )
-                        ),
-                        self.focus == Focus::HmaStopLossTicks,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Trailing Stop: {}",
-                            bool_label(self.strategy.native_hma.use_trailing_stop)
-                        ),
-                        self.focus == Focus::HmaTrailingStop,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Trail Trigger Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::HmaTrailTriggerTicks,
-                                format!("{:.0}", self.strategy.native_hma.trail_trigger_ticks),
-                            )
-                        ),
-                        self.focus == Focus::HmaTrailTriggerTicks,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Trail Offset Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::HmaTrailOffsetTicks,
-                                format!("{:.0}", self.strategy.native_hma.trail_offset_ticks),
-                            )
-                        ),
-                        self.focus == Focus::HmaTrailOffsetTicks,
-                    ));
+                    if show_protection_controls {
+                        lines.push(styled_line(
+                            format!(
+                                "Take Profit Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::HmaTakeProfitTicks,
+                                    format!("{:.0}", self.strategy.native_hma.take_profit_ticks),
+                                )
+                            ),
+                            self.focus == Focus::HmaTakeProfitTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Stop Loss Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::HmaStopLossTicks,
+                                    format!("{:.0}", self.strategy.native_hma.stop_loss_ticks),
+                                )
+                            ),
+                            self.focus == Focus::HmaStopLossTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Trailing Stop: {}",
+                                bool_label(self.strategy.native_hma.use_trailing_stop)
+                            ),
+                            self.focus == Focus::HmaTrailingStop,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Trail Trigger Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::HmaTrailTriggerTicks,
+                                    format!("{:.0}", self.strategy.native_hma.trail_trigger_ticks),
+                                )
+                            ),
+                            self.focus == Focus::HmaTrailTriggerTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Trail Offset Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::HmaTrailOffsetTicks,
+                                    format!("{:.0}", self.strategy.native_hma.trail_offset_ticks),
+                                )
+                            ),
+                            self.focus == Focus::HmaTrailOffsetTicks,
+                        ));
+                    }
                 }
                 NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
                     let (
@@ -230,50 +233,52 @@ impl App {
                         format!("Inverted: {}", bool_label(inverted)),
                         self.focus == Focus::EmaInverted,
                     ));
-                    lines.push(styled_line(
-                        format!(
-                            "Take Profit Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::EmaTakeProfitTicks,
-                                format!("{:.0}", take_profit_ticks),
-                            )
-                        ),
-                        self.focus == Focus::EmaTakeProfitTicks,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Stop Loss Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::EmaStopLossTicks,
-                                format!("{:.0}", stop_loss_ticks),
-                            )
-                        ),
-                        self.focus == Focus::EmaStopLossTicks,
-                    ));
-                    lines.push(styled_line(
-                        format!("Trailing Stop: {}", bool_label(use_trailing_stop)),
-                        self.focus == Focus::EmaTrailingStop,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Trail Trigger Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::EmaTrailTriggerTicks,
-                                format!("{:.0}", trail_trigger_ticks),
-                            )
-                        ),
-                        self.focus == Focus::EmaTrailTriggerTicks,
-                    ));
-                    lines.push(styled_line(
-                        format!(
-                            "Trail Offset Ticks: {}",
-                            self.strategy_numeric_value(
-                                Focus::EmaTrailOffsetTicks,
-                                format!("{:.0}", trail_offset_ticks),
-                            )
-                        ),
-                        self.focus == Focus::EmaTrailOffsetTicks,
-                    ));
+                    if show_protection_controls {
+                        lines.push(styled_line(
+                            format!(
+                                "Take Profit Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::EmaTakeProfitTicks,
+                                    format!("{:.0}", take_profit_ticks),
+                                )
+                            ),
+                            self.focus == Focus::EmaTakeProfitTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Stop Loss Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::EmaStopLossTicks,
+                                    format!("{:.0}", stop_loss_ticks),
+                                )
+                            ),
+                            self.focus == Focus::EmaStopLossTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!("Trailing Stop: {}", bool_label(use_trailing_stop)),
+                            self.focus == Focus::EmaTrailingStop,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Trail Trigger Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::EmaTrailTriggerTicks,
+                                    format!("{:.0}", trail_trigger_ticks),
+                                )
+                            ),
+                            self.focus == Focus::EmaTrailTriggerTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Trail Offset Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::EmaTrailOffsetTicks,
+                                    format!("{:.0}", trail_offset_ticks),
+                                )
+                            ),
+                            self.focus == Focus::EmaTrailOffsetTicks,
+                        ));
+                    }
                 }
             }
 
@@ -284,9 +289,12 @@ impl App {
                 }
             }
 
-            lines.push(Line::from(
-                "Type numbers or use Left/Right for numeric fields. Left/Right/Enter toggles timing and reversal mode. Zero TP/SL disables them.",
-            ));
+            let controls_hint = if show_protection_controls {
+                "Type numbers or use Left/Right for numeric fields. Left/Right/Enter toggles timing and reversal mode. Zero TP/SL disables them."
+            } else {
+                "Type numbers or use Left/Right for numeric fields. Left/Right/Enter toggles timing and reversal mode."
+            };
+            lines.push(Line::from(controls_hint));
         } else if self.strategy.kind == StrategyKind::Lua {
             lines.push(styled_line(
                 format!("Lua Input: {}", self.strategy.lua_source_mode.label()),
@@ -329,17 +337,23 @@ impl App {
         )];
 
         match self.strategy.kind {
-            StrategyKind::Native => lines.extend([
-                Line::from("Native can run on closed bars or live bars."),
-                Line::from("Closed-bar delay waits extra completed bars before entry."),
-                Line::from("Direct reversal is fastest."),
-                Line::from("Flatten > Confirm > Enter is safer."),
-                Line::from("CloseAll > Enter flattens the contract, then submits the reverse entry without waiting for position sync."),
-                Line::from("TP/SL/trailing stop settings are in ticks."),
-                Line::from("Blockout can flatten before close and hold until reopen."),
-                Line::from("Controls: Up/Down move, Left/Right edit."),
-                Line::from("Enter on Continue arms the strategy."),
-            ]),
+            StrategyKind::Native => {
+                lines.extend([
+                    Line::from("Native can run on closed bars or live bars."),
+                    Line::from("Closed-bar delay waits extra completed bars before entry."),
+                    Line::from("Direct reversal is fastest."),
+                    Line::from("Flatten > Confirm > Enter is safer."),
+                    Line::from("CloseAll > Enter submits close-all and the broker-owned reverse entry immediately."),
+                ]);
+                if self.native_protection_controls_visible() {
+                    lines.push(Line::from("TP/SL/trailing stop settings are in ticks."));
+                }
+                lines.extend([
+                    Line::from("Blockout can flatten before close and hold until reopen."),
+                    Line::from("Controls: Up/Down move, Left/Right edit."),
+                    Line::from("Enter on Continue arms the strategy."),
+                ]);
+            }
             StrategyKind::Lua => lines.extend([
                 Line::from("Lua can load from file or editor."),
                 Line::from("Native stays higher priority than Lua."),
@@ -377,7 +391,7 @@ impl App {
         ];
 
         if self.strategy.kind == StrategyKind::Native {
-            lines.push(Line::from(self.strategy.native_summary()));
+            lines.push(Line::from(self.native_summary_for_display()));
         } else if self.strategy.kind == StrategyKind::Lua {
             lines.push(Line::from(format!(
                 "Lua editor mode: {}",

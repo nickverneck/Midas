@@ -21,6 +21,14 @@ fn line_span_with_fg(line: &Line<'_>, content: &str, color: Color) -> bool {
         .any(|span| span.content.as_ref() == content && span.style.fg == Some(color))
 }
 
+fn rendered_text(lines: Vec<Line<'static>>) -> Vec<String> {
+    lines.into_iter().map(|line| line.to_string()).collect()
+}
+
+fn strategy_setup_text(app: &App) -> Vec<String> {
+    rendered_text(app.strategy_setup_lines())
+}
+
 fn account(id: i64, name: &str) -> AccountInfo {
     AccountInfo {
         id,
@@ -305,6 +313,227 @@ fn strategy_reversal_mode_cycles_through_all_three_options() {
         app.strategy.native_reversal_mode,
         NativeReversalMode::CloseAllEnter
     );
+}
+
+#[test]
+fn strategy_protection_controls_hide_for_direct_reversal() {
+    let mut app = App::new(AppConfig::default());
+    app.selected_broker = BrokerKind::Tradovate;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+    app.strategy.native_ema.stop_loss_ticks = 6.0;
+    app.strategy.native_ema.use_trailing_stop = true;
+    app.strategy.native_ema.trail_trigger_ticks = 10.0;
+    app.strategy.native_ema.trail_offset_ticks = 3.0;
+
+    let focus_order = app.strategy_focus_order();
+    assert!(!focus_order.contains(&Focus::EmaTakeProfitTicks));
+    assert!(!focus_order.contains(&Focus::EmaStopLossTicks));
+    assert!(!focus_order.contains(&Focus::EmaTrailingStop));
+    assert!(!focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(!focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+    let setup_text = strategy_setup_text(&app);
+    for hidden_label in [
+        "Take Profit Ticks",
+        "Stop Loss Ticks",
+        "Trailing Stop",
+        "Trail Trigger Ticks",
+        "Trail Offset Ticks",
+        "Auto Trail Preview",
+    ] {
+        assert!(
+            setup_text.iter().all(|line| !line.contains(hidden_label)),
+            "{hidden_label} should be hidden for Direct reversal"
+        );
+    }
+
+    let detail_text = rendered_text(app.strategy_detail_lines());
+    let preview_text = rendered_text(app.strategy_preview_lines());
+    for hidden_label in [
+        "Risk: tp_ticks",
+        "trail_trigger",
+        "trail_offset",
+        "TP/SL",
+        "Trailing stop",
+        "tp=",
+        "sl=",
+        "trail=",
+    ] {
+        assert!(
+            detail_text.iter().all(|line| !line.contains(hidden_label)),
+            "{hidden_label} should be hidden from detail for Direct reversal"
+        );
+        assert!(
+            preview_text.iter().all(|line| !line.contains(hidden_label)),
+            "{hidden_label} should be hidden from preview for Direct reversal"
+        );
+    }
+}
+
+#[test]
+fn strategy_protection_controls_show_for_broker_owned_reversal_modes() {
+    for reversal_mode in [
+        NativeReversalMode::FlattenConfirmEnter,
+        NativeReversalMode::CloseAllEnter,
+    ] {
+        let mut app = App::new(AppConfig::default());
+        app.selected_broker = BrokerKind::Tradovate;
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = NativeStrategyKind::HmaAngle;
+        app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+        app.strategy.native_reversal_mode = reversal_mode;
+
+        let focus_order = app.strategy_focus_order();
+        assert!(focus_order.contains(&Focus::HmaTakeProfitTicks));
+        assert!(focus_order.contains(&Focus::HmaStopLossTicks));
+        assert!(focus_order.contains(&Focus::HmaTrailingStop));
+        assert!(focus_order.contains(&Focus::HmaTrailTriggerTicks));
+        assert!(focus_order.contains(&Focus::HmaTrailOffsetTicks));
+
+        let setup_text = strategy_setup_text(&app);
+        for visible_label in [
+            "Take Profit Ticks",
+            "Stop Loss Ticks",
+            "Trailing Stop",
+            "Trail Trigger Ticks",
+            "Trail Offset Ticks",
+        ] {
+            assert!(
+                setup_text.iter().any(|line| line.contains(visible_label)),
+                "{visible_label} should be visible for {}",
+                reversal_mode.label()
+            );
+        }
+
+        let detail_text = rendered_text(app.strategy_detail_lines());
+        let preview_text = rendered_text(app.strategy_preview_lines());
+        assert!(
+            detail_text
+                .iter()
+                .any(|line| line.contains("Risk: tp_ticks"))
+        );
+        assert!(detail_text.iter().any(|line| line.contains("TP/SL")));
+        assert!(preview_text.iter().any(|line| line.contains("tp=")));
+        assert!(preview_text.iter().any(|line| line.contains("trail=")));
+    }
+}
+
+#[test]
+fn strategy_protection_controls_hide_for_non_guarded_paths() {
+    for execution_path in [
+        NativeExecutionPath::SimpleDiagnostic,
+        NativeExecutionPath::HmaDirect,
+    ] {
+        let mut app = App::new(AppConfig::default());
+        app.selected_broker = BrokerKind::Tradovate;
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = NativeStrategyKind::HmaCross;
+        app.strategy.native_execution_path = execution_path;
+        app.strategy.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+        app.strategy.native_hma_cross.take_profit_ticks = 8.0;
+        app.strategy.native_hma_cross.stop_loss_ticks = 6.0;
+        app.strategy.native_hma_cross.use_trailing_stop = true;
+        app.strategy.native_hma_cross.trail_trigger_ticks = 10.0;
+        app.strategy.native_hma_cross.trail_offset_ticks = 3.0;
+
+        let focus_order = app.strategy_focus_order();
+        assert!(!focus_order.contains(&Focus::EmaTakeProfitTicks));
+        assert!(!focus_order.contains(&Focus::EmaStopLossTicks));
+        assert!(!focus_order.contains(&Focus::EmaTrailingStop));
+        assert!(!focus_order.contains(&Focus::EmaTrailTriggerTicks));
+        assert!(!focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+        let setup_text = strategy_setup_text(&app);
+        for hidden_label in [
+            "Take Profit Ticks",
+            "Stop Loss Ticks",
+            "Trailing Stop",
+            "Trail Trigger Ticks",
+            "Trail Offset Ticks",
+            "Auto Trail Preview",
+        ] {
+            assert!(
+                setup_text.iter().all(|line| !line.contains(hidden_label)),
+                "{hidden_label} should be hidden for {}",
+                execution_path.label()
+            );
+        }
+
+        let detail_text = rendered_text(app.strategy_detail_lines());
+        let preview_text = rendered_text(app.strategy_preview_lines());
+        for hidden_label in [
+            "Risk: tp_ticks",
+            "trail_trigger",
+            "trail_offset",
+            "TP/SL",
+            "Trailing stop",
+            "tp=",
+            "sl=",
+            "trail=",
+        ] {
+            assert!(
+                detail_text.iter().all(|line| !line.contains(hidden_label)),
+                "{hidden_label} should be hidden from detail for {}",
+                execution_path.label()
+            );
+            assert!(
+                preview_text.iter().all(|line| !line.contains(hidden_label)),
+                "{hidden_label} should be hidden from preview for {}",
+                execution_path.label()
+            );
+        }
+    }
+}
+
+#[test]
+fn strategy_protection_controls_remain_visible_for_ironbeam_app_managed_protection() {
+    let mut app = App::new(AppConfig::default());
+    app.selected_broker = BrokerKind::Ironbeam;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::HmaDirect;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+    app.strategy.native_ema.stop_loss_ticks = 6.0;
+    app.strategy.native_ema.use_trailing_stop = true;
+    app.strategy.native_ema.trail_trigger_ticks = 10.0;
+    app.strategy.native_ema.trail_offset_ticks = 3.0;
+
+    let focus_order = app.strategy_focus_order();
+    assert!(focus_order.contains(&Focus::EmaTakeProfitTicks));
+    assert!(focus_order.contains(&Focus::EmaStopLossTicks));
+    assert!(focus_order.contains(&Focus::EmaTrailingStop));
+    assert!(focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+    let setup_text = strategy_setup_text(&app);
+    for visible_label in [
+        "Take Profit Ticks",
+        "Stop Loss Ticks",
+        "Trailing Stop",
+        "Trail Trigger Ticks",
+        "Trail Offset Ticks",
+    ] {
+        assert!(
+            setup_text.iter().any(|line| line.contains(visible_label)),
+            "{visible_label} should remain visible for Ironbeam app-managed protection"
+        );
+    }
+
+    let detail_text = rendered_text(app.strategy_detail_lines());
+    let preview_text = rendered_text(app.strategy_preview_lines());
+    assert!(
+        detail_text
+            .iter()
+            .any(|line| line.contains("Risk: tp_ticks"))
+    );
+    assert!(detail_text.iter().any(|line| line.contains("TP/SL")));
+    assert!(preview_text.iter().any(|line| line.contains("tp=")));
+    assert!(preview_text.iter().any(|line| line.contains("trail=")));
 }
 
 #[test]

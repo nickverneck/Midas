@@ -208,8 +208,36 @@ pub(crate) fn emit_execution_state(
     )));
 }
 
-pub(crate) fn closed_bars(session: &SessionState) -> &[Bar] {
+pub(crate) fn effective_closed_bar_len(session: &SessionState) -> usize {
     let closed_len = session.market.history_loaded.min(session.market.bars.len());
+    if should_use_t_minus_one_for_live_minute_bar(session, closed_len) {
+        return closed_len.saturating_sub(1);
+    }
+    closed_len
+}
+
+fn should_use_t_minus_one_for_live_minute_bar(session: &SessionState, closed_len: usize) -> bool {
+    if closed_len == 0
+        || session.session_kind != SessionKind::Live
+        || session.bar_type != BarType::Minute1
+        || session.execution_config.native_signal_timing != NativeSignalTiming::ClosedBar
+    {
+        return false;
+    }
+    if session.market.live_bars == 0 && session.market.status.is_empty() {
+        return false;
+    }
+
+    let Some(last_closed) = session.market.bars.get(closed_len - 1) else {
+        return false;
+    };
+    let forming_ts = session.market.bars.get(closed_len).map(|bar| bar.ts_ns);
+
+    forming_ts.is_none_or(|ts| ts <= last_closed.ts_ns)
+}
+
+pub(crate) fn closed_bars(session: &SessionState) -> &[Bar] {
+    let closed_len = effective_closed_bar_len(session);
     &session.market.bars[..closed_len]
 }
 

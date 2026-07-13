@@ -203,23 +203,34 @@ fn protected_direct_reversal_uses_closeall_then_broker_strategy() {
     match outcome {
         MarketOrderDispatchOutcome::Queued {
             target_qty: Some(-1),
-        } => match broker_rx.try_recv().expect("broker command queued") {
-            BrokerCommand::LiquidateThenOrderStrategy {
-                liquidation,
-                strategy,
-                ..
-            } => {
-                assert_eq!(liquidation.target_qty, Some(-1));
-                assert!(liquidation.cancel_order_ids.is_empty());
-                assert_eq!(strategy.target_qty, -1);
-                assert_eq!(strategy.entry_order_qty, 1);
-                assert_eq!(
-                    strategy.payload.get("action").and_then(Value::as_str),
-                    Some("Sell")
-                );
+        } => {
+            assert!(session.execution_runtime.pending_reversal_entry.is_none());
+            assert_eq!(
+                session
+                    .execution_runtime
+                    .pending_closeall_reversal_entry
+                    .as_ref()
+                    .map(|entry| entry.target_qty),
+                Some(-1)
+            );
+            match broker_rx.try_recv().expect("broker command queued") {
+                BrokerCommand::LiquidateThenOrderStrategy {
+                    liquidation,
+                    strategy,
+                    ..
+                } => {
+                    assert_eq!(liquidation.target_qty, Some(-1));
+                    assert!(liquidation.cancel_order_ids.is_empty());
+                    assert_eq!(strategy.target_qty, -1);
+                    assert_eq!(strategy.entry_order_qty, 1);
+                    assert_eq!(
+                        strategy.payload.get("action").and_then(Value::as_str),
+                        Some("Sell")
+                    );
+                }
+                _ => panic!("expected close-all plus order strategy command"),
             }
-            _ => panic!("expected close-all plus order strategy command"),
-        },
+        }
         _ => panic!("expected queued direct reversal"),
     }
 }
@@ -283,6 +294,7 @@ fn protected_reversal_clears_live_strategy_orders_before_broker_strategy_entry()
             target_qty: Some(-1)
         }
     ));
+    assert!(session.execution_runtime.pending_reversal_entry.is_none());
 
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::LiquidateThenOrderStrategy {
@@ -291,7 +303,7 @@ fn protected_reversal_clears_live_strategy_orders_before_broker_strategy_entry()
             ..
         } => {
             assert_eq!(liquidation.interrupt_order_strategy_id, None);
-            assert_eq!(liquidation.cancel_order_ids, vec![1001]);
+            assert!(liquidation.cancel_order_ids.is_empty());
             assert_eq!(liquidation.target_qty, Some(-1));
             assert_eq!(strategy.target_qty, -1);
             assert_eq!(strategy.entry_order_qty, 1);
@@ -321,16 +333,43 @@ fn protected_reversal_cancels_orphan_app_protection_before_broker_strategy_entry
     );
     session.user_store.orders.insert(
         42,
-        BTreeMap::from([(
-            1001,
-            json!({
-                "id": 1001,
-                "accountId": 42,
-                "contractId": 3570918,
-                "ordStatus": "Working",
-                "clOrdId": "midas-orphan-tp"
-            }),
-        )]),
+        BTreeMap::from([
+            (
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working",
+                    "clOrdId": "midas-orphan-tp"
+                }),
+            ),
+            (
+                2001,
+                json!({
+                    "id": 2001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            ),
+        ]),
+    );
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key: StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        },
+        order_strategy_id: 77,
+        target_qty: 1,
+    });
+    session.user_store.order_strategy_links.insert(
+        1,
+        json!({
+            "id": 1,
+            "orderStrategyId": 77,
+            "orderId": 2001
+        }),
     );
     let (broker_tx, mut broker_rx) = unbounded_channel();
 
@@ -434,7 +473,7 @@ fn automated_reversal_flatten_mode_queues_flatten_before_entry() {
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::MarketOrder { order, .. } => {
             assert_eq!(order.interrupt_order_strategy_id, Some(77));
-            assert_eq!(order.cancel_order_ids, vec![1001]);
+            assert!(order.cancel_order_ids.is_empty());
             assert_eq!(order.target_qty, Some(0));
             assert_eq!(order.order_qty, 1);
             assert_eq!(order.order_action, "Sell");
@@ -505,6 +544,14 @@ fn automated_reversal_closeall_mode_queues_liquidation_then_entry_strategy() {
         }
     ));
     assert!(session.execution_runtime.pending_reversal_entry.is_none());
+    assert_eq!(
+        session
+            .execution_runtime
+            .pending_closeall_reversal_entry
+            .as_ref()
+            .map(|entry| entry.target_qty),
+        Some(-1)
+    );
     assert!(session.order_latency_tracker.is_some());
 
     match broker_rx.try_recv().expect("broker command queued") {
@@ -515,7 +562,7 @@ fn automated_reversal_closeall_mode_queues_liquidation_then_entry_strategy() {
         } => {
             assert_eq!(liquidation.target_qty, Some(-1));
             assert_eq!(liquidation.interrupt_order_strategy_id, None);
-            assert_eq!(liquidation.cancel_order_ids, vec![1001]);
+            assert!(liquidation.cancel_order_ids.is_empty());
             assert_eq!(
                 liquidation
                     .payload

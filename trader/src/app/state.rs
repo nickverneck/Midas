@@ -116,6 +116,7 @@ impl App {
     fn strategy_focus_order(&self) -> Vec<Focus> {
         let mut order = vec![Focus::StrategyKind, Focus::OrderQty];
         if self.strategy.kind == StrategyKind::Native {
+            let show_protection_controls = self.native_protection_controls_visible();
             order.push(Focus::NativeStrategy);
             order.push(Focus::NativeSignalTiming);
             order.push(Focus::NativeSignalDelayBars);
@@ -124,29 +125,41 @@ impl App {
             order.push(Focus::NativeBlockoutEnabled);
             order.push(Focus::NativeBlockoutMinutes);
             match self.strategy.native_strategy {
-                NativeStrategyKind::HmaAngle => order.extend([
-                    Focus::HmaLength,
-                    Focus::HmaMinAngle,
-                    Focus::HmaAngleLookback,
-                    Focus::HmaBarsRequired,
-                    Focus::HmaLongsOnly,
-                    Focus::HmaInverted,
-                    Focus::HmaTakeProfitTicks,
-                    Focus::HmaStopLossTicks,
-                    Focus::HmaTrailingStop,
-                    Focus::HmaTrailTriggerTicks,
-                    Focus::HmaTrailOffsetTicks,
-                ]),
-                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => order.extend([
-                    Focus::EmaFastLength,
-                    Focus::EmaSlowLength,
-                    Focus::EmaInverted,
-                    Focus::EmaTakeProfitTicks,
-                    Focus::EmaStopLossTicks,
-                    Focus::EmaTrailingStop,
-                    Focus::EmaTrailTriggerTicks,
-                    Focus::EmaTrailOffsetTicks,
-                ]),
+                NativeStrategyKind::HmaAngle => {
+                    order.extend([
+                        Focus::HmaLength,
+                        Focus::HmaMinAngle,
+                        Focus::HmaAngleLookback,
+                        Focus::HmaBarsRequired,
+                        Focus::HmaLongsOnly,
+                        Focus::HmaInverted,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::HmaTakeProfitTicks,
+                            Focus::HmaStopLossTicks,
+                            Focus::HmaTrailingStop,
+                            Focus::HmaTrailTriggerTicks,
+                            Focus::HmaTrailOffsetTicks,
+                        ]);
+                    }
+                }
+                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
+                    order.extend([
+                        Focus::EmaFastLength,
+                        Focus::EmaSlowLength,
+                        Focus::EmaInverted,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::EmaTakeProfitTicks,
+                            Focus::EmaStopLossTicks,
+                            Focus::EmaTrailingStop,
+                            Focus::EmaTrailTriggerTicks,
+                            Focus::EmaTrailOffsetTicks,
+                        ]);
+                    }
+                }
             }
         } else if self.strategy.kind == StrategyKind::Lua {
             order.push(Focus::LuaSourceMode);
@@ -388,6 +401,25 @@ impl App {
         ));
     }
 
+    fn native_protection_controls_visible(&self) -> bool {
+        if self.strategy.kind != StrategyKind::Native {
+            return false;
+        }
+        if self.selected_broker != BrokerKind::Tradovate {
+            return true;
+        }
+        self.strategy.native_execution_path == NativeExecutionPath::Guarded
+            && self.strategy.native_reversal_mode != NativeReversalMode::Direct
+    }
+
+    fn native_summary_for_display(&self) -> String {
+        if self.native_protection_controls_visible() {
+            self.strategy.native_summary()
+        } else {
+            self.strategy.native_summary_without_protection()
+        }
+    }
+
     fn active_native_uses_broker_owned_protection(&self) -> bool {
         if self.strategy.kind != StrategyKind::Native {
             return false;
@@ -577,6 +609,9 @@ impl App {
 
     fn displayed_auto_trail(&self) -> Option<DisplayedAutoTrail> {
         if self.strategy.kind != StrategyKind::Native {
+            return None;
+        }
+        if !self.native_protection_controls_visible() {
             return None;
         }
 

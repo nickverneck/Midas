@@ -676,6 +676,56 @@ impl StrategyState {
         }
     }
 
+    pub fn native_summary_without_protection(&self) -> String {
+        match self.native_strategy {
+            NativeStrategyKind::HmaAngle => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) len={} angle={:.1} lookback={} bars_required={} longs_only={} inverted={}",
+                NativeStrategyKind::HmaAngle.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_hma.hma_length,
+                self.native_hma.min_angle,
+                self.native_hma.angle_lookback,
+                self.native_hma.bars_required_to_trade,
+                self.native_hma.longs_only,
+                self.native_hma.inverted,
+            ),
+            NativeStrategyKind::EmaCross => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} inverted={}",
+                NativeStrategyKind::EmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_ema.fast_length,
+                self.native_ema.slow_length,
+                self.native_ema.inverted,
+            ),
+            NativeStrategyKind::HmaCross => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} inverted={}",
+                NativeStrategyKind::HmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_hma_cross.fast_length,
+                self.native_hma_cross.slow_length,
+                self.native_hma_cross.inverted,
+            ),
+        }
+    }
+
     pub fn execution_config(&self) -> ExecutionStrategyConfig {
         ExecutionStrategyConfig {
             kind: self.kind,

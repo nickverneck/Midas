@@ -197,6 +197,11 @@ pub(super) fn dispatch_native_order_strategy_target(
             Vec::new(),
         )?;
         enqueue_liquidation_then_order_strategy(session, broker_tx, liquidation, strategy)?;
+        session.execution_runtime.pending_closeall_reversal_entry =
+            Some(PendingNativeReversalEntry {
+                target_qty,
+                reason: reason.to_string(),
+            });
         return Ok(MarketOrderDispatchOutcome::Queued {
             target_qty: Some(target_qty),
         });

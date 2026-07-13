@@ -157,6 +157,122 @@ fn simple_strategy_does_not_recheck_revised_closed_bar_with_same_timestamp() {
 }
 
 #[test]
+fn closed_bar_timing_uses_t_minus_one_for_live_minute_bar() {
+    let mut session = test_session();
+    session.session_kind = SessionKind::Live;
+    session.bar_type = BarType::Minute1;
+    session.execution_config.native_signal_timing = NativeSignalTiming::ClosedBar;
+
+    let mature_ts = 1_000;
+    let live_ts = 2_000;
+    session.market.history_loaded = 2;
+    session.market.live_bars = 1;
+    session.market.status = "Subscribed to Standard 1 Min bars for ESH6".to_string();
+    session.market.bars = vec![
+        Bar {
+            ts_ns: mature_ts,
+            open: 10.0,
+            high: 10.5,
+            low: 9.5,
+            close: 10.0,
+        },
+        Bar {
+            ts_ns: live_ts,
+            open: 10.0,
+            high: 12.5,
+            low: 9.75,
+            close: 12.0,
+        },
+    ];
+
+    assert_eq!(effective_closed_bar_len(&session), 1);
+    assert_eq!(latest_strategy_bar_ts(&session), Some(mature_ts));
+    assert_eq!(
+        session
+            .market
+            .bars
+            .get(effective_closed_bar_len(&session))
+            .map(|bar| bar.ts_ns),
+        Some(live_ts)
+    );
+}
+
+#[test]
+fn live_bar_timing_includes_latest_live_minute_bar() {
+    let mut session = test_session();
+    session.session_kind = SessionKind::Live;
+    session.bar_type = BarType::Minute1;
+    session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;
+    session.market.history_loaded = 2;
+    session.market.live_bars = 1;
+    session.market.status = "Subscribed to Standard 1 Min bars for ESH6".to_string();
+    session.market.bars = vec![
+        Bar {
+            ts_ns: 1_000,
+            open: 10.0,
+            high: 10.5,
+            low: 9.5,
+            close: 10.0,
+        },
+        Bar {
+            ts_ns: 2_000,
+            open: 10.0,
+            high: 12.5,
+            low: 9.75,
+            close: 12.0,
+        },
+    ];
+
+    assert_eq!(strategy_bars(&session).len(), 2);
+    assert_eq!(latest_strategy_bar_ts(&session), Some(2_000));
+}
+
+#[test]
+fn closed_bar_timing_uses_reported_t_minus_one_when_forming_bar_is_present() {
+    let mut session = test_session();
+    session.session_kind = SessionKind::Live;
+    session.bar_type = BarType::Minute1;
+    session.execution_config.native_signal_timing = NativeSignalTiming::ClosedBar;
+    session.market.history_loaded = 2;
+    session.market.live_bars = 1;
+    session.market.status = "Subscribed to Standard 1 Min bars for ESH6".to_string();
+    session.market.bars = vec![
+        Bar {
+            ts_ns: 1_000,
+            open: 10.0,
+            high: 10.5,
+            low: 9.5,
+            close: 10.0,
+        },
+        Bar {
+            ts_ns: 2_000,
+            open: 10.0,
+            high: 11.5,
+            low: 9.75,
+            close: 11.0,
+        },
+        Bar {
+            ts_ns: 3_000,
+            open: 11.0,
+            high: 12.5,
+            low: 10.75,
+            close: 12.0,
+        },
+    ];
+
+    assert_eq!(effective_closed_bar_len(&session), 2);
+    assert_eq!(latest_strategy_bar_ts(&session), Some(2_000));
+    assert_eq!(
+        session
+            .market
+            .bars
+            .get(effective_closed_bar_len(&session))
+            .map(|bar| bar.ts_ns),
+        Some(3_000)
+    );
+}
+
+#[test]
 fn guarded_closed_bar_delay_waits_extra_completed_bar_before_entry() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -217,7 +333,7 @@ fn guarded_closed_bar_delay_waits_extra_completed_bar_before_entry() {
 fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.fast_length = 2;
@@ -243,6 +359,7 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
     broker_rx
         .try_recv()
         .expect("first closed-bar signal should queue an order");
+    let _ = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
 
     session.execution_runtime.pending_target_qty = None;
     session.order_submit_in_flight = false;
@@ -263,6 +380,14 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
             .last_summary
             .contains("already dispatched")
     );
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("strategy eval | ema_cross | closed-bar already dispatched")
+                && message.contains("signal Buy")
+                && message.contains("bar_ts 7")
+    )));
 }
 
 #[test]
@@ -475,6 +600,114 @@ fn hma_direct_path_does_not_enter_from_stale_cross_state() {
 }
 
 #[test]
+fn guarded_hma_cross_blocks_same_bar_revised_side_change_after_dispatch() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::Guarded;
+    session.execution_config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    session.execution_config.native_hma_cross.fast_length = 2;
+    session.execution_config.native_hma_cross.slow_length = 4;
+    session.execution_config.native_hma_cross.take_profit_ticks = 5.0;
+    session.execution_config.native_hma_cross.stop_loss_ticks = 10.0;
+    session.market.tick_size = Some(0.25);
+    session.market.contract_id = Some(3570918);
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(7);
+    session.execution_runtime.last_closed_bar_fingerprint = Some(0);
+    session.execution_runtime.last_dispatched_signal_bar_ts = Some(7);
+    session.execution_runtime.last_dispatched_entry_signal = Some(StrategySignal::EnterShort);
+    session
+        .execution_runtime
+        .hma_cross_execution
+        .last_observed_side = Some(crate::strategies::hma_cross::HmaCrossSide::Below);
+    session
+        .execution_runtime
+        .hma_cross_execution
+        .last_observed_bar_ts = Some(7);
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+        })
+        .collect();
+    seed_short_position(&mut session);
+    let key = StrategyProtectionKey {
+        account_id: 42,
+        contract_id: 3570918,
+    };
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key,
+        order_strategy_id: 77,
+        target_qty: -1,
+    });
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            1001,
+            json!({
+                "id": 1001,
+                "accountId": 42,
+                "contractId": 3570918,
+                "ordStatus": "Working"
+            }),
+        )]),
+    );
+    session.user_store.order_strategy_links.insert(
+        1,
+        json!({
+            "id": 1,
+            "orderStrategyId": 77,
+            "orderId": 1001
+        }),
+    );
+
+    maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("guarded HMA cross should block a revised side change on the same bar");
+
+    assert_eq!(
+        session.execution_runtime.pending_target_qty, None,
+        "{}",
+        session.execution_runtime.last_summary
+    );
+    assert!(session.execution_runtime.pending_reversal_entry.is_none());
+    assert!(
+        session
+            .execution_runtime
+            .pending_closeall_reversal_entry
+            .is_none()
+    );
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "same-bar revised side change should not queue a broker command"
+    );
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("strategy closed-bar revision | hma_cross")
+                && message.contains("same timestamp fingerprint changed")
+                && message.contains("previous_fingerprint Some(0)")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("strategy eval | hma_cross | closed-bar already dispatched")
+                && message.contains("signal Buy")
+                && message.contains("Prior HMA Side: fast<slow")
+                && message.contains("HMA Side: fast>slow")
+    )));
+}
+
+#[test]
 fn strategy_loop_does_not_disarm_on_transient_oversize_with_live_strategy_path() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -591,7 +824,7 @@ fn strategy_blockout_flattens_inside_configured_preclose_window() {
 fn disabled_strategy_blockout_does_not_flatten_preclose_position() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let bar_ts = et_ts_ns(2026, 3, 9, 16, 20);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -621,6 +854,14 @@ fn disabled_strategy_blockout_does_not_flatten_preclose_position() {
             .last_summary
             .contains("Session hold active")
     );
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("strategy eval | ema_cross | no target")
+                && message.contains("signal Hold")
+                && message.contains("target_qty none")
+    )));
 }
 
 #[test]
@@ -738,7 +979,6 @@ fn strategy_loop_waits_when_flat_qty_conflicts_with_live_broker_path() {
         signal_started_at: None,
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
         cl_ord_id: "midas-hydrating-flat-strategy".to_string(),
-        strategy_owned_protection: true,
         order_id: Some(1001),
         order_strategy_id: Some(77),
         seen_recorded: true,
@@ -831,7 +1071,6 @@ fn strategy_loop_clears_stale_flat_broker_path_after_sync_grace() {
         signal_started_at: None,
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
         cl_ord_id: "midas-stale-flat-strategy".to_string(),
-        strategy_owned_protection: true,
         order_id: Some(1001),
         order_strategy_id: Some(77),
         seen_recorded: true,
@@ -892,7 +1131,7 @@ fn strategy_loop_clears_stale_flat_broker_path_after_sync_grace() {
     {
         BrokerCommand::OrderStrategy { strategy, .. } => {
             assert_eq!(strategy.interrupt_order_strategy_id, Some(77));
-            assert_eq!(strategy.cancel_order_ids, vec![1001]);
+            assert!(strategy.cancel_order_ids.is_empty());
             assert_eq!(strategy.target_qty, 1);
             assert_eq!(strategy.order_action, "Buy");
         }

@@ -430,7 +430,7 @@ impl App {
                     if self.strategy.kind == StrategyKind::Native {
                         self.push_log(format!(
                             "Strategy config: {}",
-                            self.strategy.native_summary()
+                            self.native_summary_for_display()
                         ));
                     }
                 }

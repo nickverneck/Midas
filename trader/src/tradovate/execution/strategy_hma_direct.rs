@@ -192,7 +192,7 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
 }
 
 pub(crate) fn hma_cross_market_debug(session: &SessionState, actual_qty: i32) -> String {
-    let closed_len = session.market.history_loaded.min(session.market.bars.len());
+    let closed_len = effective_closed_bar_len(session);
     let market_len = session.market.bars.len();
     let closed_ts = closed_bars(session).last().map(|bar| bar.ts_ns);
     let forming_ts = session.market.bars.get(closed_len).map(|bar| bar.ts_ns);

@@ -232,9 +232,10 @@ impl HmaCrossConfig {
 
         let expected_previous_bar_ts = bars.get(bars.len().saturating_sub(2)).map(|bar| bar.ts_ns);
         let stored_side_is_previous_bar = runtime.last_observed_bar_ts == expected_previous_bar_ts;
+        let stored_side_is_current_bar = runtime.last_observed_bar_ts == Some(last_bar.ts_ns);
         let previous_side = runtime
             .last_observed_side
-            .filter(|_| stored_side_is_previous_bar);
+            .filter(|_| stored_side_is_previous_bar || stored_side_is_current_bar);
         let desired_side = self.desired_position_side(observed_side);
         let current_bar_side_edge = previous_side.is_some_and(|side| side != observed_side);
 
@@ -583,6 +584,38 @@ mod tests {
         assert_eq!(evaluation.observed_side, Some(HmaCrossSide::Above));
         assert_eq!(evaluation.signal, StrategySignal::EnterLong);
         assert_eq!(runtime.last_observed_side, Some(HmaCrossSide::Above));
+    }
+
+    #[test]
+    fn current_cross_uses_same_bar_observed_side_for_revised_edge() {
+        let config = HmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            ..HmaCrossConfig::default()
+        };
+        let bars = vec![
+            bar(1, 10.0),
+            bar(2, 10.0),
+            bar(3, 10.0),
+            bar(4, 10.0),
+            bar(5, 10.0),
+            bar(6, 8.0),
+            bar(7, 12.0),
+        ];
+        let mut runtime = HmaCrossExecutionState {
+            last_observed_side: Some(HmaCrossSide::Below),
+            last_observed_bar_ts: Some(7),
+            ..HmaCrossExecutionState::default()
+        };
+
+        let evaluation =
+            config.evaluate_current_cross(&mut runtime, &bars, Some(PositionSide::Short));
+
+        assert_eq!(evaluation.previous_observed_side, Some(HmaCrossSide::Below));
+        assert_eq!(evaluation.observed_side, Some(HmaCrossSide::Above));
+        assert_eq!(evaluation.signal, StrategySignal::EnterLong);
+        assert_eq!(runtime.last_observed_side, Some(HmaCrossSide::Above));
+        assert_eq!(runtime.last_observed_bar_ts, Some(7));
     }
 
     #[test]
