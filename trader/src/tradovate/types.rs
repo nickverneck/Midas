@@ -93,6 +93,8 @@ struct PendingSignalLatencyContext {
 struct PendingNativeReversalEntry {
     target_qty: i32,
     reason: String,
+    started_at: time::Instant,
+    flat_seen_at: Option<time::Instant>,
 }
 
 #[derive(Debug, Clone, Default)]

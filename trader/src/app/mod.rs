@@ -52,6 +52,7 @@ pub struct App {
     logs: VecDeque<LogEntry>,
     persisted_logs: VecDeque<LogEntry>,
     session_stats: SessionStatsState,
+    session_stats_show_fees: bool,
     dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,

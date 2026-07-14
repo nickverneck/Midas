@@ -167,6 +167,8 @@ pub(super) fn dispatch_native_order_strategy_target(
         session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
             target_qty,
             reason: reason.to_string(),
+            started_at: time::Instant::now(),
+            flat_seen_at: None,
         });
         return Ok(MarketOrderDispatchOutcome::Queued {
             target_qty: Some(0),
@@ -201,6 +203,8 @@ pub(super) fn dispatch_native_order_strategy_target(
             Some(PendingNativeReversalEntry {
                 target_qty,
                 reason: reason.to_string(),
+                started_at: time::Instant::now(),
+                flat_seen_at: None,
             });
         return Ok(MarketOrderDispatchOutcome::Queued {
             target_qty: Some(target_qty),

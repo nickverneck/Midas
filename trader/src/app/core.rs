@@ -32,6 +32,7 @@ impl App {
             logs: VecDeque::new(),
             persisted_logs: VecDeque::new(),
             session_stats: SessionStatsState::new(session_stats_enabled),
+            session_stats_show_fees: true,
             dashboard_visuals_enabled: false,
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,

@@ -18,6 +18,14 @@ impl App {
             KeyCode::Enter => {
                 self.sync_selected_account(cmd_tx);
             }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.session_stats_show_fees = !self.session_stats_show_fees;
+                self.status = if self.session_stats_show_fees {
+                    "Session stats fee rows shown.".to_string()
+                } else {
+                    "Session stats fee rows hidden.".to_string()
+                };
+            }
             _ => {}
         }
     }

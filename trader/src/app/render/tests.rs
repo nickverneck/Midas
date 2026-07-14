@@ -25,6 +25,13 @@ fn rendered_text(lines: Vec<Line<'static>>) -> Vec<String> {
     lines.into_iter().map(|line| line.to_string()).collect()
 }
 
+fn assert_money_eq(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < 0.005,
+        "expected {expected:.2}, got {actual:.2}"
+    );
+}
+
 fn strategy_setup_text(app: &App) -> Vec<String> {
     rendered_text(app.strategy_setup_lines())
 }
@@ -636,6 +643,67 @@ fn session_stats_track_wins_losses_and_flats_from_balance_deltas() {
 }
 
 #[test]
+fn session_stats_reports_pnl_per_hour() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_000.0)]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_020.0)]),
+        &cmd_tx,
+    );
+
+    let end = chrono::Utc::now();
+    let stats = app
+        .session_stats
+        .accounts
+        .values_mut()
+        .next()
+        .expect("expected stats");
+    stats.started_at_utc = end - chrono::Duration::hours(2);
+    stats.last_updated_at_utc = end;
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("PnL/H: Net +10.00/h  Trade +10.00/h"))
+    );
+
+    let event_lines = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_lines
+            .iter()
+            .any(|line| line.contains("Hourly Trade PnL/H (local)"))
+    );
+    assert!(
+        event_lines
+            .iter()
+            .any(|line| line.contains("+20.00/h net +20.00 fees 0.00"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("net_pnl_per_hour: +10.00/h"));
+    assert!(body.contains("trade_pnl_per_hour: +10.00/h"));
+    assert!(body.contains("hourly_local:"));
+    assert!(body.contains("trade_per_hour=+20.00/h"));
+}
+
+#[test]
 fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -668,7 +736,23 @@ fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
     assert_eq!(stats.short_side.losses, 1);
     assert_eq!(stats.short_side.pnl, -10.0);
     assert_eq!(stats.events[0].side, SessionTradeSide::Long);
+    assert_eq!(
+        stats.events[0].previous_position_side,
+        SessionTradeSide::Long
+    );
+    assert_eq!(
+        stats.events[0].current_position_side,
+        SessionTradeSide::Flat
+    );
     assert_eq!(stats.events[1].side, SessionTradeSide::Short);
+    assert_eq!(
+        stats.events[1].previous_position_side,
+        SessionTradeSide::Short
+    );
+    assert_eq!(
+        stats.events[1].current_position_side,
+        SessionTradeSide::Flat
+    );
 
     let account_lines = app
         .selected_session_stats_lines()
@@ -701,8 +785,16 @@ fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
         .iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>();
-    assert!(event_text.iter().any(|line| line.contains("balance long")));
-    assert!(event_text.iter().any(|line| line.contains("balance short")));
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("balance long pos long->flat"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("balance short pos short->flat"))
+    );
 
     let body = app.build_persisted_log_body("20260403T120000Z");
     assert!(body.contains("long_events: 1"));
@@ -710,7 +802,215 @@ fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
     assert!(body.contains("short_events: 1"));
     assert!(body.contains("short_pnl: -10.00"));
     assert!(body.contains("side=long"));
+    assert!(body.contains("pos=long->flat"));
     assert!(body.contains("side=short"));
+    assert!(body.contains("pos=short->flat"));
+}
+
+#[test]
+fn session_stats_event_lines_include_position_transition_context() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.0, -1.0),
+        balance_snapshot_with_position(7, "SIM", 1_012.5, 1.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.events[0].side, SessionTradeSide::Short);
+    assert_eq!(
+        stats.events[0].previous_position_side,
+        SessionTradeSide::Short
+    );
+    assert_eq!(
+        stats.events[0].current_position_side,
+        SessionTradeSide::Long
+    );
+
+    let event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("balance short pos short->long"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("side=short"));
+    assert!(body.contains("pos=short->long"));
+}
+
+#[test]
+fn session_stats_filters_fee_only_and_mixed_fee_balance_deltas() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.market.tick_size = Some(0.25);
+    app.market.value_per_point = Some(5.0);
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.00, 1.0),
+        balance_snapshot_with_position(7, "SIM", 1_005.69, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_004.78, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_004.78, -1.0),
+        balance_snapshot_with_position(7, "SIM", 996.37, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.wins, 1);
+    assert_eq!(stats.losses, 1);
+    assert_eq!(stats.flat_moves, 1);
+    assert_eq!(stats.fee_events, 3);
+    assert_eq!(stats.event_count(), 3);
+    assert_money_eq(stats.session_pnl(), -3.63);
+    assert_money_eq(stats.trade_pnl_ex_fees(), -1.25);
+    assert_money_eq(stats.total_fees, -2.38);
+    assert_money_eq(stats.long_side.pnl, 6.25);
+    assert_money_eq(stats.short_side.pnl, -7.50);
+    assert_eq!(stats.long_side.wins, 1);
+    assert_eq!(stats.short_side.losses, 1);
+    assert_eq!(stats.events[0].kind, SessionBalanceEventKind::Mixed);
+    assert_eq!(stats.events[1].kind, SessionBalanceEventKind::Fee);
+    assert_eq!(stats.events[2].kind, SessionBalanceEventKind::Mixed);
+    assert_money_eq(stats.events[0].trade_delta, 6.25);
+    assert_money_eq(stats.events[0].fee_delta, -0.56);
+    assert_money_eq(stats.events[1].trade_delta, 0.0);
+    assert_money_eq(stats.events[1].fee_delta, -0.91);
+    assert_money_eq(stats.events[2].trade_delta, -7.50);
+    assert_money_eq(stats.events[2].fee_delta, -0.91);
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("Trade PnL Ex Fees: -1.25  Fees: -2.38 (3)"))
+    );
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("Wins: 1  Losses: 1  Flats: 1  Fee Events: 3"))
+    );
+
+    let event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("mixed trade -7.50 fees -0.91"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("fee trade 0.00 fees -0.91"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("mixed trade +6.25 fees -0.56"))
+    );
+
+    app.handle_session_stats_key(key(KeyCode::Char('f')), &cmd_tx);
+    assert!(!app.session_stats_show_fees);
+    assert_eq!(app.status, "Session stats fee rows hidden.");
+
+    let overview_text = rendered_text(app.session_stats_overview_lines());
+    assert!(overview_text.iter().any(|line| line == "Fees: hidden"));
+
+    let hidden_account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        hidden_account_lines
+            .iter()
+            .any(|line| line.contains("Trade PnL Ex Fees: -1.25  Fees hidden"))
+    );
+    assert!(
+        hidden_account_lines
+            .iter()
+            .any(|line| line.contains("Wins: 1  Losses: 1  Flats: 1"))
+    );
+    assert!(
+        !hidden_account_lines
+            .iter()
+            .any(|line| line.contains("Fee Events"))
+    );
+
+    let hidden_event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("(1/1, 2 trade events)"))
+    );
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("balance short") && line.contains("trade -7.50"))
+    );
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("balance long") && line.contains("trade +6.25"))
+    );
+    assert!(
+        !hidden_event_text
+            .iter()
+            .any(|line| line.contains("fee trade") || line.contains("fees"))
+    );
+    assert!(
+        !hidden_event_text
+            .iter()
+            .any(|line| line.contains("mixed trade"))
+    );
+
+    app.handle_session_stats_key(key(KeyCode::Char('F')), &cmd_tx);
+    assert!(app.session_stats_show_fees);
+    assert_eq!(app.status, "Session stats fee rows shown.");
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("fee_events: 3"));
+    assert!(body.contains("total_fees: -2.38"));
+    assert!(body.contains("trade_pnl_ex_fees: -1.25"));
+    assert!(body.contains("kind=fee"));
+    assert!(body.contains("trade_delta=+6.25 fee_delta=-0.56"));
+    assert!(body.contains("trade_delta=-7.50 fee_delta=-0.91"));
 }
 
 #[test]
