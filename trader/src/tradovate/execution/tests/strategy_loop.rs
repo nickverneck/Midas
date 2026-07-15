@@ -821,12 +821,6 @@ fn guarded_hma_cross_blocks_same_bar_revised_side_change_after_dispatch() {
     );
     assert!(session.execution_runtime.pending_reversal_entry.is_none());
     assert!(
-        session
-            .execution_runtime
-            .pending_closeall_reversal_entry
-            .is_none()
-    );
-    assert!(
         broker_rx.try_recv().is_err(),
         "same-bar revised side change should not queue a broker command"
     );

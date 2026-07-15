@@ -165,7 +165,6 @@ pub(crate) fn clear_stale_pending_target(
 ) {
     let observability = execution_observability_context(session);
     session.execution_runtime.pending_target_qty = None;
-    session.execution_runtime.pending_closeall_reversal_entry = None;
     session.pending_signal_context = None;
     session.order_latency_tracker = None;
     session.execution_runtime.last_summary = format!(
@@ -178,103 +177,6 @@ pub(crate) fn clear_stale_pending_target(
     let _ = event_tx.send(ServiceEvent::DebugLog(format!(
         "pending target cleared | target {pending} | actual {actual_qty} | broker has no active order path | {observability}"
     )));
-}
-
-fn recover_closeall_reversal_if_flat(
-    session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
-    event_tx: &UnboundedSender<ServiceEvent>,
-    pending: i32,
-    actual_qty: i32,
-) -> Result<bool> {
-    let Some(reversal) = session
-        .execution_runtime
-        .pending_closeall_reversal_entry
-        .clone()
-    else {
-        return Ok(false);
-    };
-    if pending != reversal.target_qty || actual_qty != 0 {
-        return Ok(false);
-    }
-
-    session.execution_runtime.pending_target_qty = None;
-    session.execution_runtime.pending_closeall_reversal_entry = None;
-    session.pending_signal_context = None;
-    session.order_latency_tracker = None;
-
-    let recovery_reason = format!(
-        "{} | closeall reversal recovered from flat after broker path cleared",
-        reversal.reason
-    );
-    let dispatch_outcome = dispatch_target_position_order(
-        session,
-        broker_tx,
-        reversal.target_qty,
-        true,
-        &recovery_reason,
-    )?;
-    match dispatch_outcome {
-        MarketOrderDispatchOutcome::NoOp { message } => {
-            session.execution_runtime.last_summary = message.clone();
-            let _ = event_tx.send(ServiceEvent::Status(message));
-        }
-        MarketOrderDispatchOutcome::Queued { target_qty } => {
-            session.execution_runtime.pending_target_qty = target_qty;
-            let next_summary = format!(
-                "CloseAll reversal recovered flat; submitting broker-owned entry to {}.",
-                reversal.target_qty
-            );
-            session.execution_runtime.last_summary = next_summary.clone();
-            emit_execution_transition_debug(
-                event_tx,
-                session,
-                &next_summary,
-                "execution closeall reversal recovery",
-            );
-        }
-    }
-    emit_execution_state(event_tx, session);
-    Ok(true)
-}
-
-fn closeall_reversal_entry_resolved_flat(
-    session: &SessionState,
-    pending: i32,
-    actual_qty: i32,
-) -> bool {
-    let Some(reversal) = session
-        .execution_runtime
-        .pending_closeall_reversal_entry
-        .as_ref()
-    else {
-        return false;
-    };
-    if pending != reversal.target_qty || actual_qty != 0 {
-        return false;
-    }
-
-    let Some(tracker) = session.order_latency_tracker.as_ref() else {
-        return false;
-    };
-    if !tracker.fill_recorded {
-        return false;
-    }
-
-    let Some(key) = selected_strategy_key(session).ok() else {
-        return false;
-    };
-    if let Some(order_strategy_id) = tracker.order_strategy_id {
-        if strategy_has_live_broker_path(session, key, order_strategy_id) {
-            return false;
-        }
-    } else {
-        return false;
-    }
-
-    !active_order_strategy_matches_selected(session).is_some_and(|tracked| {
-        strategy_has_live_broker_path(session, key, tracked.order_strategy_id)
-    })
 }
 
 fn force_reevaluate_pending_window(session: &mut SessionState) {
@@ -818,14 +720,8 @@ pub(crate) fn handle_execution_account_sync(
             has_live_broker_path,
             waiting_for_position_sync,
         );
-        if closeall_reversal_entry_resolved_flat(session, pending, actual_qty) {
-            if recover_closeall_reversal_if_flat(session, broker_tx, event_tx, pending, actual_qty)?
-            {
-                runtime_changed = true;
-            }
-        } else if reached || overshot {
+        if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
-            session.execution_runtime.pending_closeall_reversal_entry = None;
             force_reevaluate_pending_window(session);
             if continue_staged_reversal(session, broker_tx, event_tx, actual_qty)? {
                 runtime_changed = true;
@@ -858,10 +754,6 @@ pub(crate) fn handle_execution_account_sync(
                     "execution market position sync wait",
                 );
                 session.execution_runtime.last_summary = next_summary;
-                runtime_changed = true;
-            } else if recover_closeall_reversal_if_flat(
-                session, broker_tx, event_tx, pending, actual_qty,
-            )? {
                 runtime_changed = true;
             } else {
                 clear_stale_pending_target(session, pending, actual_qty, event_tx);
@@ -986,19 +878,8 @@ pub(crate) fn maybe_run_execution_strategy(
             has_live_broker_path,
             waiting_for_position_sync,
         );
-        if closeall_reversal_entry_resolved_flat(session, pending_target_qty, actual_market_qty) {
-            if recover_closeall_reversal_if_flat(
-                session,
-                broker_tx,
-                event_tx,
-                pending_target_qty,
-                actual_market_qty,
-            )? {
-                return Ok(());
-            }
-        } else if reached || overshot {
+        if reached || overshot {
             session.execution_runtime.pending_target_qty = None;
-            session.execution_runtime.pending_closeall_reversal_entry = None;
             force_reevaluate_pending_window(session);
             let next_summary = if reached {
                 format!("Position confirmed at target {actual_market_qty}; re-evaluating.")
@@ -1028,16 +909,6 @@ pub(crate) fn maybe_run_execution_strategy(
                 );
                 session.execution_runtime.last_summary = next_summary;
                 emit_execution_state(event_tx, session);
-                return Ok(());
-            }
-
-            if recover_closeall_reversal_if_flat(
-                session,
-                broker_tx,
-                event_tx,
-                pending_target_qty,
-                actual_market_qty,
-            )? {
                 return Ok(());
             }
 

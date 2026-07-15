@@ -205,14 +205,6 @@ fn protected_direct_reversal_uses_closeall_then_broker_strategy() {
             target_qty: Some(-1),
         } => {
             assert!(session.execution_runtime.pending_reversal_entry.is_none());
-            assert_eq!(
-                session
-                    .execution_runtime
-                    .pending_closeall_reversal_entry
-                    .as_ref()
-                    .map(|entry| entry.target_qty),
-                Some(-1)
-            );
             match broker_rx.try_recv().expect("broker command queued") {
                 BrokerCommand::LiquidateThenOrderStrategy {
                     liquidation,
@@ -544,14 +536,6 @@ fn automated_reversal_closeall_mode_queues_liquidation_then_entry_strategy() {
         }
     ));
     assert!(session.execution_runtime.pending_reversal_entry.is_none());
-    assert_eq!(
-        session
-            .execution_runtime
-            .pending_closeall_reversal_entry
-            .as_ref()
-            .map(|entry| entry.target_qty),
-        Some(-1)
-    );
     assert!(session.order_latency_tracker.is_some());
 
     match broker_rx.try_recv().expect("broker command queued") {
