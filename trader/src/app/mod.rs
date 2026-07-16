@@ -131,6 +131,7 @@ enum Focus {
     AccountList,
     InstrumentQuery,
     BarTypeToggle,
+    BarValue,
     CandleModeToggle,
     ContractList,
 }

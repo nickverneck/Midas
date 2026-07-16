@@ -22,11 +22,13 @@ impl App {
 
         if let Some(next_broker) = next_broker {
             self.selected_broker = next_broker;
+            self.normalize_market_controls_for_broker();
             self.status = format!("Broker selected: {}", self.selected_broker.label());
             return;
         }
 
         if key.code == KeyCode::Enter {
+            self.normalize_market_controls_for_broker();
             self.screen = Screen::Login;
             self.focus = Focus::Env;
             self.status = format!("Login for {}", self.selected_broker.label());

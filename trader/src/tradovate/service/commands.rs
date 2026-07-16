@@ -194,6 +194,7 @@ async fn enter_replay_mode(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
+    let candle_mode = bar_type.effective_candle_mode(candle_mode);
     reset_state_for_new_session(state, market_tx);
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Loading replay dataset from {}...",
@@ -360,6 +361,7 @@ async fn subscribe_bars(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
+    let candle_mode = bar_type.effective_candle_mode(candle_mode);
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };

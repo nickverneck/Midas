@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 #[cfg(not(feature = "replay"))]
 use anyhow::{Result, bail};
 #[cfg(feature = "replay")]
-use chrono::{NaiveDate, NaiveTime, TimeZone};
+use chrono::{NaiveDate, NaiveTime, TimeZone, Timelike};
 #[cfg(feature = "replay")]
 use std::collections::hash_map::DefaultHasher;
 #[cfg(feature = "replay")]
@@ -309,9 +309,8 @@ async fn replay_market_worker_inner(
     }
 
     let initial_status = format!(
-        "Replay {} {} loaded for {} ({}/{})",
-        candle_mode.label(),
-        bar_type.label(),
+        "Replay {} loaded for {} ({}/{})",
+        bar_type.mode_label(candle_mode),
         contract.name,
         history_loaded,
         total_bars
@@ -347,9 +346,8 @@ async fn replay_market_worker_inner(
         series.push_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT);
         live_bars = live_bars.saturating_add(1);
         let status = format!(
-            "Replay {} {} streaming for {} ({}/{})",
-            candle_mode.label(),
-            bar_type.label(),
+            "Replay {} streaming for {} ({}/{})",
+            bar_type.mode_label(candle_mode),
             contract.name,
             history_loaded + live_bars,
             total_bars
@@ -442,9 +440,12 @@ fn scale_duration(duration: Duration, factor: f64) -> Duration {
 #[cfg(feature = "replay")]
 impl ReplayState {
     fn bars_for_type(&self, bar_type: BarType) -> &[Bar] {
-        match bar_type {
-            BarType::Minute1 => &self.minute1_bars,
-            BarType::Range1 => &self.range1_bars,
+        if bar_type == BarType::minute(1) {
+            &self.minute1_bars
+        } else if bar_type == BarType::range(1) {
+            &self.range1_bars
+        } else {
+            &[]
         }
     }
 }

@@ -210,16 +210,16 @@ pub(crate) fn emit_execution_state(
 
 pub(crate) fn effective_closed_bar_len(session: &SessionState) -> usize {
     let closed_len = session.market.history_loaded.min(session.market.bars.len());
-    if should_use_t_minus_one_for_live_minute_bar(session, closed_len) {
+    if should_use_t_minus_one_for_live_time_bar(session, closed_len) {
         return closed_len.saturating_sub(1);
     }
     closed_len
 }
 
-fn should_use_t_minus_one_for_live_minute_bar(session: &SessionState, closed_len: usize) -> bool {
+fn should_use_t_minus_one_for_live_time_bar(session: &SessionState, closed_len: usize) -> bool {
     if closed_len == 0
         || session.session_kind != SessionKind::Live
-        || session.bar_type != BarType::Minute1
+        || !session.bar_type.is_time_based()
         || session.execution_config.native_signal_timing != NativeSignalTiming::ClosedBar
     {
         return false;

@@ -453,6 +453,7 @@ impl App {
             | Focus::AccountList
             | Focus::InstrumentQuery
             | Focus::BarTypeToggle
+            | Focus::BarValue
             | Focus::CandleModeToggle
             | Focus::ContractList => {}
         }

@@ -521,9 +521,8 @@ async fn market_data_worker_inner(
                     series.closed_bars.len(),
                     live_bars,
                     format!(
-                        "Subscribed to {} {} bars for {}",
-                        candle_mode.label(),
-                        bar_type.label(),
+                        "Subscribed to {} bars for {}",
+                        bar_type.mode_label(candle_mode),
                         contract.name
                     ),
                     before_closed_len,

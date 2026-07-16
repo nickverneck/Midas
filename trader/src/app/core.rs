@@ -42,10 +42,14 @@ impl App {
             last_log_at: None,
             last_market_update_at: None,
         };
+        app.normalize_market_controls_for_broker();
         if app.available_brokers.len() > 1 {
             app.screen = Screen::BrokerSelect;
             app.focus = Focus::BrokerList;
-            app.status = format!("Select a broker to continue. Current: {}", app.selected_broker.label());
+            app.status = format!(
+                "Select a broker to continue. Current: {}",
+                app.selected_broker.label()
+            );
         }
         app.push_log(
             format!(
@@ -100,7 +104,7 @@ impl App {
         cfg.cid = self.form.cid.clone();
         cfg.secret = self.form.secret.clone();
         cfg.token_path = self.form.token_path.clone().into();
-        cfg.candle_mode = self.candle_mode;
+        cfg.candle_mode = self.effective_candle_mode();
         cfg
     }
 
@@ -133,6 +137,7 @@ impl App {
             } => {
                 self.selected_broker = broker;
                 self.capabilities = capabilities;
+                self.normalize_market_controls_for_broker();
                 self.form.env = env;
                 self.form.auth_mode = auth_mode;
                 self.session_kind = session_kind;

@@ -1,9 +1,9 @@
 use super::*;
 use crate::broker::{
-    AccountInfo, AccountSnapshot, BrokerCapabilities, BrokerKind, CandleMode, ContractSuggestion,
-    ManualOrderAction, ServiceEvent,
+    AccountInfo, AccountSnapshot, BarKind, BrokerCapabilities, BrokerKind, CandleMode,
+    ContractSuggestion, ManualOrderAction, ServiceEvent,
 };
-use crate::config::{AppConfig, LogMode};
+use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategy::{
     ExecutionStateSnapshot, NativeExecutionPath, NativeReversalMode, NativeStrategyKind,
     StrategyKind,
@@ -186,6 +186,70 @@ fn broker_picker_uses_arrow_keys_and_enter_to_open_login() {
 }
 
 #[test]
+fn broker_picker_normalizes_unsupported_market_controls() {
+    let mut app = App::new(AppConfig::default());
+    if !app.available_brokers.contains(&BrokerKind::Tradovate)
+        || !app.available_brokers.contains(&BrokerKind::Ironbeam)
+    {
+        return;
+    }
+
+    app.selected_broker = BrokerKind::Tradovate;
+    app.bar_type = BarType::volume(500);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    for _ in 0..app.available_brokers.len() {
+        if app.selected_broker == BrokerKind::Ironbeam {
+            break;
+        }
+        app.handle_broker_select_key(key(KeyCode::Down));
+    }
+
+    assert_eq!(app.selected_broker, BrokerKind::Ironbeam);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn app_new_normalizes_unsupported_config_market_controls() {
+    let mut config = AppConfig::default();
+    config.broker = BrokerKind::Ironbeam;
+    config.candle_mode = CandleMode::HeikinAshi;
+
+    let app = App::new(config);
+    if app.selected_broker != BrokerKind::Ironbeam {
+        return;
+    }
+
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn connected_event_normalizes_unsupported_market_controls() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.bar_type = BarType::range(3);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_service_event(
+        ServiceEvent::Connected {
+            broker: BrokerKind::Ironbeam,
+            env: TradingEnvironment::Sim,
+            user_name: None,
+            auth_mode: AuthMode::TokenFile,
+            session_kind: SessionKind::Live,
+            capabilities: BrokerCapabilities::default(),
+        },
+        &cmd_tx,
+    );
+
+    assert_eq!(app.selected_broker, BrokerKind::Ironbeam);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
 fn f6_opens_session_stats_screen() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -206,6 +270,9 @@ fn selection_tab_order_reaches_bar_type_toggle() {
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+    assert_eq!(app.focus, Focus::BarValue);
+
+    app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
     assert_eq!(app.focus, Focus::CandleModeToggle);
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
@@ -219,21 +286,55 @@ fn selection_tab_order_reaches_bar_type_toggle() {
 fn bar_type_toggle_uses_arrow_keys_not_enter() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
     app.focus = Focus::BarTypeToggle;
 
-    assert_eq!(app.bar_type, BarType::Minute1);
+    assert_eq!(app.bar_type, BarType::minute(1));
 
     app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
-    assert_eq!(app.bar_type, BarType::Range1);
+    assert_eq!(app.bar_type, BarType::second(1));
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Left), &cmd_tx);
-    assert_eq!(app.bar_type, BarType::Minute1);
+    assert_eq!(app.bar_type, BarType::minute(1));
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
-    assert_eq!(app.bar_type, BarType::Minute1);
-    assert_eq!(app.focus, Focus::CandleModeToggle);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.focus, Focus::BarValue);
+}
+
+#[test]
+fn bar_value_accepts_arbitrary_numeric_input() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.focus = Focus::BarValue;
+
+    app.handle_selection_key(key(KeyCode::Char('2')), &cmd_tx);
+    app.handle_selection_key(key(KeyCode::Char('5')), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::minute(25));
+
+    app.handle_selection_key(key(KeyCode::Backspace), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::minute(2));
+}
+
+#[test]
+fn bar_type_cycles_through_supported_kinds() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.focus = Focus::BarTypeToggle;
+
+    for expected in [
+        BarKind::Second,
+        BarKind::Volume,
+        BarKind::Range,
+        BarKind::Minute,
+    ] {
+        app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(app.bar_type.kind(), expected);
+    }
 }
 
 #[test]
@@ -1151,7 +1252,7 @@ fn contract_selection_syncs_selected_account_before_subscribe() {
         } => {
             assert_eq!(contract.id, 123);
             assert_eq!(contract.name, "ESM6");
-            assert_eq!(bar_type, BarType::Minute1);
+            assert_eq!(bar_type, BarType::minute(1));
             assert_eq!(candle_mode, CandleMode::Standard);
         }
         _ => panic!("expected subscribe-bars command"),
@@ -1173,6 +1274,32 @@ fn contract_selection_subscribes_with_selected_candle_mode() {
     match cmd_rx.try_recv().expect("expected subscribe-bars command") {
         ServiceCommand::SubscribeBars { candle_mode, .. } => {
             assert_eq!(candle_mode, CandleMode::HeikinAshi);
+        }
+        _ => panic!("expected subscribe-bars command"),
+    }
+}
+
+#[test]
+fn contract_selection_subscribes_range_with_standard_candle_mode() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.contract_results = vec![contract(123, "ESM6")];
+    app.bar_type = BarType::range(4);
+    app.candle_mode = CandleMode::HeikinAshi;
+    app.focus = Focus::ContractList;
+
+    app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected subscribe-bars command") {
+        ServiceCommand::SubscribeBars {
+            bar_type,
+            candle_mode,
+            ..
+        } => {
+            assert_eq!(bar_type, BarType::range(4));
+            assert_eq!(candle_mode, CandleMode::Standard);
         }
         _ => panic!("expected subscribe-bars command"),
     }
@@ -1276,6 +1403,9 @@ fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::BarValue);
+
+    app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
     assert_eq!(app.focus, Focus::CandleModeToggle);
 
     app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
@@ -1286,15 +1416,43 @@ fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
 }
 
 #[test]
-fn bar_type_enter_advances_to_candle_mode_without_toggling() {
+fn bar_type_enter_advances_to_value_without_toggling() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
     app.focus = Focus::BarTypeToggle;
 
     app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
 
-    assert_eq!(app.bar_type, BarType::Minute1);
-    assert_eq!(app.focus, Focus::CandleModeToggle);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.focus, Focus::BarValue);
+}
+
+#[test]
+fn range_bars_skip_candle_mode_focus() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.bar_type = BarType::range(1);
+    app.focus = Focus::BarValue;
+
+    app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+
+    assert_eq!(app.focus, Focus::InstrumentQuery);
+}
+
+#[test]
+fn range_selection_summaries_hide_candle_mode() {
+    let mut app = App::new(AppConfig::default());
+    app.bar_type = BarType::range(3);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    let selection = rendered_text(app.selection_summary_lines());
+    let preview = rendered_text(app.selection_preview_lines());
+    let dashboard = rendered_text(app.dashboard_summary_lines());
+
+    assert!(selection.iter().any(|line| line == "Bar Type: 3 Range"));
+    assert!(!selection.iter().any(|line| line.starts_with("Candles:")));
+    assert!(!preview.iter().any(|line| line.starts_with("Candles:")));
+    assert!(!dashboard.iter().any(|line| line.starts_with("Candles:")));
 }
 
 #[test]

@@ -28,11 +28,11 @@ impl App {
                 ));
                 return;
             }
-            self.bar_type = BarType::Range1;
+            self.bar_type = BarType::range(1);
             let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
                 config: self.current_config(),
                 bar_type: self.bar_type,
-                candle_mode: self.candle_mode,
+                candle_mode: self.effective_candle_mode(),
             });
             self.push_log("Replay mode requested".to_string());
             return;

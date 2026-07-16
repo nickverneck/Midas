@@ -44,12 +44,21 @@ impl App {
         self.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay")
     }
 
-    fn broker_supports_range_bars(&self) -> bool {
+    fn broker_supports_bar_type_selection(&self) -> bool {
         self.selected_broker == BrokerKind::Tradovate
     }
 
     fn broker_supports_heikin_ashi(&self) -> bool {
         self.selected_broker == BrokerKind::Tradovate
+    }
+
+    fn normalize_market_controls_for_broker(&mut self) {
+        if !self.broker_supports_bar_type_selection() {
+            self.bar_type = BarType::default();
+        }
+        if !self.broker_supports_heikin_ashi() || !self.bar_type.supports_candle_mode() {
+            self.candle_mode = CandleMode::Standard;
+        }
     }
 
     fn set_replay_speed(
@@ -173,13 +182,19 @@ impl App {
     }
 
     fn selection_focus_order(&self) -> Vec<Focus> {
-        vec![
+        let mut order = vec![
             Focus::AccountList,
             Focus::BarTypeToggle,
-            Focus::CandleModeToggle,
+            Focus::BarValue,
+        ];
+        if self.bar_type.supports_candle_mode() {
+            order.push(Focus::CandleModeToggle);
+        }
+        order.extend([
             Focus::InstrumentQuery,
             Focus::ContractList,
-        ]
+        ]);
+        order
     }
 
     fn next_login_focus(&self) -> Focus {
@@ -267,6 +282,7 @@ impl App {
                 | Focus::NativeSignalDelayBars
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
+                | Focus::BarValue
                 | Focus::InstrumentQuery
         )
     }
@@ -348,7 +364,9 @@ impl App {
         body.push_str(&format!("selected_account: {selected_account}\n"));
         body.push_str(&format!("selected_contract: {selected_contract}\n"));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
-        body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
+        if self.bar_type.supports_candle_mode() {
+            body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
+        }
         body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
         body.push_str(&self.session_stats_log_section());
@@ -365,6 +383,18 @@ impl App {
 
     fn clear_strategy_numeric_input(&mut self) {
         self.strategy_numeric_input = None;
+    }
+
+    fn bar_value_text(&self) -> String {
+        self.strategy_numeric_value(Focus::BarValue, self.bar_type.value().to_string())
+    }
+
+    fn effective_candle_mode(&self) -> CandleMode {
+        self.bar_type.effective_candle_mode(self.candle_mode)
+    }
+
+    fn market_data_title_prefix(&self) -> String {
+        self.bar_type.mode_label(self.effective_candle_mode())
     }
 
     fn strategy_numeric_value(&self, focus: Focus, fallback: String) -> String {

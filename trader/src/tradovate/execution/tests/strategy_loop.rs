@@ -298,51 +298,59 @@ fn simple_strategy_does_not_recheck_revised_closed_bar_with_same_timestamp() {
 }
 
 #[test]
-fn closed_bar_timing_uses_t_minus_one_for_live_minute_bar() {
-    let mut session = test_session();
-    session.session_kind = SessionKind::Live;
-    session.bar_type = BarType::Minute1;
-    session.execution_config.native_signal_timing = NativeSignalTiming::ClosedBar;
+fn closed_bar_timing_uses_t_minus_one_for_live_time_bars() {
+    for bar_type in [BarType::minute(1), BarType::minute(5), BarType::second(15)] {
+        let mut session = test_session();
+        session.session_kind = SessionKind::Live;
+        session.bar_type = bar_type;
+        session.execution_config.native_signal_timing = NativeSignalTiming::ClosedBar;
 
-    let mature_ts = 1_000;
-    let live_ts = 2_000;
-    session.market.history_loaded = 2;
-    session.market.live_bars = 1;
-    session.market.status = "Subscribed to Standard 1 Min bars for ESH6".to_string();
-    session.market.bars = vec![
-        Bar {
-            ts_ns: mature_ts,
-            open: 10.0,
-            high: 10.5,
-            low: 9.5,
-            close: 10.0,
-        },
-        Bar {
-            ts_ns: live_ts,
-            open: 10.0,
-            high: 12.5,
-            low: 9.75,
-            close: 12.0,
-        },
-    ];
+        let mature_ts = 1_000;
+        let live_ts = 2_000;
+        session.market.history_loaded = 2;
+        session.market.live_bars = 1;
+        session.market.status =
+            format!("Subscribed to Standard {} bars for ESH6", bar_type.label());
+        session.market.bars = vec![
+            Bar {
+                ts_ns: mature_ts,
+                open: 10.0,
+                high: 10.5,
+                low: 9.5,
+                close: 10.0,
+            },
+            Bar {
+                ts_ns: live_ts,
+                open: 10.0,
+                high: 12.5,
+                low: 9.75,
+                close: 12.0,
+            },
+        ];
 
-    assert_eq!(effective_closed_bar_len(&session), 1);
-    assert_eq!(latest_strategy_bar_ts(&session), Some(mature_ts));
-    assert_eq!(
-        session
-            .market
-            .bars
-            .get(effective_closed_bar_len(&session))
-            .map(|bar| bar.ts_ns),
-        Some(live_ts)
-    );
+        assert_eq!(
+            effective_closed_bar_len(&session),
+            1,
+            "bar_type={}",
+            bar_type.label()
+        );
+        assert_eq!(latest_strategy_bar_ts(&session), Some(mature_ts));
+        assert_eq!(
+            session
+                .market
+                .bars
+                .get(effective_closed_bar_len(&session))
+                .map(|bar| bar.ts_ns),
+            Some(live_ts)
+        );
+    }
 }
 
 #[test]
 fn live_bar_timing_includes_latest_live_minute_bar() {
     let mut session = test_session();
     session.session_kind = SessionKind::Live;
-    session.bar_type = BarType::Minute1;
+    session.bar_type = BarType::minute(1);
     session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;
     session.market.history_loaded = 2;
     session.market.live_bars = 1;
@@ -372,7 +380,7 @@ fn live_bar_timing_includes_latest_live_minute_bar() {
 fn closed_bar_timing_uses_reported_t_minus_one_when_forming_bar_is_present() {
     let mut session = test_session();
     session.session_kind = SessionKind::Live;
-    session.bar_type = BarType::Minute1;
+    session.bar_type = BarType::minute(1);
     session.execution_config.native_signal_timing = NativeSignalTiming::ClosedBar;
     session.market.history_loaded = 2;
     session.market.live_bars = 1;

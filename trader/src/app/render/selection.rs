@@ -66,7 +66,7 @@ impl App {
                         let _ = cmd_tx.send(ServiceCommand::SubscribeBars {
                             contract,
                             bar_type: self.bar_type,
-                            candle_mode: self.candle_mode,
+                            candle_mode: self.effective_candle_mode(),
                         });
                         self.screen = Screen::Strategy;
                         self.focus = Focus::StrategyKind;
@@ -74,7 +74,7 @@ impl App {
                     return;
                 }
                 KeyCode::Left => {
-                    self.focus = Focus::CandleModeToggle;
+                    self.focus = self.prev_selection_focus();
                     return;
                 }
                 KeyCode::Right => {
@@ -89,7 +89,7 @@ impl App {
             Focus::InstrumentQuery => {
                 match key.code {
                     KeyCode::Up => {
-                        self.focus = Focus::CandleModeToggle;
+                        self.focus = self.prev_selection_focus();
                         return;
                     }
                     KeyCode::Down => {
@@ -97,7 +97,7 @@ impl App {
                         return;
                     }
                     KeyCode::Left => {
-                        self.focus = Focus::CandleModeToggle;
+                        self.focus = self.prev_selection_focus();
                         return;
                     }
                     KeyCode::Right => {
@@ -119,10 +119,13 @@ impl App {
             }
             Focus::BarTypeToggle => match key.code {
                 KeyCode::Left | KeyCode::Right => {
-                    if self.broker_supports_range_bars() {
-                        self.bar_type = self.bar_type.toggle();
+                    if self.broker_supports_bar_type_selection() {
+                        self.bar_type = match key.code {
+                            KeyCode::Left => self.bar_type.previous_kind(),
+                            _ => self.bar_type.next_kind(),
+                        };
                     } else {
-                        self.bar_type = BarType::Minute1;
+                        self.bar_type = BarType::default();
                         self.status = format!(
                             "{} currently supports 1-minute bars only.",
                             self.selected_broker.label()
@@ -135,17 +138,59 @@ impl App {
                     return;
                 }
                 KeyCode::Down => {
-                    self.focus = Focus::CandleModeToggle;
+                    self.focus = Focus::BarValue;
                     return;
                 }
                 KeyCode::Enter => {
-                    self.focus = Focus::CandleModeToggle;
+                    self.focus = Focus::BarValue;
                     return;
                 }
                 _ => {}
             },
+            Focus::BarValue => {
+                match key.code {
+                    KeyCode::Up => {
+                        self.focus = Focus::BarTypeToggle;
+                        return;
+                    }
+                    KeyCode::Down | KeyCode::Enter => {
+                        self.focus = self.next_selection_focus();
+                        return;
+                    }
+                    _ => {}
+                }
+
+                if !self.broker_supports_bar_type_selection() {
+                    self.bar_type = BarType::default();
+                    self.status = format!(
+                        "{} currently supports 1-minute bars only.",
+                        self.selected_broker.label()
+                    );
+                    return;
+                }
+
+                let mut value = self.bar_type.value() as usize;
+                if edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::BarValue,
+                    &mut value,
+                    key,
+                    1,
+                    1,
+                ) {
+                    self.bar_type = self
+                        .bar_type
+                        .with_value(value.min(u32::MAX as usize) as u32);
+                    return;
+                }
+            }
             Focus::CandleModeToggle => match key.code {
                 KeyCode::Left | KeyCode::Right => {
+                    if !self.bar_type.supports_candle_mode() {
+                        self.candle_mode = CandleMode::Standard;
+                        self.focus = Focus::InstrumentQuery;
+                        return;
+                    }
                     if self.broker_supports_heikin_ashi() {
                         self.candle_mode = self.candle_mode.toggle();
                     } else {
@@ -158,7 +203,7 @@ impl App {
                     return;
                 }
                 KeyCode::Up => {
-                    self.focus = Focus::BarTypeToggle;
+                    self.focus = Focus::BarValue;
                     return;
                 }
                 KeyCode::Down => {
@@ -270,35 +315,48 @@ impl App {
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),
+                Constraint::Length(7),
                 Constraint::Min(10),
                 Constraint::Length(8),
             ])
             .split(columns[1]);
 
-        let search = Paragraph::new(vec![
+        let mut search_lines = vec![
             styled_line(
-                format!("Bar Type: {}", self.bar_type.label()),
+                format!("Bar Type: {}", self.bar_type.kind().label()),
                 self.focus == Focus::BarTypeToggle,
             ),
             styled_line(
+                format!("Value: {}", self.bar_value_text()),
+                self.focus == Focus::BarValue,
+            ),
+        ];
+        if self.bar_type.supports_candle_mode() {
+            search_lines.push(styled_line(
                 format!("Candles: {}", self.candle_mode.label()),
                 self.focus == Focus::CandleModeToggle,
-            ),
+            ));
+        }
+        let help = if self.bar_type.supports_candle_mode() {
+            "Use Left/Right on bar type and candles, digits for value, Enter or Down advances. Enter on Query searches."
+        } else {
+            "Use Left/Right on bar type, digits for value, Enter or Down advances. Enter on Query searches."
+        };
+        search_lines.extend([
             styled_line(
                 format!("Query: {}", self.instrument_query),
                 self.focus == Focus::InstrumentQuery,
             ),
-            Line::from(
-                "Use Left/Right on bar type and candles, Enter or Down advances. Enter on Query searches. Enter on a result subscribes.",
-            ),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Instrument Search"),
-        )
-        .wrap(Wrap { trim: true });
+            Line::from(help),
+        ]);
+
+        let search = Paragraph::new(search_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Instrument Search"),
+            )
+            .wrap(Wrap { trim: true });
         frame.render_widget(search, right[0]);
 
         let results = if self.contract_results.is_empty() {

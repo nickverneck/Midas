@@ -2,7 +2,7 @@ use super::super::*;
 
 impl App {
     pub(in crate::app) fn selection_summary_lines(&self) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = vec![
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!(
                 "Strategy Runtime: {}",
@@ -10,7 +10,11 @@ impl App {
             )),
             Line::from(format!("Accounts loaded: {}", self.accounts.len())),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
-            Line::from(format!("Candles: {}", self.candle_mode.label())),
+        ];
+        if self.bar_type.supports_candle_mode() {
+            lines.push(Line::from(format!("Candles: {}", self.candle_mode.label())));
+        }
+        lines.extend([
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),
                 None => "Selected account: none".to_string(),
@@ -24,7 +28,8 @@ impl App {
                     .unwrap_or_else(|| "none".to_string())
             )),
             Line::from("F3 opens the monitoring dashboard."),
-        ]
+        ]);
+        lines
     }
 
     pub(in crate::app) fn selection_preview_lines(&self) -> Vec<Line<'static>> {
@@ -32,7 +37,6 @@ impl App {
             Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
-            Line::from(format!("Candles: {}", self.candle_mode.label())),
             Line::from(format!("Query: {}", self.instrument_query)),
             Line::from(match self.accounts.get(self.selected_account) {
                 Some(account) => format!("Selected account: {}", account.name),
@@ -43,6 +47,12 @@ impl App {
                 None => "Selected contract: none".to_string(),
             }),
         ];
+        if self.bar_type.supports_candle_mode() {
+            lines.insert(
+                3,
+                Line::from(format!("Candles: {}", self.candle_mode.label())),
+            );
+        }
 
         if let Some(snapshot) = self.selected_snapshot() {
             lines.push(Line::from(format!(
