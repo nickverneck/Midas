@@ -9,7 +9,8 @@ use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategies::hma_cross::hma_series;
 use crate::strategy::{
-    LuaSourceMode, NativeSignalTiming, NativeStrategyKind, StrategyKind, StrategyState,
+    LuaSourceMode, NativeExecutionPath, NativeReversalMode, NativeSignalTiming, NativeStrategyKind,
+    StrategyKind, StrategyState,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -18,12 +19,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs, Wrap,
+    Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, ListState, Paragraph, Tabs,
+    Wrap,
     canvas::{Canvas, Line as CanvasLine},
 };
 use std::collections::VecDeque;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
+
+const UI_LOG_ENTRY_LIMIT: usize = 200;
+const PERSISTED_LOG_ENTRY_LIMIT: usize = 10_000;
 
 pub struct App {
     base_config: AppConfig,
@@ -46,7 +51,9 @@ pub struct App {
     selected_contract: usize,
     market: MarketSnapshot,
     logs: VecDeque<LogEntry>,
+    persisted_logs: VecDeque<LogEntry>,
     session_stats: SessionStatsState,
+    session_stats_show_fees: bool,
     dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
@@ -94,6 +101,8 @@ enum Focus {
     OrderQty,
     NativeStrategy,
     NativeSignalTiming,
+    NativeSignalDelayBars,
+    NativeExecutionPath,
     NativeReversalMode,
     NativeBlockoutEnabled,
     NativeBlockoutMinutes,
@@ -123,6 +132,7 @@ enum Focus {
     AccountList,
     InstrumentQuery,
     BarTypeToggle,
+    BarValue,
     CandleModeToggle,
     ContractList,
 }

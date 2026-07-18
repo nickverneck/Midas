@@ -126,9 +126,13 @@ pub(super) fn dispatch_native_order_strategy_target(
 
     let is_reversal =
         current_qty != 0 && target_qty != 0 && current_qty.signum() != target_qty.signum();
-    if is_reversal
-        && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenConfirmEnter
-    {
+    // Protected Tradovate reversals must open the new side through
+    // startorderstrategy so TP, SL, and auto-trail remain broker-owned.
+    let reversal_mode = match session.execution_config.native_reversal_mode {
+        NativeReversalMode::Direct => NativeReversalMode::CloseAllEnter,
+        mode => mode,
+    };
+    if is_reversal && reversal_mode == NativeReversalMode::FlattenConfirmEnter {
         let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
         if interrupt_order_strategy_id.is_none() {
             return Ok(MarketOrderDispatchOutcome::NoOp {
@@ -163,16 +167,16 @@ pub(super) fn dispatch_native_order_strategy_target(
         session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
             target_qty,
             reason: reason.to_string(),
+            started_at: time::Instant::now(),
+            flat_seen_at: None,
         });
         return Ok(MarketOrderDispatchOutcome::Queued {
             target_qty: Some(0),
         });
     }
 
-    if is_reversal
-        && session.execution_config.native_reversal_mode == NativeReversalMode::CloseAllEnter
-    {
-        let _detached = detach_strategy_protection_for_selected(session)?;
+    if is_reversal && reversal_mode == NativeReversalMode::CloseAllEnter {
+        let detached = detach_strategy_protection_for_selected(session)?;
         let liquidation = build_liquidation_request(
             session,
             &account,
@@ -180,7 +184,7 @@ pub(super) fn dispatch_native_order_strategy_target(
             true,
             Some(target_qty),
             None,
-            Vec::new(),
+            detached.cancel_order_ids,
         );
         let order_action = if target_qty > 0 { "Buy" } else { "Sell" };
         let strategy = build_order_strategy_request(
@@ -200,36 +204,19 @@ pub(super) fn dispatch_native_order_strategy_target(
         });
     }
 
-    if is_reversal && session.execution_config.native_reversal_mode == NativeReversalMode::Direct {
-        let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
-        let detached = detach_strategy_protection_for_selected(session)?;
-        let order_action = if delta > 0 { "Buy" } else { "Sell" };
-        let order_qty = delta.unsigned_abs() as i32;
-        let order = build_market_order_request(
-            session,
-            &account,
-            &contract,
-            order_action,
-            order_qty,
-            "Strategy",
-            true,
-            Some(reason),
-            Some(target_qty),
-            interrupt_order_strategy_id,
-            detached.cancel_order_ids,
-        );
-        enqueue_market_order(session, broker_tx, order)?;
-        return Ok(MarketOrderDispatchOutcome::Queued {
-            target_qty: Some(target_qty),
-        });
-    }
-
-    let interrupt_order_strategy_id = if current_qty != 0 {
+    let flat_stale_order_strategy_id = if current_qty == 0 {
         selected_active_order_strategy_id(session).filter(|order_strategy_id| {
             strategy_has_live_broker_path(session, strategy_key, *order_strategy_id)
         })
     } else {
         None
+    };
+    let interrupt_order_strategy_id = if current_qty != 0 {
+        selected_active_order_strategy_id(session).filter(|order_strategy_id| {
+            strategy_has_live_broker_path(session, strategy_key, *order_strategy_id)
+        })
+    } else {
+        flat_stale_order_strategy_id
     };
     if current_qty != 0 && !is_reversal && interrupt_order_strategy_id.is_none() {
         return Ok(MarketOrderDispatchOutcome::NoOp {
@@ -240,6 +227,8 @@ pub(super) fn dispatch_native_order_strategy_target(
         });
     }
     let detached = if current_qty != 0 {
+        detach_strategy_protection_for_selected(session)?
+    } else if flat_stale_order_strategy_id.is_some() {
         detach_strategy_protection_for_selected(session)?
     } else {
         DetachedStrategyProtection {

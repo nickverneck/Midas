@@ -53,12 +53,12 @@ impl App {
                         ));
                         return;
                     }
-                    self.bar_type = BarType::Range1;
+                    self.bar_type = BarType::range(1);
                     let cfg = self.current_config();
                     let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
                         config: cfg,
                         bar_type: self.bar_type,
-                        candle_mode: self.candle_mode,
+                        candle_mode: self.effective_candle_mode(),
                     });
                     self.push_log("Replay mode requested".to_string());
                 }
@@ -77,6 +77,8 @@ impl App {
             | Focus::OrderQty
             | Focus::NativeStrategy
             | Focus::NativeSignalTiming
+            | Focus::NativeSignalDelayBars
+            | Focus::NativeExecutionPath
             | Focus::NativeReversalMode
             | Focus::NativeBlockoutEnabled
             | Focus::NativeBlockoutMinutes
@@ -106,6 +108,7 @@ impl App {
             | Focus::AccountList
             | Focus::InstrumentQuery
             | Focus::BarTypeToggle
+            | Focus::BarValue
             | Focus::CandleModeToggle
             | Focus::ContractList => {}
         }
@@ -117,8 +120,11 @@ impl App {
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(area);
 
-        let login = Paragraph::new(self.connection_lines())
+        let connection_lines = self.connection_lines();
+        let connection_scroll = focused_paragraph_scroll_offset(&connection_lines, columns[0]);
+        let login = Paragraph::new(connection_lines)
             .block(Block::default().borders(Borders::ALL).title("Login"))
+            .scroll((connection_scroll, 0))
             .wrap(Wrap { trim: false });
         frame.render_widget(login, columns[0]);
 

@@ -63,6 +63,32 @@ async fn broker_gateway_worker(
                     }
                 }
             }
+            BrokerCommand::OrderStrategy {
+                request_tx,
+                strategy,
+            } => {
+                if strategy.simulate {
+                    match replay_state.simulate_order_strategy(strategy) {
+                        Ok(events) => {
+                            for event in events {
+                                let _ = internal_tx.send(event);
+                            }
+                        }
+                        Err(failure) => {
+                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                        }
+                    }
+                } else {
+                    match submit_order_strategy_via_gateway(&request_tx, strategy).await {
+                        Ok(ack) => {
+                            let _ = internal_tx.send(InternalEvent::OrderStrategyAck(ack));
+                        }
+                        Err(failure) => {
+                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                        }
+                    }
+                }
+            }
             BrokerCommand::LiquidateThenOrderStrategy {
                 request_tx,
                 liquidation,
@@ -89,32 +115,6 @@ async fn broker_gateway_worker(
                     )
                     .await
                     {
-                        Ok(ack) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyAck(ack));
-                        }
-                        Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
-                        }
-                    }
-                }
-            }
-            BrokerCommand::OrderStrategy {
-                request_tx,
-                strategy,
-            } => {
-                if strategy.simulate {
-                    match replay_state.simulate_order_strategy(strategy) {
-                        Ok(events) => {
-                            for event in events {
-                                let _ = internal_tx.send(event);
-                            }
-                        }
-                        Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
-                        }
-                    }
-                } else {
-                    match submit_order_strategy_via_gateway(&request_tx, strategy).await {
                         Ok(ack) => {
                             let _ = internal_tx.send(InternalEvent::OrderStrategyAck(ack));
                         }

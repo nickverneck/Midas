@@ -28,11 +28,11 @@ impl App {
                 ));
                 return;
             }
-            self.bar_type = BarType::Range1;
+            self.bar_type = BarType::range(1);
             let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
                 config: self.current_config(),
                 bar_type: self.bar_type,
-                candle_mode: self.candle_mode,
+                candle_mode: self.effective_candle_mode(),
             });
             self.push_log("Replay mode requested".to_string());
             return;
@@ -79,6 +79,13 @@ impl App {
 
         if !self.is_text_focus() && key.code == KeyCode::Char('q') {
             self.should_quit = true;
+            return;
+        }
+
+        if !self.is_free_text_focus()
+            && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
+        {
+            self.manual_disarm_native_strategy(cmd_tx);
             return;
         }
 

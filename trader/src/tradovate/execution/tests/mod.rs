@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) use serde_json::{Value, json};
+pub(super) use serde_json::json;
 pub(super) use std::collections::BTreeMap;
 
 mod account_sync;
@@ -24,6 +24,7 @@ pub(super) fn test_session() -> SessionState {
             user_id: None,
             user_name: None,
         },
+        token_file_snapshot: None,
         accounts: vec![AccountInfo {
             id: 42,
             name: "SIM".to_string(),

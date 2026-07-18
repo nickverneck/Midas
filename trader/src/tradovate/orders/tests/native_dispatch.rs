@@ -1,5 +1,16 @@
 use super::*;
 
+fn parsed_strategy_params(strategy: &PendingOrderStrategyTransition) -> Value {
+    serde_json::from_str(
+        strategy
+            .payload
+            .get("params")
+            .and_then(Value::as_str)
+            .expect("strategy params should be serialized JSON"),
+    )
+    .expect("strategy params should parse")
+}
+
 #[test]
 fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
     let mut session = test_session();
@@ -43,6 +54,139 @@ fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
 }
 
 #[test]
+fn native_strategy_auto_trail_payload_uses_startorderstrategy_envelope() {
+    let mut session = test_session();
+    session.cfg.custom_tag50 = "MIDAS".to_string();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_ema.take_profit_ticks = 8.0;
+    session.execution_config.native_ema.stop_loss_ticks = 8.0;
+    session.execution_config.native_ema.use_trailing_stop = true;
+    session.execution_config.native_ema.trail_trigger_ticks = 4.0;
+    session.execution_config.native_ema.trail_offset_ticks = 2.0;
+    session.market.tick_size = Some(0.25);
+    let (broker_tx, mut broker_rx) = unbounded_channel();
+
+    dispatch_target_position_order(&mut session, &broker_tx, -1, true, "ema_cross signal")
+        .expect("auto-trail config should queue a startorderstrategy request");
+
+    match broker_rx.try_recv().expect("broker command queued") {
+        BrokerCommand::OrderStrategy { strategy, .. } => {
+            let mut keys = strategy
+                .payload
+                .as_object()
+                .expect("payload should be an object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "accountId",
+                    "accountSpec",
+                    "action",
+                    "customTag50",
+                    "orderStrategyTypeId",
+                    "params",
+                    "symbol",
+                    "uuid",
+                ]
+            );
+            assert_eq!(
+                strategy.payload.get("accountSpec").and_then(Value::as_str),
+                Some("SIM")
+            );
+            assert_eq!(
+                strategy.payload.get("accountId").and_then(Value::as_i64),
+                Some(42)
+            );
+            assert_eq!(
+                strategy.payload.get("symbol").and_then(Value::as_str),
+                Some("ESM6")
+            );
+            assert_eq!(
+                strategy.payload.get("action").and_then(Value::as_str),
+                Some("Sell")
+            );
+            assert_eq!(
+                strategy
+                    .payload
+                    .get("orderStrategyTypeId")
+                    .and_then(Value::as_i64),
+                Some(2)
+            );
+            assert!(
+                strategy
+                    .payload
+                    .get("params")
+                    .and_then(Value::as_str)
+                    .is_some(),
+                "StartOrderStrategy params field is serialized JSON"
+            );
+            assert_eq!(
+                strategy.payload.get("customTag50").and_then(Value::as_str),
+                Some("MIDAS")
+            );
+            assert!(
+                strategy
+                    .payload
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .is_some()
+            );
+
+            let params = parsed_strategy_params(&strategy);
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("orderQty"))
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("orderType"))
+                    .and_then(Value::as_str),
+                Some("Market")
+            );
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("timeInForce"))
+                    .and_then(Value::as_str),
+                Some("Day")
+            );
+            let bracket = params
+                .get("brackets")
+                .and_then(Value::as_array)
+                .and_then(|brackets| brackets.first())
+                .expect("strategy should include a bracket");
+            assert_eq!(bracket.get("qty").and_then(Value::as_i64), Some(1));
+            assert_eq!(
+                bracket.get("trailingStop").and_then(Value::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                bracket.get("profitTarget").and_then(Value::as_f64),
+                Some(-2.0)
+            );
+            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(2.0));
+            assert_eq!(
+                bracket.get("autoTrail"),
+                Some(&json!({
+                    "stopLoss": 0.5,
+                    "trigger": 1.0,
+                    "freq": 0.25,
+                }))
+            );
+        }
+        _ => panic!("expected order strategy command"),
+    }
+}
+
+#[test]
 fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
@@ -74,14 +218,14 @@ fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
                 strategy.payload.get("action").and_then(Value::as_str),
                 Some("Buy")
             );
-            let params: Value = serde_json::from_str(
-                strategy
-                    .payload
-                    .get("params")
-                    .and_then(Value::as_str)
-                    .expect("strategy params should be serialized JSON"),
-            )
-            .expect("strategy params should parse");
+            let params = parsed_strategy_params(&strategy);
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("orderType"))
+                    .and_then(Value::as_str),
+                Some("Market")
+            );
             let bracket = params
                 .get("brackets")
                 .and_then(Value::as_array)
@@ -119,7 +263,7 @@ fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
 }
 
 #[test]
-fn native_strategy_auto_trail_without_fixed_stop_uses_trail_offset_as_initial_stop() {
+fn native_strategy_auto_trail_without_fixed_stop_sends_required_initial_stop_leg() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -134,20 +278,27 @@ fn native_strategy_auto_trail_without_fixed_stop_uses_trail_offset_as_initial_st
 
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::OrderStrategy { strategy, .. } => {
-            let params: Value = serde_json::from_str(
-                strategy
-                    .payload
-                    .get("params")
-                    .and_then(Value::as_str)
-                    .expect("strategy params should be serialized JSON"),
-            )
-            .expect("strategy params should parse");
+            let params = parsed_strategy_params(&strategy);
             let bracket = params
                 .get("brackets")
                 .and_then(Value::as_array)
                 .and_then(|brackets| brackets.first())
                 .expect("strategy should include a bracket");
-            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(-0.5));
+            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(-1.5));
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("trigger"))
+                    .and_then(Value::as_f64),
+                Some(1.0)
+            );
+            assert_eq!(
+                bracket
+                    .get("autoTrail")
+                    .and_then(|auto_trail| auto_trail.get("stopLoss"))
+                    .and_then(Value::as_f64),
+                Some(0.5)
+            );
             assert!(bracket.get("autoTrail").is_some());
         }
         _ => panic!("expected order strategy command"),
@@ -155,7 +306,7 @@ fn native_strategy_auto_trail_without_fixed_stop_uses_trail_offset_as_initial_st
 }
 
 #[test]
-fn automated_reversal_uses_market_order_path_for_direct_mode() {
+fn protected_direct_reversal_uses_closeall_then_broker_strategy() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -177,27 +328,37 @@ fn automated_reversal_uses_market_order_path_for_direct_mode() {
 
     let outcome =
         dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
-            .expect("non-flat direct reversal should queue a market order");
+            .expect("protected direct reversal should queue close-all then order strategy");
 
     match outcome {
         MarketOrderDispatchOutcome::Queued {
             target_qty: Some(-1),
-        } => match broker_rx.try_recv().expect("broker command queued") {
-            BrokerCommand::MarketOrder { order, .. } => {
-                assert_eq!(order.interrupt_order_strategy_id, None);
-                assert!(order.cancel_order_ids.is_empty());
-                assert_eq!(order.target_qty, Some(-1));
-                assert_eq!(order.order_qty, 2);
-                assert_eq!(order.order_action, "Sell");
+        } => {
+            assert!(session.execution_runtime.pending_reversal_entry.is_none());
+            match broker_rx.try_recv().expect("broker command queued") {
+                BrokerCommand::LiquidateThenOrderStrategy {
+                    liquidation,
+                    strategy,
+                    ..
+                } => {
+                    assert_eq!(liquidation.target_qty, Some(-1));
+                    assert!(liquidation.cancel_order_ids.is_empty());
+                    assert_eq!(strategy.target_qty, -1);
+                    assert_eq!(strategy.entry_order_qty, 1);
+                    assert_eq!(
+                        strategy.payload.get("action").and_then(Value::as_str),
+                        Some("Sell")
+                    );
+                }
+                _ => panic!("expected close-all plus order strategy command"),
             }
-            _ => panic!("expected market order command"),
-        },
+        }
         _ => panic!("expected queued direct reversal"),
     }
 }
 
 #[test]
-fn automated_reversal_interrupts_live_order_strategy_path() {
+fn protected_reversal_clears_live_strategy_orders_before_broker_strategy_entry() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -247,7 +408,7 @@ fn automated_reversal_interrupts_live_order_strategy_path() {
 
     let outcome =
         dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
-            .expect("live reversal should interrupt the previous strategy path");
+            .expect("live reversal should clear old orders before broker strategy entry");
 
     assert!(matches!(
         outcome,
@@ -255,21 +416,26 @@ fn automated_reversal_interrupts_live_order_strategy_path() {
             target_qty: Some(-1)
         }
     ));
+    assert!(session.execution_runtime.pending_reversal_entry.is_none());
 
     match broker_rx.try_recv().expect("broker command queued") {
-        BrokerCommand::MarketOrder { order, .. } => {
-            assert_eq!(order.interrupt_order_strategy_id, Some(77));
-            assert_eq!(order.cancel_order_ids, vec![1001]);
-            assert_eq!(order.target_qty, Some(-1));
-            assert_eq!(order.order_qty, 2);
-            assert_eq!(order.order_action, "Sell");
+        BrokerCommand::LiquidateThenOrderStrategy {
+            liquidation,
+            strategy,
+            ..
+        } => {
+            assert_eq!(liquidation.interrupt_order_strategy_id, None);
+            assert!(liquidation.cancel_order_ids.is_empty());
+            assert_eq!(liquidation.target_qty, Some(-1));
+            assert_eq!(strategy.target_qty, -1);
+            assert_eq!(strategy.entry_order_qty, 1);
         }
-        _ => panic!("expected market order command"),
+        _ => panic!("expected close-all plus order strategy command"),
     }
 }
 
 #[test]
-fn automated_reversal_cancels_orphan_native_protection_when_strategy_path_missing() {
+fn protected_reversal_cancels_orphan_app_protection_before_broker_strategy_entry() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -289,16 +455,43 @@ fn automated_reversal_cancels_orphan_native_protection_when_strategy_path_missin
     );
     session.user_store.orders.insert(
         42,
-        BTreeMap::from([(
-            1001,
-            json!({
-                "id": 1001,
-                "accountId": 42,
-                "contractId": 3570918,
-                "ordStatus": "Working",
-                "clOrdId": "midas-orphan-tp"
-            }),
-        )]),
+        BTreeMap::from([
+            (
+                1001,
+                json!({
+                    "id": 1001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working",
+                    "clOrdId": "midas-orphan-tp"
+                }),
+            ),
+            (
+                2001,
+                json!({
+                    "id": 2001,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "ordStatus": "Working"
+                }),
+            ),
+        ]),
+    );
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key: StrategyProtectionKey {
+            account_id: 42,
+            contract_id: 3570918,
+        },
+        order_strategy_id: 77,
+        target_qty: 1,
+    });
+    session.user_store.order_strategy_links.insert(
+        1,
+        json!({
+            "id": 1,
+            "orderStrategyId": 77,
+            "orderId": 2001
+        }),
     );
     let (broker_tx, mut broker_rx) = unbounded_channel();
 
@@ -314,14 +507,18 @@ fn automated_reversal_cancels_orphan_native_protection_when_strategy_path_missin
     ));
 
     match broker_rx.try_recv().expect("broker command queued") {
-        BrokerCommand::MarketOrder { order, .. } => {
-            assert_eq!(order.interrupt_order_strategy_id, None);
-            assert_eq!(order.cancel_order_ids, vec![1001]);
-            assert_eq!(order.target_qty, Some(-1));
-            assert_eq!(order.order_qty, 2);
-            assert_eq!(order.order_action, "Sell");
+        BrokerCommand::LiquidateThenOrderStrategy {
+            liquidation,
+            strategy,
+            ..
+        } => {
+            assert_eq!(liquidation.interrupt_order_strategy_id, None);
+            assert_eq!(liquidation.cancel_order_ids, vec![1001]);
+            assert_eq!(liquidation.target_qty, Some(-1));
+            assert_eq!(strategy.target_qty, -1);
+            assert_eq!(strategy.entry_order_qty, 1);
         }
-        _ => panic!("expected market order command"),
+        _ => panic!("expected close-all plus order strategy command"),
     }
 }
 
@@ -398,7 +595,7 @@ fn automated_reversal_flatten_mode_queues_flatten_before_entry() {
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::MarketOrder { order, .. } => {
             assert_eq!(order.interrupt_order_strategy_id, Some(77));
-            assert_eq!(order.cancel_order_ids, vec![1001]);
+            assert!(order.cancel_order_ids.is_empty());
             assert_eq!(order.target_qty, Some(0));
             assert_eq!(order.order_qty, 1);
             assert_eq!(order.order_action, "Sell");

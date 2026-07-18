@@ -20,8 +20,8 @@ use super::support::{
     FOLLOWUP_REFRESH_DELAY_MS, contract_session_profile, pick_number, pick_str, schedule_refresh,
 };
 use crate::broker::{
-    BarType, BrokerCapabilities, BrokerKind, CandleMode, LatencySnapshot, MarketSnapshot,
-    ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
+    BrokerCapabilities, BrokerKind, CandleMode, LatencySnapshot, MarketSnapshot, ReplaySpeed,
+    ServiceCommand, ServiceEvent, SessionKind,
 };
 use crate::strategy::ExecutionStateSnapshot;
 use anyhow::{Context, Result, bail};
@@ -209,7 +209,7 @@ async fn handle_command(
             candle_mode,
         } => {
             let session = require_session_mut(state.session.as_mut())?;
-            if bar_type != BarType::Minute1 {
+            if !bar_type.is_one_minute() {
                 let _ = event_tx.send(ServiceEvent::Status(
                     "Ironbeam currently supports 1-minute bars only; using 1 Min.".to_string(),
                 ));

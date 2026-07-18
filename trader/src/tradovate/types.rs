@@ -35,6 +35,14 @@ struct TokenBundle {
     user_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenFileSnapshot {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+    content_hash: u64,
+}
+
 struct ServiceState {
     client: Client,
     broker_tx: UnboundedSender<BrokerCommand>,
@@ -54,6 +62,7 @@ struct SessionState {
     session_kind: SessionKind,
     replay_enabled: bool,
     tokens: TokenBundle,
+    token_file_snapshot: Option<TokenFileSnapshot>,
     accounts: Vec<AccountInfo>,
     request_tx: UnboundedSender<UserSocketCommand>,
     execution_config: ExecutionStrategyConfig,
@@ -84,12 +93,17 @@ struct PendingSignalLatencyContext {
 struct PendingNativeReversalEntry {
     target_qty: i32,
     reason: String,
+    started_at: time::Instant,
+    flat_seen_at: Option<time::Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct ExecutionRuntimeState {
     armed: bool,
     last_closed_bar_ts: Option<i64>,
+    last_closed_bar_fingerprint: Option<u64>,
+    last_dispatched_signal_bar_ts: Option<i64>,
+    last_dispatched_entry_signal: Option<StrategySignal>,
     pending_target_qty: Option<i32>,
     pending_reversal_entry: Option<PendingNativeReversalEntry>,
     last_summary: String,
@@ -110,6 +124,8 @@ impl ExecutionRuntimeState {
 
     fn reset_execution(&mut self) {
         self.pending_reversal_entry = None;
+        self.last_dispatched_signal_bar_ts = None;
+        self.last_dispatched_entry_signal = None;
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
         self.hma_cross_execution = HmaCrossExecutionState::default();
@@ -139,8 +155,6 @@ struct ManagedProtectionOrders {
     signed_qty: i32,
     take_profit_price: Option<f64>,
     stop_price: Option<f64>,
-    last_requested_take_profit_price: Option<f64>,
-    last_requested_stop_price: Option<f64>,
     take_profit_cl_ord_id: Option<String>,
     stop_cl_ord_id: Option<String>,
     take_profit_order_id: Option<i64>,
@@ -154,7 +168,7 @@ struct TrackedOrderStrategy {
     target_qty: i32,
 }
 
-const TOKEN_REFRESH_LEAD_SECS: i64 = 300;
+const TOKEN_REFRESH_LEAD_SECS: i64 = 900;
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 const ENGINE_MARKET_BAR_LIMIT: usize = 4_096;
 const UI_MARKET_BAR_LIMIT: usize = 256;

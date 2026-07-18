@@ -98,11 +98,11 @@ impl App {
                 Line::from(self.market.status.clone()),
                 Line::from("Select a contract to load history + live bars."),
             ])
-            .block(Block::default().borders(Borders::ALL).title(format!(
-                "{} {} Market Data",
-                self.candle_mode.label(),
-                self.bar_type.label()
-            )));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("{} Market Data", self.market_data_title_prefix())),
+            );
             frame.render_widget(empty, area);
             return;
         }
@@ -139,14 +139,13 @@ impl App {
         let take_profit_price = trade_levels.take_profit_price;
         let stop_price = trade_levels.stop_price;
         let mut chart_prices = bars.iter().map(|bar| bar.close).collect::<Vec<_>>();
-        let bar_label = self.bar_type.label();
-        let candle_label = self.candle_mode.label();
+        let market_label = self.market_data_title_prefix();
         let mut title = match &self.market.contract_name {
             Some(name) => format!(
-                "{candle_label} {bar_label} Market Data [{}] hist={} live={}",
+                "{market_label} Market Data [{}] hist={} live={}",
                 name, self.market.history_loaded, self.market.live_bars
             ),
-            None => format!("{candle_label} {bar_label} Market Data"),
+            None => format!("{market_label} Market Data"),
         };
         let mut overlay_labels = Vec::new();
         if let Some(price) = entry_price {

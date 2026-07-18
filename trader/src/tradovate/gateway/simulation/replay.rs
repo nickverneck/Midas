@@ -1,4 +1,5 @@
 use super::state::ReplayBrokerState;
+#[cfg(any(feature = "replay", test))]
 use super::*;
 
 #[cfg(any(feature = "replay", test))]

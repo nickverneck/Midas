@@ -36,7 +36,7 @@ impl App {
                 }
             }
             Screen::Stats => {
-                "F1 login | F2 selection | F3 strategy | F4 dashboard | Up/Down choose account | Enter re-sync account | F5/Ctrl+S save logs | q quit"
+                "F1 login | F2 selection | F3 strategy | F4 dashboard | Up/Down account | Enter re-sync | f fees | F5/Ctrl+S save logs | q quit"
             }
         };
         let titles = [

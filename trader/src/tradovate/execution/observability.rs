@@ -208,8 +208,36 @@ pub(crate) fn emit_execution_state(
     )));
 }
 
-pub(crate) fn closed_bars(session: &SessionState) -> &[Bar] {
+pub(crate) fn effective_closed_bar_len(session: &SessionState) -> usize {
     let closed_len = session.market.history_loaded.min(session.market.bars.len());
+    if should_use_t_minus_one_for_live_time_bar(session, closed_len) {
+        return closed_len.saturating_sub(1);
+    }
+    closed_len
+}
+
+fn should_use_t_minus_one_for_live_time_bar(session: &SessionState, closed_len: usize) -> bool {
+    if closed_len == 0
+        || session.session_kind != SessionKind::Live
+        || !session.bar_type.is_time_based()
+        || session.execution_config.native_signal_timing != NativeSignalTiming::ClosedBar
+    {
+        return false;
+    }
+    if session.market.live_bars == 0 && session.market.status.is_empty() {
+        return false;
+    }
+
+    let Some(last_closed) = session.market.bars.get(closed_len - 1) else {
+        return false;
+    };
+    let forming_ts = session.market.bars.get(closed_len).map(|bar| bar.ts_ns);
+
+    forming_ts.is_none_or(|ts| ts <= last_closed.ts_ns)
+}
+
+pub(crate) fn closed_bars(session: &SessionState) -> &[Bar] {
+    let closed_len = effective_closed_bar_len(session);
     &session.market.bars[..closed_len]
 }
 
@@ -221,8 +249,34 @@ pub(crate) fn strategy_bars(session: &SessionState) -> &[Bar] {
     }
 }
 
+pub(crate) fn signal_delay_bars(session: &SessionState) -> usize {
+    if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+        session.execution_config.native_signal_delay_bars
+    } else {
+        0
+    }
+}
+
+pub(crate) fn signal_evaluation_bars(session: &SessionState) -> &[Bar] {
+    let bars = strategy_bars(session);
+    let eligible_len = bars.len().saturating_sub(signal_delay_bars(session));
+    &bars[..eligible_len]
+}
+
 pub(crate) fn latest_strategy_bar_ts(session: &SessionState) -> Option<i64> {
-    strategy_bars(session).last().map(|bar| bar.ts_ns)
+    signal_evaluation_bars(session).last().map(|bar| bar.ts_ns)
+}
+
+pub(crate) fn latest_strategy_bar_fingerprint(session: &SessionState) -> Option<u64> {
+    signal_evaluation_bars(session).last().map(bar_fingerprint)
+}
+
+pub(crate) fn bar_fingerprint(bar: &Bar) -> u64 {
+    let mut fingerprint = bar.ts_ns as u64;
+    for value in [bar.open, bar.high, bar.low, bar.close] {
+        fingerprint = fingerprint.rotate_left(13) ^ value.to_bits();
+    }
+    fingerprint
 }
 
 pub(crate) fn active_signal_timing_label(session: &SessionState) -> &'static str {
@@ -403,11 +457,19 @@ pub(crate) fn execution_observability_context(session: &SessionState) -> String 
             active_linked_order_count(session, key.account_id, key.contract_id, strategy_id)
         })
         .unwrap_or_default();
+    let tracker_within_broker_grace = session
+        .order_latency_tracker
+        .as_ref()
+        .and_then(|tracker| tracker.order_strategy_id)
+        .is_some_and(|order_strategy_id| {
+            tracker_within_broker_path_grace(session, order_strategy_id)
+        });
 
     format!(
-        "pending target {} | tracker {} | tracked strategy {} ({} active linked) | broker strategy {} ({} active linked) | managed {}",
+        "pending target {} | tracker {} | tracker within broker grace {} | tracked strategy {} ({} active linked) | broker strategy {} ({} active linked) | managed {}",
         pending_target,
         format_selected_tracker_state(session),
+        tracker_within_broker_grace,
         tracked_strategy_id
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
@@ -442,19 +504,4 @@ pub(crate) fn active_native_slug(session: &SessionState) -> &'static str {
 
 pub(crate) fn active_native_label(session: &SessionState) -> &'static str {
     session.execution_config.native_strategy.label()
-}
-
-pub(crate) fn active_native_uses_protection(session: &SessionState) -> bool {
-    match session.execution_config.native_strategy {
-        NativeStrategyKind::HmaAngle => {
-            session.execution_config.native_hma.uses_native_protection()
-        }
-        NativeStrategyKind::EmaCross => {
-            session.execution_config.native_ema.uses_native_protection()
-        }
-        NativeStrategyKind::HmaCross => session
-            .execution_config
-            .native_hma_cross
-            .uses_native_protection(),
-    }
 }

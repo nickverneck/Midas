@@ -1,17 +1,54 @@
 use super::*;
 use crate::broker::{
-    AccountInfo, AccountSnapshot, BrokerCapabilities, BrokerKind, CandleMode, ContractSuggestion,
-    ManualOrderAction, ServiceEvent,
+    AccountInfo, AccountSnapshot, BarKind, BrokerCapabilities, BrokerKind, CandleMode,
+    ContractSuggestion, ManualOrderAction, ServiceEvent,
 };
-use crate::config::{AppConfig, LogMode};
+use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::strategy::{
-    ExecutionStateSnapshot, NativeReversalMode, NativeStrategyKind, StrategyKind,
+    ExecutionStateSnapshot, NativeExecutionPath, NativeReversalMode, NativeStrategyKind,
+    StrategyKind,
 };
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn line_span_with_fg(line: &Line<'_>, content: &str, color: Color) -> bool {
+    line.spans
+        .iter()
+        .any(|span| span.content.as_ref() == content && span.style.fg == Some(color))
+}
+
+fn rendered_text(lines: Vec<Line<'static>>) -> Vec<String> {
+    lines.into_iter().map(|line| line.to_string()).collect()
+}
+
+fn assert_money_eq(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < 0.005,
+        "expected {expected:.2}, got {actual:.2}"
+    );
+}
+
+fn strategy_setup_text(app: &App) -> Vec<String> {
+    rendered_text(app.strategy_setup_lines())
+}
+
+fn assert_focused_line_visible(lines: &[Line<'_>], area: Rect) {
+    let offset = focused_paragraph_scroll_offset(lines, area) as usize;
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let focused = focused_line_index(lines).expect("expected one focused line");
+
+    assert!(
+        focused >= offset,
+        "focused line should not be above the viewport"
+    );
+    assert!(
+        focused < offset + visible_rows,
+        "focused line should not be below the viewport"
+    );
 }
 
 fn account(id: i64, name: &str) -> AccountInfo {
@@ -79,6 +116,18 @@ fn balance_snapshot(account_id: i64, account_name: &str, balance: f64) -> Accoun
         raw_cash: None,
         raw_positions: Vec::new(),
     }
+}
+
+fn balance_snapshot_with_position(
+    account_id: i64,
+    account_name: &str,
+    balance: f64,
+    market_position_qty: f64,
+) -> AccountSnapshot {
+    let mut snapshot = balance_snapshot(account_id, account_name, balance);
+    snapshot.open_position_qty = Some(market_position_qty);
+    snapshot.market_position_qty = Some(market_position_qty);
+    snapshot
 }
 
 fn enable_tradovate_controls(app: &mut App) {
@@ -152,6 +201,70 @@ fn broker_picker_uses_arrow_keys_and_enter_to_open_login() {
 }
 
 #[test]
+fn broker_picker_normalizes_unsupported_market_controls() {
+    let mut app = App::new(AppConfig::default());
+    if !app.available_brokers.contains(&BrokerKind::Tradovate)
+        || !app.available_brokers.contains(&BrokerKind::Ironbeam)
+    {
+        return;
+    }
+
+    app.selected_broker = BrokerKind::Tradovate;
+    app.bar_type = BarType::volume(500);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    for _ in 0..app.available_brokers.len() {
+        if app.selected_broker == BrokerKind::Ironbeam {
+            break;
+        }
+        app.handle_broker_select_key(key(KeyCode::Down));
+    }
+
+    assert_eq!(app.selected_broker, BrokerKind::Ironbeam);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn app_new_normalizes_unsupported_config_market_controls() {
+    let mut config = AppConfig::default();
+    config.broker = BrokerKind::Ironbeam;
+    config.candle_mode = CandleMode::HeikinAshi;
+
+    let app = App::new(config);
+    if app.selected_broker != BrokerKind::Ironbeam {
+        return;
+    }
+
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn connected_event_normalizes_unsupported_market_controls() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.bar_type = BarType::range(3);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_service_event(
+        ServiceEvent::Connected {
+            broker: BrokerKind::Ironbeam,
+            env: TradingEnvironment::Sim,
+            user_name: None,
+            auth_mode: AuthMode::TokenFile,
+            session_kind: SessionKind::Live,
+            capabilities: BrokerCapabilities::default(),
+        },
+        &cmd_tx,
+    );
+
+    assert_eq!(app.selected_broker, BrokerKind::Ironbeam);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
 fn f6_opens_session_stats_screen() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -172,6 +285,9 @@ fn selection_tab_order_reaches_bar_type_toggle() {
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+    assert_eq!(app.focus, Focus::BarValue);
+
+    app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
     assert_eq!(app.focus, Focus::CandleModeToggle);
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
@@ -185,21 +301,55 @@ fn selection_tab_order_reaches_bar_type_toggle() {
 fn bar_type_toggle_uses_arrow_keys_not_enter() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
     app.focus = Focus::BarTypeToggle;
 
-    assert_eq!(app.bar_type, BarType::Minute1);
+    assert_eq!(app.bar_type, BarType::minute(1));
 
     app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
-    assert_eq!(app.bar_type, BarType::Range1);
+    assert_eq!(app.bar_type, BarType::second(1));
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Left), &cmd_tx);
-    assert_eq!(app.bar_type, BarType::Minute1);
+    assert_eq!(app.bar_type, BarType::minute(1));
     assert_eq!(app.focus, Focus::BarTypeToggle);
 
     app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
-    assert_eq!(app.bar_type, BarType::Minute1);
-    assert_eq!(app.focus, Focus::CandleModeToggle);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.focus, Focus::BarValue);
+}
+
+#[test]
+fn bar_value_accepts_arbitrary_numeric_input() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.focus = Focus::BarValue;
+
+    app.handle_selection_key(key(KeyCode::Char('2')), &cmd_tx);
+    app.handle_selection_key(key(KeyCode::Char('5')), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::minute(25));
+
+    app.handle_selection_key(key(KeyCode::Backspace), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::minute(2));
+}
+
+#[test]
+fn bar_type_cycles_through_supported_kinds() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.focus = Focus::BarTypeToggle;
+
+    for expected in [
+        BarKind::Second,
+        BarKind::Volume,
+        BarKind::Range,
+        BarKind::Minute,
+    ] {
+        app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
+        assert_eq!(app.bar_type.kind(), expected);
+    }
 }
 
 #[test]
@@ -237,6 +387,18 @@ fn login_log_mode_toggle_uses_arrow_keys() {
 
     app.handle_login_key(key(KeyCode::Left), &cmd_tx);
     assert_eq!(app.form.log_mode, LogMode::Default);
+}
+
+#[test]
+fn login_scrolls_focused_option_into_short_panel() {
+    let mut app = App::new(AppConfig::default());
+    app.focus = Focus::ReplayMode;
+
+    let lines = app.connection_lines();
+    let offset = focused_paragraph_scroll_offset(&lines, Rect::new(0, 0, 120, 8));
+
+    assert!(offset > 0, "short panel should scroll down to Replay Mode");
+    assert_focused_line_visible(&lines, Rect::new(0, 0, 120, 8));
 }
 
 #[test]
@@ -286,6 +448,342 @@ fn strategy_reversal_mode_cycles_through_all_three_options() {
         app.strategy.native_reversal_mode,
         NativeReversalMode::CloseAllEnter
     );
+}
+
+#[test]
+fn strategy_setup_scrolls_focused_option_into_short_panel() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    app.focus = Focus::EmaTrailOffsetTicks;
+
+    let lines = app.strategy_setup_lines();
+    let offset = focused_paragraph_scroll_offset(&lines, Rect::new(0, 0, 120, 7));
+
+    assert!(
+        offset > 0,
+        "short setup panel should scroll down to the focused strategy option"
+    );
+    assert_focused_line_visible(&lines, Rect::new(0, 0, 120, 7));
+}
+
+#[test]
+fn focused_list_state_selects_only_visible_focused_lists() {
+    assert_eq!(focused_list_state(true, 7, 10).selected(), Some(7));
+    assert_eq!(focused_list_state(false, 7, 10).selected(), None);
+    assert_eq!(focused_list_state(true, 10, 10).selected(), None);
+}
+
+#[test]
+fn strategy_setting_edit_updates_draft_without_service_command() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::NativeReversalMode;
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+
+    assert_eq!(
+        app.strategy.native_reversal_mode,
+        NativeReversalMode::FlattenConfirmEnter
+    );
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "strategy edits should stay draft-only until arm"
+    );
+}
+
+#[test]
+fn strategy_continue_applies_draft_config_and_arms() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.screen = Screen::Strategy;
+    app.focus = Focus::NativeReversalMode;
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "draft edit should not touch the service"
+    );
+
+    app.focus = Focus::StrategyContinue;
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config sync command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(
+                config.native_reversal_mode,
+                NativeReversalMode::FlattenConfirmEnter
+            );
+        }
+        _ => panic!("expected execution-config command"),
+    }
+    match cmd_rx.try_recv().expect("expected arm command") {
+        ServiceCommand::ArmExecutionStrategy => {}
+        _ => panic!("expected arm-execution command"),
+    }
+}
+
+#[test]
+fn manual_disarm_hotkey_sends_explicit_disarm_command() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Dashboard;
+
+    app.handle_key(key(KeyCode::Char('d')), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected disarm command") {
+        ServiceCommand::DisarmExecutionStrategy { reason } => {
+            assert_eq!(reason, "Manual strategy disarm requested.");
+        }
+        _ => panic!("expected disarm command"),
+    }
+}
+
+#[test]
+fn manual_disarm_hotkey_works_from_numeric_strategy_fields() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::EmaFastLength;
+
+    app.handle_key(key(KeyCode::Char('d')), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected disarm command") {
+        ServiceCommand::DisarmExecutionStrategy { reason } => {
+            assert_eq!(reason, "Manual strategy disarm requested.");
+        }
+        _ => panic!("expected disarm command"),
+    }
+}
+
+#[test]
+fn strategy_protection_controls_hide_for_direct_reversal() {
+    let mut app = App::new(AppConfig::default());
+    app.selected_broker = BrokerKind::Tradovate;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+    app.strategy.native_ema.stop_loss_ticks = 6.0;
+    app.strategy.native_ema.use_trailing_stop = true;
+    app.strategy.native_ema.trail_trigger_ticks = 10.0;
+    app.strategy.native_ema.trail_offset_ticks = 3.0;
+
+    let focus_order = app.strategy_focus_order();
+    assert!(!focus_order.contains(&Focus::EmaTakeProfitTicks));
+    assert!(!focus_order.contains(&Focus::EmaStopLossTicks));
+    assert!(!focus_order.contains(&Focus::EmaTrailingStop));
+    assert!(!focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(!focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+    let setup_text = strategy_setup_text(&app);
+    for hidden_label in [
+        "Take Profit Ticks",
+        "Stop Loss Ticks",
+        "Trailing Stop",
+        "Trail Trigger Ticks",
+        "Trail Offset Ticks",
+        "Auto Trail Preview",
+    ] {
+        assert!(
+            setup_text.iter().all(|line| !line.contains(hidden_label)),
+            "{hidden_label} should be hidden for Direct reversal"
+        );
+    }
+
+    let detail_text = rendered_text(app.strategy_detail_lines());
+    let preview_text = rendered_text(app.strategy_preview_lines());
+    for hidden_label in [
+        "Risk: tp_ticks",
+        "trail_trigger",
+        "trail_offset",
+        "TP/SL",
+        "Trailing stop",
+        "tp=",
+        "sl=",
+        "trail=",
+    ] {
+        assert!(
+            detail_text.iter().all(|line| !line.contains(hidden_label)),
+            "{hidden_label} should be hidden from detail for Direct reversal"
+        );
+        assert!(
+            preview_text.iter().all(|line| !line.contains(hidden_label)),
+            "{hidden_label} should be hidden from preview for Direct reversal"
+        );
+    }
+}
+
+#[test]
+fn strategy_protection_controls_show_for_broker_owned_reversal_modes() {
+    for reversal_mode in [
+        NativeReversalMode::FlattenConfirmEnter,
+        NativeReversalMode::CloseAllEnter,
+    ] {
+        let mut app = App::new(AppConfig::default());
+        app.selected_broker = BrokerKind::Tradovate;
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = NativeStrategyKind::HmaAngle;
+        app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+        app.strategy.native_reversal_mode = reversal_mode;
+
+        let focus_order = app.strategy_focus_order();
+        assert!(focus_order.contains(&Focus::HmaTakeProfitTicks));
+        assert!(focus_order.contains(&Focus::HmaStopLossTicks));
+        assert!(focus_order.contains(&Focus::HmaTrailingStop));
+        assert!(focus_order.contains(&Focus::HmaTrailTriggerTicks));
+        assert!(focus_order.contains(&Focus::HmaTrailOffsetTicks));
+
+        let setup_text = strategy_setup_text(&app);
+        for visible_label in [
+            "Take Profit Ticks",
+            "Stop Loss Ticks",
+            "Trailing Stop",
+            "Trail Trigger Ticks",
+            "Trail Offset Ticks",
+        ] {
+            assert!(
+                setup_text.iter().any(|line| line.contains(visible_label)),
+                "{visible_label} should be visible for {}",
+                reversal_mode.label()
+            );
+        }
+
+        let detail_text = rendered_text(app.strategy_detail_lines());
+        let preview_text = rendered_text(app.strategy_preview_lines());
+        assert!(
+            detail_text
+                .iter()
+                .any(|line| line.contains("Risk: tp_ticks"))
+        );
+        assert!(detail_text.iter().any(|line| line.contains("TP/SL")));
+        assert!(preview_text.iter().any(|line| line.contains("tp=")));
+        assert!(preview_text.iter().any(|line| line.contains("trail=")));
+    }
+}
+
+#[test]
+fn strategy_protection_controls_hide_for_non_guarded_paths() {
+    for execution_path in [
+        NativeExecutionPath::SimpleDiagnostic,
+        NativeExecutionPath::HmaDirect,
+    ] {
+        let mut app = App::new(AppConfig::default());
+        app.selected_broker = BrokerKind::Tradovate;
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = NativeStrategyKind::HmaCross;
+        app.strategy.native_execution_path = execution_path;
+        app.strategy.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+        app.strategy.native_hma_cross.take_profit_ticks = 8.0;
+        app.strategy.native_hma_cross.stop_loss_ticks = 6.0;
+        app.strategy.native_hma_cross.use_trailing_stop = true;
+        app.strategy.native_hma_cross.trail_trigger_ticks = 10.0;
+        app.strategy.native_hma_cross.trail_offset_ticks = 3.0;
+
+        let focus_order = app.strategy_focus_order();
+        assert!(!focus_order.contains(&Focus::EmaTakeProfitTicks));
+        assert!(!focus_order.contains(&Focus::EmaStopLossTicks));
+        assert!(!focus_order.contains(&Focus::EmaTrailingStop));
+        assert!(!focus_order.contains(&Focus::EmaTrailTriggerTicks));
+        assert!(!focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+        let setup_text = strategy_setup_text(&app);
+        for hidden_label in [
+            "Take Profit Ticks",
+            "Stop Loss Ticks",
+            "Trailing Stop",
+            "Trail Trigger Ticks",
+            "Trail Offset Ticks",
+            "Auto Trail Preview",
+        ] {
+            assert!(
+                setup_text.iter().all(|line| !line.contains(hidden_label)),
+                "{hidden_label} should be hidden for {}",
+                execution_path.label()
+            );
+        }
+
+        let detail_text = rendered_text(app.strategy_detail_lines());
+        let preview_text = rendered_text(app.strategy_preview_lines());
+        for hidden_label in [
+            "Risk: tp_ticks",
+            "trail_trigger",
+            "trail_offset",
+            "TP/SL",
+            "Trailing stop",
+            "tp=",
+            "sl=",
+            "trail=",
+        ] {
+            assert!(
+                detail_text.iter().all(|line| !line.contains(hidden_label)),
+                "{hidden_label} should be hidden from detail for {}",
+                execution_path.label()
+            );
+            assert!(
+                preview_text.iter().all(|line| !line.contains(hidden_label)),
+                "{hidden_label} should be hidden from preview for {}",
+                execution_path.label()
+            );
+        }
+    }
+}
+
+#[test]
+fn strategy_protection_controls_remain_visible_for_ironbeam_app_managed_protection() {
+    let mut app = App::new(AppConfig::default());
+    app.selected_broker = BrokerKind::Ironbeam;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::HmaDirect;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+    app.strategy.native_ema.stop_loss_ticks = 6.0;
+    app.strategy.native_ema.use_trailing_stop = true;
+    app.strategy.native_ema.trail_trigger_ticks = 10.0;
+    app.strategy.native_ema.trail_offset_ticks = 3.0;
+
+    let focus_order = app.strategy_focus_order();
+    assert!(focus_order.contains(&Focus::EmaTakeProfitTicks));
+    assert!(focus_order.contains(&Focus::EmaStopLossTicks));
+    assert!(focus_order.contains(&Focus::EmaTrailingStop));
+    assert!(focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+    let setup_text = strategy_setup_text(&app);
+    for visible_label in [
+        "Take Profit Ticks",
+        "Stop Loss Ticks",
+        "Trailing Stop",
+        "Trail Trigger Ticks",
+        "Trail Offset Ticks",
+    ] {
+        assert!(
+            setup_text.iter().any(|line| line.contains(visible_label)),
+            "{visible_label} should remain visible for Ironbeam app-managed protection"
+        );
+    }
+
+    let detail_text = rendered_text(app.strategy_detail_lines());
+    let preview_text = rendered_text(app.strategy_preview_lines());
+    assert!(
+        detail_text
+            .iter()
+            .any(|line| line.contains("Risk: tp_ticks"))
+    );
+    assert!(detail_text.iter().any(|line| line.contains("TP/SL")));
+    assert!(preview_text.iter().any(|line| line.contains("tp=")));
+    assert!(preview_text.iter().any(|line| line.contains("trail=")));
 }
 
 #[test]
@@ -388,6 +886,377 @@ fn session_stats_track_wins_losses_and_flats_from_balance_deltas() {
 }
 
 #[test]
+fn session_stats_reports_pnl_per_hour() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_000.0)]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_020.0)]),
+        &cmd_tx,
+    );
+
+    let end = chrono::Utc::now();
+    let stats = app
+        .session_stats
+        .accounts
+        .values_mut()
+        .next()
+        .expect("expected stats");
+    stats.started_at_utc = end - chrono::Duration::hours(2);
+    stats.last_updated_at_utc = end;
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("PnL/H: Net +10.00/h  Trade +10.00/h"))
+    );
+
+    let event_lines = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_lines
+            .iter()
+            .any(|line| line.contains("Hourly Trade PnL/H (local)"))
+    );
+    assert!(
+        event_lines
+            .iter()
+            .any(|line| line.contains("+20.00/h net +20.00 fees 0.00"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("net_pnl_per_hour: +10.00/h"));
+    assert!(body.contains("trade_pnl_per_hour: +10.00/h"));
+    assert!(body.contains("hourly_local:"));
+    assert!(body.contains("trade_per_hour=+20.00/h"));
+}
+
+#[test]
+fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.0, 1.0),
+        balance_snapshot_with_position(7, "SIM", 1_015.0, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_015.0, -1.0),
+        balance_snapshot_with_position(7, "SIM", 1_005.0, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.long_side.events, 1);
+    assert_eq!(stats.long_side.wins, 1);
+    assert_eq!(stats.long_side.losses, 0);
+    assert_eq!(stats.long_side.pnl, 15.0);
+    assert_eq!(stats.short_side.events, 1);
+    assert_eq!(stats.short_side.wins, 0);
+    assert_eq!(stats.short_side.losses, 1);
+    assert_eq!(stats.short_side.pnl, -10.0);
+    assert_eq!(stats.events[0].side, SessionTradeSide::Long);
+    assert_eq!(
+        stats.events[0].previous_position_side,
+        SessionTradeSide::Long
+    );
+    assert_eq!(
+        stats.events[0].current_position_side,
+        SessionTradeSide::Flat
+    );
+    assert_eq!(stats.events[1].side, SessionTradeSide::Short);
+    assert_eq!(
+        stats.events[1].previous_position_side,
+        SessionTradeSide::Short
+    );
+    assert_eq!(
+        stats.events[1].current_position_side,
+        SessionTradeSide::Flat
+    );
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| { line.contains("Side PnL: Long +15.00 (1/0)  Short -10.00 (0/1)") })
+    );
+
+    let event_lines = app.session_stats_event_lines(8);
+    let long_event_line = event_lines
+        .iter()
+        .find(|line| line.to_string().contains("balance long"))
+        .expect("expected long balance event line");
+    let short_event_line = event_lines
+        .iter()
+        .find(|line| line.to_string().contains("balance short"))
+        .expect("expected short balance event line");
+    assert!(line_span_with_fg(long_event_line, "long", Color::Cyan));
+    assert!(line_span_with_fg(long_event_line, "1015.00", Color::Green));
+    assert!(line_span_with_fg(long_event_line, "+15.00", Color::Green));
+    assert!(line_span_with_fg(short_event_line, "short", Color::Magenta));
+    assert!(line_span_with_fg(short_event_line, "1005.00", Color::Red));
+    assert!(line_span_with_fg(short_event_line, "-10.00", Color::Red));
+
+    let event_text = event_lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("balance long pos long->flat"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("balance short pos short->flat"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("long_events: 1"));
+    assert!(body.contains("long_pnl: +15.00"));
+    assert!(body.contains("short_events: 1"));
+    assert!(body.contains("short_pnl: -10.00"));
+    assert!(body.contains("side=long"));
+    assert!(body.contains("pos=long->flat"));
+    assert!(body.contains("side=short"));
+    assert!(body.contains("pos=short->flat"));
+}
+
+#[test]
+fn session_stats_event_lines_include_position_transition_context() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.0, -1.0),
+        balance_snapshot_with_position(7, "SIM", 1_012.5, 1.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.events[0].side, SessionTradeSide::Short);
+    assert_eq!(
+        stats.events[0].previous_position_side,
+        SessionTradeSide::Short
+    );
+    assert_eq!(
+        stats.events[0].current_position_side,
+        SessionTradeSide::Long
+    );
+
+    let event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("balance short pos short->long"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("side=short"));
+    assert!(body.contains("pos=short->long"));
+}
+
+#[test]
+fn session_stats_filters_fee_only_and_mixed_fee_balance_deltas() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.market.tick_size = Some(0.25);
+    app.market.value_per_point = Some(5.0);
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.00, 1.0),
+        balance_snapshot_with_position(7, "SIM", 1_005.69, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_004.78, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_004.78, -1.0),
+        balance_snapshot_with_position(7, "SIM", 996.37, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.wins, 1);
+    assert_eq!(stats.losses, 1);
+    assert_eq!(stats.flat_moves, 1);
+    assert_eq!(stats.fee_events, 3);
+    assert_eq!(stats.event_count(), 3);
+    assert_money_eq(stats.session_pnl(), -3.63);
+    assert_money_eq(stats.trade_pnl_ex_fees(), -1.25);
+    assert_money_eq(stats.total_fees, -2.38);
+    assert_money_eq(stats.long_side.pnl, 6.25);
+    assert_money_eq(stats.short_side.pnl, -7.50);
+    assert_eq!(stats.long_side.wins, 1);
+    assert_eq!(stats.short_side.losses, 1);
+    assert_eq!(stats.events[0].kind, SessionBalanceEventKind::Mixed);
+    assert_eq!(stats.events[1].kind, SessionBalanceEventKind::Fee);
+    assert_eq!(stats.events[2].kind, SessionBalanceEventKind::Mixed);
+    assert_money_eq(stats.events[0].trade_delta, 6.25);
+    assert_money_eq(stats.events[0].fee_delta, -0.56);
+    assert_money_eq(stats.events[1].trade_delta, 0.0);
+    assert_money_eq(stats.events[1].fee_delta, -0.91);
+    assert_money_eq(stats.events[2].trade_delta, -7.50);
+    assert_money_eq(stats.events[2].fee_delta, -0.91);
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("Trade PnL Ex Fees: -1.25  Fees: -2.38 (3)"))
+    );
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("Wins: 1  Losses: 1  Flats: 1  Fee Events: 3"))
+    );
+
+    let event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("mixed trade -7.50 fees -0.91"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("fee trade 0.00 fees -0.91"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("mixed trade +6.25 fees -0.56"))
+    );
+
+    app.handle_session_stats_key(key(KeyCode::Char('f')), &cmd_tx);
+    assert!(!app.session_stats_show_fees);
+    assert_eq!(app.status, "Session stats fee rows hidden.");
+
+    let overview_text = rendered_text(app.session_stats_overview_lines());
+    assert!(overview_text.iter().any(|line| line == "Fees: hidden"));
+
+    let hidden_account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        hidden_account_lines
+            .iter()
+            .any(|line| line.contains("Trade PnL Ex Fees: -1.25  Fees hidden"))
+    );
+    assert!(
+        hidden_account_lines
+            .iter()
+            .any(|line| line.contains("Wins: 1  Losses: 1  Flats: 1"))
+    );
+    assert!(
+        !hidden_account_lines
+            .iter()
+            .any(|line| line.contains("Fee Events"))
+    );
+
+    let hidden_event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("(1/1, 2 trade events)"))
+    );
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("balance short") && line.contains("trade -7.50"))
+    );
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("balance long") && line.contains("trade +6.25"))
+    );
+    assert!(
+        !hidden_event_text
+            .iter()
+            .any(|line| line.contains("fee trade") || line.contains("fees"))
+    );
+    assert!(
+        !hidden_event_text
+            .iter()
+            .any(|line| line.contains("mixed trade"))
+    );
+
+    app.handle_session_stats_key(key(KeyCode::Char('F')), &cmd_tx);
+    assert!(app.session_stats_show_fees);
+    assert_eq!(app.status, "Session stats fee rows shown.");
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("fee_events: 3"));
+    assert!(body.contains("total_fees: -2.38"));
+    assert!(body.contains("trade_pnl_ex_fees: -1.25"));
+    assert!(body.contains("kind=fee"));
+    assert!(body.contains("trade_delta=+6.25 fee_delta=-0.56"));
+    assert!(body.contains("trade_delta=-7.50 fee_delta=-0.91"));
+}
+
+#[test]
 fn persisted_log_body_includes_session_stats_summary_and_events() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -448,6 +1317,37 @@ fn dashboard_visual_toggle_updates_state_without_sending_commands() {
 }
 
 #[test]
+fn dashboard_summary_hides_replay_speed_in_live_mode() {
+    let mut app = App::new(AppConfig::default());
+    app.session_kind = SessionKind::Live;
+
+    let lines = app
+        .dashboard_summary_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line == "Mode: Live"));
+    assert!(!lines.iter().any(|line| line.contains("Replay Speed")));
+}
+
+#[test]
+fn dashboard_summary_shows_replay_speed_in_replay_mode() {
+    let mut app = App::new(AppConfig::default());
+    app.session_kind = SessionKind::Replay;
+    app.replay_speed = ReplaySpeed::X5;
+
+    let lines = app
+        .dashboard_summary_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line == "Mode: Replay"));
+    assert!(lines.iter().any(|line| line == "Replay Speed: 5x"));
+}
+
+#[test]
 fn replay_speed_hotkeys_send_replay_only_commands() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
@@ -494,7 +1394,7 @@ fn contract_selection_syncs_selected_account_before_subscribe() {
         } => {
             assert_eq!(contract.id, 123);
             assert_eq!(contract.name, "ESM6");
-            assert_eq!(bar_type, BarType::Minute1);
+            assert_eq!(bar_type, BarType::minute(1));
             assert_eq!(candle_mode, CandleMode::Standard);
         }
         _ => panic!("expected subscribe-bars command"),
@@ -516,6 +1416,32 @@ fn contract_selection_subscribes_with_selected_candle_mode() {
     match cmd_rx.try_recv().expect("expected subscribe-bars command") {
         ServiceCommand::SubscribeBars { candle_mode, .. } => {
             assert_eq!(candle_mode, CandleMode::HeikinAshi);
+        }
+        _ => panic!("expected subscribe-bars command"),
+    }
+}
+
+#[test]
+fn contract_selection_subscribes_range_with_standard_candle_mode() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.contract_results = vec![contract(123, "ESM6")];
+    app.bar_type = BarType::range(4);
+    app.candle_mode = CandleMode::HeikinAshi;
+    app.focus = Focus::ContractList;
+
+    app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected subscribe-bars command") {
+        ServiceCommand::SubscribeBars {
+            bar_type,
+            candle_mode,
+            ..
+        } => {
+            assert_eq!(bar_type, BarType::range(4));
+            assert_eq!(candle_mode, CandleMode::Standard);
         }
         _ => panic!("expected subscribe-bars command"),
     }
@@ -544,6 +1470,72 @@ fn strategy_continue_syncs_selected_account_before_arming() {
 }
 
 #[test]
+fn strategy_continue_forces_guarded_when_settings_need_order_strategy_path() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.focus = Focus::StrategyContinue;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::HmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::HmaDirect;
+    app.strategy.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    app.strategy.native_hma_cross.use_trailing_stop = true;
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(config.native_execution_path, NativeExecutionPath::Guarded);
+            assert_eq!(
+                config.native_reversal_mode,
+                NativeReversalMode::CloseAllEnter
+            );
+            assert!(config.native_hma_cross.use_trailing_stop);
+        }
+        _ => panic!("expected execution-config command"),
+    }
+    match cmd_rx.try_recv().expect("expected arm command") {
+        ServiceCommand::ArmExecutionStrategy => {}
+        _ => panic!("expected arm-execution command"),
+    }
+}
+
+#[test]
+fn strategy_continue_forces_closeall_when_protection_needs_broker_owned_reversal() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.focus = Focus::StrategyContinue;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(config.native_execution_path, NativeExecutionPath::Guarded);
+            assert_eq!(
+                config.native_reversal_mode,
+                NativeReversalMode::CloseAllEnter
+            );
+            assert_eq!(config.native_ema.take_profit_ticks, 8.0);
+        }
+        _ => panic!("expected execution-config command"),
+    }
+    match cmd_rx.try_recv().expect("expected arm command") {
+        ServiceCommand::ArmExecutionStrategy => {}
+        _ => panic!("expected arm-execution command"),
+    }
+}
+
+#[test]
 fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -551,6 +1543,9 @@ fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
 
     app.handle_selection_key(key(KeyCode::Right), &cmd_tx);
     assert_eq!(app.focus, Focus::BarTypeToggle);
+
+    app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::BarValue);
 
     app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
     assert_eq!(app.focus, Focus::CandleModeToggle);
@@ -563,21 +1558,50 @@ fn selection_flow_moves_from_account_to_bar_type_to_query_to_contract() {
 }
 
 #[test]
-fn bar_type_enter_advances_to_candle_mode_without_toggling() {
+fn bar_type_enter_advances_to_value_without_toggling() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
     app.focus = Focus::BarTypeToggle;
 
     app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
 
-    assert_eq!(app.bar_type, BarType::Minute1);
-    assert_eq!(app.focus, Focus::CandleModeToggle);
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.focus, Focus::BarValue);
+}
+
+#[test]
+fn range_bars_skip_candle_mode_focus() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.bar_type = BarType::range(1);
+    app.focus = Focus::BarValue;
+
+    app.handle_selection_key(key(KeyCode::Down), &cmd_tx);
+
+    assert_eq!(app.focus, Focus::InstrumentQuery);
+}
+
+#[test]
+fn range_selection_summaries_hide_candle_mode() {
+    let mut app = App::new(AppConfig::default());
+    app.bar_type = BarType::range(3);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    let selection = rendered_text(app.selection_summary_lines());
+    let preview = rendered_text(app.selection_preview_lines());
+    let dashboard = rendered_text(app.dashboard_summary_lines());
+
+    assert!(selection.iter().any(|line| line == "Bar Type: 3 Range"));
+    assert!(!selection.iter().any(|line| line.starts_with("Candles:")));
+    assert!(!preview.iter().any(|line| line.starts_with("Candles:")));
+    assert!(!dashboard.iter().any(|line| line.starts_with("Candles:")));
 }
 
 #[test]
 fn push_log_records_wall_time_and_elapsed_delta() {
     let mut app = App::new(AppConfig::default());
     app.logs.clear();
+    app.persisted_logs.clear();
     app.last_log_at = None;
 
     app.push_log("first event".to_string());
@@ -585,6 +1609,7 @@ fn push_log_records_wall_time_and_elapsed_delta() {
     app.push_log("second event".to_string());
 
     assert_eq!(app.logs.len(), 2);
+    assert_eq!(app.persisted_logs.len(), 2);
     assert_eq!(app.logs[0].elapsed_since_previous, None);
     assert!(app.logs[1].elapsed_since_previous.is_some());
     assert!(app.logs[0].render_line().contains("first event"));
@@ -594,16 +1619,47 @@ fn push_log_records_wall_time_and_elapsed_delta() {
 }
 
 #[test]
+fn persisted_logs_keep_more_entries_than_ui_logs() {
+    let mut app = App::new(AppConfig::default());
+    app.logs.clear();
+    app.persisted_logs.clear();
+    app.last_log_at = None;
+
+    for idx in 0..(UI_LOG_ENTRY_LIMIT + 5) {
+        app.push_log(format!("event {idx}"));
+    }
+
+    assert_eq!(app.logs.len(), UI_LOG_ENTRY_LIMIT);
+    assert_eq!(
+        app.logs.front().map(|entry| entry.message.as_str()),
+        Some("event 5")
+    );
+    assert_eq!(app.persisted_logs.len(), UI_LOG_ENTRY_LIMIT + 5);
+    assert_eq!(
+        app.persisted_logs
+            .front()
+            .map(|entry| entry.message.as_str()),
+        Some("event 0")
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("event 0"));
+    assert!(body.contains("event 204"));
+}
+
+#[test]
 fn debug_log_events_are_filtered_by_log_mode() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
     app.logs.clear();
+    app.persisted_logs.clear();
 
     app.handle_service_event(
         ServiceEvent::DebugLog("submit 42ms | order".to_string()),
         &cmd_tx,
     );
     assert!(app.logs.is_empty());
+    assert!(app.persisted_logs.is_empty());
 
     app.form.log_mode = LogMode::Debug;
     app.handle_service_event(
@@ -612,6 +1668,7 @@ fn debug_log_events_are_filtered_by_log_mode() {
     );
 
     assert_eq!(app.logs.len(), 1);
+    assert_eq!(app.persisted_logs.len(), 1);
     assert_eq!(app.logs[0].message, "DEBUG: submit 42ms | order");
 }
 

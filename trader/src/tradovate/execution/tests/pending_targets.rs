@@ -15,7 +15,6 @@ fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
         cl_ord_id: "midas-stale-entry".to_string(),
-        strategy_owned_protection: false,
         order_id: Some(77),
         order_strategy_id: None,
         seen_recorded: true,
@@ -36,7 +35,7 @@ fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
 
     assert_eq!(session.execution_runtime.pending_target_qty, None);
     assert!(session.order_latency_tracker.is_none());
-    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(99));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(100));
     assert!(
         session
             .execution_runtime
@@ -74,7 +73,6 @@ fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 0 -> -1)".to_string()),
         cl_ord_id: "midas-stale-strategy-loop".to_string(),
-        strategy_owned_protection: true,
         order_id: Some(88),
         order_strategy_id: Some(77),
         seen_recorded: true,
@@ -95,7 +93,7 @@ fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
 
     assert_eq!(session.execution_runtime.pending_target_qty, None);
     assert!(session.order_latency_tracker.is_none());
-    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(199));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(200));
     assert!(
         session
             .execution_runtime
@@ -142,7 +140,6 @@ fn strategy_loop_keeps_pending_target_during_broker_path_grace_after_ack() {
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
         cl_ord_id: "midas-fresh-strategy-loop".to_string(),
-        strategy_owned_protection: true,
         order_id: Some(88),
         order_strategy_id: Some(77),
         seen_recorded: true,
@@ -198,7 +195,6 @@ fn strategy_loop_keeps_market_order_pending_target_during_position_sync_grace() 
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
         cl_ord_id: "midas-market-sync".to_string(),
-        strategy_owned_protection: false,
         order_id: Some(88),
         order_strategy_id: None,
         seen_recorded: true,
@@ -250,7 +246,6 @@ fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace(
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
         cl_ord_id: "midas-strategy-position-sync".to_string(),
-        strategy_owned_protection: true,
         order_id: Some(88),
         order_strategy_id: Some(77),
         seen_recorded: true,
@@ -415,7 +410,6 @@ fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_ex
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
         cl_ord_id: "midas-market-sync-stale".to_string(),
-        strategy_owned_protection: false,
         order_id: Some(99),
         order_strategy_id: None,
         seen_recorded: true,
@@ -435,7 +429,7 @@ fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_ex
         .expect("stale market-order pending target should eventually clear");
 
     assert_eq!(session.execution_runtime.pending_target_qty, None);
-    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(329));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(330));
     assert!(
         session
             .execution_runtime

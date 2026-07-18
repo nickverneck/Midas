@@ -236,8 +236,6 @@ fn build_snapshots_include_realized_pnl_and_protection_prices() {
             signed_qty: 1,
             take_profit_price: Some(5004.0),
             stop_price: Some(4998.0),
-            last_requested_take_profit_price: Some(5004.0),
-            last_requested_stop_price: Some(4998.0),
             take_profit_cl_ord_id: None,
             stop_cl_ord_id: None,
             take_profit_order_id: None,

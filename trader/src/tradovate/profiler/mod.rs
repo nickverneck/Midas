@@ -92,7 +92,7 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
 
         harness.send(ServiceCommand::SubscribeBars {
             contract: selected_contract.clone(),
-            bar_type: BarType::Range1,
+            bar_type: BarType::range(1),
             candle_mode: CandleMode::Standard,
         })?;
         harness
@@ -212,7 +212,7 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
             account_name: selected_account.name.clone(),
             contract_id: selected_contract.id,
             contract_name: selected_contract.name.clone(),
-            bar_type: BarType::Range1,
+            bar_type: BarType::range(1),
             options: SwipeProfileReportOptions {
                 account_filter: options.account_filter,
                 contract_query: options.contract_query,

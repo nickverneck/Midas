@@ -139,37 +139,165 @@ pub struct AccountInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BarType {
-    Minute1,
-    Range1,
+#[serde(rename_all = "snake_case")]
+pub enum BarKind {
+    Minute,
+    Second,
+    Volume,
+    Range,
 }
 
-impl BarType {
+impl BarKind {
+    const ALL: [Self; 4] = [Self::Minute, Self::Second, Self::Volume, Self::Range];
+
     pub fn label(self) -> &'static str {
         match self {
-            Self::Minute1 => "1 Min",
-            Self::Range1 => "1 Range",
+            Self::Minute => "Minute",
+            Self::Second => "Seconds",
+            Self::Volume => "Volume",
+            Self::Range => "Range",
         }
     }
 
-    pub fn toggle(self) -> Self {
+    fn short_label(self) -> &'static str {
         match self {
-            Self::Minute1 => Self::Range1,
-            Self::Range1 => Self::Minute1,
+            Self::Minute => "Min",
+            Self::Second => "Sec",
+            Self::Volume => "Vol",
+            Self::Range => "Range",
+        }
+    }
+
+    fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BarType {
+    kind: BarKind,
+    value: u32,
+}
+
+impl BarType {
+    pub fn new(kind: BarKind, value: u32) -> Self {
+        Self {
+            kind,
+            value: value.max(1),
+        }
+    }
+
+    pub fn minute(value: u32) -> Self {
+        Self::new(BarKind::Minute, value)
+    }
+
+    pub fn second(value: u32) -> Self {
+        Self::new(BarKind::Second, value)
+    }
+
+    pub fn volume(value: u32) -> Self {
+        Self::new(BarKind::Volume, value)
+    }
+
+    pub fn range(value: u32) -> Self {
+        Self::new(BarKind::Range, value)
+    }
+
+    pub fn kind(self) -> BarKind {
+        self.kind
+    }
+
+    pub fn value(self) -> u32 {
+        self.value
+    }
+
+    pub fn is_range(self) -> bool {
+        self.kind == BarKind::Range
+    }
+
+    pub fn is_one_minute(self) -> bool {
+        self.kind == BarKind::Minute && self.value == 1
+    }
+
+    pub fn is_time_based(self) -> bool {
+        matches!(self.kind, BarKind::Minute | BarKind::Second)
+    }
+
+    pub fn supports_candle_mode(self) -> bool {
+        !self.is_range()
+    }
+
+    pub fn effective_candle_mode(self, candle_mode: CandleMode) -> CandleMode {
+        if self.supports_candle_mode() {
+            candle_mode
+        } else {
+            CandleMode::Standard
+        }
+    }
+
+    pub fn with_value(self, value: u32) -> Self {
+        Self::new(self.kind, value)
+    }
+
+    pub fn next_kind(self) -> Self {
+        match self.kind.next() {
+            BarKind::Minute => Self::minute(self.value),
+            BarKind::Second => Self::second(self.value),
+            BarKind::Volume => Self::volume(self.value),
+            BarKind::Range => Self::range(self.value),
+        }
+    }
+
+    pub fn previous_kind(self) -> Self {
+        match self.kind.previous() {
+            BarKind::Minute => Self::minute(self.value),
+            BarKind::Second => Self::second(self.value),
+            BarKind::Volume => Self::volume(self.value),
+            BarKind::Range => Self::range(self.value),
+        }
+    }
+
+    pub fn label(self) -> String {
+        format!("{} {}", self.value, self.kind.short_label())
+    }
+
+    pub fn mode_label(self, candle_mode: CandleMode) -> String {
+        if self.supports_candle_mode() {
+            format!("{} {}", candle_mode.label(), self.label())
+        } else {
+            self.label()
         }
     }
 
     pub fn chart_description(self) -> Value {
-        match self {
-            Self::Minute1 => json!({
+        match self.kind {
+            BarKind::Minute => json!({
                 "underlyingType": "MinuteBar",
-                "elementSize": 1,
+                "elementSize": self.value,
                 "elementSizeUnit": "UnderlyingUnits",
                 "withHistogram": false
             }),
-            Self::Range1 => json!({
+            BarKind::Second => json!({
+                "underlyingType": "Custom",
+                "elementSize": self.value,
+                "elementSizeUnit": "UnderlyingUnits",
+                "withHistogram": false
+            }),
+            BarKind::Volume => json!({
                 "underlyingType": "Tick",
-                "elementSize": 1,
+                "elementSize": self.value,
+                "elementSizeUnit": "Volume",
+                "withHistogram": false
+            }),
+            BarKind::Range => json!({
+                "underlyingType": "Tick",
+                "elementSize": self.value,
                 "elementSizeUnit": "Range",
                 "withHistogram": false
             }),
@@ -179,7 +307,7 @@ impl BarType {
 
 impl Default for BarType {
     fn default() -> Self {
-        Self::Minute1
+        Self::minute(1)
     }
 }
 
@@ -307,6 +435,58 @@ mod tests {
                     close: 13.5,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn bar_type_chart_descriptions_match_tradovate_units() {
+        assert_eq!(
+            BarType::minute(3).chart_description(),
+            json!({
+                "underlyingType": "MinuteBar",
+                "elementSize": 3,
+                "elementSizeUnit": "UnderlyingUnits",
+                "withHistogram": false
+            })
+        );
+        assert_eq!(
+            BarType::second(15).chart_description(),
+            json!({
+                "underlyingType": "Custom",
+                "elementSize": 15,
+                "elementSizeUnit": "UnderlyingUnits",
+                "withHistogram": false
+            })
+        );
+        assert_eq!(
+            BarType::volume(1000).chart_description(),
+            json!({
+                "underlyingType": "Tick",
+                "elementSize": 1000,
+                "elementSizeUnit": "Volume",
+                "withHistogram": false
+            })
+        );
+        assert_eq!(
+            BarType::range(4).chart_description(),
+            json!({
+                "underlyingType": "Tick",
+                "elementSize": 4,
+                "elementSizeUnit": "Range",
+                "withHistogram": false
+            })
+        );
+    }
+
+    #[test]
+    fn range_bars_force_standard_effective_candle_mode() {
+        assert_eq!(
+            BarType::range(1).effective_candle_mode(CandleMode::HeikinAshi),
+            CandleMode::Standard
+        );
+        assert_eq!(
+            BarType::volume(1000).effective_candle_mode(CandleMode::HeikinAshi),
+            CandleMode::HeikinAshi
         );
     }
 }

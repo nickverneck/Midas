@@ -541,11 +541,8 @@ fn evaluate_active_execution_strategy(
                 .execution_config
                 .native_hma_cross
                 .evaluate(bars, side_from_signed_qty(current_qty));
-            (
-                evaluation.signal,
-                evaluation.summary(),
-                evaluation.debug_summary(),
-            )
+            let summary = evaluation.summary();
+            (evaluation.signal, summary.clone(), summary)
         }
     }
 }

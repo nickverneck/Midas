@@ -143,7 +143,7 @@ fn manual_buy_interrupts_live_strategy_and_cancels_protection() {
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::MarketOrder { order, .. } => {
             assert_eq!(order.interrupt_order_strategy_id, Some(77));
-            assert_eq!(order.cancel_order_ids, vec![1001]);
+            assert!(order.cancel_order_ids.is_empty());
             assert_eq!(
                 order.payload.get("action").and_then(Value::as_str),
                 Some("Buy")

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn enqueue_market_order(
+pub(crate) fn enqueue_market_order(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,
     order: PendingMarketOrder,
@@ -12,7 +12,6 @@ pub(super) fn enqueue_market_order(
         signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
         signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: order.cl_ord_id.clone(),
-        strategy_owned_protection: false,
         order_id: None,
         order_strategy_id: None,
         seen_recorded: false,
@@ -65,7 +64,6 @@ pub(super) fn enqueue_liquidation_then_order_strategy(
         signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
         signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: strategy.uuid.clone(),
-        strategy_owned_protection: true,
         order_id: None,
         order_strategy_id: None,
         seen_recorded: false,
@@ -100,7 +98,6 @@ pub(super) fn enqueue_order_strategy(
         signal_started_at: pending_signal.as_ref().map(|signal| signal.started_at),
         signal_context: pending_signal.map(|signal| signal.description),
         cl_ord_id: strategy.uuid.clone(),
-        strategy_owned_protection: true,
         order_id: None,
         order_strategy_id: None,
         seen_recorded: false,

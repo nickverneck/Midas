@@ -82,7 +82,17 @@ fn handle_user_entities(
                 continue;
             }
             if let Some(marker) = trade_marker_from_fill(session, &envelope.entity) {
-                trade_markers_changed |= record_trade_marker(session, marker);
+                let emit_fill_detail =
+                    fill_matches_active_latency_tracker(session, &envelope.entity);
+                let fill_detail =
+                    emit_fill_detail.then(|| fill_debug_detail(session, &marker, &envelope.entity));
+                if record_trade_marker(session, marker) {
+                    trade_markers_changed = true;
+                    if let Some(detail) = fill_detail {
+                        let _ = event_tx
+                            .send(ServiceEvent::DebugLog(format!("fill detail | {detail}")));
+                    }
+                }
             }
         }
         if trade_markers_changed {
@@ -90,7 +100,14 @@ fn handle_user_entities(
                 session.market.trade_markers.clone(),
             ));
         }
-        handle_execution_account_sync(session, &broker_tx, event_tx)?;
+        match session.execution_config.native_execution_path {
+            NativeExecutionPath::SimpleDiagnostic | NativeExecutionPath::HmaDirect => {
+                handle_simple_execution_account_sync(session, event_tx);
+            }
+            NativeExecutionPath::Guarded => {
+                handle_execution_account_sync(session, &broker_tx, event_tx)?;
+            }
+        }
     }
     request_snapshot_refresh(state, &internal_tx);
     if latency_changed {
@@ -114,7 +131,17 @@ fn handle_market_update(
     let (display_snapshot, closed_bar_advanced) = {
         let session = state.session.as_mut().expect("checked session above");
         let closed_bar_advanced = apply_market_update(&mut session.market, update);
-        maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
+        match session.execution_config.native_execution_path {
+            NativeExecutionPath::Guarded => {
+                maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
+            }
+            NativeExecutionPath::SimpleDiagnostic => {
+                maybe_run_simple_execution_strategy(session, &broker_tx, event_tx)?;
+            }
+            NativeExecutionPath::HmaDirect => {
+                maybe_run_hma_direct_execution_strategy(session, &broker_tx, event_tx)?;
+            }
+        }
         (
             display_market_snapshot(&session.market),
             closed_bar_advanced,
@@ -150,9 +177,10 @@ fn handle_broker_order_ack(
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
     let debug_message = format!(
-        "submit {}{} | {}",
+        "submit {}{} | endpoint {} | {}",
         format_debug_latency_ms(ack.submit_rtt_ms),
         debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+        ack.endpoint,
         ack.message
     );
     let _ = event_tx.send(ServiceEvent::Status(ack.message));
@@ -168,6 +196,7 @@ fn handle_broker_order_failed(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let mut stale_interrupt_recovered = false;
+    let mut observability_context = None;
     if let Some(session) = state.session.as_mut() {
         session.order_submit_in_flight = false;
         if session
@@ -197,24 +226,40 @@ fn handle_broker_order_failed(
                 }
             }
         }
+        observability_context = Some(execution_observability_context(session));
     }
 
+    let debug_message =
+        format_broker_order_failure_debug(&failure, observability_context.as_deref());
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | {}",
-            failure.message
+            "submit stale | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | {}",
-            failure.message
+            "submit failed | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
 
     Ok(())
+}
+
+fn format_broker_order_failure_debug(
+    failure: &BrokerOrderFailure,
+    observability_context: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "endpoint {} | clOrdId {} | target {:?} | {}",
+        failure.endpoint, failure.cl_ord_id, failure.target_qty, failure.message
+    );
+    if let Some(context) = observability_context {
+        message.push_str(" | ");
+        message.push_str(context);
+    }
+    message
 }
 
 fn handle_order_strategy_ack(
@@ -247,9 +292,10 @@ fn handle_order_strategy_ack(
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
     let debug_message = format!(
-        "submit {}{} | {}",
+        "submit {}{} | endpoint {} | {}",
         format_debug_latency_ms(ack.submit_rtt_ms),
         debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+        ack.endpoint,
         ack.message
     );
     let _ = event_tx.send(ServiceEvent::Status(ack.message));
@@ -265,6 +311,7 @@ fn handle_order_strategy_failed(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let mut stale_interrupt_recovered = false;
+    let mut observability_context = None;
     if let Some(session) = state.session.as_mut() {
         session.order_submit_in_flight = false;
         if session
@@ -292,24 +339,40 @@ fn handle_order_strategy_failed(
             session.execution_runtime.last_summary = failure.message.clone();
             emit_execution_state(event_tx, session);
         }
+        observability_context = Some(execution_observability_context(session));
     }
 
+    let debug_message =
+        format_order_strategy_failure_debug(&failure, observability_context.as_deref());
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | {}",
-            failure.message
+            "submit stale | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
         let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | {}",
-            failure.message
+            "submit failed | {debug_message}"
         )));
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
 
     Ok(())
+}
+
+fn format_order_strategy_failure_debug(
+    failure: &BrokerOrderStrategyFailure,
+    observability_context: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "endpoint {} | uuid {} | target {} | {}",
+        failure.endpoint, failure.uuid, failure.target_qty, failure.message
+    );
+    if let Some(context) = observability_context {
+        message.push_str(" | ");
+        message.push_str(context);
+    }
+    message
 }
 
 fn handle_protection_sync_applied(
@@ -341,6 +404,10 @@ fn handle_protection_sync_applied(
     if let Some(message) = ack.message {
         let _ = event_tx.send(ServiceEvent::Status(message));
     }
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "protection sync applied | endpoint {}",
+        ack.endpoint
+    )));
     Ok(())
 }
 
@@ -361,6 +428,10 @@ fn handle_protection_sync_failed(
         }
     }
     request_snapshot_refresh(state, &internal_tx);
+    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        "protection sync failed | endpoint {} | {}",
+        failure.endpoint, failure.message
+    )));
     let _ = event_tx.send(ServiceEvent::Error(failure.message));
     Ok(())
 }

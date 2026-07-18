@@ -98,6 +98,13 @@ async fn connect_live_session(
     )));
 
     let tokens = authenticate(&state.client, &cfg).await?;
+    let token_file_snapshot = if matches!(cfg.auth_mode, AuthMode::TokenFile) {
+        load_runtime_token_bundle(&cfg)
+            .ok()
+            .and_then(|loaded| loaded.file_snapshot)
+    } else {
+        None
+    };
     save_token_cache(&cfg.session_cache_path, &tokens)?;
 
     let _ = event_tx.send(ServiceEvent::Connected {
@@ -151,6 +158,7 @@ async fn connect_live_session(
         session_kind: SessionKind::Live,
         replay_enabled: false,
         tokens,
+        token_file_snapshot,
         accounts,
         request_tx,
         execution_config: ExecutionStrategyConfig::default(),
@@ -186,6 +194,7 @@ async fn enter_replay_mode(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
+    let candle_mode = bar_type.effective_candle_mode(candle_mode);
     reset_state_for_new_session(state, market_tx);
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Loading replay dataset from {}...",
@@ -212,6 +221,7 @@ async fn enter_replay_mode(
             user_id: None,
             user_name: Some("Replay".to_string()),
         },
+        token_file_snapshot: None,
         accounts: accounts.clone(),
         request_tx,
         execution_config: ExecutionStrategyConfig::default(),
@@ -351,6 +361,7 @@ async fn subscribe_bars(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
+    let candle_mode = bar_type.effective_candle_mode(candle_mode);
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };
@@ -530,26 +541,37 @@ fn sync_native_protection_command(
 }
 
 fn set_execution_strategy_config(
-    config: ExecutionStrategyConfig,
+    mut config: ExecutionStrategyConfig,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
 ) -> Result<()> {
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };
+    normalize_broker_owned_protection_config(&mut config);
     if session.execution_config != config {
         session.execution_config = config;
-        if session.execution_runtime.armed {
-            session.execution_runtime.armed = false;
-            session.execution_runtime.pending_target_qty = None;
-            session.execution_runtime.last_closed_bar_ts = None;
-            session.execution_runtime.reset_execution();
-            session.execution_runtime.last_summary =
-                "Native strategy config changed; press Continue to re-arm.".to_string();
-        }
         emit_execution_state(event_tx, session);
     }
     Ok(())
+}
+
+fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig) {
+    if config.kind != StrategyKind::Native {
+        return;
+    }
+
+    let uses_protection = match config.native_strategy {
+        NativeStrategyKind::HmaAngle => config.native_hma.uses_native_protection(),
+        NativeStrategyKind::EmaCross => config.native_ema.uses_native_protection(),
+        NativeStrategyKind::HmaCross => config.native_hma_cross.uses_native_protection(),
+    };
+    if uses_protection && config.native_reversal_mode == NativeReversalMode::Direct {
+        config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    }
+    if uses_protection || config.native_reversal_mode != NativeReversalMode::Direct {
+        config.native_execution_path = NativeExecutionPath::Guarded;
+    }
 }
 
 fn arm_execution_strategy_command(

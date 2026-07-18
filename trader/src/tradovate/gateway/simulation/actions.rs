@@ -1,5 +1,5 @@
 use super::{
-    helpers::{exit_action_for_target, synthetic_ts_ns, working_order_entity},
+    helpers::{exit_action_for_target, synthetic_ts_ns},
     state::{ReplayBrokerState, SimActiveOrder, SimOrderStrategyState},
     *,
 };
@@ -10,6 +10,7 @@ impl ReplayBrokerState {
         order: PendingMarketOrder,
     ) -> std::result::Result<Vec<InternalEvent>, BrokerOrderFailure> {
         let fill_price = order.reference_price.ok_or_else(|| BrokerOrderFailure {
+            endpoint: "replay/order/placeorder",
             cl_ord_id: order.cl_ord_id.clone(),
             message: format!(
                 "replay order rejected: no market price is available for {}",
@@ -105,6 +106,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::BrokerOrderAck(BrokerOrderAck {
+                endpoint: "replay/order/placeorder",
                 cl_ord_id: order.cl_ord_id,
                 order_id: Some(order_id),
                 submit_rtt_ms: 0,
@@ -121,6 +123,7 @@ impl ReplayBrokerState {
         let fill_price = liquidation
             .reference_price
             .ok_or_else(|| BrokerOrderFailure {
+                endpoint: "replay/order/liquidateposition",
                 cl_ord_id: liquidation.request_id.clone(),
                 message: format!(
                     "replay close rejected: no market price is available for {}",
@@ -194,6 +197,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::BrokerOrderAck(BrokerOrderAck {
+                endpoint: "replay/order/liquidateposition",
                 cl_ord_id: liquidation.request_id.clone(),
                 order_id: Some(order_id),
                 submit_rtt_ms: 0,
@@ -215,6 +219,7 @@ impl ReplayBrokerState {
         let mut liquidation_message = None;
         for event in self.simulate_liquidation(liquidation).map_err(|failure| {
             BrokerOrderStrategyFailure {
+                endpoint: failure.endpoint,
                 uuid: strategy.uuid.clone(),
                 message: failure.message,
                 target_qty: strategy.target_qty,
@@ -260,6 +265,7 @@ impl ReplayBrokerState {
         let fill_price = strategy
             .reference_price
             .ok_or_else(|| BrokerOrderStrategyFailure {
+                endpoint: "replay/orderStrategy/startorderstrategy",
                 uuid: strategy.uuid.clone(),
                 message: format!(
                     "replay strategy rejected: no market price is available for {}",
@@ -464,6 +470,7 @@ impl ReplayBrokerState {
 
         Ok(vec![
             InternalEvent::OrderStrategyAck(BrokerOrderStrategyAck {
+                endpoint: "replay/orderStrategy/startorderstrategy",
                 uuid: strategy.uuid,
                 order_strategy_id: Some(order_strategy_id),
                 submit_rtt_ms: 0,
@@ -479,144 +486,18 @@ impl ReplayBrokerState {
         &mut self,
         sync: PendingProtectionSync,
     ) -> std::result::Result<Vec<InternalEvent>, ProtectionSyncFailure> {
-        let mut next_state = sync.next_state;
+        let next_state = sync.next_state;
         let mut envelopes = Vec::new();
-        match sync.operation {
+        let endpoint = match sync.operation {
             ProtectionSyncOperation::Clear { cancel_order_ids } => {
                 envelopes.extend(self.cancel_orders(&cancel_order_ids));
+                "replay/order/cancelorder"
             }
-            ProtectionSyncOperation::ModifyStop { payload } => {
-                let Some(order_id) = json_i64(&payload, "orderId") else {
-                    return Err(ProtectionSyncFailure {
-                        message: format!(
-                            "native protection sync failed for {} on {}: modify replay payload missing orderId",
-                            sync.contract_name, sync.account_name
-                        ),
-                    });
-                };
-                let Some(active) = self.active_orders.get_mut(&order_id) else {
-                    return Err(ProtectionSyncFailure {
-                        message: format!(
-                            "native protection sync failed for {} on {}: replay stop order {order_id} was not found",
-                            sync.contract_name, sync.account_name
-                        ),
-                    });
-                };
-                if let Some(order) = active.order.as_object_mut() {
-                    order.insert(
-                        "stopPrice".to_string(),
-                        payload.get("stopPrice").cloned().unwrap_or(Value::Null),
-                    );
-                }
-                envelopes.push(EntityEnvelope {
-                    entity_type: "order".to_string(),
-                    deleted: false,
-                    entity: active.order.clone(),
-                });
-                if let Some(state) = next_state.as_mut() {
-                    state.stop_order_id = Some(order_id);
-                }
-            }
-            ProtectionSyncOperation::Replace {
-                cancel_order_ids,
-                request,
-            } => {
-                envelopes.extend(self.cancel_orders(&cancel_order_ids));
-                match request {
-                    ProtectionPlaceRequest::TakeProfit { payload } => {
-                        let order_id = self.next_order_id();
-                        let entity =
-                            working_order_entity(order_id, sync.key.contract_id, &payload, None);
-                        self.active_orders.insert(
-                            order_id,
-                            SimActiveOrder {
-                                order: entity.clone(),
-                                link_id: None,
-                                strategy_id: None,
-                            },
-                        );
-                        if let Some(state) = next_state.as_mut() {
-                            state.take_profit_order_id = Some(order_id);
-                        }
-                        envelopes.push(EntityEnvelope {
-                            entity_type: "order".to_string(),
-                            deleted: false,
-                            entity,
-                        });
-                    }
-                    ProtectionPlaceRequest::StopLoss { payload } => {
-                        let order_id = self.next_order_id();
-                        let entity =
-                            working_order_entity(order_id, sync.key.contract_id, &payload, None);
-                        self.active_orders.insert(
-                            order_id,
-                            SimActiveOrder {
-                                order: entity.clone(),
-                                link_id: None,
-                                strategy_id: None,
-                            },
-                        );
-                        if let Some(state) = next_state.as_mut() {
-                            state.stop_order_id = Some(order_id);
-                        }
-                        envelopes.push(EntityEnvelope {
-                            entity_type: "order".to_string(),
-                            deleted: false,
-                            entity,
-                        });
-                    }
-                    ProtectionPlaceRequest::Oco { payload } => {
-                        let tp_order_id = self.next_order_id();
-                        let tp_entity =
-                            working_order_entity(tp_order_id, sync.key.contract_id, &payload, None);
-                        self.active_orders.insert(
-                            tp_order_id,
-                            SimActiveOrder {
-                                order: tp_entity.clone(),
-                                link_id: None,
-                                strategy_id: None,
-                            },
-                        );
-                        envelopes.push(EntityEnvelope {
-                            entity_type: "order".to_string(),
-                            deleted: false,
-                            entity: tp_entity,
-                        });
-
-                        let stop_payload =
-                            payload.get("other").cloned().unwrap_or_else(|| json!({}));
-                        let stop_order_id = self.next_order_id();
-                        let stop_entity = working_order_entity(
-                            stop_order_id,
-                            sync.key.contract_id,
-                            &stop_payload,
-                            None,
-                        );
-                        self.active_orders.insert(
-                            stop_order_id,
-                            SimActiveOrder {
-                                order: stop_entity.clone(),
-                                link_id: None,
-                                strategy_id: None,
-                            },
-                        );
-                        envelopes.push(EntityEnvelope {
-                            entity_type: "order".to_string(),
-                            deleted: false,
-                            entity: stop_entity,
-                        });
-
-                        if let Some(state) = next_state.as_mut() {
-                            state.take_profit_order_id = Some(tp_order_id);
-                            state.stop_order_id = Some(stop_order_id);
-                        }
-                    }
-                }
-            }
-        }
+        };
 
         Ok(vec![
             InternalEvent::ProtectionSyncApplied(ProtectionSyncAck {
+                endpoint,
                 key: sync.key,
                 message: sync.message,
                 next_state,

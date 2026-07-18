@@ -16,6 +16,7 @@ fn test_session() -> SessionState {
             user_id: None,
             user_name: None,
         },
+        token_file_snapshot: None,
         accounts: vec![AccountInfo {
             id: 42,
             name: "SIM".to_string(),
@@ -65,6 +66,40 @@ fn test_state(session: SessionState) -> ServiceState {
 }
 
 #[tokio::test]
+async fn config_sync_does_not_disarm_armed_native_strategy() {
+    let mut session = test_session();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.pending_target_qty = Some(1);
+    session.execution_runtime.last_closed_bar_ts = Some(123);
+    session.execution_runtime.last_summary = "Armed before edit".to_string();
+    let mut state = test_state(session);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = ExecutionStrategyConfig::default();
+    config.kind = StrategyKind::Native;
+    config.native_ema.fast_length = 8;
+
+    handle_command(
+        ServiceCommand::SetExecutionStrategyConfig(config),
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("config sync should succeed");
+
+    let session = state.session.expect("session should persist");
+    assert!(session.execution_runtime.armed);
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+    assert_eq!(session.execution_runtime.last_closed_bar_ts, Some(123));
+    assert_eq!(session.execution_runtime.last_summary, "Armed before edit");
+    assert_eq!(session.execution_config.native_ema.fast_length, 8);
+}
+
+#[tokio::test]
 async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
     let stale_strategy_id = 453147950116_i64;
     let mut session = test_session();
@@ -93,7 +128,6 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
         cl_ord_id: "midas-stale-direct-reversal".to_string(),
-        strategy_owned_protection: false,
         order_id: Some(77),
         order_strategy_id: Some(stale_strategy_id),
         seen_recorded: false,
@@ -117,6 +151,7 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
 
     handle_internal(
         InternalEvent::BrokerOrderFailed(BrokerOrderFailure {
+            endpoint: "orderStrategy/interruptorderstrategy",
             cl_ord_id: "midas-stale-direct-reversal".to_string(),
             message: format!(
                 "strategy {stale_strategy_id} was already inactive; waiting for broker sync before retrying the reversal"
@@ -153,7 +188,11 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
         event,
         ServiceEvent::DebugLog(message)
             if message.contains("submit stale")
+                && message.contains("endpoint orderStrategy/interruptorderstrategy")
+                && message.contains("clOrdId midas-stale-direct-reversal")
+                && message.contains("target Some(-1)")
                 && message.contains("already inactive")
+                && message.contains("pending target none")
     )));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -165,6 +204,72 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
             .iter()
             .any(|event| matches!(event, ServiceEvent::Error(_)))
     );
+}
+
+#[tokio::test]
+async fn order_strategy_submit_failure_debug_logs_request_and_target() {
+    let mut session = test_session();
+    session.execution_runtime.armed = true;
+    session.execution_runtime.pending_target_qty = Some(-1);
+    session.order_submit_in_flight = true;
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        started_at: time::Instant::now(),
+        signal_started_at: Some(time::Instant::now()),
+        signal_context: Some("hma_cross Sell (qty 1 -> -1)".to_string()),
+        cl_ord_id: "midas-start-fail".to_string(),
+        order_id: None,
+        order_strategy_id: None,
+        seen_recorded: false,
+        exec_report_recorded: false,
+        fill_recorded: false,
+    });
+
+    let mut state = test_state(session);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    handle_internal(
+        InternalEvent::OrderStrategyFailed(BrokerOrderStrategyFailure {
+            endpoint: "orderStrategy/startorderstrategy",
+            uuid: "midas-start-fail".to_string(),
+            message: "broker rejected entry".to_string(),
+            target_qty: -1,
+            stale_interrupt: false,
+        }),
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("order strategy failure should be handled");
+
+    let session = state.session.expect("session should persist");
+    assert!(!session.order_submit_in_flight);
+    assert!(session.order_latency_tracker.is_none());
+    assert_eq!(session.execution_runtime.pending_target_qty, None);
+    assert_eq!(
+        session.execution_runtime.last_summary,
+        "broker rejected entry"
+    );
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("submit failed")
+                && message.contains("endpoint orderStrategy/startorderstrategy")
+                && message.contains("uuid midas-start-fail")
+                && message.contains("target -1")
+                && message.contains("broker rejected entry")
+                && message.contains("pending target none")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::Error(message)
+            if message == "broker rejected entry"
+    )));
 }
 
 #[tokio::test]
@@ -186,7 +291,6 @@ async fn pending_target_watchdog_respects_order_strategy_position_sync_grace() {
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
         cl_ord_id: "midas-strategy-position-sync".to_string(),
-        strategy_owned_protection: true,
         order_id: Some(77),
         order_strategy_id: Some(88),
         seen_recorded: true,
@@ -256,7 +360,6 @@ async fn set_target_position_records_pending_target_for_staged_reversal() {
         signal_started_at: None,
         signal_context: None,
         cl_ord_id: "midas-live-strategy".to_string(),
-        strategy_owned_protection: true,
         order_id: None,
         order_strategy_id: Some(77),
         seen_recorded: false,

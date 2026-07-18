@@ -7,6 +7,18 @@ struct DisplayedTradeLevels {
     stop_price_projected: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DisplayedAutoTrail {
+    trigger_ticks: f64,
+    offset_ticks: f64,
+    initial_stop_ticks_from_entry: f64,
+    first_stop_ticks_from_entry: f64,
+    has_fixed_stop: bool,
+    initial_stop_price: Option<f64>,
+    trigger_price: Option<f64>,
+    first_stop_price: Option<f64>,
+}
+
 impl LogEntry {
     fn render_line(&self) -> String {
         format!(
@@ -32,12 +44,21 @@ impl App {
         self.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay")
     }
 
-    fn broker_supports_range_bars(&self) -> bool {
+    fn broker_supports_bar_type_selection(&self) -> bool {
         self.selected_broker == BrokerKind::Tradovate
     }
 
     fn broker_supports_heikin_ashi(&self) -> bool {
         self.selected_broker == BrokerKind::Tradovate
+    }
+
+    fn normalize_market_controls_for_broker(&mut self) {
+        if !self.broker_supports_bar_type_selection() {
+            self.bar_type = BarType::default();
+        }
+        if !self.broker_supports_heikin_ashi() || !self.bar_type.supports_candle_mode() {
+            self.candle_mode = CandleMode::Standard;
+        }
     }
 
     fn set_replay_speed(
@@ -104,35 +125,50 @@ impl App {
     fn strategy_focus_order(&self) -> Vec<Focus> {
         let mut order = vec![Focus::StrategyKind, Focus::OrderQty];
         if self.strategy.kind == StrategyKind::Native {
+            let show_protection_controls = self.native_protection_controls_visible();
             order.push(Focus::NativeStrategy);
             order.push(Focus::NativeSignalTiming);
+            order.push(Focus::NativeSignalDelayBars);
+            order.push(Focus::NativeExecutionPath);
             order.push(Focus::NativeReversalMode);
             order.push(Focus::NativeBlockoutEnabled);
             order.push(Focus::NativeBlockoutMinutes);
             match self.strategy.native_strategy {
-                NativeStrategyKind::HmaAngle => order.extend([
-                    Focus::HmaLength,
-                    Focus::HmaMinAngle,
-                    Focus::HmaAngleLookback,
-                    Focus::HmaBarsRequired,
-                    Focus::HmaLongsOnly,
-                    Focus::HmaInverted,
-                    Focus::HmaTakeProfitTicks,
-                    Focus::HmaStopLossTicks,
-                    Focus::HmaTrailingStop,
-                    Focus::HmaTrailTriggerTicks,
-                    Focus::HmaTrailOffsetTicks,
-                ]),
-                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => order.extend([
-                    Focus::EmaFastLength,
-                    Focus::EmaSlowLength,
-                    Focus::EmaInverted,
-                    Focus::EmaTakeProfitTicks,
-                    Focus::EmaStopLossTicks,
-                    Focus::EmaTrailingStop,
-                    Focus::EmaTrailTriggerTicks,
-                    Focus::EmaTrailOffsetTicks,
-                ]),
+                NativeStrategyKind::HmaAngle => {
+                    order.extend([
+                        Focus::HmaLength,
+                        Focus::HmaMinAngle,
+                        Focus::HmaAngleLookback,
+                        Focus::HmaBarsRequired,
+                        Focus::HmaLongsOnly,
+                        Focus::HmaInverted,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::HmaTakeProfitTicks,
+                            Focus::HmaStopLossTicks,
+                            Focus::HmaTrailingStop,
+                            Focus::HmaTrailTriggerTicks,
+                            Focus::HmaTrailOffsetTicks,
+                        ]);
+                    }
+                }
+                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
+                    order.extend([
+                        Focus::EmaFastLength,
+                        Focus::EmaSlowLength,
+                        Focus::EmaInverted,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::EmaTakeProfitTicks,
+                            Focus::EmaStopLossTicks,
+                            Focus::EmaTrailingStop,
+                            Focus::EmaTrailTriggerTicks,
+                            Focus::EmaTrailOffsetTicks,
+                        ]);
+                    }
+                }
             }
         } else if self.strategy.kind == StrategyKind::Lua {
             order.push(Focus::LuaSourceMode);
@@ -146,13 +182,19 @@ impl App {
     }
 
     fn selection_focus_order(&self) -> Vec<Focus> {
-        vec![
+        let mut order = vec![
             Focus::AccountList,
             Focus::BarTypeToggle,
-            Focus::CandleModeToggle,
+            Focus::BarValue,
+        ];
+        if self.bar_type.supports_candle_mode() {
+            order.push(Focus::CandleModeToggle);
+        }
+        order.extend([
             Focus::InstrumentQuery,
             Focus::ContractList,
-        ]
+        ]);
+        order
     }
 
     fn next_login_focus(&self) -> Focus {
@@ -237,6 +279,26 @@ impl App {
                 | Focus::EmaTrailTriggerTicks
                 | Focus::EmaTrailOffsetTicks
                 | Focus::NativeBlockoutMinutes
+                | Focus::NativeSignalDelayBars
+                | Focus::LuaFilePath
+                | Focus::LuaEditor
+                | Focus::BarValue
+                | Focus::InstrumentQuery
+        )
+    }
+
+    fn is_free_text_focus(&self) -> bool {
+        matches!(
+            self.focus,
+            Focus::TokenOverride
+                | Focus::Username
+                | Focus::Password
+                | Focus::ApiKey
+                | Focus::AppId
+                | Focus::AppVersion
+                | Focus::Cid
+                | Focus::Secret
+                | Focus::TokenPath
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
                 | Focus::InstrumentQuery
@@ -245,14 +307,19 @@ impl App {
 
     fn push_log(&mut self, message: String) {
         let now = std::time::Instant::now();
-        while self.logs.len() >= 200 {
-            self.logs.pop_front();
-        }
-        self.logs.push_back(LogEntry {
+        let entry = LogEntry {
             timestamp: chrono::Local::now(),
             elapsed_since_previous: self.last_log_at.map(|last| now.duration_since(last)),
             message,
-        });
+        };
+        while self.logs.len() >= UI_LOG_ENTRY_LIMIT {
+            self.logs.pop_front();
+        }
+        while self.persisted_logs.len() >= PERSISTED_LOG_ENTRY_LIMIT {
+            self.persisted_logs.pop_front();
+        }
+        self.logs.push_back(entry.clone());
+        self.persisted_logs.push_back(entry);
         self.last_log_at = Some(now);
     }
 
@@ -315,14 +382,16 @@ impl App {
         body.push_str(&format!("selected_account: {selected_account}\n"));
         body.push_str(&format!("selected_contract: {selected_contract}\n"));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
-        body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
+        if self.bar_type.supports_candle_mode() {
+            body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
+        }
         body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
         body.push_str(&self.session_stats_log_section());
         body.push('\n');
         body.push_str("[logs]\n");
 
-        for entry in &self.logs {
+        for entry in &self.persisted_logs {
             body.push_str(&entry.render_line());
             body.push('\n');
         }
@@ -332,6 +401,18 @@ impl App {
 
     fn clear_strategy_numeric_input(&mut self) {
         self.strategy_numeric_input = None;
+    }
+
+    fn bar_value_text(&self) -> String {
+        self.strategy_numeric_value(Focus::BarValue, self.bar_type.value().to_string())
+    }
+
+    fn effective_candle_mode(&self) -> CandleMode {
+        self.bar_type.effective_candle_mode(self.candle_mode)
+    }
+
+    fn market_data_title_prefix(&self) -> String {
+        self.bar_type.mode_label(self.effective_candle_mode())
     }
 
     fn strategy_numeric_value(&self, focus: Focus, fallback: String) -> String {
@@ -368,19 +449,89 @@ impl App {
         ));
     }
 
-    fn disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    fn native_protection_controls_visible(&self) -> bool {
+        if self.strategy.kind != StrategyKind::Native {
+            return false;
+        }
+        if self.selected_broker != BrokerKind::Tradovate {
+            return true;
+        }
+        self.strategy.native_execution_path == NativeExecutionPath::Guarded
+            && self.strategy.native_reversal_mode != NativeReversalMode::Direct
+    }
+
+    fn native_summary_for_display(&self) -> String {
+        if self.native_protection_controls_visible() {
+            self.strategy.native_summary()
+        } else {
+            self.strategy.native_summary_without_protection()
+        }
+    }
+
+    fn active_native_uses_broker_owned_protection(&self) -> bool {
+        if self.strategy.kind != StrategyKind::Native {
+            return false;
+        }
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
+            NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
+            NativeStrategyKind::HmaCross => {
+                self.strategy.native_hma_cross.uses_native_protection()
+            }
+        }
+    }
+
+    fn active_native_requires_guarded_path(&self) -> bool {
+        self.strategy.kind == StrategyKind::Native
+            && (self.strategy.native_reversal_mode != NativeReversalMode::Direct
+                || self.active_native_uses_broker_owned_protection())
+    }
+
+    fn normalize_native_reversal_mode_before_arm(&mut self) -> Option<&'static str> {
+        if !self.active_native_uses_broker_owned_protection()
+            || self.strategy.native_reversal_mode != NativeReversalMode::Direct
+        {
+            return None;
+        }
+        let previous = self.strategy.native_reversal_mode.label();
+        self.strategy.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+        Some(previous)
+    }
+
+    fn normalize_native_execution_path_before_arm(&mut self) -> Option<&'static str> {
+        if !self.active_native_requires_guarded_path()
+            || self.strategy.native_execution_path == NativeExecutionPath::Guarded
+        {
+            return None;
+        }
+        let previous = self.strategy.native_execution_path.label();
+        self.strategy.native_execution_path = NativeExecutionPath::Guarded;
+        Some(previous)
+    }
+
+    fn manual_disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
         }
-        self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::DisarmExecutionStrategy {
-            reason: "Native strategy config changed; press Continue to re-arm.".to_string(),
+            reason: "Manual strategy disarm requested.".to_string(),
         });
+        self.push_log("Manual strategy disarm requested.".to_string());
     }
 
     fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
+        }
+        if let Some(previous_mode) = self.normalize_native_reversal_mode_before_arm() {
+            self.push_log(format!(
+                "Reversal Mode switched to CloseAll > Enter before arming; {previous_mode} cannot attach broker-owned TP/SL/trailing protection."
+            ));
+        }
+        if let Some(previous_path) = self.normalize_native_execution_path_before_arm() {
+            self.push_log(format!(
+                "Execution Path switched to Guarded before arming; {previous_path} ignores broker protection or non-direct reversal settings."
+            ));
         }
         self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::ArmExecutionStrategy);
@@ -502,6 +653,91 @@ impl App {
         }
 
         levels
+    }
+
+    fn displayed_auto_trail(&self) -> Option<DisplayedAutoTrail> {
+        if self.strategy.kind != StrategyKind::Native {
+            return None;
+        }
+        if !self.native_protection_controls_visible() {
+            return None;
+        }
+
+        let (use_trailing_stop, trigger_ticks, offset_ticks, stop_loss_ticks) =
+            match self.strategy.native_strategy {
+                NativeStrategyKind::HmaAngle => (
+                    self.strategy.native_hma.use_trailing_stop,
+                    self.strategy.native_hma.trail_trigger_ticks,
+                    self.strategy.native_hma.trail_offset_ticks,
+                    self.strategy.native_hma.stop_loss_ticks,
+                ),
+                NativeStrategyKind::EmaCross => (
+                    self.strategy.native_ema.use_trailing_stop,
+                    self.strategy.native_ema.trail_trigger_ticks,
+                    self.strategy.native_ema.trail_offset_ticks,
+                    self.strategy.native_ema.stop_loss_ticks,
+                ),
+                NativeStrategyKind::HmaCross => (
+                    self.strategy.native_hma_cross.use_trailing_stop,
+                    self.strategy.native_hma_cross.trail_trigger_ticks,
+                    self.strategy.native_hma_cross.trail_offset_ticks,
+                    self.strategy.native_hma_cross.stop_loss_ticks,
+                ),
+            };
+        if !use_trailing_stop || trigger_ticks <= 0.0 || offset_ticks <= 0.0 {
+            return None;
+        }
+
+        let has_fixed_stop = stop_loss_ticks > 0.0;
+        let initial_stop_distance_ticks = if has_fixed_stop {
+            stop_loss_ticks
+        } else {
+            trigger_ticks + offset_ticks
+        };
+        let initial_stop_ticks_from_entry = -initial_stop_distance_ticks;
+        let first_stop_ticks_from_entry = trigger_ticks - offset_ticks;
+        let (initial_stop_price, trigger_price, first_stop_price) = self
+            .market
+            .tick_size
+            .filter(|tick| tick.is_finite() && *tick > 0.0)
+            .and_then(|tick_size| {
+                let entry_price = self
+                    .selected_snapshot()
+                    .and_then(|snapshot| snapshot.market_entry_price)
+                    .filter(|price| price.is_finite())?;
+                let signed_qty = self
+                    .selected_snapshot()
+                    .and_then(|snapshot| snapshot.market_position_qty)
+                    .map(|qty| qty.round() as i32)
+                    .filter(|qty| *qty != 0)?;
+                let direction = if signed_qty > 0 { 1.0 } else { -1.0 };
+                Some((
+                    entry_price + direction * initial_stop_ticks_from_entry * tick_size,
+                    entry_price + direction * trigger_ticks * tick_size,
+                    entry_price + direction * first_stop_ticks_from_entry * tick_size,
+                ))
+            })
+            .map_or(
+                (None, None, None),
+                |(initial_stop_price, trigger_price, first_stop_price)| {
+                    (
+                        Some(initial_stop_price),
+                        Some(trigger_price),
+                        Some(first_stop_price),
+                    )
+                },
+            );
+
+        Some(DisplayedAutoTrail {
+            trigger_ticks,
+            offset_ticks,
+            initial_stop_ticks_from_entry,
+            first_stop_ticks_from_entry,
+            has_fixed_stop,
+            initial_stop_price,
+            trigger_price,
+            first_stop_price,
+        })
     }
 
     fn projected_native_take_profit_price(&self, entry_price: f64, signed_qty: i32) -> Option<f64> {

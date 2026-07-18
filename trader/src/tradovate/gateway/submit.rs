@@ -8,6 +8,7 @@ pub(crate) async fn submit_market_order_via_gateway(
         if let Err(err) = interrupt_order_strategy_by_id(request_tx, order_strategy_id).await {
             let stale_interrupt = interrupt_error_is_stale(&err);
             return Err(BrokerOrderFailure {
+                endpoint: "orderStrategy/interruptorderstrategy",
                 cl_ord_id: order.cl_ord_id,
                 message: if stale_interrupt {
                     format!(
@@ -25,6 +26,7 @@ pub(crate) async fn submit_market_order_via_gateway(
     for order_id in &order.cancel_order_ids {
         if let Err(err) = cancel_order_by_id(request_tx, *order_id).await {
             return Err(BrokerOrderFailure {
+                endpoint: "order/cancelorder",
                 cl_ord_id: order.cl_ord_id,
                 message: format!("failed to clear strategy protection: {err}"),
                 target_qty: order.target_qty,
@@ -38,6 +40,7 @@ pub(crate) async fn submit_market_order_via_gateway(
         Ok(parsed) => parsed,
         Err(err) => {
             return Err(BrokerOrderFailure {
+                endpoint: "order/placeorder",
                 cl_ord_id: order.cl_ord_id,
                 message: err.to_string(),
                 target_qty: order.target_qty,
@@ -63,6 +66,7 @@ pub(crate) async fn submit_market_order_via_gateway(
     }
     message.push_str(&format!(" [clOrdId {}]", order.cl_ord_id));
     Ok(BrokerOrderAck {
+        endpoint: "order/placeorder",
         cl_ord_id: order.cl_ord_id,
         order_id,
         submit_rtt_ms,
@@ -78,6 +82,7 @@ pub(crate) async fn submit_liquidation_via_gateway(
         if let Err(err) = interrupt_order_strategy_by_id(request_tx, order_strategy_id).await {
             let stale_interrupt = interrupt_error_is_stale(&err);
             return Err(BrokerOrderFailure {
+                endpoint: "orderStrategy/interruptorderstrategy",
                 cl_ord_id: liquidation.request_id,
                 message: if stale_interrupt {
                     format!("strategy {order_strategy_id} was already inactive before close-all")
@@ -93,6 +98,7 @@ pub(crate) async fn submit_liquidation_via_gateway(
     for order_id in &liquidation.cancel_order_ids {
         if let Err(err) = cancel_order_by_id(request_tx, *order_id).await {
             return Err(BrokerOrderFailure {
+                endpoint: "order/cancelorder",
                 cl_ord_id: liquidation.request_id.clone(),
                 message: format!("failed to clear strategy protection before close-all: {err}"),
                 target_qty: liquidation.target_qty,
@@ -108,6 +114,7 @@ pub(crate) async fn submit_liquidation_via_gateway(
             Ok(parsed) => parsed,
             Err(err) => {
                 return Err(BrokerOrderFailure {
+                    endpoint: "order/liquidateposition",
                     cl_ord_id: liquidation.request_id,
                     message: err.to_string(),
                     target_qty: liquidation.target_qty,
@@ -125,6 +132,7 @@ pub(crate) async fn submit_liquidation_via_gateway(
         message.push_str(&format!(" (order {order_id})"));
     }
     Ok(BrokerOrderAck {
+        endpoint: "order/liquidateposition",
         cl_ord_id: liquidation.request_id,
         order_id,
         submit_rtt_ms,
@@ -142,6 +150,7 @@ pub(crate) async fn submit_liquidation_then_order_strategy_via_gateway(
     let liquidation_ack = submit_liquidation_via_gateway(request_tx, liquidation)
         .await
         .map_err(|failure| BrokerOrderStrategyFailure {
+            endpoint: failure.endpoint,
             uuid: strategy_uuid,
             message: format!(
                 "failed to submit close-all before immediate reversal: {}",
@@ -163,6 +172,7 @@ pub(crate) async fn submit_order_strategy_via_gateway(
         if let Err(err) = interrupt_order_strategy_by_id(request_tx, order_strategy_id).await {
             let stale_interrupt = interrupt_error_is_stale(&err);
             return Err(BrokerOrderStrategyFailure {
+                endpoint: "orderStrategy/interruptorderstrategy",
                 uuid: strategy.uuid,
                 message: if stale_interrupt {
                     format!(
@@ -180,6 +190,7 @@ pub(crate) async fn submit_order_strategy_via_gateway(
     for order_id in &strategy.cancel_order_ids {
         if let Err(err) = cancel_order_by_id(request_tx, *order_id).await {
             return Err(BrokerOrderStrategyFailure {
+                endpoint: "order/cancelorder",
                 uuid: strategy.uuid,
                 message: format!("failed to clear strategy protection: {err}"),
                 target_qty: strategy.target_qty,
@@ -199,6 +210,7 @@ pub(crate) async fn submit_order_strategy_via_gateway(
         Ok(parsed) => parsed,
         Err(err) => {
             return Err(BrokerOrderStrategyFailure {
+                endpoint: "orderStrategy/startorderstrategy",
                 uuid: strategy.uuid,
                 message: err.to_string(),
                 target_qty: strategy.target_qty,
@@ -230,6 +242,7 @@ pub(crate) async fn submit_order_strategy_via_gateway(
     }
     message.push_str(&format!(" [uuid {}]", strategy_uuid));
     Ok(BrokerOrderStrategyAck {
+        endpoint: "orderStrategy/startorderstrategy",
         uuid: strategy_uuid,
         order_strategy_id,
         submit_rtt_ms,
@@ -249,8 +262,9 @@ pub(crate) async fn submit_native_protection_via_gateway(
     request_tx: &UnboundedSender<UserSocketCommand>,
     sync: PendingProtectionSync,
 ) -> Result<ProtectionSyncAck, ProtectionSyncFailure> {
-    let mut next_state = sync.next_state;
-    let failure_message = |err: anyhow::Error| ProtectionSyncFailure {
+    let next_state = sync.next_state;
+    let failure_message = |endpoint: &'static str, err: anyhow::Error| ProtectionSyncFailure {
+        endpoint,
         message: format!(
             "native protection sync failed for {} on {}: {err}",
             sync.contract_name, sync.account_name
@@ -258,64 +272,18 @@ pub(crate) async fn submit_native_protection_via_gateway(
     };
     let outcome = match sync.operation {
         ProtectionSyncOperation::Clear { cancel_order_ids } => {
-            let cleared = cancel_orders_by_id(request_tx, &cancel_order_ids).await;
-            cleared.map(|cleared| ProtectionSyncAck {
+            let cleared = match cancel_orders_by_id(request_tx, &cancel_order_ids).await {
+                Ok(cleared) => cleared,
+                Err(err) => return Err(failure_message("order/cancelorder", err)),
+            };
+            Ok(ProtectionSyncAck {
+                endpoint: "order/cancelorder",
                 key: sync.key,
                 message: if cleared { sync.message } else { None },
                 next_state,
             })
         }
-        ProtectionSyncOperation::ModifyStop { payload } => {
-            request_order_json(request_tx, "order/modifyorder", &payload)
-                .await
-                .map(|_| ProtectionSyncAck {
-                    key: sync.key,
-                    message: sync.message,
-                    next_state,
-                })
-        }
-        ProtectionSyncOperation::Replace {
-            cancel_order_ids,
-            request,
-        } => {
-            let _ = match cancel_orders_by_id(request_tx, &cancel_order_ids).await {
-                Ok(cancelled) => cancelled,
-                Err(err) => return Err(failure_message(err)),
-            };
-            let (endpoint, payload, place_kind) = match &request {
-                ProtectionPlaceRequest::TakeProfit { payload } => {
-                    ("order/placeorder", payload, "tp")
-                }
-                ProtectionPlaceRequest::StopLoss { payload } => ("order/placeorder", payload, "sl"),
-                ProtectionPlaceRequest::Oco { payload } => ("order/placeOCO", payload, "oco"),
-            };
-            let parsed = match request_order_json(request_tx, endpoint, payload).await {
-                Ok(parsed) => parsed,
-                Err(err) => return Err(failure_message(err)),
-            };
-
-            if let Some(state) = next_state.as_mut() {
-                match place_kind {
-                    "tp" => {
-                        state.take_profit_order_id = first_known_order_id(&parsed);
-                    }
-                    "sl" => {
-                        state.stop_order_id = first_known_order_id(&parsed);
-                    }
-                    _ => {
-                        state.take_profit_order_id = first_known_order_id(&parsed);
-                        state.stop_order_id = known_order_id(&parsed, &["otherId", "stopOrderId"]);
-                    }
-                }
-            }
-
-            Ok(ProtectionSyncAck {
-                key: sync.key,
-                message: sync.message,
-                next_state,
-            })
-        }
     };
 
-    outcome.map_err(failure_message)
+    outcome
 }

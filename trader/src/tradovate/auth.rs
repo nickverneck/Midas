@@ -20,15 +20,7 @@ async fn authenticate(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
 
     match cfg.auth_mode {
         AuthMode::TokenFile => {
-            let tokens = load_token_file(&cfg.token_path)
-                .or_else(|_| load_token_file(&cfg.session_cache_path))
-                .with_context(|| {
-                    format!(
-                        "load token from {} or {}",
-                        cfg.token_path.display(),
-                        cfg.session_cache_path.display()
-                    )
-                })?;
+            let tokens = load_runtime_token_bundle(cfg)?.tokens;
             let user_name = fetch_auth_me(client, &cfg.env, &tokens.access_token)
                 .await
                 .ok()
@@ -80,6 +72,51 @@ fn load_token_file(path: &Path) -> Result<TokenBundle> {
             .get("name")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+    })
+}
+
+fn load_token_file_with_snapshot(path: &Path) -> Result<RuntimeTokenBundle> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("read token file {}", path.display()))?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse token JSON {}", path.display()))?;
+    let access_token = parsed
+        .get("token")
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("accessToken").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .filter(|token| !token.trim().is_empty())
+        .context("token JSON missing token/accessToken")?;
+    let md_access_token = parsed
+        .get("mdAccessToken")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .filter(|token| !token.trim().is_empty())
+        .unwrap_or_else(|| access_token.clone());
+    let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+
+    Ok(RuntimeTokenBundle {
+        tokens: TokenBundle {
+            access_token,
+            md_access_token,
+            expiration_time: parsed
+                .get("expirationTime")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            user_id: parsed.get("userId").and_then(Value::as_i64),
+            user_name: parsed
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        },
+        file_snapshot: Some(TokenFileSnapshot {
+            path: path.to_path_buf(),
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+            content_hash: hasher.finish(),
+        }),
     })
 }
 
@@ -145,6 +182,49 @@ async fn request_access_token(client: &Client, cfg: &AppConfig) -> Result<TokenB
         expiration_time: parsed.expiration_time,
         user_id: parsed.user_id,
         user_name: parsed.name,
+    })
+}
+
+async fn renew_access_token(
+    client: &Client,
+    env: &TradingEnvironment,
+    current: &TokenBundle,
+) -> Result<TokenBundle> {
+    let url = format!("{}/auth/renewAccessToken", env.rest_url());
+    let response = client
+        .get(url)
+        .bearer_auth(&current.access_token)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("renew access token failed ({status}): {body}");
+    }
+
+    let parsed: AccessTokenResponse =
+        serde_json::from_str(&body).context("parse renew access token response")?;
+    if let Some(error_text) = parsed.error_text.as_deref() {
+        if !error_text.trim().is_empty() {
+            bail!("renew access token rejected: {error_text}");
+        }
+    }
+
+    let access_token = parsed
+        .access_token
+        .filter(|token| !token.trim().is_empty())
+        .context("missing accessToken in renew response")?;
+    let md_access_token = parsed
+        .md_access_token
+        .filter(|token| !token.trim().is_empty())
+        .unwrap_or_else(|| current.md_access_token.clone());
+
+    Ok(TokenBundle {
+        access_token,
+        md_access_token,
+        expiration_time: parsed.expiration_time,
+        user_id: parsed.user_id.or(current.user_id),
+        user_name: parsed.name.or_else(|| current.user_name.clone()),
     })
 }
 

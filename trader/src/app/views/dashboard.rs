@@ -2,16 +2,19 @@ use super::super::*;
 
 impl App {
     pub(in crate::app) fn dashboard_summary_lines(&self) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = vec![
             Line::from(format!("Status: {}", self.status)),
             Line::from(format!("Broker: {}", self.selected_broker.label())),
             Line::from(format!("Strategy: {}", self.strategy.summary_label())),
             Line::from(format!("Mode: {}", self.session_kind.label())),
-            Line::from(if self.session_kind == SessionKind::Replay {
-                format!("Replay Speed: {}", self.replay_speed.label())
-            } else {
-                "Replay Speed: inactive".to_string()
-            }),
+        ];
+        if self.session_kind == SessionKind::Replay {
+            lines.push(Line::from(format!(
+                "Replay Speed: {}",
+                self.replay_speed.label()
+            )));
+        }
+        lines.extend([
             Line::from(format!(
                 "Strategy Status: {}",
                 self.strategy_runtime_summary()
@@ -27,7 +30,11 @@ impl App {
                 None => "Selected contract: none".to_string(),
             }),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
-            Line::from(format!("Candles: {}", self.candle_mode.label())),
+        ]);
+        if self.bar_type.supports_candle_mode() {
+            lines.push(Line::from(format!("Candles: {}", self.candle_mode.label())));
+        }
+        lines.extend([
             Line::from(format!("Session Gate: {}", self.session_gate_summary())),
             Line::from(format!(
                 "Chart Overlay: {}",
@@ -59,7 +66,8 @@ impl App {
                 "Market Update Age: {}",
                 format_age_ms(self.market_update_age_ms())
             )),
-        ]
+        ]);
+        lines
     }
 
     pub(in crate::app) fn stats_lines(&self) -> Vec<Line<'static>> {
@@ -83,14 +91,14 @@ impl App {
         };
         let hotkeys = if self.session_kind == SessionKind::Replay {
             format!(
-                "Order {} {} | Keys b/s/c/v [/] 0 ({})",
+                "Order {} {} | Keys b/s/c/v d [/] 0 ({})",
                 self.base_config.order_qty,
                 self.base_config.time_in_force,
                 self.replay_speed.label(),
             )
         } else {
             format!(
-                "Order {} {} | Keys b/s/c/v",
+                "Order {} {} | Keys b/s/c/v d",
                 self.base_config.order_qty, self.base_config.time_in_force
             )
         };

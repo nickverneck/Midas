@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn replay_trailing_stop_sync_ratchets_forward_without_backsliding() {
+fn replay_trailing_stop_sync_does_not_queue_software_updates() {
     let mut session = test_session();
     session.replay_enabled = true;
     session.execution_runtime.armed = true;
@@ -37,8 +37,6 @@ fn replay_trailing_stop_sync_ratchets_forward_without_backsliding() {
             signed_qty: 1,
             take_profit_price: None,
             stop_price: Some(98.0),
-            last_requested_take_profit_price: None,
-            last_requested_stop_price: Some(98.0),
             take_profit_cl_ord_id: None,
             stop_cl_ord_id: Some("replay-stop".to_string()),
             take_profit_order_id: None,
@@ -55,40 +53,11 @@ fn replay_trailing_stop_sync_ratchets_forward_without_backsliding() {
         close: 101.0,
     };
     sync_execution_protection(&mut session, &broker_tx, Some(&first_bar))
-        .expect("initial trailing sync should queue a stop update");
-
-    let first_next_state = match broker_rx.try_recv().expect("expected stop modify command") {
-        BrokerCommand::NativeProtection { sync, .. } => {
-            assert!(
-                sync.simulate,
-                "replay mode should use simulated protection sync"
-            );
-            match sync.operation {
-                ProtectionSyncOperation::ModifyStop { payload } => {
-                    assert_eq!(payload.get("orderId").and_then(Value::as_i64), Some(1002));
-                    assert_eq!(
-                        payload.get("stopPrice").and_then(Value::as_f64),
-                        Some(101.0)
-                    );
-                }
-                _ => panic!("expected stop modification"),
-            }
-            sync.next_state
-                .expect("planner should provide the updated protection snapshot")
-        }
-        _ => panic!("expected native protection command"),
-    };
-    assert_eq!(
-        session
-            .execution_runtime
-            .ema_execution
-            .position
-            .as_ref()
-            .and_then(|position| position.current_stop_price),
-        Some(101.0)
+        .expect("broker-owned trailing sync should not queue a software stop update");
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "Tradovate auto-trail is broker-owned and must not be modified by app sync"
     );
-    session.protection_sync_in_flight = false;
-    session.managed_protection.insert(key, first_next_state);
 
     let weaker_bar = Bar {
         ts_ns: 2,
@@ -110,7 +79,7 @@ fn replay_trailing_stop_sync_ratchets_forward_without_backsliding() {
             .position
             .as_ref()
             .and_then(|position| position.current_stop_price),
-        Some(101.0)
+        None
     );
 
     let stronger_bar = Bar {
@@ -121,31 +90,11 @@ fn replay_trailing_stop_sync_ratchets_forward_without_backsliding() {
         close: 101.75,
     };
     sync_execution_protection(&mut session, &broker_tx, Some(&stronger_bar))
-        .expect("stronger bar should ratchet the trailing stop forward");
-
-    let second_next_state = match broker_rx
-        .try_recv()
-        .expect("expected second stop modify command")
-    {
-        BrokerCommand::NativeProtection { sync, .. } => {
-            assert!(sync.simulate);
-            match sync.operation {
-                ProtectionSyncOperation::ModifyStop { payload } => {
-                    assert_eq!(payload.get("orderId").and_then(Value::as_i64), Some(1002));
-                    assert_eq!(
-                        payload.get("stopPrice").and_then(Value::as_f64),
-                        Some(101.5)
-                    );
-                }
-                _ => panic!("expected stop modification"),
-            }
-            sync.next_state
-                .expect("planner should retain the replay protection snapshot")
-        }
-        _ => panic!("expected native protection command"),
-    };
-    assert_eq!(second_next_state.stop_order_id, Some(1002));
-    assert_eq!(second_next_state.stop_price, Some(101.5));
+        .expect("stronger bar should still leave broker-owned trail alone");
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "stronger bars must not trigger app-managed stop modification"
+    );
     assert_eq!(
         session
             .execution_runtime
@@ -153,6 +102,6 @@ fn replay_trailing_stop_sync_ratchets_forward_without_backsliding() {
             .position
             .as_ref()
             .and_then(|position| position.current_stop_price),
-        Some(101.5)
+        None
     );
 }

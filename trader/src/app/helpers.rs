@@ -27,6 +27,63 @@ fn styled_line(text: String, focused: bool) -> Line<'static> {
     }
 }
 
+fn focused_list_state(focused: bool, selected: usize, len: usize) -> ListState {
+    let selected = if focused && selected < len {
+        Some(selected)
+    } else {
+        None
+    };
+    ListState::default().with_selected(selected)
+}
+
+fn focused_paragraph_scroll_offset(lines: &[Line<'_>], area: Rect) -> u16 {
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    if visible_rows == 0 {
+        return 0;
+    }
+
+    let Some(focused_index) = focused_line_index(lines) else {
+        return 0;
+    };
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let focused_top = lines[..focused_index]
+        .iter()
+        .map(|line| wrapped_line_height(line, inner_width))
+        .sum::<usize>();
+    let focused_height = wrapped_line_height(&lines[focused_index], inner_width);
+    let total_height = lines
+        .iter()
+        .map(|line| wrapped_line_height(line, inner_width))
+        .sum::<usize>();
+
+    let max_offset = total_height.saturating_sub(visible_rows);
+    let desired_offset = if focused_height > visible_rows {
+        focused_top
+    } else {
+        focused_top
+            .saturating_add(focused_height)
+            .saturating_sub(visible_rows)
+    };
+
+    desired_offset.min(max_offset).min(u16::MAX as usize) as u16
+}
+
+fn focused_line_index(lines: &[Line<'_>]) -> Option<usize> {
+    lines.iter().position(|line| {
+        line.spans.iter().any(|span| {
+            span.style.fg == Some(Color::Black) && span.style.bg == Some(Color::Cyan)
+        })
+    })
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    line.width().max(1).div_ceil(width)
+}
+
 fn pnl_style(value: Option<f64>) -> Style {
     match value {
         Some(value) if value > 0.0 => Style::default().fg(Color::Green),
@@ -40,6 +97,56 @@ fn format_money(value: Option<f64>) -> String {
         Some(value) => format!("{value:.2}"),
         None => "n/a".to_string(),
     }
+}
+
+fn format_tick_value(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn format_signed_tick_value(value: f64) -> String {
+    if value > 0.0 {
+        format!("+{}", format_tick_value(value))
+    } else {
+        format_tick_value(value)
+    }
+}
+
+fn format_auto_trail_preview(auto_trail: DisplayedAutoTrail) -> String {
+    let initial_stop = if auto_trail.has_fixed_stop {
+        format!(
+            "fixed SL {} ticks",
+            format_signed_tick_value(auto_trail.initial_stop_ticks_from_entry)
+        )
+    } else {
+        format!(
+            "broker initial SL {} ticks",
+            format_signed_tick_value(auto_trail.initial_stop_ticks_from_entry)
+        )
+    };
+    format!(
+        "Auto Trail Preview: {}; arms after +{} ticks; first trail {} ticks from entry",
+        initial_stop,
+        format_tick_value(auto_trail.trigger_ticks),
+        format_signed_tick_value(auto_trail.first_stop_ticks_from_entry),
+    )
+}
+
+fn format_auto_trail_live(auto_trail: DisplayedAutoTrail) -> Option<String> {
+    Some(format!(
+        "Auto Trail Live: initial stop {}; arm at {}; first trail {}",
+        format_money(auto_trail.initial_stop_price),
+        format_money(auto_trail.trigger_price),
+        format_money(auto_trail.first_stop_price),
+    ))
+    .filter(|_| {
+        auto_trail.initial_stop_price.is_some()
+            && auto_trail.trigger_price.is_some()
+            && auto_trail.first_stop_price.is_some()
+    })
 }
 
 fn format_signed_money(value: Option<f64>) -> String {
