@@ -287,6 +287,24 @@ impl App {
         )
     }
 
+    fn is_free_text_focus(&self) -> bool {
+        matches!(
+            self.focus,
+            Focus::TokenOverride
+                | Focus::Username
+                | Focus::Password
+                | Focus::ApiKey
+                | Focus::AppId
+                | Focus::AppVersion
+                | Focus::Cid
+                | Focus::Secret
+                | Focus::TokenPath
+                | Focus::LuaFilePath
+                | Focus::LuaEditor
+                | Focus::InstrumentQuery
+        )
+    }
+
     fn push_log(&mut self, message: String) {
         let now = std::time::Instant::now();
         let entry = LogEntry {
@@ -491,14 +509,14 @@ impl App {
         Some(previous)
     }
 
-    fn disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    fn manual_disarm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
         }
-        self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::DisarmExecutionStrategy {
-            reason: "Native strategy config changed; press Continue to re-arm.".to_string(),
+            reason: "Manual strategy disarm requested.".to_string(),
         });
+        self.push_log("Manual strategy disarm requested.".to_string());
     }
 
     fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {

@@ -309,8 +309,14 @@ impl App {
                 .collect()
         };
         let accounts = List::new(account_items)
-            .block(Block::default().borders(Borders::ALL).title("Accounts"));
-        frame.render_widget(accounts, left[1]);
+            .block(Block::default().borders(Borders::ALL).title("Accounts"))
+            .scroll_padding(1);
+        let mut account_state = focused_list_state(
+            self.focus == Focus::AccountList,
+            self.selected_account,
+            self.accounts.len(),
+        );
+        frame.render_stateful_widget(accounts, left[1], &mut account_state);
 
         let right = Layout::default()
             .direction(Direction::Vertical)
@@ -350,12 +356,14 @@ impl App {
             Line::from(help),
         ]);
 
+        let search_scroll = focused_paragraph_scroll_offset(&search_lines, right[0]);
         let search = Paragraph::new(search_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Instrument Search"),
             )
+            .scroll((search_scroll, 0))
             .wrap(Wrap { trim: true });
         frame.render_widget(search, right[0]);
 
@@ -376,7 +384,13 @@ impl App {
         };
         let contract_list =
             List::new(results).block(Block::default().borders(Borders::ALL).title("Contracts"));
-        frame.render_widget(contract_list, right[1]);
+        let contract_list = contract_list.scroll_padding(1);
+        let mut contract_state = focused_list_state(
+            self.focus == Focus::ContractList,
+            self.selected_contract,
+            self.contract_results.len(),
+        );
+        frame.render_stateful_widget(contract_list, right[1], &mut contract_state);
 
         let preview = Paragraph::new(self.selection_preview_lines())
             .block(

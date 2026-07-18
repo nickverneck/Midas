@@ -91,14 +91,14 @@ impl App {
         };
         let hotkeys = if self.session_kind == SessionKind::Replay {
             format!(
-                "Order {} {} | Keys b/s/c/v [/] 0 ({})",
+                "Order {} {} | Keys b/s/c/v d [/] 0 ({})",
                 self.base_config.order_qty,
                 self.base_config.time_in_force,
                 self.replay_speed.label(),
             )
         } else {
             format!(
-                "Order {} {} | Keys b/s/c/v",
+                "Order {} {} | Keys b/s/c/v d",
                 self.base_config.order_qty, self.base_config.time_in_force
             )
         };

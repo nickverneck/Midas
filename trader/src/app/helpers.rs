@@ -27,6 +27,63 @@ fn styled_line(text: String, focused: bool) -> Line<'static> {
     }
 }
 
+fn focused_list_state(focused: bool, selected: usize, len: usize) -> ListState {
+    let selected = if focused && selected < len {
+        Some(selected)
+    } else {
+        None
+    };
+    ListState::default().with_selected(selected)
+}
+
+fn focused_paragraph_scroll_offset(lines: &[Line<'_>], area: Rect) -> u16 {
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    if visible_rows == 0 {
+        return 0;
+    }
+
+    let Some(focused_index) = focused_line_index(lines) else {
+        return 0;
+    };
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let focused_top = lines[..focused_index]
+        .iter()
+        .map(|line| wrapped_line_height(line, inner_width))
+        .sum::<usize>();
+    let focused_height = wrapped_line_height(&lines[focused_index], inner_width);
+    let total_height = lines
+        .iter()
+        .map(|line| wrapped_line_height(line, inner_width))
+        .sum::<usize>();
+
+    let max_offset = total_height.saturating_sub(visible_rows);
+    let desired_offset = if focused_height > visible_rows {
+        focused_top
+    } else {
+        focused_top
+            .saturating_add(focused_height)
+            .saturating_sub(visible_rows)
+    };
+
+    desired_offset.min(max_offset).min(u16::MAX as usize) as u16
+}
+
+fn focused_line_index(lines: &[Line<'_>]) -> Option<usize> {
+    lines.iter().position(|line| {
+        line.spans.iter().any(|span| {
+            span.style.fg == Some(Color::Black) && span.style.bg == Some(Color::Cyan)
+        })
+    })
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    line.width().max(1).div_ceil(width)
+}
+
 fn pnl_style(value: Option<f64>) -> Style {
     match value {
         Some(value) if value > 0.0 => Style::default().fg(Color::Green),

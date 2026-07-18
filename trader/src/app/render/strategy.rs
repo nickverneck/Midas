@@ -24,22 +24,18 @@ impl App {
             Focus::StrategyKind => match key.code {
                 KeyCode::Left => {
                     self.strategy.kind = self.strategy.kind.prev();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.kind = self.strategy.kind.next();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
             Focus::NativeStrategy => match key.code {
                 KeyCode::Left => {
                     self.strategy.native_strategy = self.strategy.native_strategy.prev();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_strategy = self.strategy.native_strategy.next();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
@@ -47,183 +43,149 @@ impl App {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_signal_timing =
                         self.strategy.native_signal_timing.toggle();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
             Focus::NativeSignalDelayBars => {
-                if edit_strategy_usize(
+                let _ = edit_strategy_usize(
                     &mut self.strategy_numeric_input,
                     Focus::NativeSignalDelayBars,
                     &mut self.strategy.native_signal_delay_bars,
                     key,
                     0,
                     1,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::NativeExecutionPath => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_execution_path =
                         self.strategy.native_execution_path.toggle();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
             Focus::NativeReversalMode => match key.code {
                 KeyCode::Left => {
                     self.strategy.native_reversal_mode = self.strategy.native_reversal_mode.prev();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.native_reversal_mode = self.strategy.native_reversal_mode.next();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
             Focus::NativeBlockoutEnabled => {
-                if toggle_bool(&mut self.strategy.blockout_enabled, key) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                let _ = toggle_bool(&mut self.strategy.blockout_enabled, key);
             }
             Focus::NativeBlockoutMinutes => {
-                if edit_strategy_float(
+                let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::NativeBlockoutMinutes,
                     &mut self.strategy.blockout_minutes_before_close,
                     key,
                     0.0,
                     5.0,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::OrderQty => {
-                if edit_strategy_i32(
+                let _ = edit_strategy_i32(
                     &mut self.strategy_numeric_input,
                     Focus::OrderQty,
                     &mut self.strategy.order_qty,
                     key,
                     1,
                     1,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaLength => {
-                if edit_strategy_usize(
+                let _ = edit_strategy_usize(
                     &mut self.strategy_numeric_input,
                     Focus::HmaLength,
                     &mut self.strategy.native_hma.hma_length,
                     key,
                     2,
                     1,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaMinAngle => {
-                if edit_strategy_float(
+                let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::HmaMinAngle,
                     &mut self.strategy.native_hma.min_angle,
                     key,
                     0.0,
                     0.5,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaAngleLookback => {
-                if edit_strategy_usize(
+                let _ = edit_strategy_usize(
                     &mut self.strategy_numeric_input,
                     Focus::HmaAngleLookback,
                     &mut self.strategy.native_hma.angle_lookback,
                     key,
                     1,
                     1,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaBarsRequired => {
-                if edit_strategy_usize(
+                let _ = edit_strategy_usize(
                     &mut self.strategy_numeric_input,
                     Focus::HmaBarsRequired,
                     &mut self.strategy.native_hma.bars_required_to_trade,
                     key,
                     1,
                     1,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaLongsOnly => {
-                if toggle_bool(&mut self.strategy.native_hma.longs_only, key) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                let _ = toggle_bool(&mut self.strategy.native_hma.longs_only, key);
             }
             Focus::HmaInverted => {
-                if toggle_bool(&mut self.strategy.native_hma.inverted, key) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                let _ = toggle_bool(&mut self.strategy.native_hma.inverted, key);
             }
             Focus::HmaTakeProfitTicks => {
-                if edit_strategy_float(
+                let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::HmaTakeProfitTicks,
                     &mut self.strategy.native_hma.take_profit_ticks,
                     key,
                     0.0,
                     1.0,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaStopLossTicks => {
-                if edit_strategy_float(
+                let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::HmaStopLossTicks,
                     &mut self.strategy.native_hma.stop_loss_ticks,
                     key,
                     0.0,
                     1.0,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaTrailingStop => {
-                if toggle_bool(&mut self.strategy.native_hma.use_trailing_stop, key) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                let _ = toggle_bool(&mut self.strategy.native_hma.use_trailing_stop, key);
             }
             Focus::HmaTrailTriggerTicks => {
-                if edit_strategy_float(
+                let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::HmaTrailTriggerTicks,
                     &mut self.strategy.native_hma.trail_trigger_ticks,
                     key,
                     0.0,
                     1.0,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::HmaTrailOffsetTicks => {
-                if edit_strategy_float(
+                let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::HmaTrailOffsetTicks,
                     &mut self.strategy.native_hma.trail_offset_ticks,
                     key,
                     0.0,
                     1.0,
-                ) {
-                    self.disarm_native_strategy(cmd_tx);
-                }
+                );
             }
             Focus::EmaFastLength => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_usize(
                         &mut self.strategy_numeric_input,
                         Focus::EmaFastLength,
@@ -241,12 +203,9 @@ impl App {
                         1,
                     ),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaSlowLength => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_usize(
                         &mut self.strategy_numeric_input,
                         Focus::EmaSlowLength,
@@ -264,23 +223,17 @@ impl App {
                         1,
                     ),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaInverted => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => {
                         toggle_bool(&mut self.strategy.native_hma_cross.inverted, key)
                     }
                     _ => toggle_bool(&mut self.strategy.native_ema.inverted, key),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaTakeProfitTicks => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_float(
                         &mut self.strategy_numeric_input,
                         Focus::EmaTakeProfitTicks,
@@ -298,12 +251,9 @@ impl App {
                         1.0,
                     ),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaStopLossTicks => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_float(
                         &mut self.strategy_numeric_input,
                         Focus::EmaStopLossTicks,
@@ -321,23 +271,17 @@ impl App {
                         1.0,
                     ),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaTrailingStop => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => {
                         toggle_bool(&mut self.strategy.native_hma_cross.use_trailing_stop, key)
                     }
                     _ => toggle_bool(&mut self.strategy.native_ema.use_trailing_stop, key),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaTrailTriggerTicks => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_float(
                         &mut self.strategy_numeric_input,
                         Focus::EmaTrailTriggerTicks,
@@ -355,12 +299,9 @@ impl App {
                         1.0,
                     ),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::EmaTrailOffsetTicks => {
-                let changed = match self.strategy.native_strategy {
+                let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_float(
                         &mut self.strategy_numeric_input,
                         Focus::EmaTrailOffsetTicks,
@@ -378,14 +319,10 @@ impl App {
                         1.0,
                     ),
                 };
-                if changed {
-                    self.disarm_native_strategy(cmd_tx);
-                }
             }
             Focus::LuaSourceMode => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                     self.strategy.lua_source_mode = self.strategy.lua_source_mode.toggle();
-                    self.disarm_native_strategy(cmd_tx);
                 }
                 _ => {}
             },
@@ -403,12 +340,10 @@ impl App {
                     }
                 } else {
                     edit_string(&mut self.strategy.lua_file_path, key);
-                    self.disarm_native_strategy(cmd_tx);
                 }
             }
             Focus::LuaEditor => {
                 let _ = self.strategy.lua_editor.handle_key(key);
-                self.disarm_native_strategy(cmd_tx);
             }
             Focus::StrategyContinue => {
                 if key.code == KeyCode::Enter {
@@ -472,12 +407,15 @@ impl App {
             .constraints([Constraint::Min(10), Constraint::Length(notes_height)])
             .split(columns[0]);
 
-        let setup = Paragraph::new(self.strategy_setup_lines())
+        let setup_lines = self.strategy_setup_lines();
+        let setup_scroll = focused_paragraph_scroll_offset(&setup_lines, left[0]);
+        let setup = Paragraph::new(setup_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Strategy Setup"),
             )
+            .scroll((setup_scroll, 0))
             .wrap(Wrap { trim: false });
         frame.render_widget(setup, left[0]);
 

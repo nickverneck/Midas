@@ -82,6 +82,13 @@ impl App {
             return;
         }
 
+        if !self.is_free_text_focus()
+            && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
+        {
+            self.manual_disarm_native_strategy(cmd_tx);
+            return;
+        }
+
         match self.screen {
             Screen::BrokerSelect => self.handle_broker_select_key(key),
             Screen::Login => self.handle_login_key(key, cmd_tx),

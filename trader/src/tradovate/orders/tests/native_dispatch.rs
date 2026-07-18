@@ -1,5 +1,16 @@
 use super::*;
 
+fn parsed_strategy_params(strategy: &PendingOrderStrategyTransition) -> Value {
+    serde_json::from_str(
+        strategy
+            .payload
+            .get("params")
+            .and_then(Value::as_str)
+            .expect("strategy params should be serialized JSON"),
+    )
+    .expect("strategy params should parse")
+}
+
 #[test]
 fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
     let mut session = test_session();
@@ -43,6 +54,139 @@ fn native_strategy_entry_from_flat_ignores_stale_active_order_strategy() {
 }
 
 #[test]
+fn native_strategy_auto_trail_payload_uses_startorderstrategy_envelope() {
+    let mut session = test_session();
+    session.cfg.custom_tag50 = "MIDAS".to_string();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_ema.take_profit_ticks = 8.0;
+    session.execution_config.native_ema.stop_loss_ticks = 8.0;
+    session.execution_config.native_ema.use_trailing_stop = true;
+    session.execution_config.native_ema.trail_trigger_ticks = 4.0;
+    session.execution_config.native_ema.trail_offset_ticks = 2.0;
+    session.market.tick_size = Some(0.25);
+    let (broker_tx, mut broker_rx) = unbounded_channel();
+
+    dispatch_target_position_order(&mut session, &broker_tx, -1, true, "ema_cross signal")
+        .expect("auto-trail config should queue a startorderstrategy request");
+
+    match broker_rx.try_recv().expect("broker command queued") {
+        BrokerCommand::OrderStrategy { strategy, .. } => {
+            let mut keys = strategy
+                .payload
+                .as_object()
+                .expect("payload should be an object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "accountId",
+                    "accountSpec",
+                    "action",
+                    "customTag50",
+                    "orderStrategyTypeId",
+                    "params",
+                    "symbol",
+                    "uuid",
+                ]
+            );
+            assert_eq!(
+                strategy.payload.get("accountSpec").and_then(Value::as_str),
+                Some("SIM")
+            );
+            assert_eq!(
+                strategy.payload.get("accountId").and_then(Value::as_i64),
+                Some(42)
+            );
+            assert_eq!(
+                strategy.payload.get("symbol").and_then(Value::as_str),
+                Some("ESM6")
+            );
+            assert_eq!(
+                strategy.payload.get("action").and_then(Value::as_str),
+                Some("Sell")
+            );
+            assert_eq!(
+                strategy
+                    .payload
+                    .get("orderStrategyTypeId")
+                    .and_then(Value::as_i64),
+                Some(2)
+            );
+            assert!(
+                strategy
+                    .payload
+                    .get("params")
+                    .and_then(Value::as_str)
+                    .is_some(),
+                "StartOrderStrategy params field is serialized JSON"
+            );
+            assert_eq!(
+                strategy.payload.get("customTag50").and_then(Value::as_str),
+                Some("MIDAS")
+            );
+            assert!(
+                strategy
+                    .payload
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .is_some()
+            );
+
+            let params = parsed_strategy_params(&strategy);
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("orderQty"))
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("orderType"))
+                    .and_then(Value::as_str),
+                Some("Market")
+            );
+            assert_eq!(
+                params
+                    .get("entryVersion")
+                    .and_then(|entry| entry.get("timeInForce"))
+                    .and_then(Value::as_str),
+                Some("Day")
+            );
+            let bracket = params
+                .get("brackets")
+                .and_then(Value::as_array)
+                .and_then(|brackets| brackets.first())
+                .expect("strategy should include a bracket");
+            assert_eq!(bracket.get("qty").and_then(Value::as_i64), Some(1));
+            assert_eq!(
+                bracket.get("trailingStop").and_then(Value::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                bracket.get("profitTarget").and_then(Value::as_f64),
+                Some(-2.0)
+            );
+            assert_eq!(bracket.get("stopLoss").and_then(Value::as_f64), Some(2.0));
+            assert_eq!(
+                bracket.get("autoTrail"),
+                Some(&json!({
+                    "stopLoss": 0.5,
+                    "trigger": 1.0,
+                    "freq": 0.25,
+                }))
+            );
+        }
+        _ => panic!("expected order strategy command"),
+    }
+}
+
+#[test]
 fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
@@ -74,14 +218,7 @@ fn native_strategy_entry_with_trailing_stop_uses_broker_auto_trail_strategy() {
                 strategy.payload.get("action").and_then(Value::as_str),
                 Some("Buy")
             );
-            let params: Value = serde_json::from_str(
-                strategy
-                    .payload
-                    .get("params")
-                    .and_then(Value::as_str)
-                    .expect("strategy params should be serialized JSON"),
-            )
-            .expect("strategy params should parse");
+            let params = parsed_strategy_params(&strategy);
             assert_eq!(
                 params
                     .get("entryVersion")
@@ -141,14 +278,7 @@ fn native_strategy_auto_trail_without_fixed_stop_sends_required_initial_stop_leg
 
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::OrderStrategy { strategy, .. } => {
-            let params: Value = serde_json::from_str(
-                strategy
-                    .payload
-                    .get("params")
-                    .and_then(Value::as_str)
-                    .expect("strategy params should be serialized JSON"),
-            )
-            .expect("strategy params should parse");
+            let params = parsed_strategy_params(&strategy);
             let bracket = params
                 .get("brackets")
                 .and_then(Value::as_array)

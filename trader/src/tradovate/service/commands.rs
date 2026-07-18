@@ -551,14 +551,6 @@ fn set_execution_strategy_config(
     normalize_broker_owned_protection_config(&mut config);
     if session.execution_config != config {
         session.execution_config = config;
-        if session.execution_runtime.armed {
-            session.execution_runtime.armed = false;
-            session.execution_runtime.pending_target_qty = None;
-            session.execution_runtime.last_closed_bar_ts = None;
-            session.execution_runtime.reset_execution();
-            session.execution_runtime.last_summary =
-                "Native strategy config changed; press Continue to re-arm.".to_string();
-        }
         emit_execution_state(event_tx, session);
     }
     Ok(())

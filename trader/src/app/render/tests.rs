@@ -36,6 +36,21 @@ fn strategy_setup_text(app: &App) -> Vec<String> {
     rendered_text(app.strategy_setup_lines())
 }
 
+fn assert_focused_line_visible(lines: &[Line<'_>], area: Rect) {
+    let offset = focused_paragraph_scroll_offset(lines, area) as usize;
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let focused = focused_line_index(lines).expect("expected one focused line");
+
+    assert!(
+        focused >= offset,
+        "focused line should not be above the viewport"
+    );
+    assert!(
+        focused < offset + visible_rows,
+        "focused line should not be below the viewport"
+    );
+}
+
 fn account(id: i64, name: &str) -> AccountInfo {
     AccountInfo {
         id,
@@ -375,6 +390,18 @@ fn login_log_mode_toggle_uses_arrow_keys() {
 }
 
 #[test]
+fn login_scrolls_focused_option_into_short_panel() {
+    let mut app = App::new(AppConfig::default());
+    app.focus = Focus::ReplayMode;
+
+    let lines = app.connection_lines();
+    let offset = focused_paragraph_scroll_offset(&lines, Rect::new(0, 0, 120, 8));
+
+    assert!(offset > 0, "short panel should scroll down to Replay Mode");
+    assert_focused_line_visible(&lines, Rect::new(0, 0, 120, 8));
+}
+
+#[test]
 fn strategy_reversal_mode_cycles_through_all_three_options() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -421,6 +448,121 @@ fn strategy_reversal_mode_cycles_through_all_three_options() {
         app.strategy.native_reversal_mode,
         NativeReversalMode::CloseAllEnter
     );
+}
+
+#[test]
+fn strategy_setup_scrolls_focused_option_into_short_panel() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    app.focus = Focus::EmaTrailOffsetTicks;
+
+    let lines = app.strategy_setup_lines();
+    let offset = focused_paragraph_scroll_offset(&lines, Rect::new(0, 0, 120, 7));
+
+    assert!(
+        offset > 0,
+        "short setup panel should scroll down to the focused strategy option"
+    );
+    assert_focused_line_visible(&lines, Rect::new(0, 0, 120, 7));
+}
+
+#[test]
+fn focused_list_state_selects_only_visible_focused_lists() {
+    assert_eq!(focused_list_state(true, 7, 10).selected(), Some(7));
+    assert_eq!(focused_list_state(false, 7, 10).selected(), None);
+    assert_eq!(focused_list_state(true, 10, 10).selected(), None);
+}
+
+#[test]
+fn strategy_setting_edit_updates_draft_without_service_command() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::NativeReversalMode;
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+
+    assert_eq!(
+        app.strategy.native_reversal_mode,
+        NativeReversalMode::FlattenConfirmEnter
+    );
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "strategy edits should stay draft-only until arm"
+    );
+}
+
+#[test]
+fn strategy_continue_applies_draft_config_and_arms() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.screen = Screen::Strategy;
+    app.focus = Focus::NativeReversalMode;
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "draft edit should not touch the service"
+    );
+
+    app.focus = Focus::StrategyContinue;
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config sync command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(
+                config.native_reversal_mode,
+                NativeReversalMode::FlattenConfirmEnter
+            );
+        }
+        _ => panic!("expected execution-config command"),
+    }
+    match cmd_rx.try_recv().expect("expected arm command") {
+        ServiceCommand::ArmExecutionStrategy => {}
+        _ => panic!("expected arm-execution command"),
+    }
+}
+
+#[test]
+fn manual_disarm_hotkey_sends_explicit_disarm_command() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Dashboard;
+
+    app.handle_key(key(KeyCode::Char('d')), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected disarm command") {
+        ServiceCommand::DisarmExecutionStrategy { reason } => {
+            assert_eq!(reason, "Manual strategy disarm requested.");
+        }
+        _ => panic!("expected disarm command"),
+    }
+}
+
+#[test]
+fn manual_disarm_hotkey_works_from_numeric_strategy_fields() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::EmaFastLength;
+
+    app.handle_key(key(KeyCode::Char('d')), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected disarm command") {
+        ServiceCommand::DisarmExecutionStrategy { reason } => {
+            assert_eq!(reason, "Manual strategy disarm requested.");
+        }
+        _ => panic!("expected disarm command"),
+    }
 }
 
 #[test]

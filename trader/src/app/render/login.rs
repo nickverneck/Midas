@@ -120,8 +120,11 @@ impl App {
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(area);
 
-        let login = Paragraph::new(self.connection_lines())
+        let connection_lines = self.connection_lines();
+        let connection_scroll = focused_paragraph_scroll_offset(&connection_lines, columns[0]);
+        let login = Paragraph::new(connection_lines)
             .block(Block::default().borders(Borders::ALL).title("Login"))
+            .scroll((connection_scroll, 0))
             .wrap(Wrap { trim: false });
         frame.render_widget(login, columns[0]);
 
