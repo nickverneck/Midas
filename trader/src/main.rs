@@ -3,6 +3,7 @@ mod broker;
 mod config;
 mod engine_control;
 mod engine_registry;
+mod engine_runtime;
 mod ipc;
 #[cfg(feature = "ironbeam")]
 mod ironbeam;
@@ -23,16 +24,15 @@ use crossterm::terminal::{
 };
 use engine_control::{close_and_kill_engine, kill_engine_process};
 use engine_registry::{list_running_engines, resolve_engine};
+use engine_runtime::{EngineSession, unique_engine_socket_path};
 use futures_util::StreamExt;
-use ipc::{connect_client, run_engine_server};
+use ipc::run_engine_server;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 
 #[derive(Debug, Parser)]
 #[command(name = "trader")]
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
         config.autoconnect = false;
     }
 
-    run_tui(&cli, config).await
+    run_tui(&cli, config, attach_mode).await
 }
 
 fn list_engines() -> Result<()> {
@@ -258,17 +258,51 @@ fn configure_attach_mode(cli: &mut Cli, id: u32) -> Result<()> {
     Ok(())
 }
 
-async fn run_tui(cli: &Cli, config: AppConfig) -> Result<()> {
-    let (_engine_child, cmd_tx, mut event_rx) = connect_or_spawn_engine(cli).await?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineEntryMode {
+    AttachExisting,
+    CreateNew,
+}
+
+fn should_autoconnect_engine_session(
+    config: &AppConfig,
+    awaiting_broker_selection: bool,
+    mode: EngineEntryMode,
+) -> bool {
+    config.autoconnect && mode == EngineEntryMode::CreateNew && !awaiting_broker_selection
+}
+
+async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> Result<()> {
+    let running_engines = list_running_engines()?;
+    let direct_session = if attach_mode {
+        Some(connect_or_spawn_engine(cli).await?)
+    } else {
+        None
+    };
 
     let mut terminal = init_terminal()?;
     let mut app = App::new(config.clone());
+    app.set_running_engines(running_engines);
+    app.set_engine_creation_enabled(!cli.no_spawn_engine);
     let mut event_stream = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(125));
+    let (dummy_cmd_tx, _dummy_cmd_rx) = mpsc::unbounded_channel();
+    let mut engine_child = None;
+    let mut cmd_tx = None;
+    let mut event_rx = None;
     tick.tick().await;
 
-    if config.autoconnect && !app.awaiting_broker_selection() {
-        let _ = cmd_tx.send(ServiceCommand::Connect(config));
+    if let Some(session) = direct_session {
+        enter_engine_session(
+            &mut app,
+            session,
+            cli.engine_socket.clone(),
+            &mut engine_child,
+            &mut cmd_tx,
+            &mut event_rx,
+            &config,
+            EngineEntryMode::AttachExisting,
+        );
     }
 
     loop {
@@ -278,18 +312,50 @@ async fn run_tui(cli: &Cli, config: AppConfig) -> Result<()> {
             _ = tick.tick() => {}
             maybe_event = event_stream.next() => {
                 match maybe_event {
-                    Some(Ok(CEvent::Key(key))) => app.handle_key(key, &cmd_tx),
+                    Some(Ok(CEvent::Key(key))) => {
+                        let active_cmd_tx = cmd_tx.as_ref().unwrap_or(&dummy_cmd_tx);
+                        app.handle_key(key, active_cmd_tx);
+                        if let Some(action) = app.take_engine_selection_action() {
+                            match connect_selected_engine(cli, action).await {
+                                Ok((session, socket_path, mode)) => {
+                                    enter_engine_session(
+                                        &mut app,
+                                        session,
+                                        socket_path,
+                                        &mut engine_child,
+                                        &mut cmd_tx,
+                                        &mut event_rx,
+                                        &config,
+                                        mode,
+                                    );
+                                }
+                                Err(err) => {
+                                    app.handle_service_event(
+                                        ServiceEvent::Error(format!("Engine selection failed: {err}")),
+                                        active_cmd_tx,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Some(Ok(CEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
-                        app.handle_service_event(ServiceEvent::Error(err.to_string()), &cmd_tx);
+                        let active_cmd_tx = cmd_tx.as_ref().unwrap_or(&dummy_cmd_tx);
+                        app.handle_service_event(ServiceEvent::Error(err.to_string()), active_cmd_tx);
                     }
                     None => break,
                 }
             }
-            maybe_service = event_rx.recv() => {
+            maybe_service = async {
+                match event_rx.as_mut() {
+                    Some(event_rx) => event_rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 if let Some(event) = maybe_service {
-                    app.handle_service_event(event, &cmd_tx);
+                    let active_cmd_tx = cmd_tx.as_ref().unwrap_or(&dummy_cmd_tx);
+                    app.handle_service_event(event, active_cmd_tx);
                 } else {
                     break;
                 }
@@ -305,54 +371,56 @@ async fn run_tui(cli: &Cli, config: AppConfig) -> Result<()> {
     Ok(())
 }
 
-async fn connect_or_spawn_engine(
-    cli: &Cli,
-) -> Result<(
-    Option<tokio::process::Child>,
-    mpsc::UnboundedSender<ServiceCommand>,
-    mpsc::UnboundedReceiver<ServiceEvent>,
-)> {
-    if let Ok((cmd_tx, event_rx)) = connect_client(&cli.engine_socket).await {
-        let _ = cmd_tx.send(ServiceCommand::ReplayState);
-        return Ok((None, cmd_tx, event_rx));
-    }
-    if cli.no_spawn_engine {
-        bail!(
-            "engine socket {} is unavailable and --no-spawn-engine was set",
-            cli.engine_socket.display()
-        );
-    }
-
-    let mut child = spawn_engine_process(cli)?;
-    for _ in 0..50 {
-        if let Ok((cmd_tx, event_rx)) = connect_client(&cli.engine_socket).await {
-            let _ = cmd_tx.send(ServiceCommand::ReplayState);
-            return Ok((Some(child), cmd_tx, event_rx));
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    let _ = child.start_kill();
-    bail!(
-        "timed out waiting for engine socket {}",
-        cli.engine_socket.display()
-    );
+async fn connect_or_spawn_engine(cli: &Cli) -> Result<EngineSession> {
+    engine_runtime::connect_or_spawn_engine(
+        cli.config.as_deref(),
+        &cli.engine_socket,
+        cli.no_spawn_engine,
+    )
+    .await
 }
 
-fn spawn_engine_process(cli: &Cli) -> Result<tokio::process::Child> {
-    let current_exe = std::env::current_exe()?;
-    let mut command = tokio::process::Command::new(current_exe);
-    if let Some(config_path) = cli.config.as_ref() {
-        command.arg("--config").arg(config_path);
+async fn connect_selected_engine(
+    cli: &Cli,
+    action: app::EngineSelectionAction,
+) -> Result<(EngineSession, PathBuf, EngineEntryMode)> {
+    match action {
+        app::EngineSelectionAction::Attach { socket_path } => {
+            let session = engine_runtime::connect_existing_engine(&socket_path).await?;
+            Ok((session, socket_path, EngineEntryMode::AttachExisting))
+        }
+        app::EngineSelectionAction::CreateNew => {
+            if cli.no_spawn_engine {
+                bail!("engine creation is disabled by --no-spawn-engine");
+            }
+            let socket_path = unique_engine_socket_path(&cli.engine_socket);
+            let session =
+                engine_runtime::spawn_and_connect_engine(cli.config.as_deref(), &socket_path)
+                    .await?;
+            Ok((session, socket_path, EngineEntryMode::CreateNew))
+        }
     }
-    command
-        .arg("--engine-socket")
-        .arg(&cli.engine_socket)
-        .arg("engine")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    Ok(command.spawn()?)
+}
+
+fn enter_engine_session(
+    app: &mut App,
+    session: EngineSession,
+    socket_path: PathBuf,
+    engine_child: &mut Option<tokio::process::Child>,
+    cmd_tx: &mut Option<mpsc::UnboundedSender<ServiceCommand>>,
+    event_rx: &mut Option<mpsc::UnboundedReceiver<ServiceEvent>>,
+    config: &AppConfig,
+    mode: EngineEntryMode,
+) {
+    *engine_child = session.child;
+    *cmd_tx = Some(session.cmd_tx);
+    *event_rx = Some(session.event_rx);
+    app.enter_engine_session(socket_path);
+    if should_autoconnect_engine_session(config, app.awaiting_broker_selection(), mode) {
+        if let Some(cmd_tx) = cmd_tx.as_ref() {
+            let _ = cmd_tx.send(ServiceCommand::Connect(config.clone()));
+        }
+    }
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -370,4 +438,51 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     terminal.show_cursor()?;
     terminal.clear()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_attach_does_not_autoconnect_existing_session() {
+        let config = AppConfig {
+            autoconnect: true,
+            ..AppConfig::default()
+        };
+
+        assert!(!should_autoconnect_engine_session(
+            &config,
+            false,
+            EngineEntryMode::AttachExisting
+        ));
+    }
+
+    #[test]
+    fn engine_create_can_autoconnect_when_broker_is_already_selected() {
+        let config = AppConfig {
+            autoconnect: true,
+            ..AppConfig::default()
+        };
+
+        assert!(should_autoconnect_engine_session(
+            &config,
+            false,
+            EngineEntryMode::CreateNew
+        ));
+    }
+
+    #[test]
+    fn engine_create_does_not_autoconnect_while_broker_picker_is_visible() {
+        let config = AppConfig {
+            autoconnect: true,
+            ..AppConfig::default()
+        };
+
+        assert!(!should_autoconnect_engine_session(
+            &config,
+            true,
+            EngineEntryMode::CreateNew
+        ));
+    }
 }

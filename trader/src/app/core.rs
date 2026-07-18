@@ -16,8 +16,13 @@ impl App {
             capabilities: BrokerCapabilities::default(),
             form,
             strategy: StrategyState::new(),
-            screen: Screen::Login,
-            focus: Focus::Env,
+            screen: Screen::EngineSelect,
+            focus: Focus::EngineList,
+            running_engines: Vec::new(),
+            selected_engine: 0,
+            engine_creation_enabled: true,
+            pending_engine_selection_action: None,
+            engine_socket_path: None,
             should_quit: false,
             status: "Idle".to_string(),
             accounts: Vec::new(),
@@ -43,14 +48,7 @@ impl App {
             last_market_update_at: None,
         };
         app.normalize_market_controls_for_broker();
-        if app.available_brokers.len() > 1 {
-            app.screen = Screen::BrokerSelect;
-            app.focus = Focus::BrokerList;
-            app.status = format!(
-                "Select a broker to continue. Current: {}",
-                app.selected_broker.label()
-            );
-        }
+        app.status = "Select an engine to continue or create a new one.".to_string();
         app.push_log(
             format!(
                 "Broker support compiled in: {}.",
@@ -83,6 +81,42 @@ impl App {
             .to_string(),
         );
         app
+    }
+
+    pub fn set_running_engines(&mut self, engines: Vec<RunningEngine>) {
+        self.running_engines = engines;
+        if self.selected_engine > self.running_engines.len() {
+            self.selected_engine = self.running_engines.len();
+        }
+    }
+
+    pub fn set_engine_creation_enabled(&mut self, enabled: bool) {
+        self.engine_creation_enabled = enabled;
+    }
+
+    pub(crate) fn take_engine_selection_action(&mut self) -> Option<EngineSelectionAction> {
+        self.pending_engine_selection_action.take()
+    }
+
+    pub fn enter_engine_session(&mut self, socket_path: PathBuf) {
+        self.engine_socket_path = Some(socket_path.clone());
+        self.move_to_initial_broker_screen();
+        self.push_log(format!("Attached to engine socket {}.", socket_path.display()));
+    }
+
+    fn move_to_initial_broker_screen(&mut self) {
+        if self.available_brokers.len() > 1 {
+            self.screen = Screen::BrokerSelect;
+            self.focus = Focus::BrokerList;
+            self.status = format!(
+                "Select a broker to continue. Current: {}",
+                self.selected_broker.label()
+            );
+        } else {
+            self.screen = Screen::Login;
+            self.focus = Focus::Env;
+            self.status = format!("Login for {}", self.selected_broker.label());
+        }
     }
 
     pub fn awaiting_broker_selection(&self) -> bool {
@@ -161,7 +195,10 @@ impl App {
                 self.push_log(self.status.clone());
             }
             ServiceEvent::Disconnected => {
-                if self.awaiting_broker_selection() {
+                if self.engine_socket_path.is_none() {
+                    self.screen = Screen::EngineSelect;
+                    self.focus = Focus::EngineList;
+                } else if self.available_brokers.len() > 1 {
                     self.screen = Screen::BrokerSelect;
                     self.focus = Focus::BrokerList;
                 } else {

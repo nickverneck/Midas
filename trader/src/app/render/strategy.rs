@@ -370,7 +370,8 @@ impl App {
                     }
                 }
             }
-            Focus::Env
+            Focus::EngineList
+            | Focus::Env
             | Focus::AuthMode
             | Focus::LogMode
             | Focus::TokenOverride

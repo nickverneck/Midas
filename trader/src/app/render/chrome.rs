@@ -8,6 +8,7 @@ impl App {
             .split(area);
 
         let screen_label = match self.screen {
+            Screen::EngineSelect => "Engine",
             Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
             Screen::Selection => "Selection",
@@ -16,6 +17,9 @@ impl App {
             Screen::Stats => "Stats",
         };
         let help = match self.screen {
+            Screen::EngineSelect => {
+                "Up/Down/Left/Right choose engine | Enter attach/create | F5/Ctrl+S save logs | q quit"
+            }
             Screen::BrokerSelect => {
                 "Up/Down/Left/Right choose broker | Enter open login/token options | F6 stats | F5/Ctrl+S save logs | q quit"
             }
@@ -40,6 +44,7 @@ impl App {
             }
         };
         let titles = [
+            "Engine",
             "Broker",
             "Login",
             "Selection",
@@ -51,12 +56,13 @@ impl App {
         .map(Line::from)
         .collect::<Vec<_>>();
         let selected_tab = match self.screen {
-            Screen::BrokerSelect => 0,
-            Screen::Login => 1,
-            Screen::Selection => 2,
-            Screen::Strategy => 3,
-            Screen::Dashboard => 4,
-            Screen::Stats => 5,
+            Screen::EngineSelect => 0,
+            Screen::BrokerSelect => 1,
+            Screen::Login => 2,
+            Screen::Selection => 3,
+            Screen::Strategy => 4,
+            Screen::Dashboard => 5,
+            Screen::Stats => 6,
         };
         let tabs = Tabs::new(titles)
             .select(selected_tab)

@@ -5,6 +5,7 @@ use crate::broker::{
     TradeMarkerSide, compiled_brokers, default_broker,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
+use crate::engine_registry::RunningEngine;
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategies::hma_cross::hma_series;
@@ -24,6 +25,7 @@ use ratatui::widgets::{
     canvas::{Canvas, Line as CanvasLine},
 };
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -39,6 +41,11 @@ pub struct App {
     strategy: StrategyState,
     screen: Screen,
     focus: Focus,
+    running_engines: Vec<RunningEngine>,
+    selected_engine: usize,
+    engine_creation_enabled: bool,
+    pending_engine_selection_action: Option<EngineSelectionAction>,
+    engine_socket_path: Option<PathBuf>,
     pub should_quit: bool,
     status: String,
     accounts: Vec<AccountInfo>,
@@ -82,6 +89,7 @@ struct FormState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    EngineList,
     BrokerList,
     Env,
     AuthMode,
@@ -139,12 +147,19 @@ enum Focus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    EngineSelect,
     BrokerSelect,
     Login,
     Strategy,
     Selection,
     Dashboard,
     Stats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EngineSelectionAction {
+    Attach { socket_path: PathBuf },
+    CreateNew,
 }
 
 #[derive(Debug, Clone, Default)]

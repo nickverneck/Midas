@@ -351,6 +351,7 @@ impl App {
 
     fn build_persisted_log_body(&self, timestamp: &str) -> String {
         let screen = match self.screen {
+            Screen::EngineSelect => "Engine",
             Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
             Screen::Selection => "Selection",

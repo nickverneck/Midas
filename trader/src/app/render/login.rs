@@ -72,7 +72,8 @@ impl App {
             Focus::Cid => edit_string(&mut self.form.cid, key),
             Focus::Secret => edit_string(&mut self.form.secret, key),
             Focus::TokenPath => edit_string(&mut self.form.token_path, key),
-            Focus::BrokerList
+            Focus::EngineList
+            | Focus::BrokerList
             | Focus::StrategyKind
             | Focus::OrderQty
             | Focus::NativeStrategy

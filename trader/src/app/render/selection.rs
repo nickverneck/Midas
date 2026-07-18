@@ -216,7 +216,8 @@ impl App {
                 }
                 _ => {}
             },
-            Focus::AccountList
+            Focus::EngineList
+            | Focus::AccountList
             | Focus::ContractList
             | Focus::Env
             | Focus::AuthMode

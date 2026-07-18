@@ -3,6 +3,7 @@ use super::*;
 mod broker;
 mod chrome;
 mod dashboard;
+mod engine;
 mod login;
 mod selection;
 mod session_stats;
@@ -24,6 +25,7 @@ impl App {
 
         self.render_header(frame, layout[0]);
         match self.screen {
+            Screen::EngineSelect => self.render_engine_select_screen(frame, layout[1]),
             Screen::BrokerSelect => self.render_broker_select_screen(frame, layout[1]),
             Screen::Login => self.render_login_screen(frame, layout[1]),
             Screen::Strategy => self.render_strategy_screen(frame, layout[1]),

@@ -4,11 +4,13 @@ use crate::broker::{
     ContractSuggestion, ManualOrderAction, ServiceEvent,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
+use crate::engine_registry::RunningEngine;
 use crate::strategy::{
     ExecutionStateSnapshot, NativeExecutionPath, NativeReversalMode, NativeStrategyKind,
     StrategyKind,
 };
 use serde_json::json;
+use std::path::PathBuf;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -150,8 +152,21 @@ fn expect_select_account(rx: &mut UnboundedReceiver<ServiceCommand>, account_id:
 }
 
 #[test]
-fn app_starts_on_broker_select_when_multiple_brokers_are_available() {
-    let app = App::new(AppConfig::default());
+fn app_starts_on_engine_select() {
+    let mut app = App::new(AppConfig::default());
+
+    assert_eq!(app.screen, Screen::EngineSelect);
+    assert_eq!(app.focus, Focus::EngineList);
+    assert_eq!(app.selected_engine, 0);
+    assert!(!app.awaiting_broker_selection());
+    assert!(app.take_engine_selection_action().is_none());
+}
+
+#[test]
+fn entering_engine_session_uses_old_broker_start_flow() {
+    let mut app = App::new(AppConfig::default());
+
+    app.enter_engine_session(PathBuf::from("/tmp/trader-engine.sock"));
 
     if compiled_brokers().len() > 1 {
         assert_eq!(app.screen, Screen::BrokerSelect);
@@ -169,6 +184,8 @@ fn startup_disconnected_event_keeps_broker_picker_visible() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
 
+    app.enter_engine_session(PathBuf::from("/tmp/trader-engine.sock"));
+
     app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
 
     if compiled_brokers().len() > 1 {
@@ -182,9 +199,92 @@ fn startup_disconnected_event_keeps_broker_picker_visible() {
     }
 }
 
+fn running_engine(id: u32, live: bool) -> RunningEngine {
+    RunningEngine {
+        id,
+        cwd: PathBuf::from("/tmp"),
+        socket_path: PathBuf::from(format!("/tmp/trader-engine-{id}.sock")),
+        socket_is_live: live,
+    }
+}
+
+#[test]
+fn engine_picker_navigation_wraps_through_create_option() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true), running_engine(11, true)]);
+
+    assert_eq!(app.selected_engine, 0);
+
+    app.handle_engine_select_key(key(KeyCode::Down));
+    assert_eq!(app.selected_engine, 1);
+
+    app.handle_engine_select_key(key(KeyCode::Down));
+    assert_eq!(app.selected_engine, 2);
+
+    app.handle_engine_select_key(key(KeyCode::Down));
+    assert_eq!(app.selected_engine, 0);
+
+    app.handle_engine_select_key(key(KeyCode::Up));
+    assert_eq!(app.selected_engine, 2);
+}
+
+#[test]
+fn engine_picker_enter_on_create_emits_create_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.selected_engine = app.running_engines.len();
+
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_engine_selection_action(),
+        Some(EngineSelectionAction::CreateNew)
+    );
+}
+
+#[test]
+fn engine_picker_create_disabled_by_no_spawn_does_not_emit_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_engine_creation_enabled(false);
+    app.selected_engine = app.running_engines.len();
+
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("--no-spawn-engine"));
+}
+
+#[test]
+fn engine_picker_enter_on_live_engine_emits_attach_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_engine_selection_action(),
+        Some(EngineSelectionAction::Attach {
+            socket_path: PathBuf::from("/tmp/trader-engine-10.sock")
+        })
+    );
+}
+
+#[test]
+fn engine_picker_enter_on_stale_engine_stays_on_picker() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, false)]);
+
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert_eq!(app.screen, Screen::EngineSelect);
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("stale"));
+}
+
 #[test]
 fn broker_picker_uses_arrow_keys_and_enter_to_open_login() {
     let mut app = App::new(AppConfig::default());
+    app.enter_engine_session(PathBuf::from("/tmp/trader-engine.sock"));
     if app.available_brokers.len() < 2 {
         return;
     }
@@ -268,6 +368,7 @@ fn connected_event_normalizes_unsupported_market_controls() {
 fn f6_opens_session_stats_screen() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.enter_engine_session(PathBuf::from("/tmp/trader-engine.sock"));
 
     app.handle_key(key(KeyCode::F(6)), &cmd_tx);
 

@@ -17,6 +17,11 @@ impl App {
             return;
         }
 
+        if self.screen == Screen::EngineSelect {
+            self.handle_engine_select_key(key);
+            return;
+        }
+
         if self.screen == Screen::Login
             && !self.is_text_focus()
             && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
@@ -90,6 +95,7 @@ impl App {
         }
 
         match self.screen {
+            Screen::EngineSelect => self.handle_engine_select_key(key),
             Screen::BrokerSelect => self.handle_broker_select_key(key),
             Screen::Login => self.handle_login_key(key, cmd_tx),
             Screen::Strategy => self.handle_strategy_key(key, cmd_tx),
