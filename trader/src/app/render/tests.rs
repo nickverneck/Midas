@@ -1,13 +1,13 @@
 use super::*;
 use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, ManualOrderAction, ServiceEvent,
+    ContractSuggestion, LatencySnapshot, ManualOrderAction, MarketSnapshot, ServiceEvent,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::engine_registry::RunningEngine;
 use crate::strategy::{
-    ExecutionStateSnapshot, NativeExecutionPath, NativeReversalMode, NativeStrategyKind,
-    StrategyKind,
+    ExecutionRuntimeSnapshot, ExecutionStateSnapshot, NativeExecutionPath, NativeReversalMode,
+    NativeStrategyKind, StrategyKind,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -208,6 +208,21 @@ fn running_engine(id: u32, live: bool) -> RunningEngine {
     }
 }
 
+fn connected_event(broker: BrokerKind) -> ServiceEvent {
+    ServiceEvent::Connected {
+        broker,
+        env: TradingEnvironment::Sim,
+        user_name: Some("tester".to_string()),
+        auth_mode: AuthMode::TokenFile,
+        session_kind: SessionKind::Live,
+        capabilities: BrokerCapabilities::default(),
+    }
+}
+
+fn engine_key(id: u32) -> EngineKey {
+    EngineKey::from_socket_path(PathBuf::from(format!("/tmp/trader-engine-{id}.sock")).as_path())
+}
+
 #[test]
 fn engine_picker_navigation_wraps_through_create_option() {
     let mut app = App::new(AppConfig::default());
@@ -264,6 +279,9 @@ fn engine_picker_enter_on_live_engine_emits_attach_action() {
     assert_eq!(
         app.take_engine_selection_action(),
         Some(EngineSelectionAction::Attach {
+            engine_key: EngineKey::from_socket_path(
+                PathBuf::from("/tmp/trader-engine-10.sock").as_path()
+            ),
             socket_path: PathBuf::from("/tmp/trader-engine-10.sock")
         })
     );
@@ -279,6 +297,180 @@ fn engine_picker_enter_on_stale_engine_stays_on_picker() {
     assert_eq!(app.screen, Screen::EngineSelect);
     assert!(app.take_engine_selection_action().is_none());
     assert!(app.status.contains("stale"));
+}
+
+#[test]
+fn engine_summary_updates_from_replay_state_events() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        false,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        false,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::MarketSnapshot(MarketSnapshot {
+            contract_name: Some("ESZ6".to_string()),
+            status: "streaming".to_string(),
+            ..MarketSnapshot::default()
+        }),
+        false,
+        &cmd_tx,
+    );
+    let execution = ExecutionStateSnapshot {
+        runtime: ExecutionRuntimeSnapshot {
+            armed: true,
+            last_summary: "armed and tracking".to_string(),
+            ..ExecutionRuntimeSnapshot::default()
+        },
+        selected_account_id: Some(7),
+        selected_contract_name: Some("ESZ6".to_string()),
+        market_position_qty: 3,
+        ..ExecutionStateSnapshot::default()
+    };
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::ExecutionState(execution),
+        false,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::Latency(LatencySnapshot {
+            rest_rtt_ms: Some(42),
+            ..LatencySnapshot::default()
+        }),
+        false,
+        &cmd_tx,
+    );
+
+    let summary = app
+        .engine_summaries
+        .iter()
+        .find(|summary| summary.key == key)
+        .expect("expected engine summary");
+    assert_eq!(summary.connection_state, EngineConnectionState::Connected);
+    assert!(summary.broker_mode_label().contains("Tradovate"));
+    assert_eq!(summary.account_label(), "SIM");
+    assert_eq!(summary.instrument_label(), "ESZ6");
+    assert_eq!(summary.position_label(), "3");
+    assert_eq!(summary.latency_label(), "42ms");
+    assert!(summary.strategy_label().contains("HMA Angle armed"));
+    assert_eq!(summary.status_label(), "armed and tracking");
+}
+
+#[test]
+fn engine_summary_tracks_disconnect_and_error_events() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_service_event(key.clone(), ServiceEvent::Disconnected, false, &cmd_tx);
+
+    let summary = app
+        .engine_summaries
+        .iter()
+        .find(|summary| summary.key == key)
+        .expect("expected engine summary");
+    assert_eq!(
+        summary.connection_state,
+        EngineConnectionState::Disconnected
+    );
+    assert_eq!(summary.status_label(), "Disconnected");
+
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::Error("ipc failed".to_string()),
+        false,
+        &cmd_tx,
+    );
+    let summary = app
+        .engine_summaries
+        .iter()
+        .find(|summary| summary.key == key)
+        .expect("expected engine summary");
+    assert_eq!(summary.connection_state, EngineConnectionState::Error);
+    assert_eq!(summary.status_label(), "ipc failed");
+}
+
+#[test]
+fn inactive_engine_events_do_not_mutate_detail_state() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let active_key = engine_key(10);
+    let inactive_key = engine_key(11);
+    app.set_running_engines(vec![running_engine(10, true), running_engine(11, true)]);
+    app.enter_engine_session_for_key(active_key, PathBuf::from("/tmp/trader-engine-10.sock"));
+    app.screen = Screen::Dashboard;
+    app.status = "detail stable".to_string();
+
+    app.handle_engine_service_event(
+        inactive_key.clone(),
+        connected_event(BrokerKind::Ironbeam),
+        false,
+        &cmd_tx,
+    );
+
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert_eq!(app.status, "detail stable");
+    let inactive = app
+        .engine_summaries
+        .iter()
+        .find(|summary| summary.key == inactive_key)
+        .expect("expected inactive summary");
+    assert_eq!(inactive.connection_state, EngineConnectionState::Connected);
+    assert!(inactive.broker_mode_label().contains("Ironbeam"));
+}
+
+#[test]
+fn active_engine_events_preserve_detail_behavior() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.enter_engine_session_for_key(key.clone(), PathBuf::from("/tmp/trader-engine-10.sock"));
+
+    app.handle_engine_service_event(key, connected_event(BrokerKind::Tradovate), true, &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Selection);
+    assert_eq!(app.focus, Focus::AccountList);
+    assert!(app.status.contains("Connected to Tradovate"));
+}
+
+#[test]
+fn active_engine_receiver_close_returns_to_engine_overview() {
+    let mut app = App::new(AppConfig::default());
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.enter_engine_session_for_key(key.clone(), PathBuf::from("/tmp/trader-engine-10.sock"));
+    app.screen = Screen::Dashboard;
+    app.focus = Focus::AccountList;
+
+    app.handle_engine_receiver_closed(&key, true);
+
+    assert_eq!(app.screen, Screen::EngineSelect);
+    assert_eq!(app.focus, Focus::EngineList);
+    assert!(app.engine_socket_path.is_none());
+    assert!(app.active_engine_key.is_none());
+    assert_eq!(app.status, "Engine connection closed.");
+    let summary = app
+        .engine_summaries
+        .iter()
+        .find(|summary| summary.key == key)
+        .expect("expected engine summary");
+    assert_eq!(summary.connection_state, EngineConnectionState::Closed);
 }
 
 #[test]

@@ -13,7 +13,7 @@ mod strategy;
 mod tradovate;
 
 use anyhow::{Result, bail};
-use app::App;
+use app::{App, EngineKey};
 use broker::{ServiceCommand, ServiceEvent};
 use clap::{Args, Parser, Subcommand};
 use config::AppConfig;
@@ -29,10 +29,12 @@ use futures_util::StreamExt;
 use ipc::run_engine_server;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Parser)]
 #[command(name = "trader")]
@@ -282,27 +284,67 @@ async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> Result<()> 
 
     let mut terminal = init_terminal()?;
     let mut app = App::new(config.clone());
+    let startup_engines = running_engines
+        .iter()
+        .map(|engine| {
+            (
+                EngineKey::from_socket_path(&engine.socket_path),
+                engine.socket_path.clone(),
+                engine.socket_is_live,
+            )
+        })
+        .collect::<Vec<_>>();
     app.set_running_engines(running_engines);
     app.set_engine_creation_enabled(!cli.no_spawn_engine);
     let mut event_stream = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(125));
     let (dummy_cmd_tx, _dummy_cmd_rx) = mpsc::unbounded_channel();
-    let mut engine_child = None;
-    let mut cmd_tx = None;
-    let mut event_rx = None;
+    let (engine_event_tx, mut engine_event_rx) = mpsc::unbounded_channel();
+    let mut engine_sessions = HashMap::<EngineKey, ObservedEngineSession>::new();
+    let mut active_engine_key = None::<EngineKey>;
     tick.tick().await;
 
     if let Some(session) = direct_session {
+        let engine_key = EngineKey::from_socket_path(&cli.engine_socket);
+        insert_observed_engine_session(
+            &mut engine_sessions,
+            engine_key.clone(),
+            session,
+            &engine_event_tx,
+        );
         enter_engine_session(
             &mut app,
-            session,
+            &engine_sessions,
+            &mut active_engine_key,
+            engine_key,
             cli.engine_socket.clone(),
-            &mut engine_child,
-            &mut cmd_tx,
-            &mut event_rx,
             &config,
             EngineEntryMode::AttachExisting,
         );
+    }
+
+    for (engine_key, socket_path, socket_is_live) in startup_engines {
+        if !socket_is_live || engine_sessions.contains_key(&engine_key) {
+            continue;
+        }
+        match engine_runtime::connect_existing_engine(&socket_path).await {
+            Ok(session) => {
+                insert_observed_engine_session(
+                    &mut engine_sessions,
+                    engine_key,
+                    session,
+                    &engine_event_tx,
+                );
+            }
+            Err(err) => {
+                app.handle_engine_service_event(
+                    engine_key,
+                    ServiceEvent::Error(format!("Engine observer failed: {err}")),
+                    false,
+                    &dummy_cmd_tx,
+                );
+            }
+        }
     }
 
     loop {
@@ -313,23 +355,40 @@ async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> Result<()> 
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(CEvent::Key(key))) => {
-                        let active_cmd_tx = cmd_tx.as_ref().unwrap_or(&dummy_cmd_tx);
-                        app.handle_key(key, active_cmd_tx);
+                        {
+                            let active_cmd_tx = active_engine_key
+                                .as_ref()
+                                .and_then(|engine_key| engine_sessions.get(engine_key))
+                                .map(|session| &session.cmd_tx)
+                                .unwrap_or(&dummy_cmd_tx);
+                            app.handle_key(key, active_cmd_tx);
+                        }
                         if let Some(action) = app.take_engine_selection_action() {
-                            match connect_selected_engine(cli, action).await {
-                                Ok((session, socket_path, mode)) => {
+                            match connect_selected_engine(
+                                cli,
+                                action,
+                                &engine_event_tx,
+                                &mut engine_sessions,
+                            )
+                            .await
+                            {
+                                Ok((engine_key, socket_path, mode)) => {
                                     enter_engine_session(
                                         &mut app,
-                                        session,
+                                        &engine_sessions,
+                                        &mut active_engine_key,
+                                        engine_key,
                                         socket_path,
-                                        &mut engine_child,
-                                        &mut cmd_tx,
-                                        &mut event_rx,
                                         &config,
                                         mode,
                                     );
                                 }
                                 Err(err) => {
+                                    let active_cmd_tx = active_engine_key
+                                        .as_ref()
+                                        .and_then(|engine_key| engine_sessions.get(engine_key))
+                                        .map(|session| &session.cmd_tx)
+                                        .unwrap_or(&dummy_cmd_tx);
                                     app.handle_service_event(
                                         ServiceEvent::Error(format!("Engine selection failed: {err}")),
                                         active_cmd_tx,
@@ -341,23 +400,47 @@ async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> Result<()> 
                     Some(Ok(CEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
-                        let active_cmd_tx = cmd_tx.as_ref().unwrap_or(&dummy_cmd_tx);
+                        let active_cmd_tx = active_engine_key
+                            .as_ref()
+                            .and_then(|engine_key| engine_sessions.get(engine_key))
+                            .map(|session| &session.cmd_tx)
+                            .unwrap_or(&dummy_cmd_tx);
                         app.handle_service_event(ServiceEvent::Error(err.to_string()), active_cmd_tx);
                     }
                     None => break,
                 }
             }
-            maybe_service = async {
-                match event_rx.as_mut() {
-                    Some(event_rx) => event_rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(event) = maybe_service {
-                    let active_cmd_tx = cmd_tx.as_ref().unwrap_or(&dummy_cmd_tx);
-                    app.handle_service_event(event, active_cmd_tx);
-                } else {
+            maybe_service = engine_event_rx.recv() => {
+                let Some(message) = maybe_service else {
                     break;
+                };
+                match message {
+                    EngineRelayMessage::Event(envelope) => {
+                        let is_active_detail =
+                            active_engine_key.as_ref() == Some(&envelope.engine_key);
+                        let active_cmd_tx = active_engine_key
+                            .as_ref()
+                            .and_then(|engine_key| engine_sessions.get(engine_key))
+                            .map(|session| &session.cmd_tx)
+                            .unwrap_or(&dummy_cmd_tx);
+                        app.handle_engine_service_event(
+                            envelope.engine_key,
+                            envelope.event,
+                            is_active_detail,
+                            active_cmd_tx,
+                        );
+                    }
+                    EngineRelayMessage::Closed { engine_key } => {
+                        let is_active_detail = active_engine_key.as_ref() == Some(&engine_key);
+                        app.handle_engine_receiver_closed(
+                            &engine_key,
+                            is_active_detail,
+                        );
+                        engine_sessions.remove(&engine_key);
+                        if is_active_detail {
+                            active_engine_key = None;
+                        }
+                    }
                 }
             }
         }
@@ -383,11 +466,24 @@ async fn connect_or_spawn_engine(cli: &Cli) -> Result<EngineSession> {
 async fn connect_selected_engine(
     cli: &Cli,
     action: app::EngineSelectionAction,
-) -> Result<(EngineSession, PathBuf, EngineEntryMode)> {
+    engine_event_tx: &mpsc::UnboundedSender<EngineRelayMessage>,
+    engine_sessions: &mut HashMap<EngineKey, ObservedEngineSession>,
+) -> Result<(EngineKey, PathBuf, EngineEntryMode)> {
     match action {
-        app::EngineSelectionAction::Attach { socket_path } => {
-            let session = engine_runtime::connect_existing_engine(&socket_path).await?;
-            Ok((session, socket_path, EngineEntryMode::AttachExisting))
+        app::EngineSelectionAction::Attach {
+            engine_key,
+            socket_path,
+        } => {
+            if !engine_sessions.contains_key(&engine_key) {
+                let session = engine_runtime::connect_existing_engine(&socket_path).await?;
+                insert_observed_engine_session(
+                    engine_sessions,
+                    engine_key.clone(),
+                    session,
+                    engine_event_tx,
+                );
+            }
+            Ok((engine_key, socket_path, EngineEntryMode::AttachExisting))
         }
         app::EngineSelectionAction::CreateNew => {
             if cli.no_spawn_engine {
@@ -397,30 +493,98 @@ async fn connect_selected_engine(
             let session =
                 engine_runtime::spawn_and_connect_engine(cli.config.as_deref(), &socket_path)
                     .await?;
-            Ok((session, socket_path, EngineEntryMode::CreateNew))
+            let engine_key = EngineKey::from_socket_path(&socket_path);
+            insert_observed_engine_session(
+                engine_sessions,
+                engine_key.clone(),
+                session,
+                engine_event_tx,
+            );
+            Ok((engine_key, socket_path, EngineEntryMode::CreateNew))
         }
     }
 }
 
 fn enter_engine_session(
     app: &mut App,
-    session: EngineSession,
+    engine_sessions: &HashMap<EngineKey, ObservedEngineSession>,
+    active_engine_key: &mut Option<EngineKey>,
+    engine_key: EngineKey,
     socket_path: PathBuf,
-    engine_child: &mut Option<tokio::process::Child>,
-    cmd_tx: &mut Option<mpsc::UnboundedSender<ServiceCommand>>,
-    event_rx: &mut Option<mpsc::UnboundedReceiver<ServiceEvent>>,
     config: &AppConfig,
     mode: EngineEntryMode,
 ) {
-    *engine_child = session.child;
-    *cmd_tx = Some(session.cmd_tx);
-    *event_rx = Some(session.event_rx);
-    app.enter_engine_session(socket_path);
+    *active_engine_key = Some(engine_key.clone());
+    app.enter_engine_session_for_key(engine_key.clone(), socket_path);
+    if let Some(session) = engine_sessions.get(&engine_key) {
+        let _ = session.cmd_tx.send(ServiceCommand::ReplayState);
+    }
     if should_autoconnect_engine_session(config, app.awaiting_broker_selection(), mode) {
-        if let Some(cmd_tx) = cmd_tx.as_ref() {
-            let _ = cmd_tx.send(ServiceCommand::Connect(config.clone()));
+        if let Some(session) = engine_sessions.get(&engine_key) {
+            let _ = session.cmd_tx.send(ServiceCommand::Connect(config.clone()));
         }
     }
+}
+
+#[derive(Debug)]
+struct ObservedEngineSession {
+    cmd_tx: mpsc::UnboundedSender<ServiceCommand>,
+    _child: Option<tokio::process::Child>,
+    _relay_task: JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct EngineEventEnvelope {
+    engine_key: EngineKey,
+    event: ServiceEvent,
+}
+
+#[derive(Debug)]
+enum EngineRelayMessage {
+    Event(EngineEventEnvelope),
+    Closed { engine_key: EngineKey },
+}
+
+fn insert_observed_engine_session(
+    engine_sessions: &mut HashMap<EngineKey, ObservedEngineSession>,
+    engine_key: EngineKey,
+    session: EngineSession,
+    engine_event_tx: &mpsc::UnboundedSender<EngineRelayMessage>,
+) {
+    let relay_task = spawn_engine_event_relay(
+        engine_key.clone(),
+        session.event_rx,
+        engine_event_tx.clone(),
+    );
+    engine_sessions.insert(
+        engine_key,
+        ObservedEngineSession {
+            cmd_tx: session.cmd_tx,
+            _child: session.child,
+            _relay_task: relay_task,
+        },
+    );
+}
+
+fn spawn_engine_event_relay(
+    engine_key: EngineKey,
+    mut event_rx: mpsc::UnboundedReceiver<ServiceEvent>,
+    engine_event_tx: mpsc::UnboundedSender<EngineRelayMessage>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if engine_event_tx
+                .send(EngineRelayMessage::Event(EngineEventEnvelope {
+                    engine_key: engine_key.clone(),
+                    event,
+                }))
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = engine_event_tx.send(EngineRelayMessage::Closed { engine_key });
+    })
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -484,5 +648,44 @@ mod tests {
             true,
             EngineEntryMode::CreateNew
         ));
+    }
+
+    #[tokio::test]
+    async fn engine_event_relay_tags_events_and_reports_closed() {
+        let key =
+            EngineKey::from_socket_path(PathBuf::from("/tmp/trader-engine-99.sock").as_path());
+        let (service_tx, service_rx) = mpsc::unbounded_channel();
+        let (relay_tx, mut relay_rx) = mpsc::unbounded_channel();
+        let _relay_task = spawn_engine_event_relay(key.clone(), service_rx, relay_tx);
+
+        service_tx
+            .send(ServiceEvent::Status("ready".to_string()))
+            .expect("send service event");
+        drop(service_tx);
+
+        match tokio::time::timeout(Duration::from_secs(1), relay_rx.recv())
+            .await
+            .expect("relay event timed out")
+            .expect("expected relay event")
+        {
+            EngineRelayMessage::Event(envelope) => {
+                assert_eq!(envelope.engine_key, key);
+                assert!(
+                    matches!(envelope.event, ServiceEvent::Status(message) if message == "ready")
+                );
+            }
+            EngineRelayMessage::Closed { .. } => panic!("expected tagged service event first"),
+        }
+
+        match tokio::time::timeout(Duration::from_secs(1), relay_rx.recv())
+            .await
+            .expect("relay close timed out")
+            .expect("expected relay close")
+        {
+            EngineRelayMessage::Closed { engine_key } => {
+                assert_eq!(engine_key, key);
+            }
+            EngineRelayMessage::Event(_) => panic!("expected relay close after sender drop"),
+        }
     }
 }

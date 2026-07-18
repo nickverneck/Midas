@@ -19,10 +19,12 @@ impl App {
             screen: Screen::EngineSelect,
             focus: Focus::EngineList,
             running_engines: Vec::new(),
+            engine_summaries: Vec::new(),
             selected_engine: 0,
             engine_creation_enabled: true,
             pending_engine_selection_action: None,
             engine_socket_path: None,
+            active_engine_key: None,
             should_quit: false,
             status: "Idle".to_string(),
             accounts: Vec::new(),
@@ -84,9 +86,10 @@ impl App {
     }
 
     pub fn set_running_engines(&mut self, engines: Vec<RunningEngine>) {
+        self.engine_summaries = engines.iter().map(EngineSummary::from_running_engine).collect();
         self.running_engines = engines;
-        if self.selected_engine > self.running_engines.len() {
-            self.selected_engine = self.running_engines.len();
+        if self.selected_engine > self.engine_summaries.len() {
+            self.selected_engine = self.engine_summaries.len();
         }
     }
 
@@ -99,9 +102,44 @@ impl App {
     }
 
     pub fn enter_engine_session(&mut self, socket_path: PathBuf) {
+        let engine_key = EngineKey::from_socket_path(&socket_path);
+        self.enter_engine_session_for_key(engine_key, socket_path);
+    }
+
+    pub fn enter_engine_session_for_key(&mut self, engine_key: EngineKey, socket_path: PathBuf) {
+        self.observe_live_engine_socket(socket_path.clone());
+        self.active_engine_key = Some(engine_key);
         self.engine_socket_path = Some(socket_path.clone());
         self.move_to_initial_broker_screen();
         self.push_log(format!("Attached to engine socket {}.", socket_path.display()));
+    }
+
+    pub fn leave_active_engine_session(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.active_engine_key = None;
+        self.engine_socket_path = None;
+        self.screen = Screen::EngineSelect;
+        self.focus = Focus::EngineList;
+        self.capabilities = BrokerCapabilities::default();
+        self.session_kind = SessionKind::Live;
+        self.accounts.clear();
+        self.account_snapshots.clear();
+        self.contract_results.clear();
+        self.market = MarketSnapshot::default();
+        self.strategy_runtime = StrategyRuntimeState::default();
+        self.latency = LatencySnapshot::default();
+        self.replay_speed = ReplaySpeed::default();
+        self.last_market_update_at = None;
+        self.status = message.clone();
+        self.push_log(message);
+    }
+
+    pub fn observe_live_engine_socket(&mut self, socket_path: PathBuf) {
+        let key = EngineKey::from_socket_path(&socket_path);
+        if self.engine_summaries.iter().any(|summary| summary.key == key) {
+            return;
+        }
+        self.engine_summaries.push(EngineSummary::live_socket(socket_path));
     }
 
     fn move_to_initial_broker_screen(&mut self) {
@@ -270,6 +308,43 @@ impl App {
             ServiceEvent::ReplaySpeedUpdated(speed) => {
                 self.replay_speed = speed;
             }
+        }
+    }
+
+    pub fn handle_engine_service_event(
+        &mut self,
+        engine_key: EngineKey,
+        event: ServiceEvent,
+        is_active_detail: bool,
+        cmd_tx: &UnboundedSender<ServiceCommand>,
+    ) {
+        if let Some(summary) = self
+            .engine_summaries
+            .iter_mut()
+            .find(|summary| summary.key == engine_key)
+        {
+            summary.apply_event(&event);
+        }
+
+        if is_active_detail {
+            self.handle_service_event(event, cmd_tx);
+        }
+    }
+
+    pub fn handle_engine_receiver_closed(
+        &mut self,
+        engine_key: &EngineKey,
+        is_active_detail: bool,
+    ) {
+        if let Some(summary) = self
+            .engine_summaries
+            .iter_mut()
+            .find(|summary| &summary.key == engine_key)
+        {
+            summary.mark_receiver_closed("Engine connection closed.");
+        }
+        if is_active_detail {
+            self.leave_active_engine_session("Engine connection closed.");
         }
     }
 }

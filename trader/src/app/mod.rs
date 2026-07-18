@@ -20,8 +20,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, ListState, Paragraph, Tabs,
-    Wrap,
+    Axis, Block, Borders, Cell, Chart, Dataset, GraphType, List, ListItem, ListState, Paragraph,
+    Row, Table, Tabs, Wrap,
     canvas::{Canvas, Line as CanvasLine},
 };
 use std::collections::VecDeque;
@@ -42,10 +42,12 @@ pub struct App {
     screen: Screen,
     focus: Focus,
     running_engines: Vec<RunningEngine>,
+    engine_summaries: Vec<EngineSummary>,
     selected_engine: usize,
     engine_creation_enabled: bool,
     pending_engine_selection_action: Option<EngineSelectionAction>,
     engine_socket_path: Option<PathBuf>,
+    active_engine_key: Option<EngineKey>,
     pub should_quit: bool,
     status: String,
     accounts: Vec<AccountInfo>,
@@ -158,7 +160,10 @@ enum Screen {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EngineSelectionAction {
-    Attach { socket_path: PathBuf },
+    Attach {
+        engine_key: EngineKey,
+        socket_path: PathBuf,
+    },
     CreateNew,
 }
 
@@ -186,6 +191,8 @@ struct NumericInputState {
 include!("core.rs");
 include!("input.rs");
 include!("session_stats.rs");
+mod engine_observation;
+pub(crate) use engine_observation::{EngineConnectionState, EngineKey, EngineSummary};
 mod render;
 mod views;
 include!("state.rs");

@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub(in crate::app) fn handle_engine_select_key(&mut self, key: KeyEvent) {
-        let item_count = self.running_engines.len() + 1;
+        let item_count = self.engine_summaries.len() + 1;
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.should_quit = true;
@@ -16,7 +16,7 @@ impl App {
                 self.update_engine_select_status();
             }
             KeyCode::Enter => {
-                if self.selected_engine == self.running_engines.len() {
+                if self.selected_engine == self.engine_summaries.len() {
                     if !self.engine_creation_enabled {
                         self.status =
                             "Engine creation is disabled by --no-spawn-engine.".to_string();
@@ -29,22 +29,33 @@ impl App {
                     return;
                 }
 
-                let Some(engine) = self.running_engines.get(self.selected_engine) else {
+                let Some(engine) = self.engine_summaries.get(self.selected_engine) else {
                     return;
                 };
-                if !engine.socket_is_live {
+                if !engine.connection_state.attachable() {
                     self.status = format!(
-                        "Engine {} is stale; choose a live engine or create a new one.",
-                        engine.id
+                        "Engine {} is {}; choose a live engine or create a new one.",
+                        engine
+                            .id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| engine.socket_path.display().to_string()),
+                        engine.connection_state.label()
                     );
                     self.push_log(format!("ERROR: {}", self.status));
                     return;
                 }
 
                 self.pending_engine_selection_action = Some(EngineSelectionAction::Attach {
+                    engine_key: engine.key.clone(),
                     socket_path: engine.socket_path.clone(),
                 });
-                self.status = format!("Attaching to engine {}...", engine.id);
+                self.status = format!(
+                    "Opening engine {}...",
+                    engine
+                        .id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| engine.socket_path.display().to_string())
+                );
                 self.push_log(self.status.clone());
             }
             _ => {}
@@ -52,7 +63,7 @@ impl App {
     }
 
     fn update_engine_select_status(&mut self) {
-        if self.selected_engine == self.running_engines.len() {
+        if self.selected_engine == self.engine_summaries.len() {
             self.status = if self.engine_creation_enabled {
                 "Create a new engine for this TUI session.".to_string()
             } else {
@@ -60,124 +71,171 @@ impl App {
             };
             return;
         }
-        if let Some(engine) = self.running_engines.get(self.selected_engine) {
-            let status = if engine.socket_is_live {
-                "live"
-            } else {
-                "stale"
-            };
-            self.status = format!("Selected engine {} ({status}).", engine.id);
+        if let Some(engine) = self.engine_summaries.get(self.selected_engine) {
+            self.status = format!(
+                "Selected engine {} ({}).",
+                engine
+                    .id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| engine.socket_path.display().to_string()),
+                engine.connection_state.label()
+            );
         }
     }
 
     pub(in crate::app) fn render_engine_select_screen(&self, frame: &mut Frame<'_>, area: Rect) {
-        let centered_row = Layout::default()
+        let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(15),
-                Constraint::Percentage(70),
-                Constraint::Percentage(15),
+                Constraint::Length(2),
+                Constraint::Min(10),
+                Constraint::Length(3),
             ])
             .split(area);
-        let centered_area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(12),
-                Constraint::Percentage(76),
-                Constraint::Percentage(12),
-            ])
-            .split(centered_row[1])[1];
 
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "Select Engine",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("Choose a live engine to attach to, or start a new engine."),
-            Line::from(""),
-        ];
+        let title = Paragraph::new(Line::from(Span::styled(
+            "Engine Overview",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(title, layout[0]);
 
-        if self.running_engines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No running engines found.",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            lines.extend(
-                self.running_engines
-                    .iter()
-                    .enumerate()
-                    .map(|(index, engine)| {
-                        let selected = index == self.selected_engine;
-                        let status = if engine.socket_is_live {
-                            "live"
-                        } else {
-                            "stale"
-                        };
-                        let marker = if selected { ">" } else { " " };
-                        let label = format!(
-                            "{marker} Engine {} [{status}]  {}",
-                            engine.id,
-                            engine.socket_path.display()
-                        );
-                        let style = if selected {
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(if engine.socket_is_live {
-                                    Color::Cyan
-                                } else {
-                                    Color::DarkGray
-                                })
-                                .add_modifier(Modifier::BOLD)
-                        } else if engine.socket_is_live {
-                            Style::default().fg(Color::Gray)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        };
-                        Line::from(Span::styled(label, style))
-                    }),
-            );
-        }
+        let mut rows = self
+            .engine_summaries
+            .iter()
+            .enumerate()
+            .map(|(index, engine)| {
+                let selected = index == self.selected_engine;
+                let marker = if selected { ">" } else { " " };
+                let id = engine
+                    .id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "new".to_string());
+                let socket = engine
+                    .socket_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_else(|| engine.socket_path.to_str().unwrap_or("-"));
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if engine.connection_state.attachable() {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                Row::new(vec![
+                    Cell::from(marker.to_string()),
+                    Cell::from(id),
+                    Cell::from(engine.connection_state.label()),
+                    Cell::from(socket.to_string()),
+                    Cell::from(engine.broker_mode_label()),
+                    Cell::from(engine.account_label()),
+                    Cell::from(engine.instrument_label()),
+                    Cell::from(engine.position_label()),
+                    Cell::from(engine.strategy_label()),
+                    Cell::from(engine.latency_label()),
+                    Cell::from(engine.status_label()),
+                ])
+                .style(style)
+            })
+            .collect::<Vec<_>>();
 
-        let create_selected = self.selected_engine == self.running_engines.len();
-        let create_style = if !self.engine_creation_enabled {
-            Style::default().fg(Color::DarkGray)
-        } else if create_selected {
+        let create_selected = self.selected_engine == self.engine_summaries.len();
+        let create_style = if create_selected && self.engine_creation_enabled {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
-        } else {
+        } else if self.engine_creation_enabled {
             Style::default().fg(Color::Gray)
+        } else {
+            Style::default().fg(Color::DarkGray)
         };
         let create_marker = if create_selected { ">" } else { " " };
-        let create_label = if self.engine_creation_enabled {
-            "Create new engine"
+        let create_state = if self.engine_creation_enabled {
+            "create"
         } else {
-            "Create new engine (disabled by --no-spawn-engine)"
+            "disabled"
         };
-        lines.extend([
-            Line::from(""),
-            Line::from(Span::styled(
-                format!("{create_marker} {create_label}"),
-                create_style,
-            )),
-            Line::from(""),
-            Line::from("Stale engines are shown for context but cannot be attached."),
-            Line::from("Use arrow keys to move. Press Enter to continue."),
-        ]);
+        rows.push(
+            Row::new(vec![
+                Cell::from(create_marker.to_string()),
+                Cell::from("+"),
+                Cell::from(create_state),
+                Cell::from("new engine"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from(if self.engine_creation_enabled {
+                    "Start a new engine"
+                } else {
+                    "Disabled by --no-spawn-engine"
+                }),
+            ])
+            .style(create_style),
+        );
 
-        let card = Paragraph::new(lines)
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(6),
+                Constraint::Length(10),
+                Constraint::Length(24),
+                Constraint::Length(22),
+                Constraint::Length(14),
+                Constraint::Length(14),
+                Constraint::Length(5),
+                Constraint::Length(16),
+                Constraint::Length(8),
+                Constraint::Min(12),
+            ],
+        )
+        .header(
+            Row::new(vec![
+                "",
+                "ID",
+                "State",
+                "Socket",
+                "Broker/Mode",
+                "Account",
+                "Instrument",
+                "Pos",
+                "Strategy",
+                "RTT",
+                "Status",
+            ])
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Active Engines"),
+        );
+        frame.render_widget(table, layout[1]);
+
+        let help = Paragraph::new(vec![
+            Line::from("Enter opens a live engine in the existing detail flow. Inactive engines keep updating here."),
+            Line::from("Stale or closed engines are shown for context but cannot be opened."),
+        ])
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Engine Selection"),
+                    .title("Engine Controls"),
             )
-            .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
-        frame.render_widget(card, centered_area);
+        frame.render_widget(help, layout[2]);
     }
 }
