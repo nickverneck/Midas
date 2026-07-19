@@ -145,6 +145,7 @@ struct SessionBalanceEvent {
 
 #[derive(Debug, Clone)]
 struct AccountSessionStats {
+    engine_identity: String,
     account_id: i64,
     account_name: String,
     broker: BrokerKind,
@@ -177,6 +178,7 @@ struct AccountSessionStats {
 
 impl AccountSessionStats {
     fn new(
+        engine_identity: String,
         snapshot: &AccountSnapshot,
         broker: BrokerKind,
         env: TradingEnvironment,
@@ -186,6 +188,7 @@ impl AccountSessionStats {
         captured_at_utc: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         Self {
+            engine_identity,
             account_id: snapshot.account_id,
             account_name: snapshot.account_name.clone(),
             broker,
@@ -219,6 +222,7 @@ impl AccountSessionStats {
 
     fn apply_snapshot(
         &mut self,
+        engine_identity: String,
         snapshot: &AccountSnapshot,
         broker: BrokerKind,
         env: TradingEnvironment,
@@ -228,6 +232,7 @@ impl AccountSessionStats {
         fee_context: SessionFeeContext,
         captured_at_utc: chrono::DateTime<chrono::Utc>,
     ) {
+        self.engine_identity = engine_identity;
         self.account_name = snapshot.account_name.clone();
         self.broker = broker;
         self.env = env;
@@ -588,7 +593,8 @@ fn format_session_stats_timestamp(
 impl App {
     fn session_stats_key_for_account_id(&self, account_id: i64) -> String {
         format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
+            self.active_engine_stats_identity_key(),
             self.selected_broker.label(),
             self.form.env.label(),
             self.session_kind.label(),
@@ -603,6 +609,7 @@ impl App {
 
         let captured_at_utc = chrono::Utc::now();
         let fee_context = self.session_fee_context();
+        let engine_identity = self.active_engine_stats_identity_key();
         for snapshot in snapshots {
             let Some((source, value)) = tracked_balance_value(snapshot) else {
                 continue;
@@ -611,6 +618,7 @@ impl App {
             match self.session_stats.accounts.entry(key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(AccountSessionStats::new(
+                        engine_identity.clone(),
                         snapshot,
                         self.selected_broker,
                         self.form.env,
@@ -622,6 +630,7 @@ impl App {
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().apply_snapshot(
+                        engine_identity.clone(),
                         snapshot,
                         self.selected_broker,
                         self.form.env,
@@ -691,6 +700,7 @@ impl App {
 
         for stats in self.session_stats.accounts.values() {
             body.push_str("[session_stats.account]\n");
+            body.push_str(&format!("engine_identity: {}\n", stats.engine_identity));
             body.push_str(&format!("account_id: {}\n", stats.account_id));
             body.push_str(&format!("account_name: {}\n", stats.account_name));
             body.push_str(&format!("broker: {}\n", stats.broker.label()));

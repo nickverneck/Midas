@@ -38,6 +38,16 @@ fn assert_money_eq(actual: f64, expected: f64) {
     );
 }
 
+fn section_between<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
+    let start_index = body.find(start).expect("expected section start");
+    let after_start = &body[start_index..];
+    let end_index = after_start[start.len()..]
+        .find(end)
+        .map(|index| index + start.len())
+        .unwrap_or(after_start.len());
+    &after_start[..end_index]
+}
+
 fn strategy_setup_text(app: &App) -> Vec<String> {
     rendered_text(app.strategy_setup_lines())
 }
@@ -1725,6 +1735,334 @@ fn persisted_log_body_includes_session_stats_summary_and_events() {
     assert!(body.contains("account_name: SIM"));
     assert!(body.contains("session_pnl: +15.00"));
     assert!(body.contains("delta=+15.00"));
+}
+
+#[test]
+fn persisted_log_body_includes_live_engine_review_metadata_without_secret_fields() {
+    let mut config = AppConfig {
+        password: "super-secret-password".to_string(),
+        api_key: "super-secret-api-key".to_string(),
+        token_override: "super-secret-token".to_string(),
+        token_path: PathBuf::from(".auth/secret-token.json"),
+        time_in_force: "GTC".to_string(),
+        ..AppConfig::default()
+    };
+    config.order_qty = 3;
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.set_running_engines(vec![running_engine(10, true), running_engine(11, true)]);
+    let active_key = engine_key(10);
+    app.enter_engine_session_for_key(
+        active_key.clone(),
+        PathBuf::from("/tmp/trader-engine-10.sock"),
+    );
+    app.handle_engine_service_event(
+        active_key,
+        ServiceEvent::Connected {
+            broker: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            user_name: Some("tester".to_string()),
+            auth_mode: AuthMode::TokenFile,
+            session_kind: SessionKind::Replay,
+            capabilities: BrokerCapabilities {
+                replay: true,
+                manual_orders: true,
+                automated_orders: true,
+                native_protection: true,
+            },
+        },
+        true,
+        &cmd_tx,
+    );
+    app.handle_service_event(ServiceEvent::ReplaySpeedUpdated(ReplaySpeed::X10), &cmd_tx);
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+    app.contract_results = vec![contract(99, "ESZ6")];
+    app.selected_contract = 0;
+    app.handle_service_event(
+        ServiceEvent::Latency(LatencySnapshot {
+            rest_rtt_ms: Some(42),
+            last_order_ack_ms: Some(17),
+            last_order_seen_ms: Some(13),
+            last_exec_report_ms: Some(19),
+            last_fill_ms: Some(23),
+            last_signal_submit_ms: Some(3),
+            last_signal_seen_ms: Some(5),
+            last_signal_ack_ms: Some(7),
+            last_signal_fill_ms: Some(11),
+        }),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            runtime: ExecutionRuntimeSnapshot {
+                armed: true,
+                pending_target_qty: Some(2),
+                last_summary: "strategy decision | buy".to_string(),
+                ..ExecutionRuntimeSnapshot::default()
+            },
+            selected_account_id: Some(7),
+            selected_contract_name: Some("ESZ6".to_string()),
+            ..ExecutionStateSnapshot::default()
+        }),
+        &cmd_tx,
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+
+    assert!(body.contains("engine_socket: /tmp/trader-engine-10.sock"));
+    assert!(body.contains("engine_id: 10"));
+    assert!(body.contains("engine_connection_state: connected"));
+    assert!(body.contains("active_engine_key_display: /tmp/trader-engine-10.sock"));
+    assert!(body.contains("other_live_engine_count: 1"));
+    assert!(body.contains("session_kind: Replay"));
+    assert!(body.contains("replay_speed: 10x"));
+    assert!(body.contains("capability_replay: true"));
+    assert!(body.contains("capability_manual_orders: true"));
+    assert!(body.contains("capability_automated_orders: true"));
+    assert!(body.contains("capability_native_protection: true"));
+    assert!(body.contains("strategy_order_qty: 1"));
+    assert!(body.contains("order_time_in_force: GTC"));
+    assert!(body.contains("strategy_armed: true"));
+    assert!(body.contains("pending_target: 2"));
+    assert!(body.contains("last_strategy_summary: strategy decision | buy"));
+    assert!(body.contains("latency_last_signal_fill_ms: 11"));
+    assert!(body.contains("selected_account_id: 7"));
+    assert!(body.contains("selected_account_name: SIM"));
+    assert!(body.contains("selected_contract_id: 99"));
+    assert!(body.contains("selected_contract_name: ESZ6"));
+    assert!(!body.contains("super-secret"));
+    assert!(!body.contains(".auth/secret-token.json"));
+}
+
+#[test]
+fn persisted_log_body_redacts_raw_response_bodies_and_structured_payloads() {
+    let config = AppConfig {
+        log_mode: LogMode::Debug,
+        ..AppConfig::default()
+    };
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.logs.clear();
+    app.persisted_logs.clear();
+
+    app.handle_service_event(
+        ServiceEvent::Error(
+            "auth request failed (401 Unauthorized): {\"accessToken\":\"super-secret-token\",\"password\":\"hidden\"}"
+                .to_string(),
+        ),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::DebugLog(
+            "request payload {\"apiKey\":\"super-secret-api-key\",\"qty\":1}".to_string(),
+        ),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::DebugLog("bulk response [{\"token\":\"array-secret\"}]".to_string()),
+        &cmd_tx,
+    );
+    app.push_log("operator note [manual check]".to_string());
+
+    assert!(app.status.contains("super-secret-token"));
+    assert!(
+        app.persisted_logs
+            .iter()
+            .any(|entry| entry.message.contains("super-secret-api-key"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+
+    assert!(body.contains(
+        "status: Error: auth request failed (401 Unauthorized): [redacted broker response]"
+    ));
+    assert!(body.contains(
+        "final_status: Error: auth request failed (401 Unauthorized): [redacted broker response]"
+    ));
+    assert!(
+        body.contains("ERROR: auth request failed (401 Unauthorized): [redacted broker response]")
+    );
+    assert!(body.contains("DEBUG: request payload [redacted structured data]"));
+    assert!(body.contains("DEBUG: bulk response [redacted structured data]"));
+    assert!(body.contains("operator note [manual check]"));
+    assert!(!body.contains("super-secret"));
+    assert!(!body.contains("array-secret"));
+    assert!(!body.contains("accessToken"));
+    assert!(!body.contains("apiKey"));
+    assert!(!body.contains("password"));
+}
+
+#[test]
+fn persisted_log_review_summary_counts_logs_and_pnl_before_full_stats() {
+    let config = AppConfig {
+        log_mode: LogMode::Debug,
+        ..AppConfig::default()
+    };
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.persisted_logs.clear();
+    app.logs.clear();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 1_000.0)]),
+        &cmd_tx,
+    );
+    let mut latest = balance_snapshot(7, "SIM", 1_015.0);
+    latest.realized_pnl = Some(12.25);
+    latest.unrealized_pnl = Some(-1.50);
+    app.handle_service_event(ServiceEvent::AccountSnapshotsLoaded(vec![latest]), &cmd_tx);
+    app.handle_service_event(ServiceEvent::Error("bad fill".to_string()), &cmd_tx);
+    app.handle_service_event(ServiceEvent::DebugLog("wire detail".to_string()), &cmd_tx);
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    let review_index = body.find("[review_summary]").expect("review summary");
+    let stats_index = body.find("[session_stats]").expect("session stats");
+
+    assert!(review_index < stats_index);
+    assert!(body.contains("selected_account_session_pnl: +15.00"));
+    assert!(body.contains("selected_account_trade_pnl_ex_fees: +15.00"));
+    assert!(body.contains("selected_account_realized_pnl: +12.25"));
+    assert!(body.contains("selected_account_unrealized_pnl: -1.50"));
+    assert!(body.contains("persisted_error_count: 1"));
+    assert!(body.contains("persisted_debug_count: 1"));
+}
+
+#[test]
+fn persisted_log_body_handles_disabled_stats_recent_events_clearly() {
+    let config = AppConfig {
+        session_stats_enabled: false,
+        ..AppConfig::default()
+    };
+    let app = App::new(config);
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+
+    assert!(body.contains("[recent_session_events]"));
+    assert!(body.contains("Tracking is disabled, so no balance-delta events were recorded."));
+    assert!(body.contains("[session_stats]"));
+    assert!(body.contains("enabled: false"));
+    assert!(body.contains("Session stats tracking was disabled for this run."));
+    assert!(!body.contains("[session_stats.account]"));
+}
+
+#[test]
+fn persisted_recent_session_events_respect_hidden_fee_visibility() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.market.tick_size = Some(0.25);
+    app.market.value_per_point = Some(5.0);
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.00, 1.0),
+        balance_snapshot_with_position(7, "SIM", 1_005.69, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_004.78, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_004.78, -1.0),
+        balance_snapshot_with_position(7, "SIM", 996.37, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+    app.handle_session_stats_key(key(KeyCode::Char('f')), &cmd_tx);
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    let recent = section_between(&body, "[recent_session_events]", "[session_stats]");
+
+    assert!(recent.contains("fees_visible: hidden"));
+    assert!(recent.contains("balance short") && recent.contains("trade -7.50"));
+    assert!(recent.contains("balance long") && recent.contains("trade +6.25"));
+    assert!(!recent.contains("fee trade"));
+    assert!(!recent.contains(" fees "));
+    assert!(!recent.contains("mixed trade"));
+}
+
+#[test]
+fn session_stats_identity_keeps_same_account_separate_by_active_engine() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.set_running_engines(vec![running_engine(10, true), running_engine(11, true)]);
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    let first_key = engine_key(10);
+    app.enter_engine_session_for_key(
+        first_key.clone(),
+        PathBuf::from("/tmp/trader-engine-10.sock"),
+    );
+    for balance in [1_000.0, 1_010.0] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", balance)]),
+            &cmd_tx,
+        );
+    }
+    assert_eq!(
+        app.selected_session_stats()
+            .expect("first engine stats")
+            .session_pnl(),
+        10.0
+    );
+
+    let second_key = engine_key(11);
+    app.enter_engine_session_for_key(
+        second_key.clone(),
+        PathBuf::from("/tmp/trader-engine-11.sock"),
+    );
+    for balance in [2_000.0, 1_980.0] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", balance)]),
+            &cmd_tx,
+        );
+    }
+
+    assert_eq!(app.session_stats.accounts.len(), 2);
+    assert_eq!(
+        app.selected_session_stats()
+            .expect("second engine stats")
+            .session_pnl(),
+        -20.0
+    );
+
+    app.enter_engine_session_for_key(first_key, PathBuf::from("/tmp/trader-engine-10.sock"));
+    assert_eq!(
+        app.selected_session_stats()
+            .expect("first engine stats after switch")
+            .session_pnl(),
+        10.0
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("engine_identity: engine:/tmp/trader-engine-10.sock"));
+    assert!(body.contains("engine_identity: engine:/tmp/trader-engine-11.sock"));
+}
+
+#[test]
+fn log_panel_lines_include_last_saved_path_stably() {
+    let mut app = App::new(AppConfig::default());
+    app.last_saved_log_path = Some(PathBuf::from(".run/trader-logs/session-test.txt"));
+    for index in 0..10 {
+        app.push_log(format!("status update {index}"));
+    }
+
+    let text = rendered_text(app.log_panel_lines());
+
+    assert_eq!(
+        text.first().map(String::as_str),
+        Some("Last saved: .run/trader-logs/session-test.txt")
+    );
+    assert!(text.iter().any(|line| line.contains("status update 9")));
 }
 
 #[test]

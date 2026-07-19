@@ -114,18 +114,31 @@ impl App {
         frame.render_widget(header, rows[1]);
     }
 
-    pub(in crate::app) fn render_logs(&self, frame: &mut Frame<'_>, area: Rect) {
-        let lines = self
+    pub(in crate::app) fn log_panel_lines(&self) -> Vec<Line<'static>> {
+        let log_take = if self.last_saved_log_path.is_some() {
+            5
+        } else {
+            6
+        };
+        let mut lines = self
             .logs
             .iter()
             .rev()
-            .take(6)
+            .take(log_take)
             .map(LogEntry::render_line)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .map(Line::from)
             .collect::<Vec<_>>();
+        if let Some(path) = &self.last_saved_log_path {
+            lines.insert(0, Line::from(format!("Last saved: {}", path.display())));
+        }
+        lines
+    }
+
+    pub(in crate::app) fn render_logs(&self, frame: &mut Frame<'_>, area: Rect) {
+        let lines = self.log_panel_lines();
         let logs =
             Paragraph::new(lines)
                 .block(Block::default().borders(Borders::ALL).title(

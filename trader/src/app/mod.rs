@@ -62,6 +62,7 @@ pub struct App {
     market: MarketSnapshot,
     logs: VecDeque<LogEntry>,
     persisted_logs: VecDeque<LogEntry>,
+    last_saved_log_path: Option<PathBuf>,
     session_stats: SessionStatsState,
     session_stats_show_fees: bool,
     dashboard_visuals_enabled: bool,

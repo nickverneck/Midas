@@ -8,6 +8,10 @@ impl EngineKey {
     pub(crate) fn from_socket_path(socket_path: &Path) -> Self {
         Self(socket_path.to_path_buf())
     }
+
+    pub(crate) fn display_label(&self) -> String {
+        self.0.display().to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

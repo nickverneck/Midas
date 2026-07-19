@@ -39,6 +39,7 @@ impl App {
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
             persisted_logs: VecDeque::new(),
+            last_saved_log_path: None,
             session_stats: SessionStatsState::new(session_stats_enabled),
             session_stats_show_fees: true,
             dashboard_visuals_enabled: false,
