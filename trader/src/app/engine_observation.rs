@@ -309,6 +309,21 @@ impl EngineSummary {
             .unwrap_or_else(|| "-".to_string())
     }
 
+    pub(crate) fn socket_short_label(&self) -> String {
+        self.socket_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.socket_path.display().to_string())
+    }
+
+    pub(crate) fn identity_label(&self) -> String {
+        match self.id {
+            Some(id) => format!("#{id} {}", self.socket_short_label()),
+            None => self.socket_short_label(),
+        }
+    }
+
     fn sync_selected_account_name(&mut self) {
         self.selected_account_name = self.selected_account_id.and_then(|selected_id| {
             self.accounts

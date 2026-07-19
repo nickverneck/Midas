@@ -357,17 +357,26 @@ impl App {
         } else {
             "Enter opens a selected live engine. r refreshes the process list."
         };
-        let help = Paragraph::new(vec![
+        let mut help_lines = vec![
             Line::from(open_help),
+            Line::from(
+                "Live/connected rows attach. Stale/closed rows remain for observation context.",
+            ),
             self.engine_lifecycle_help_line(),
             Line::from("Destructive actions always open a confirmation prompt before running."),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Engine Controls"),
-        )
-        .wrap(Wrap { trim: true });
+        ];
+        if self.engine_create_affordance_visible() {
+            help_lines.push(Line::from(
+                "The create row starts a separate engine process.",
+            ));
+        }
+        let help = Paragraph::new(help_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Engine Controls"),
+            )
+            .wrap(Wrap { trim: true });
         frame.render_widget(help, layout[2]);
 
         self.render_engine_lifecycle_confirmation(frame, area);

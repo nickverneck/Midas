@@ -558,7 +558,15 @@ impl App {
             self.active_engine_key_display_label()
         ));
         body.push_str(&format!(
+            "active_engine_key: {}\n",
+            self.active_engine_key_display_label()
+        ));
+        body.push_str(&format!(
             "other_live_engine_count: {}\n",
+            self.other_live_engine_count()
+        ));
+        body.push_str(&format!(
+            "other_live_engines: {}\n",
             self.other_live_engine_count()
         ));
         body.push_str(&format!("broker: {}\n", self.selected_broker.label()));
@@ -689,6 +697,20 @@ impl App {
             .unwrap_or_else(|| "none".to_string())
     }
 
+    fn active_engine_socket_short_label(&self) -> String {
+        self.active_engine_summary()
+            .map(EngineSummary::socket_short_label)
+            .or_else(|| {
+                self.engine_socket_path.as_ref().map(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| path.display().to_string())
+                })
+            })
+            .unwrap_or_else(|| "none".to_string())
+    }
+
     fn active_engine_id_label(&self) -> String {
         self.active_engine_summary()
             .and_then(|summary| summary.id)
@@ -706,6 +728,50 @@ impl App {
                     "none".to_string()
                 }
             })
+    }
+
+    pub(in crate::app) fn active_engine_header_label(&self) -> String {
+        if self.engine_socket_path.is_none() && self.active_engine_key.is_none() {
+            return "none".to_string();
+        }
+
+        let id = self.active_engine_id_label();
+        let socket = self.active_engine_socket_short_label();
+        let identity = if id == "none" {
+            socket
+        } else {
+            format!("#{id} {socket}")
+        };
+        let mut label = format!(
+            "{} {} {}",
+            identity,
+            self.active_engine_connection_state_label(),
+            self.session_kind.label()
+        );
+        let other_count = self.other_live_engine_count();
+        if other_count > 0 {
+            label.push_str(&format!(" +{other_count} other"));
+        }
+        label
+    }
+
+    fn engine_receiver_closed_message(&self, engine_key: &EngineKey) -> String {
+        let Some(summary) = self
+            .engine_summaries
+            .iter()
+            .find(|summary| &summary.key == engine_key)
+        else {
+            return format!(
+                "Engine {} connection closed.",
+                engine_key.display_label()
+            );
+        };
+
+        format!(
+            "Engine {} connection closed; last state was {}.",
+            summary.identity_label(),
+            summary.connection_state.label()
+        )
     }
 
     fn active_engine_key_display_label(&self) -> String {

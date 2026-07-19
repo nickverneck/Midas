@@ -211,6 +211,16 @@ impl App {
                 Span::raw(format!("Logs: {}", self.form.log_mode.label())),
                 Span::raw("  "),
                 Span::raw(format!("Mode: {}", self.session_kind.label())),
+                if self.screen == Screen::EngineSelect {
+                    Span::raw("")
+                } else {
+                    Span::raw("  ")
+                },
+                if self.screen == Screen::EngineSelect {
+                    Span::raw("")
+                } else {
+                    Span::raw(format!("Engine: {}", self.active_engine_header_label()))
+                },
             ]),
             Line::from(vec![
                 Span::raw("Focus: "),

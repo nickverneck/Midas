@@ -351,15 +351,16 @@ impl App {
         engine_key: &EngineKey,
         is_active_detail: bool,
     ) {
+        let message = self.engine_receiver_closed_message(engine_key);
         if let Some(summary) = self
             .engine_summaries
             .iter_mut()
             .find(|summary| &summary.key == engine_key)
         {
-            summary.mark_receiver_closed("Engine connection closed.");
+            summary.mark_receiver_closed(message.clone());
         }
         if is_active_detail {
-            self.leave_active_engine_session("Engine connection closed.");
+            self.leave_active_engine_session(message);
         }
     }
 }

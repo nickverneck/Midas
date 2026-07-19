@@ -617,6 +617,39 @@ fn active_engine_events_preserve_detail_behavior() {
 }
 
 #[test]
+fn active_engine_header_label_includes_identity_state_and_other_count() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let active_key = engine_key(10);
+    let other_key = engine_key(11);
+    app.set_running_engines(vec![running_engine(10, true), running_engine(11, true)]);
+    app.enter_engine_session_for_key(
+        active_key.clone(),
+        PathBuf::from("/tmp/trader-engine-10.sock"),
+    );
+
+    app.handle_engine_service_event(
+        active_key,
+        connected_event(BrokerKind::Tradovate),
+        true,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        other_key,
+        connected_event(BrokerKind::Ironbeam),
+        false,
+        &cmd_tx,
+    );
+
+    let label = app.active_engine_header_label();
+    assert!(label.contains("#10"));
+    assert!(label.contains("trader-engine-10.sock"));
+    assert!(label.contains("connected"));
+    assert!(label.contains("Live"));
+    assert!(label.contains("+1 other"));
+}
+
+#[test]
 fn active_engine_receiver_close_returns_to_engine_overview() {
     let mut app = App::new(AppConfig::default());
     let key = engine_key(10);
@@ -631,13 +664,17 @@ fn active_engine_receiver_close_returns_to_engine_overview() {
     assert_eq!(app.focus, Focus::EngineList);
     assert!(app.engine_socket_path.is_none());
     assert!(app.active_engine_key.is_none());
-    assert_eq!(app.status, "Engine connection closed.");
+    assert_eq!(
+        app.status,
+        "Engine #10 trader-engine-10.sock connection closed; last state was live."
+    );
     let summary = app
         .engine_summaries
         .iter()
         .find(|summary| summary.key == key)
         .expect("expected engine summary");
     assert_eq!(summary.connection_state, EngineConnectionState::Closed);
+    assert_eq!(summary.status_label(), app.status);
 }
 
 #[test]
@@ -1966,7 +2003,9 @@ fn persisted_log_body_includes_live_engine_review_metadata_without_secret_fields
     assert!(body.contains("engine_id: 10"));
     assert!(body.contains("engine_connection_state: connected"));
     assert!(body.contains("active_engine_key_display: /tmp/trader-engine-10.sock"));
+    assert!(body.contains("active_engine_key: /tmp/trader-engine-10.sock"));
     assert!(body.contains("other_live_engine_count: 1"));
+    assert!(body.contains("other_live_engines: 1"));
     assert!(body.contains("session_kind: Replay"));
     assert!(body.contains("replay_speed: 10x"));
     assert!(body.contains("capability_replay: true"));
