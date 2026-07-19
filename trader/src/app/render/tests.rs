@@ -272,15 +272,20 @@ fn engine_picker_enter_on_create_emits_create_action() {
 }
 
 #[test]
-fn engine_picker_create_disabled_by_no_spawn_does_not_emit_action() {
+fn engine_picker_create_disabled_by_no_spawn_removes_create_option() {
     let mut app = App::new(AppConfig::default());
     app.set_engine_creation_enabled(false);
-    app.selected_engine = app.running_engines.len();
 
     app.handle_engine_select_key(key(KeyCode::Enter));
 
+    assert!(!app.engine_create_affordance_visible());
+    assert_eq!(app.engine_select_item_count(), app.engine_summaries.len());
     assert!(app.take_engine_selection_action().is_none());
-    assert!(app.status.contains("--no-spawn-engine"));
+    assert!(app.status.contains("No live engines"));
+
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.handle_engine_select_key(key(KeyCode::Down));
+    assert_eq!(app.selected_engine, 0);
 }
 
 #[test]
@@ -731,6 +736,23 @@ fn f6_opens_session_stats_screen() {
 }
 
 #[test]
+fn disabled_session_stats_hides_navigation_affordances() {
+    let mut config = AppConfig::default();
+    config.session_stats_enabled = false;
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.enter_engine_session(PathBuf::from("/tmp/trader-engine.sock"));
+    app.screen = Screen::Dashboard;
+
+    assert!(!app.header_tab_titles().contains(&"Stats"));
+    assert!(!app.header_help_text().contains("F6 stats"));
+
+    app.handle_key(key(KeyCode::F(6)), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Dashboard);
+}
+
+#[test]
 fn selection_tab_order_reaches_bar_type_toggle() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -750,6 +772,28 @@ fn selection_tab_order_reaches_bar_type_toggle() {
 
     app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
     assert_eq!(app.focus, Focus::ContractList);
+}
+
+#[test]
+fn fixed_market_broker_hides_bar_and_candle_controls() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.selected_broker = BrokerKind::Ironbeam;
+    app.normalize_market_controls_for_broker();
+    app.focus = Focus::AccountList;
+
+    let focus_order = app.selection_focus_order();
+    assert!(!focus_order.contains(&Focus::BarTypeToggle));
+    assert!(!focus_order.contains(&Focus::BarValue));
+    assert!(!focus_order.contains(&Focus::CandleModeToggle));
+
+    app.handle_selection_key(key(KeyCode::Tab), &cmd_tx);
+    assert_eq!(app.focus, Focus::InstrumentQuery);
+
+    let search_text = rendered_text(app.selection_preview_lines());
+    assert!(search_text.iter().any(|line| line == "Bar Type: 1 Min"));
+    assert!(!search_text.iter().any(|line| line.starts_with("Candles:")));
+    assert!(!app.header_help_text().contains("Left/Right bar type"));
 }
 
 #[test]
@@ -847,13 +891,38 @@ fn login_log_mode_toggle_uses_arrow_keys() {
 #[test]
 fn login_scrolls_focused_option_into_short_panel() {
     let mut app = App::new(AppConfig::default());
-    app.focus = Focus::ReplayMode;
+    app.focus = Focus::Connect;
 
     let lines = app.connection_lines();
     let offset = focused_paragraph_scroll_offset(&lines, Rect::new(0, 0, 120, 8));
 
-    assert!(offset > 0, "short panel should scroll down to Replay Mode");
+    assert!(offset > 0, "short panel should scroll down to Connect");
     assert_focused_line_visible(&lines, Rect::new(0, 0, 120, 8));
+}
+
+#[test]
+fn unavailable_replay_is_hidden_from_login() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.selected_broker = BrokerKind::Ironbeam;
+    app.focus = Focus::Env;
+
+    assert!(!app.login_focus_order().contains(&Focus::ReplayMode));
+    assert!(
+        rendered_text(app.connection_lines())
+            .iter()
+            .all(|line| !line.contains("Replay Mode"))
+    );
+    assert!(
+        rendered_text(app.login_notes_lines())
+            .iter()
+            .all(|line| !line.contains("Replay Mode"))
+    );
+    assert!(!app.header_help_text().contains("connect/replay"));
+
+    app.handle_key(key(KeyCode::Char('r')), &cmd_tx);
+
+    assert!(cmd_rx.try_recv().is_err());
 }
 
 #[test]
@@ -947,6 +1016,55 @@ fn strategy_setting_edit_updates_draft_without_service_command() {
     assert!(
         cmd_rx.try_recv().is_err(),
         "strategy edits should stay draft-only until arm"
+    );
+}
+
+#[test]
+fn strategy_type_hides_lua_and_machine_learning_options() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.screen = Screen::Strategy;
+    app.focus = Focus::StrategyKind;
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(app.strategy.kind, StrategyKind::Native);
+
+    app.handle_strategy_key(key(KeyCode::Left), &cmd_tx);
+    assert_eq!(app.strategy.kind, StrategyKind::Native);
+
+    let notes = rendered_text(app.strategy_notes_lines());
+    assert!(notes.iter().all(|line| !line.contains("Lua")));
+    assert!(notes.iter().all(|line| !line.contains("Machine Learning")));
+}
+
+#[test]
+fn monitor_only_strategy_setup_removes_arm_wording() {
+    let app = App::new(AppConfig::default());
+
+    let setup = strategy_setup_text(&app);
+    let notes = rendered_text(app.strategy_notes_lines());
+    let preview = rendered_text(app.strategy_preview_lines());
+
+    assert!(
+        setup
+            .iter()
+            .any(|line| line.contains("Continue To Dashboard (Monitor Only)"))
+    );
+    assert!(setup.iter().all(|line| !line.contains("Arm Strategy")));
+    assert!(
+        notes
+            .iter()
+            .any(|line| line.contains("dashboard in monitor mode"))
+    );
+    assert!(
+        preview
+            .iter()
+            .any(|line| line.contains("monitor-only observation"))
+    );
+    assert!(
+        preview
+            .iter()
+            .all(|line| !line.contains("automated market orders"))
     );
 }
 
@@ -1086,7 +1204,7 @@ fn strategy_protection_controls_show_for_broker_owned_reversal_modes() {
         NativeReversalMode::CloseAllEnter,
     ] {
         let mut app = App::new(AppConfig::default());
-        app.selected_broker = BrokerKind::Tradovate;
+        enable_tradovate_controls(&mut app);
         app.strategy.kind = StrategyKind::Native;
         app.strategy.native_strategy = NativeStrategyKind::HmaAngle;
         app.strategy.native_execution_path = NativeExecutionPath::Guarded;
@@ -1195,9 +1313,41 @@ fn strategy_protection_controls_hide_for_non_guarded_paths() {
 }
 
 #[test]
+fn strategy_protection_controls_hide_when_capability_is_unavailable() {
+    let mut app = App::new(AppConfig::default());
+    app.selected_broker = BrokerKind::Tradovate;
+    app.capabilities.native_protection = false;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+    app.strategy.native_ema.stop_loss_ticks = 6.0;
+    app.strategy.native_ema.use_trailing_stop = true;
+
+    let focus_order = app.strategy_focus_order();
+    assert!(!focus_order.contains(&Focus::EmaTakeProfitTicks));
+    assert!(!focus_order.contains(&Focus::EmaStopLossTicks));
+    assert!(!focus_order.contains(&Focus::EmaTrailingStop));
+
+    let setup_text = strategy_setup_text(&app);
+    assert!(
+        setup_text
+            .iter()
+            .all(|line| !line.contains("Take Profit Ticks"))
+    );
+    assert!(
+        setup_text
+            .iter()
+            .all(|line| !line.contains("Stop Loss Ticks"))
+    );
+}
+
+#[test]
 fn strategy_protection_controls_remain_visible_for_ironbeam_app_managed_protection() {
     let mut app = App::new(AppConfig::default());
     app.selected_broker = BrokerKind::Ironbeam;
+    app.capabilities.native_protection = true;
     app.strategy.kind = StrategyKind::Native;
     app.strategy.native_strategy = NativeStrategyKind::EmaCross;
     app.strategy.native_execution_path = NativeExecutionPath::HmaDirect;
@@ -2082,6 +2232,34 @@ fn dashboard_manual_orders_sync_selected_account_first() {
         } => {}
         _ => panic!("expected buy manual-order command"),
     }
+}
+
+#[test]
+fn dashboard_hides_manual_order_affordances_without_capability() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.screen = Screen::Dashboard;
+    app.capabilities.manual_orders = false;
+    app.capabilities.automated_orders = false;
+    app.accounts = vec![account(1, "SIM")];
+    app.account_snapshots = vec![account_snapshot(1, None, None, None, None)];
+
+    assert!(!app.header_help_text().contains("b/s/c manual"));
+    assert!(!app.header_help_text().contains("timing/reversal mode"));
+    assert!(
+        rendered_text(app.stats_lines())
+            .iter()
+            .all(|line| !line.contains("b/s/c"))
+    );
+    assert!(
+        rendered_text(app.stats_lines())
+            .iter()
+            .any(|line| line.contains("Keys v"))
+    );
+
+    app.handle_dashboard_key(key(KeyCode::Char('b')), &cmd_tx);
+
+    assert!(cmd_rx.try_recv().is_err());
 }
 
 #[test]

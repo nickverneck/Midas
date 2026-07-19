@@ -63,7 +63,7 @@ impl App {
                     .join(", ")
             ),
         );
-        app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close, v visuals.".to_string());
+        app.push_log("Dashboard visual overlays can be toggled with v.".to_string());
         app.push_log(
             "Native HMA Angle and EMA Crossover strategies can auto-trade on closed bars or live forming bars once armed from Strategy."
                 .to_string(),
@@ -103,13 +103,12 @@ impl App {
             })
             .collect();
         self.running_engines = engines;
-        if self.selected_engine > self.engine_summaries.len() {
-            self.selected_engine = self.engine_summaries.len();
-        }
+        self.clamp_selected_engine();
     }
 
     pub fn set_engine_creation_enabled(&mut self, enabled: bool) {
         self.engine_creation_enabled = enabled;
+        self.clamp_selected_engine();
     }
 
     pub(crate) fn take_engine_selection_action(&mut self) -> Option<EngineSelectionAction> {

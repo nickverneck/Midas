@@ -23,10 +23,10 @@ impl App {
         match self.focus {
             Focus::StrategyKind => match key.code {
                 KeyCode::Left => {
-                    self.strategy.kind = self.strategy.kind.prev();
+                    self.strategy.kind = self.prev_visible_strategy_kind();
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.strategy.kind = self.strategy.kind.next();
+                    self.strategy.kind = self.next_visible_strategy_kind();
                 }
                 _ => {}
             },
@@ -350,13 +350,10 @@ impl App {
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
                     self.sync_selected_account(cmd_tx);
-                    if self.capabilities.automated_orders {
+                    if self.automated_strategy_affordance_visible() {
                         self.arm_native_strategy(cmd_tx);
                     } else {
-                        self.push_log(format!(
-                            "{} automation is not enabled yet; opening the dashboard in monitor mode.",
-                            self.selected_broker.label()
-                        ));
+                        self.push_log("Opening the dashboard in monitor mode.".to_string());
                     }
                     self.push_log(format!(
                         "Strategy selected: {}",

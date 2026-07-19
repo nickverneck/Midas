@@ -324,17 +324,20 @@ impl App {
         }
 
         lines.push(Line::from(""));
+        let continue_label = if self.automated_strategy_affordance_visible() {
+            "[Enter] Continue To Dashboard / Arm Strategy"
+        } else {
+            "[Enter] Continue To Dashboard (Monitor Only)"
+        };
         lines.push(styled_line(
-            "[Enter] Continue To Dashboard / Arm Strategy".to_string(),
+            continue_label.to_string(),
             self.focus == Focus::StrategyContinue,
         ));
         lines
     }
 
     pub(in crate::app) fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(
-            "Backend order: Native Rust > Lua > Machine Learning.",
-        )];
+        let mut lines = vec![Line::from("TUI strategy setup supports Native Rust.")];
 
         match self.strategy.kind {
             StrategyKind::Native => {
@@ -351,20 +354,23 @@ impl App {
                 lines.extend([
                     Line::from("Blockout can flatten before close and hold until reopen."),
                     Line::from("Controls: Up/Down move, Left/Right edit."),
-                    Line::from("Enter on Continue arms the strategy."),
                 ]);
+                if self.automated_strategy_affordance_visible() {
+                    lines.push(Line::from("Enter on Continue arms the strategy."));
+                } else {
+                    lines.push(Line::from(
+                        "Enter on Continue opens the dashboard in monitor mode.",
+                    ));
+                }
             }
             StrategyKind::Lua => lines.extend([
                 Line::from("Lua can load from file or editor."),
-                Line::from("Native stays higher priority than Lua."),
-                Line::from("ML remains selection-only for now."),
-                Line::from("Controls: Up/Down move, Enter loads or arms."),
+                Line::from("Controls: Up/Down move, Enter loads or continues."),
                 Line::from("Lua normal: h/j/k/l move, i/a/o/x edit."),
                 Line::from("Lua insert: type, Enter newline, Esc exit."),
             ]),
             StrategyKind::MachineLearning => lines.extend([
-                Line::from("ML stays selection-only for now."),
-                Line::from("Native and Lua remain higher priority."),
+                Line::from("Machine Learning strategies are not available in the TUI."),
                 Line::from("Controls: Up/Down move, Enter continues."),
             ]),
         }
@@ -376,8 +382,14 @@ impl App {
         let mut lines = vec![
             Line::from(format!("Selected: {}", self.strategy.summary_label())),
             Line::from(match self.strategy.kind {
+                StrategyKind::Native if self.automated_strategy_affordance_visible() => {
+                    format!(
+                        "Native Rust {} is active and can submit automated market orders.",
+                        self.strategy.native_strategy.label()
+                    )
+                }
                 StrategyKind::Native => format!(
-                    "Native Rust {} is active and can submit automated market orders.",
+                    "Native Rust {} is active for monitor-only observation.",
                     self.strategy.native_strategy.label()
                 ),
                 StrategyKind::Lua => {

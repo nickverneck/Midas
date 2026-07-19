@@ -26,11 +26,7 @@ impl App {
             && !self.is_text_focus()
             && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
         {
-            if !self.broker_supports_replay() {
-                self.push_log(format!(
-                    "{} does not support replay mode in this build.",
-                    self.selected_broker.label()
-                ));
+            if !self.replay_affordance_visible() {
                 return;
             }
             self.bar_type = BarType::range(1);
@@ -65,6 +61,9 @@ impl App {
                 return;
             }
             KeyCode::F(6) => {
+                if !self.session_stats_affordance_visible() {
+                    return;
+                }
                 self.screen = Screen::Stats;
                 self.focus = Focus::AccountList;
                 return;
@@ -90,6 +89,9 @@ impl App {
         if !self.is_free_text_focus()
             && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
         {
+            if !self.automated_strategy_affordance_visible() {
+                return;
+            }
             self.manual_disarm_native_strategy(cmd_tx);
             return;
         }

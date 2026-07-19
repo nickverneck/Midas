@@ -78,14 +78,12 @@ impl App {
             "[Enter] Connect / Refresh Session".to_string(),
             self.focus == Focus::Connect,
         ));
-        lines.push(styled_line(
-            if self.broker_supports_replay() {
-                "[Enter] Replay Mode (local file, skips login)".to_string()
-            } else {
-                "[Enter] Replay Mode unavailable for this broker/build".to_string()
-            },
-            self.focus == Focus::ReplayMode,
-        ));
+        if self.replay_affordance_visible() {
+            lines.push(styled_line(
+                "[Enter] Replay Mode (local file, skips login)".to_string(),
+                self.focus == Focus::ReplayMode,
+            ));
+        }
         lines
     }
 
@@ -106,12 +104,13 @@ impl App {
             Line::from("Use Up/Down to move between fields."),
             Line::from("Use Left/Right on Env, Auth Mode, or Log Mode."),
             Line::from("Paste a token directly into Token Override when needed."),
-            Line::from(if self.broker_supports_replay() {
-                "Replay Mode loads the local tick file and starts on 1 Range bars by default."
-            } else {
-                "Replay Mode is only available on Tradovate builds with `--features replay`."
-            }),
         ];
+
+        if self.replay_affordance_visible() {
+            lines.push(Line::from(
+                "Replay Mode loads the local tick file and starts on 1 Range bars by default.",
+            ));
+        }
 
         if self.selected_broker == BrokerKind::Ironbeam {
             lines.push(Line::from(

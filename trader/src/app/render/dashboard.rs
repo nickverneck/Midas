@@ -43,11 +43,7 @@ impl App {
         };
 
         if let Some(action) = action {
-            if !self.capabilities.manual_orders {
-                self.push_log(format!(
-                    "{} manual order routing is not enabled yet.",
-                    self.selected_broker.label()
-                ));
+            if !self.manual_order_affordance_visible() {
                 return;
             }
             self.sync_selected_account(cmd_tx);

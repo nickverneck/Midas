@@ -23,22 +23,6 @@ impl StrategyKind {
             Self::MachineLearning => "Machine Learning",
         }
     }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Native => Self::Lua,
-            Self::Lua => Self::MachineLearning,
-            Self::MachineLearning => Self::Native,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Native => Self::MachineLearning,
-            Self::Lua => Self::Native,
-            Self::MachineLearning => Self::Lua,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

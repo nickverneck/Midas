@@ -1,6 +1,163 @@
 use super::*;
 
 impl App {
+    pub(in crate::app) fn header_help_text(&self) -> String {
+        let stats_hint = self
+            .session_stats_affordance_visible()
+            .then_some("F6 stats");
+        let mut items = match self.screen {
+            Screen::EngineSelect => vec![
+                if self.engine_create_affordance_visible() {
+                    "Up/Down/Left/Right choose engine"
+                } else {
+                    "Up/Down/Left/Right choose live engine"
+                }
+                .to_string(),
+                if self.engine_create_affordance_visible() {
+                    "Enter attach/create".to_string()
+                } else {
+                    "Enter attach".to_string()
+                },
+                "r refresh".to_string(),
+                "F5/Ctrl+S save logs".to_string(),
+                "q quit".to_string(),
+            ],
+            Screen::BrokerSelect => {
+                let mut items = vec![
+                    "Up/Down/Left/Right choose broker".to_string(),
+                    "Enter open login/token options".to_string(),
+                ];
+                if let Some(hint) = stats_hint {
+                    items.push(hint.to_string());
+                }
+                items.extend(["F5/Ctrl+S save logs".to_string(), "q quit".to_string()]);
+                items
+            }
+            Screen::Login => {
+                let mut items = vec![
+                    "F2 selection".to_string(),
+                    "Up/Down focus".to_string(),
+                    "Left/Right toggle env/auth/logs".to_string(),
+                    if self.replay_affordance_visible() {
+                        "Enter connect/replay".to_string()
+                    } else {
+                        "Enter connect".to_string()
+                    },
+                ];
+                if let Some(hint) = stats_hint {
+                    items.push(hint.to_string());
+                }
+                items.extend([
+                    "Esc broker picker".to_string(),
+                    "F5/Ctrl+S save logs".to_string(),
+                    "q quit".to_string(),
+                ]);
+                items
+            }
+            Screen::Selection => {
+                let mut items = vec![
+                    "F1 login".to_string(),
+                    "F3 strategy".to_string(),
+                    "F4 dashboard".to_string(),
+                ];
+                if let Some(hint) = stats_hint {
+                    items.push(hint.to_string());
+                }
+                items.push("Tab focus".to_string());
+                if self.bar_type_controls_visible() {
+                    items.push("Left/Right bar type".to_string());
+                }
+                items.extend([
+                    "Enter search/select".to_string(),
+                    "F5/Ctrl+S save logs".to_string(),
+                ]);
+                items
+            }
+            Screen::Strategy => {
+                let mut items = vec![
+                    "F1 login".to_string(),
+                    "F2 selection".to_string(),
+                    "F4 dashboard".to_string(),
+                ];
+                if let Some(hint) = stats_hint {
+                    items.push(hint.to_string());
+                }
+                items.extend([
+                    "Up/Down focus".to_string(),
+                    "Left/Right edit native strategy settings".to_string(),
+                    "F5/Ctrl+S save logs".to_string(),
+                ]);
+                items
+            }
+            Screen::Dashboard => {
+                let mut items = vec![
+                    "F1 login".to_string(),
+                    "F2 selection".to_string(),
+                    "F3 strategy".to_string(),
+                ];
+                if let Some(hint) = stats_hint {
+                    items.push(hint.to_string());
+                }
+                if self.automated_strategy_affordance_visible() {
+                    items
+                        .push("native runtime follows configured timing/reversal mode".to_string());
+                } else {
+                    items.push("monitor-only runtime".to_string());
+                }
+                if self.manual_order_affordance_visible() {
+                    items.push("b/s/c manual".to_string());
+                }
+                items.push("v visuals".to_string());
+                if self.session_kind == SessionKind::Replay {
+                    items.extend(["[/] replay speed".to_string(), "0 realtime".to_string()]);
+                }
+                items.extend(["F5/Ctrl+S save logs".to_string(), "q quit".to_string()]);
+                items
+            }
+            Screen::Stats => vec![
+                "F1 login".to_string(),
+                "F2 selection".to_string(),
+                "F3 strategy".to_string(),
+                "F4 dashboard".to_string(),
+                "Up/Down account".to_string(),
+                "Enter re-sync".to_string(),
+                "f fees".to_string(),
+                "F5/Ctrl+S save logs".to_string(),
+                "q quit".to_string(),
+            ],
+        };
+        items.retain(|item| !item.is_empty());
+        items.join(" | ")
+    }
+
+    pub(in crate::app) fn header_tab_titles(&self) -> Vec<&'static str> {
+        let mut titles = vec![
+            "Engine",
+            "Broker",
+            "Login",
+            "Selection",
+            "Strategy",
+            "Dashboard",
+        ];
+        if self.session_stats_affordance_visible() {
+            titles.push("Stats");
+        }
+        titles
+    }
+
+    fn header_selected_tab(&self) -> usize {
+        match self.screen {
+            Screen::EngineSelect => 0,
+            Screen::BrokerSelect => 1,
+            Screen::Login => 2,
+            Screen::Selection => 3,
+            Screen::Strategy => 4,
+            Screen::Dashboard => 5,
+            Screen::Stats if self.session_stats_affordance_visible() => 6,
+            Screen::Stats => 5,
+        }
+    }
+
     pub(in crate::app) fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -16,54 +173,13 @@ impl App {
             Screen::Dashboard => "Dashboard",
             Screen::Stats => "Stats",
         };
-        let help = match self.screen {
-            Screen::EngineSelect => {
-                "Up/Down/Left/Right choose engine | Enter attach/create | r refresh | F5/Ctrl+S save logs | q quit"
-            }
-            Screen::BrokerSelect => {
-                "Up/Down/Left/Right choose broker | Enter open login/token options | F6 stats | F5/Ctrl+S save logs | q quit"
-            }
-            Screen::Login => {
-                "F2 selection | Up/Down focus | Left/Right toggle env/auth/logs | Enter connect/replay | F6 stats | Esc broker picker | F5/Ctrl+S save logs | q quit"
-            }
-            Screen::Selection => {
-                "F1 login | F3 strategy | F4 dashboard | F6 stats | Tab focus | Left/Right bar type | Enter search/select | F5/Ctrl+S save logs"
-            }
-            Screen::Strategy => {
-                "F1 login | F2 selection | F4 dashboard | F6 stats | Up/Down focus | Left/Right edit native strategy settings | F5/Ctrl+S save logs"
-            }
-            Screen::Dashboard => {
-                if self.session_kind == SessionKind::Replay {
-                    "F1 login | F2 selection | F3 strategy | F6 stats | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | [/] replay speed | 0 realtime | F5/Ctrl+S save logs | q quit"
-                } else {
-                    "F1 login | F2 selection | F3 strategy | F6 stats | native runtime follows configured timing/reversal mode | b/s/c manual | v visuals | F5/Ctrl+S save logs | q quit"
-                }
-            }
-            Screen::Stats => {
-                "F1 login | F2 selection | F3 strategy | F4 dashboard | Up/Down account | Enter re-sync | f fees | F5/Ctrl+S save logs | q quit"
-            }
-        };
-        let titles = [
-            "Engine",
-            "Broker",
-            "Login",
-            "Selection",
-            "Strategy",
-            "Dashboard",
-            "Stats",
-        ]
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-        let selected_tab = match self.screen {
-            Screen::EngineSelect => 0,
-            Screen::BrokerSelect => 1,
-            Screen::Login => 2,
-            Screen::Selection => 3,
-            Screen::Strategy => 4,
-            Screen::Dashboard => 5,
-            Screen::Stats => 6,
-        };
+        let help = self.header_help_text();
+        let titles = self
+            .header_tab_titles()
+            .into_iter()
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        let selected_tab = self.header_selected_tab();
         let tabs = Tabs::new(titles)
             .select(selected_tab)
             .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))

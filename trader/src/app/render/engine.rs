@@ -7,7 +7,7 @@ impl App {
             return;
         }
 
-        let item_count = self.engine_summaries.len() + 1;
+        let item_count = self.engine_select_item_count();
         match key.code {
             KeyCode::Char('k') | KeyCode::Char('K')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -32,21 +32,23 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
+                if item_count == 0 {
+                    return;
+                }
                 self.selected_engine = (self.selected_engine + item_count - 1) % item_count;
                 self.update_engine_select_status();
             }
             KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                if item_count == 0 {
+                    return;
+                }
                 self.selected_engine = (self.selected_engine + 1) % item_count;
                 self.update_engine_select_status();
             }
             KeyCode::Enter => {
-                if self.selected_engine == self.engine_summaries.len() {
-                    if !self.engine_creation_enabled {
-                        self.status =
-                            "Engine creation is disabled by --no-spawn-engine.".to_string();
-                        self.push_log(format!("ERROR: {}", self.status));
-                        return;
-                    }
+                if self.engine_create_affordance_visible()
+                    && self.selected_engine == self.engine_summaries.len()
+                {
                     self.pending_engine_selection_action = Some(EngineSelectionAction::CreateNew);
                     self.status = "Creating a new engine...".to_string();
                     self.push_log(self.status.clone());
@@ -54,6 +56,8 @@ impl App {
                 }
 
                 let Some(engine) = self.engine_summaries.get(self.selected_engine) else {
+                    self.status =
+                        "No live engines are available. Refresh the engine list.".to_string();
                     return;
                 };
                 if !engine.connection_state.attachable() {
@@ -194,12 +198,10 @@ impl App {
     }
 
     fn update_engine_select_status(&mut self) {
-        if self.selected_engine == self.engine_summaries.len() {
-            self.status = if self.engine_creation_enabled {
-                "Create a new engine for this TUI session.".to_string()
-            } else {
-                "Engine creation is disabled by --no-spawn-engine.".to_string()
-            };
+        if self.engine_create_affordance_visible()
+            && self.selected_engine == self.engine_summaries.len()
+        {
+            self.status = "Create a new engine for this TUI session.".to_string();
             return;
         }
         if let Some(engine) = self.engine_summaries.get(self.selected_engine) {
@@ -211,6 +213,8 @@ impl App {
                     .unwrap_or_else(|| engine.socket_path.display().to_string()),
                 engine.connection_state.label()
             );
+        } else {
+            self.status = "No live engines are available. Refresh the engine list.".to_string();
         }
     }
 
@@ -276,43 +280,34 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        let create_selected = self.selected_engine == self.engine_summaries.len();
-        let create_style = if create_selected && self.engine_creation_enabled {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if self.engine_creation_enabled {
-            Style::default().fg(Color::Gray)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let create_marker = if create_selected { ">" } else { " " };
-        let create_state = if self.engine_creation_enabled {
-            "create"
-        } else {
-            "disabled"
-        };
-        rows.push(
-            Row::new(vec![
-                Cell::from(create_marker.to_string()),
-                Cell::from("+"),
-                Cell::from(create_state),
-                Cell::from("new engine"),
-                Cell::from("-"),
-                Cell::from("-"),
-                Cell::from("-"),
-                Cell::from("-"),
-                Cell::from("-"),
-                Cell::from("-"),
-                Cell::from(if self.engine_creation_enabled {
-                    "Start a new engine"
-                } else {
-                    "Disabled by --no-spawn-engine"
-                }),
-            ])
-            .style(create_style),
-        );
+        if self.engine_create_affordance_visible() {
+            let create_selected = self.selected_engine == self.engine_summaries.len();
+            let create_style = if create_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let create_marker = if create_selected { ">" } else { " " };
+            rows.push(
+                Row::new(vec![
+                    Cell::from(create_marker.to_string()),
+                    Cell::from("+"),
+                    Cell::from("create"),
+                    Cell::from("new engine"),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                    Cell::from("-"),
+                    Cell::from("Start a new engine"),
+                ])
+                .style(create_style),
+            );
+        }
 
         let table = Table::new(
             rows,
@@ -357,10 +352,13 @@ impl App {
         );
         frame.render_widget(table, layout[1]);
 
+        let open_help = if self.engine_create_affordance_visible() {
+            "Enter opens a live engine or creates a new one. r refreshes the process list."
+        } else {
+            "Enter opens a selected live engine. r refreshes the process list."
+        };
         let help = Paragraph::new(vec![
-            Line::from(
-                "Enter opens a live engine or creates a new one. r refreshes the process list.",
-            ),
+            Line::from(open_help),
             self.engine_lifecycle_help_line(),
             Line::from("Destructive actions always open a confirmation prompt before running."),
         ])

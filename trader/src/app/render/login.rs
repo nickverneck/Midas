@@ -46,11 +46,7 @@ impl App {
             }
             Focus::ReplayMode => {
                 if key.code == KeyCode::Enter {
-                    if !self.broker_supports_replay() {
-                        self.push_log(format!(
-                            "Replay mode is unavailable for {}.",
-                            self.selected_broker.label()
-                        ));
+                    if !self.replay_affordance_visible() {
                         return;
                     }
                     self.bar_type = BarType::range(1);

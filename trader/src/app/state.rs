@@ -144,6 +144,69 @@ impl App {
         self.selected_broker == BrokerKind::Tradovate
     }
 
+    fn replay_affordance_visible(&self) -> bool {
+        self.broker_supports_replay()
+    }
+
+    fn session_stats_affordance_visible(&self) -> bool {
+        self.session_stats.enabled
+    }
+
+    fn manual_order_affordance_visible(&self) -> bool {
+        self.capabilities.manual_orders
+    }
+
+    fn automated_strategy_affordance_visible(&self) -> bool {
+        self.capabilities.automated_orders
+    }
+
+    fn engine_create_affordance_visible(&self) -> bool {
+        self.engine_creation_enabled
+    }
+
+    fn engine_select_item_count(&self) -> usize {
+        self.engine_summaries.len() + usize::from(self.engine_create_affordance_visible())
+    }
+
+    fn clamp_selected_engine(&mut self) {
+        let item_count = self.engine_select_item_count();
+        if item_count == 0 {
+            self.selected_engine = 0;
+        } else if self.selected_engine >= item_count {
+            self.selected_engine = item_count - 1;
+        }
+    }
+
+    fn bar_type_controls_visible(&self) -> bool {
+        self.broker_supports_bar_type_selection()
+    }
+
+    fn candle_mode_controls_visible(&self) -> bool {
+        self.broker_supports_heikin_ashi() && self.bar_type.supports_candle_mode()
+    }
+
+    fn visible_strategy_kinds(&self) -> &'static [StrategyKind] {
+        &[StrategyKind::Native]
+    }
+
+    fn next_visible_strategy_kind(&self) -> StrategyKind {
+        let kinds = self.visible_strategy_kinds();
+        let index = kinds
+            .iter()
+            .position(|kind| *kind == self.strategy.kind)
+            .unwrap_or(0);
+        kinds[(index + 1) % kinds.len()]
+    }
+
+    fn prev_visible_strategy_kind(&self) -> StrategyKind {
+        let kinds = self.visible_strategy_kinds();
+        let index = kinds
+            .iter()
+            .position(|kind| *kind == self.strategy.kind)
+            .unwrap_or(0);
+        kinds[(index + kinds.len() - 1) % kinds.len()]
+    }
+
     fn normalize_market_controls_for_broker(&mut self) {
         if !self.broker_supports_bar_type_selection() {
             self.bar_type = BarType::default();
@@ -193,8 +256,10 @@ impl App {
             Focus::Username,
             Focus::Password,
             Focus::Connect,
-            Focus::ReplayMode,
         ];
+        if self.replay_affordance_visible() {
+            order.push(Focus::ReplayMode);
+        }
         match self.selected_broker {
             BrokerKind::Ironbeam => {
                 order.insert(7, Focus::ApiKey);
@@ -274,12 +339,12 @@ impl App {
     }
 
     fn selection_focus_order(&self) -> Vec<Focus> {
-        let mut order = vec![
-            Focus::AccountList,
-            Focus::BarTypeToggle,
-            Focus::BarValue,
-        ];
-        if self.bar_type.supports_candle_mode() {
+        let mut order = vec![Focus::AccountList];
+        if self.bar_type_controls_visible() {
+            order.push(Focus::BarTypeToggle);
+            order.push(Focus::BarValue);
+        }
+        if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
         }
         order.extend([
@@ -824,6 +889,9 @@ impl App {
 
     fn native_protection_controls_visible(&self) -> bool {
         if self.strategy.kind != StrategyKind::Native {
+            return false;
+        }
+        if !self.capabilities.native_protection {
             return false;
         }
         if self.selected_broker != BrokerKind::Tradovate {
