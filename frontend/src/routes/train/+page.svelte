@@ -59,6 +59,9 @@
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
+		"bar-kind": "price-action",
+		"volume-bar-size": "",
+		"price-source": "ohlc",
 		device: "auto",
 		"batch-candidates": 0,
 		generations: 5,
@@ -108,6 +111,9 @@
 		"train-parquet": "data/train",
 		"val-parquet": "data/val",
 		"test-parquet": "data/test",
+		"bar-kind": "price-action",
+		"volume-bar-size": "",
+		"price-source": "ohlc",
 		device: "auto",
 		window: defaultWindowBars,
 		step: defaultStepBars,
@@ -524,8 +530,30 @@
 		return params;
 	};
 
+	const normalizeBarSelection = (params: Record<string, unknown>) => {
+		params["bar-kind"] = params["bar-kind"] === "volume" ? "volume" : "price-action";
+		params["price-source"] = params["price-source"] === "heikin-ashi" ? "heikin-ashi" : "ohlc";
+		if (params["bar-kind"] !== "volume") {
+			params["volume-bar-size"] = "";
+			return params;
+		}
+		const volumeBarSize = toNumber(params["volume-bar-size"]);
+		params["volume-bar-size"] = volumeBarSize ?? "";
+		return params;
+	};
+
+	const validateBarSelection = (params: Record<string, unknown>) => {
+		if (params["bar-kind"] !== "volume") return null;
+		const volumeBarSize = toNumber(params["volume-bar-size"]);
+		if (volumeBarSize === null || volumeBarSize <= 0) {
+			return "Volume bar size must be greater than 0 when volume bars are selected.";
+		}
+		return null;
+	};
+
 	const buildGaParams = () => {
 		const params = { ...gaParams } as Record<string, unknown>;
+		normalizeBarSelection(params);
 		if (gaDataMode === "full") {
 			params["full-file"] = true;
 		} else {
@@ -536,6 +564,7 @@
 
 	const buildRlParams = () => {
 		const params = { ...rlParams } as Record<string, unknown>;
+		normalizeBarSelection(params);
 		params.algorithm = rlAlgorithm;
 		if (params.backend !== "candle" && params.backend !== "libtorch") {
 			delete params.dropout;
@@ -580,6 +609,11 @@
 			return;
 		}
 		const params = mode === "ga" ? buildGaParams() : buildRlParams();
+		const barSelectionError = validateBarSelection(params);
+		if (barSelectionError) {
+			consoleOutput = [...consoleOutput, { type: "error", text: barSelectionError }];
+			return;
+		}
 		const backend = (typeof params.backend === "string" ? params.backend : "libtorch") as MlBackend;
 		const fallbackDir = trainMode === "rl" ? "runs_rl" : "runs_ga";
 		const outdir = typeof params.outdir === "string" ? params.outdir : fallbackDir;

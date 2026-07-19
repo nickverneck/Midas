@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use midas_env::bars::BarSelection;
 use midas_env::env::MarginMode;
 use midas_env::ml::{self, ResolvedTrainingStack};
 use rand::{SeedableRng, rngs::StdRng};
@@ -96,30 +97,9 @@ pub(crate) fn load_run_resources(
     behavior_dir: PathBuf,
 ) -> Result<RunResources> {
     let (train_path, val_path, test_path) = util::resolve_paths(args)?;
-    let train = data::load_dataset(&train_path, args.globex && !args.rth)?;
-    let val = data::load_dataset(&val_path, args.globex && !args.rth)?;
-    let test = data::load_dataset(&test_path, args.globex && !args.rth)?;
-    if args.debug_data {
-        data::dump_dataset_stats("train", &train);
-        data::dump_dataset_stats("val", &val);
-        data::dump_dataset_stats("test", &test);
-    }
-
-    let (margin_cfg, session_cfg) = util::load_symbol_config(&args.symbol_config, &train.symbol)?;
-    let margin_mode = match args.margin_mode.as_str() {
-        "per-contract" => MarginMode::PerContract,
-        "price" => MarginMode::Price,
-        _ => util::infer_margin_mode(&train.symbol, margin_cfg),
-    };
-    let contract_multiplier = if args.contract_multiplier > 0.0 {
-        args.contract_multiplier
-    } else {
-        1.0
-    };
-    let margin_per_contract = args
-        .margin_per_contract
-        .or(margin_cfg)
-        .unwrap_or_else(|| util::infer_margin(&train.symbol));
+    let train_symbol = data::read_symbol(&train_path)
+        .with_context(|| format!("read symbol from {}", train_path.display()))?;
+    let (margin_cfg, session_cfg) = util::load_symbol_config(&args.symbol_config, &train_symbol)?;
     let use_globex = if let Some(session) = session_cfg {
         match session.as_str() {
             "rth" => false,
@@ -129,6 +109,34 @@ pub(crate) fn load_run_resources(
     } else {
         !args.rth
     };
+    let bar_selection = BarSelection {
+        bar_kind: args.bar_kind,
+        volume_bar_size: args.volume_bar_size,
+        price_source: args.price_source,
+    };
+    let train = data::load_dataset_with_bars(&train_path, use_globex, bar_selection)?;
+    let val = data::load_dataset_with_bars(&val_path, use_globex, bar_selection)?;
+    let test = data::load_dataset_with_bars(&test_path, use_globex, bar_selection)?;
+    if args.debug_data {
+        data::dump_dataset_stats("train", &train);
+        data::dump_dataset_stats("val", &val);
+        data::dump_dataset_stats("test", &test);
+    }
+
+    let margin_mode = match args.margin_mode.as_str() {
+        "per-contract" => MarginMode::PerContract,
+        "price" => MarginMode::Price,
+        _ => util::infer_margin_mode(&train_symbol, margin_cfg),
+    };
+    let contract_multiplier = if args.contract_multiplier > 0.0 {
+        args.contract_multiplier
+    } else {
+        1.0
+    };
+    let margin_per_contract = args
+        .margin_per_contract
+        .or(margin_cfg)
+        .unwrap_or_else(|| util::infer_margin(&train_symbol));
 
     let train = train.with_session(use_globex);
     let val = val.with_session(use_globex);

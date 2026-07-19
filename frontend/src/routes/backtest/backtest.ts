@@ -62,6 +62,9 @@ export const createDefaultBacktestLimits = (): BacktestLimits => ({
 });
 
 export const createDefaultAnalyzerConfig = (): AnalyzerConfig => ({
+	barKind: "price-action",
+	volumeBarSize: "",
+	priceSource: "ohlc",
 	indicatorA: {
 		kind: "ema",
 		sweepParam: "period",

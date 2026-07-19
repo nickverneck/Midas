@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap, ops::softmax};
 use clap::Parser;
+use midas_env::bars::{BarKind, BarSelection, PriceSource};
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
 use rand::Rng;
 use rand::SeedableRng;
@@ -54,6 +55,12 @@ struct Args {
     globex: bool,
     #[arg(long)]
     rth: bool,
+    #[arg(long)]
+    bar_kind: Option<BarKind>,
+    #[arg(long)]
+    volume_bar_size: Option<f64>,
+    #[arg(long)]
+    price_source: Option<PriceSource>,
     #[arg(long, default_value = "config/symbols.yaml")]
     symbol_config: PathBuf,
 }
@@ -185,6 +192,9 @@ struct ReplaySummary {
     eval_windows: usize,
     sample: bool,
     seed: Option<u64>,
+    bar_kind: String,
+    volume_bar_size: Option<f64>,
+    price_source: String,
     metrics: ReplayMetrics,
     behavior: BehaviorStats,
 }
@@ -255,18 +265,15 @@ fn run() -> Result<()> {
     };
     std::fs::create_dir_all(&outdir)?;
 
-    let default_session = args.globex && !args.rth;
     let observation_schema =
         resolve_observation_schema(run_summary_json.as_ref(), run_dir.as_ref())?;
     println!(
         "info: replay observation schema {}",
         observation_schema.as_str()
     );
-    let dataset =
-        data::load_dataset_with_schema(&parquet_path, default_session, observation_schema)
-            .with_context(|| format!("load dataset {}", parquet_path.display()))?;
-    let (margin_cfg, session_cfg) =
-        common::load_symbol_config(&args.symbol_config, &dataset.symbol)?;
+    let train_symbol = data::read_symbol(&parquet_path)
+        .with_context(|| format!("read symbol from {}", parquet_path.display()))?;
+    let (margin_cfg, session_cfg) = common::load_symbol_config(&args.symbol_config, &train_symbol)?;
     let use_globex = if let Some(session) = session_cfg {
         match session.as_str() {
             "rth" => false,
@@ -276,9 +283,17 @@ fn run() -> Result<()> {
     } else {
         !args.rth
     };
+    let bar_selection = resolve_bar_selection(&args, params)?;
+    let dataset = data::load_dataset_with_schema_and_bars(
+        &parquet_path,
+        use_globex,
+        observation_schema,
+        bar_selection,
+    )
+    .with_context(|| format!("load dataset {}", parquet_path.display()))?;
     let dataset = dataset.with_session(use_globex);
 
-    let replay_cfg = build_replay_config(params, &dataset.symbol, margin_cfg)?;
+    let replay_cfg = build_replay_config(params, &train_symbol, margin_cfg)?;
     if replay_cfg.hidden == 0 || replay_cfg.layers == 0 {
         bail!("run summary params missing valid hidden/layers for RL replay");
     }
@@ -386,6 +401,9 @@ fn run() -> Result<()> {
         eval_windows,
         sample: args.sample,
         seed,
+        bar_kind: bar_selection.bar_kind.to_string(),
+        volume_bar_size: bar_selection.volume_bar_size,
+        price_source: bar_selection.price_source.to_string(),
         metrics,
         behavior: summarize_behavior(&history),
     };
@@ -637,6 +655,52 @@ fn resolve_observation_schema(
         Ok(data::ObservationSchema::LegacyV1)
     } else {
         Ok(data::ObservationSchema::NormalizedV2)
+    }
+}
+
+#[cfg(feature = "backend-candle")]
+fn resolve_bar_selection(args: &Args, params: Option<&Value>) -> Result<BarSelection> {
+    let params = params.unwrap_or(&Value::Null);
+    let bar_kind = args
+        .bar_kind
+        .or_else(|| json_bar_kind(params, "bar-kind"))
+        .unwrap_or_default();
+    let volume_bar_size = args
+        .volume_bar_size
+        .or_else(|| json_f64(params, "volume-bar-size"));
+    let price_source = args
+        .price_source
+        .or_else(|| json_price_source(params, "price-source"))
+        .unwrap_or_default();
+
+    if matches!(bar_kind, BarKind::Volume) && volume_bar_size.unwrap_or(0.0) <= 0.0 {
+        bail!("volume bar replay requires --volume-bar-size or params.volume-bar-size > 0");
+    }
+
+    Ok(BarSelection {
+        bar_kind,
+        volume_bar_size,
+        price_source,
+    })
+}
+
+#[cfg(feature = "backend-candle")]
+fn json_bar_kind(value: &Value, key: &str) -> Option<BarKind> {
+    match json_string(value, key)? {
+        "price-action" | "price_action" | "price" | "ohlc" => Some(BarKind::PriceAction),
+        "volume" | "volume-bars" | "volume_bars" => Some(BarKind::Volume),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "backend-candle")]
+fn json_price_source(value: &Value, key: &str) -> Option<PriceSource> {
+    match json_string(value, key)? {
+        "ohlc" | "standard" | "regular" => Some(PriceSource::Ohlc),
+        "heikin-ashi" | "heikin_ashi" | "heikin" | "heiken-ashi" | "heiken_ashi" | "heiken" => {
+            Some(PriceSource::HeikinAshi)
+        }
+        _ => None,
     }
 }
 

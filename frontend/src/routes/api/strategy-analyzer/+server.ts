@@ -73,11 +73,22 @@ export const POST = async ({ request }: RequestEvent) => {
 		return json({ error: 'Parquet file not found' }, { status: 404, headers });
 	}
 
+	const barKind = payload.barKind === 'volume' ? 'volume' : 'price-action';
+	const priceSource = payload.priceSource === 'heikin-ashi' ? 'heikin-ashi' : 'ohlc';
+	const parsedVolumeBarSize = Number(payload.volumeBarSize);
+	if (barKind === 'volume' && (!Number.isFinite(parsedVolumeBarSize) || parsedVolumeBarSize <= 0)) {
+		return json({ error: 'Volume bar size must be greater than 0' }, { status: 400, headers });
+	}
+	const volumeBarSize = barKind === 'volume' ? parsedVolumeBarSize : null;
+
 	const root = resolveProjectRoot();
 	const { command, argsPrefix } = resolveAnalyzerBin(root);
 
 	const config = {
 		file: filePath,
+		barKind,
+		volumeBarSize,
+		priceSource,
 		offset: payload.offset ?? null,
 		limit: payload.limit ?? null,
 		initialBalance: payload.env?.initialBalance ?? 10_000,

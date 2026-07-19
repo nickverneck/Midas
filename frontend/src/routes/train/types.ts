@@ -8,6 +8,8 @@ export type DataMode = "full" | "windowed";
 export type StartChoice = "new" | "resume";
 export type ParquetKey = "train-parquet" | "val-parquet" | "test-parquet";
 export type FuturesPresetKey = "mes-micro" | "es-mini";
+export type BarKind = "price-action" | "volume";
+export type PriceSource = "ohlc" | "heikin-ashi";
 
 export type FileEntry = {
 	name: string;
@@ -37,6 +39,9 @@ export type GaParams = {
 	"train-parquet": string;
 	"val-parquet": string;
 	"test-parquet": string;
+	"bar-kind": BarKind;
+	"volume-bar-size": string | number;
+	"price-source": PriceSource;
 	device: string;
 	"batch-candidates": number;
 	generations: number;
@@ -86,6 +91,9 @@ export type RlParams = {
 	"train-parquet": string;
 	"val-parquet": string;
 	"test-parquet": string;
+	"bar-kind": BarKind;
+	"volume-bar-size": string | number;
+	"price-source": PriceSource;
 	device: string;
 	window: number;
 	step: number;

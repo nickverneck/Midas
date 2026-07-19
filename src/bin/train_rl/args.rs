@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use midas_env::bars::{BarKind, PriceSource};
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Rust PPO trainer for midas_env")]
@@ -29,6 +30,12 @@ pub struct Args {
     pub globex: bool,
     #[arg(long)]
     pub rth: bool,
+    #[arg(long, default_value = "price-action")]
+    pub bar_kind: BarKind,
+    #[arg(long)]
+    pub volume_bar_size: Option<f64>,
+    #[arg(long, default_value = "ohlc")]
+    pub price_source: PriceSource,
     #[arg(long, default_value_t = 10000.0)]
     pub initial_balance: f64,
     #[arg(long, default_value_t = 0)]

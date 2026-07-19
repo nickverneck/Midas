@@ -1,4 +1,5 @@
 <script lang="ts">
+	import AnalyzerBarSettingsCard from "./AnalyzerBarSettingsCard.svelte";
 	import AnalyzerEnvironmentCard from "./AnalyzerEnvironmentCard.svelte";
 	import AnalyzerHeader from "./AnalyzerHeader.svelte";
 	import DatasetCard from "./DatasetCard.svelte";
@@ -24,6 +25,7 @@
 		invalidAnalyzerSlippage: boolean;
 		invalidAnalyzerMargin: boolean;
 		invalidAnalyzerContractMultiplier: boolean;
+		invalidAnalyzerVolumeBarSize: boolean;
 	};
 
 	type HeatmapMetricOption = { value: keyof AnalyzerMetrics; label: string };
@@ -125,6 +127,10 @@
 			bind:datasetPath
 			datasetPathInvalid={datasetPathInvalid}
 			onBrowse={onBrowseDataset}
+		/>
+		<AnalyzerBarSettingsCard
+			{analyzer}
+			invalidVolumeBarSize={validation.invalidAnalyzerVolumeBarSize}
 		/>
 		<AnalyzerEnvironmentCard
 			{analyzerEnv}

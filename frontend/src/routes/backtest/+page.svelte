@@ -281,6 +281,8 @@
 		step: toNumber(analyzer.stopLoss.step)
 	}));
 
+	let analyzerVolumeBarSize = $derived.by(() => toNumber(analyzer.volumeBarSize));
+
 	let analyzerDatasetPathInvalid = $derived.by(() => {
 		if (analyzerDatasetMode !== "custom") return false;
 		const trimmed = analyzerDatasetPath.trim().toLowerCase();
@@ -340,6 +342,11 @@
 	let invalidAnalyzerContractMultiplier = $derived.by(
 		() => numericAnalyzerEnv.contractMultiplier === null || numericAnalyzerEnv.contractMultiplier <= 0
 	);
+	let invalidAnalyzerVolumeBarSize = $derived.by(
+		() =>
+			analyzer.barKind === "volume" &&
+			(analyzerVolumeBarSize === null || analyzerVolumeBarSize <= 0)
+	);
 
 	let analyzerCombos = $derived.by(() => {
 		const countA = countRange(analyzerIndicatorA.start, analyzerIndicatorA.end, analyzerIndicatorA.step);
@@ -366,6 +373,9 @@
 		if (invalidAnalyzerMargin) errors.push("Margin per contract must be 0 or higher.");
 		if (invalidAnalyzerContractMultiplier) {
 			errors.push("Contract multiplier must be greater than 0.");
+		}
+		if (invalidAnalyzerVolumeBarSize) {
+			errors.push("Volume bar size must be greater than 0 when volume bars are selected.");
 		}
 		if (analyzerCombos > ANALYZER_MAX_COMBOS) {
 			errors.push(`Combination count exceeds ${ANALYZER_MAX_COMBOS.toLocaleString()}.`);
@@ -554,6 +564,9 @@
 			const payload = {
 				dataset: analyzerDatasetMode === "custom" ? null : analyzerDatasetMode,
 				path: analyzerDatasetMode === "custom" ? analyzerDatasetPath : null,
+				barKind: analyzer.barKind,
+				volumeBarSize: analyzer.barKind === "volume" ? analyzerVolumeBarSize : null,
+				priceSource: analyzer.priceSource,
 				signal: {
 					indicatorA: {
 						kind: analyzer.indicatorA.kind,
@@ -714,7 +727,8 @@
 					invalidAnalyzerCommission,
 					invalidAnalyzerSlippage,
 					invalidAnalyzerMargin,
-					invalidAnalyzerContractMultiplier
+					invalidAnalyzerContractMultiplier,
+					invalidAnalyzerVolumeBarSize
 				}}
 				bind:heatmapMetric
 				{heatmapMetricOptions}
