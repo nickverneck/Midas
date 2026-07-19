@@ -39,6 +39,16 @@ pub struct HmaCrossEvaluation {
     pub slow_hma: Option<f64>,
     pub previous_observed_side: Option<HmaCrossSide>,
     pub observed_side: Option<HmaCrossSide>,
+    pub bars_len: usize,
+    pub warmup_bars: usize,
+    pub current_side: Option<PositionSide>,
+    pub inverted: bool,
+    pub raw_buy_signal: bool,
+    pub raw_sell_signal: bool,
+    pub effective_buy_signal: bool,
+    pub effective_sell_signal: bool,
+    pub current_bar_side_edge: bool,
+    pub hold_reason: Option<&'static str>,
 }
 
 impl HmaCrossEvaluation {
@@ -77,6 +87,42 @@ impl HmaCrossEvaluation {
             ));
         }
         parts.join(" | ")
+    }
+
+    pub fn debug_summary(&self) -> String {
+        format!(
+            "Signal: {} | reason: {} | bars: {}/{} | side: {:?} | inverted: {} | close: {} | prev_fast_hma: {} | prev_slow_hma: {} | fast_hma: {} | slow_hma: {} | delta: {}->{} | raw_cross buy={} sell={} | effective_cross buy={} sell={} | prior_hma_side: {} | hma_side: {} | Prior HMA Side: {} | HMA Side: {} | current_bar_side_edge: {}",
+            self.signal.label(),
+            self.hold_reason.unwrap_or("signal_ready"),
+            self.bars_len,
+            self.warmup_bars,
+            self.current_side,
+            self.inverted,
+            fmt_price(self.latest_close),
+            fmt_price(self.previous_fast_hma),
+            fmt_price(self.previous_slow_hma),
+            fmt_price(self.fast_hma),
+            fmt_price(self.slow_hma),
+            fmt_delta(self.previous_fast_hma, self.previous_slow_hma),
+            fmt_delta(self.fast_hma, self.slow_hma),
+            self.raw_buy_signal,
+            self.raw_sell_signal,
+            self.effective_buy_signal,
+            self.effective_sell_signal,
+            self.previous_observed_side
+                .map(HmaCrossSide::label)
+                .unwrap_or("unset"),
+            self.observed_side
+                .map(HmaCrossSide::label)
+                .unwrap_or("unset"),
+            self.previous_observed_side
+                .map(HmaCrossSide::label)
+                .unwrap_or("unset"),
+            self.observed_side
+                .map(HmaCrossSide::label)
+                .unwrap_or("unset"),
+            self.current_bar_side_edge
+        )
     }
 }
 
@@ -143,6 +189,16 @@ impl HmaCrossConfig {
                 slow_hma: None,
                 previous_observed_side: None,
                 observed_side: None,
+                bars_len: bars.len(),
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                current_bar_side_edge: false,
+                hold_reason: Some("no_bars"),
             };
         };
 
@@ -156,6 +212,16 @@ impl HmaCrossConfig {
                 slow_hma: None,
                 previous_observed_side: None,
                 observed_side: None,
+                bars_len: bars.len(),
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                current_bar_side_edge: false,
+                hold_reason: Some("warming_up"),
             };
         }
 
@@ -190,16 +256,39 @@ impl HmaCrossConfig {
                 slow_hma: slow.get(idx).copied().filter(|value| value.is_finite()),
                 previous_observed_side: None,
                 observed_side: None,
+                bars_len: bars.len(),
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                current_bar_side_edge: false,
+                hold_reason: Some("non_finite_indicator"),
             };
         }
 
-        let mut buy_signal = prev_fast <= prev_slow && curr_fast > curr_slow;
-        let mut sell_signal = prev_fast >= prev_slow && curr_fast < curr_slow;
+        let raw_buy_signal = prev_fast <= prev_slow && curr_fast > curr_slow;
+        let raw_sell_signal = prev_fast >= prev_slow && curr_fast < curr_slow;
+        let mut buy_signal = raw_buy_signal;
+        let mut sell_signal = raw_sell_signal;
         if self.inverted {
             std::mem::swap(&mut buy_signal, &mut sell_signal);
         }
 
         let signal = resolve_signal(buy_signal, sell_signal, current_side);
+        let hold_reason = if signal != StrategySignal::Hold {
+            None
+        } else if buy_signal && current_side == Some(PositionSide::Long) {
+            Some("buy_cross_already_long")
+        } else if sell_signal && current_side == Some(PositionSide::Short) {
+            Some("sell_cross_already_short")
+        } else if !buy_signal && !sell_signal {
+            Some("no_effective_cross")
+        } else {
+            Some("hold")
+        };
         HmaCrossEvaluation {
             signal,
             latest_close: Some(last_bar.close),
@@ -209,6 +298,16 @@ impl HmaCrossConfig {
             slow_hma: Some(curr_slow),
             previous_observed_side: None,
             observed_side: None,
+            bars_len: bars.len(),
+            warmup_bars: self.warmup_bars(),
+            current_side,
+            inverted: self.inverted,
+            raw_buy_signal,
+            raw_sell_signal,
+            effective_buy_signal: buy_signal,
+            effective_sell_signal: sell_signal,
+            current_bar_side_edge: false,
+            hold_reason,
         }
     }
 
@@ -241,10 +340,16 @@ impl HmaCrossConfig {
 
         evaluation.previous_observed_side = previous_side;
         evaluation.observed_side = Some(observed_side);
+        evaluation.current_bar_side_edge = current_bar_side_edge;
         if current_bar_side_edge {
             evaluation.signal = match desired_side {
                 PositionSide::Long => resolve_signal(true, false, current_side),
                 PositionSide::Short => resolve_signal(false, true, current_side),
+            };
+            evaluation.hold_reason = if evaluation.signal == StrategySignal::Hold {
+                Some("stateful_side_edge_already_current")
+            } else {
+                None
             };
         }
 
@@ -477,6 +582,19 @@ fn signed_qty_to_side(signed_qty: i32) -> Option<PositionSide> {
     }
 }
 
+fn fmt_price(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn fmt_delta(fast: Option<f64>, slow: Option<f64>) -> String {
+    match (fast, slow) {
+        (Some(fast), Some(slow)) => format!("{:.6}", fast - slow),
+        _ => "n/a".to_string(),
+    }
+}
+
 fn resolve_signal(
     buy_signal: bool,
     sell_signal: bool,
@@ -584,6 +702,14 @@ mod tests {
         assert_eq!(evaluation.observed_side, Some(HmaCrossSide::Above));
         assert_eq!(evaluation.signal, StrategySignal::EnterLong);
         assert_eq!(runtime.last_observed_side, Some(HmaCrossSide::Above));
+
+        let debug = evaluation.debug_summary();
+        assert!(debug.contains("Signal: Buy"));
+        assert!(debug.contains("prior_hma_side: fast<slow"));
+        assert!(debug.contains("hma_side: fast>slow"));
+        assert!(debug.contains("current_bar_side_edge: true"));
+        assert!(debug.contains("delta:"));
+        assert!(debug.contains("raw_cross buy=true"));
     }
 
     #[test]

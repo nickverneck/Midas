@@ -9,6 +9,7 @@ mod ipc;
 mod ironbeam;
 mod strategies;
 mod strategy;
+mod strategy_debug;
 #[cfg(feature = "tradovate")]
 mod tradovate;
 

@@ -250,6 +250,12 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
         ServiceEvent::DebugLog(message)
             if message.contains("simple strategy dispatch")
                 && message.contains("submit_in_flight ignored")
+                && message.starts_with("strategy decision |")
+                && message.contains("strategy=ema_cross")
+                && message.contains("broker=tradovate")
+                && message.contains("path=simple diagnostic")
+                && message.contains("decision=dispatching")
+                && message.contains("signal=Buy")
     )));
 }
 
@@ -536,6 +542,11 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
             if message.contains("strategy eval | ema_cross | closed-bar already dispatched")
                 && message.contains("signal Buy")
                 && message.contains("bar_ts 7")
+                && message.starts_with("strategy decision |")
+                && message.contains("path=guarded")
+                && message.contains("decision=closed-bar already dispatched")
+                && message.contains("strategy_detail=Signal: Buy")
+                && message.contains("delta:")
     )));
 }
 
@@ -688,6 +699,10 @@ fn hma_direct_path_executes_current_closed_bar_cross() {
             if message.contains("hma direct dispatch")
                 && message.contains("Prior HMA Side: fast<slow")
                 && message.contains("HMA Side: fast>slow")
+                && message.starts_with("strategy decision |")
+                && message.contains("path=hma direct")
+                && message.contains("decision=dispatching")
+                && message.contains("prior_hma_side: fast<slow")
     )));
 }
 
@@ -745,6 +760,9 @@ fn hma_direct_path_does_not_enter_from_stale_cross_state() {
             if message.contains("hma direct eval")
                 && message.contains("signal Hold")
                 && message.contains("Prior HMA Side: unset")
+                && message.starts_with("strategy decision |")
+                && message.contains("strategy_detail=Signal: Hold")
+                && message.contains("current_bar_side_edge: false")
     )));
 }
 

@@ -7,6 +7,7 @@ use super::state::{IronbeamSession, OrderDispatchOutcome};
 use crate::broker::{Bar, InstrumentSessionWindow, LatencySnapshot, ServiceEvent};
 use crate::strategies::{StrategySignal, side_from_signed_qty};
 use crate::strategy::{NativeSignalTiming, NativeStrategyKind, StrategyKind};
+use crate::strategy_debug::{StrategyDecisionDebug, format_strategy_decision};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use tokio::sync::mpsc::UnboundedSender;
@@ -133,12 +134,25 @@ pub(super) async fn maybe_run_execution_strategy(
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
         && session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
     {
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        let gate_detail = format!(
             "strategy gate | {} | closed-bar timing waiting for next bar | last_bar_ts {} | actual_qty {} | pending_target {:?}",
             active_native_slug(session),
             last_strategy_ts,
             actual_market_qty,
             session.execution_runtime.pending_target_qty
+        );
+        let _ = event_tx.send(ServiceEvent::DebugLog(format_ironbeam_strategy_decision(
+            session,
+            IronbeamStrategyDecisionDebug {
+                decision: "blocked",
+                signal: None,
+                bar_ts: Some(last_strategy_ts),
+                actual_qty: actual_market_qty,
+                effective_qty: effective_market_position_qty(session),
+                target_qty: None,
+                strategy_detail: "n/a",
+                gate_detail,
+            },
         )));
         return Ok(());
     }
@@ -155,20 +169,32 @@ pub(super) async fn maybe_run_execution_strategy(
             evaluate_active_execution_strategy(session, bars, current_qty);
         (signal_bar, signal, summary, debug_summary)
     };
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "strategy eval | {} | timing {} | bar_ts {} | actual_qty {} | effective_qty {} | {}",
+    let gate_detail = format!(
+        "strategy eval | {} | timing {} | bar_ts {} | actual_qty {} | effective_qty {}",
         active_native_slug(session),
         active_signal_timing_label(session),
         signal_bar.ts_ns,
         actual_market_qty,
-        current_qty,
-        debug_summary
+        current_qty
+    );
+    let _ = event_tx.send(ServiceEvent::DebugLog(format_ironbeam_strategy_decision(
+        session,
+        IronbeamStrategyDecisionDebug {
+            decision: "evaluated",
+            signal: Some(signal),
+            bar_ts: Some(signal_bar.ts_ns),
+            actual_qty: actual_market_qty,
+            effective_qty: current_qty,
+            target_qty: None,
+            strategy_detail: &debug_summary,
+            gate_detail,
+        },
     )));
 
     if let Some(window) = session_window_at(session, signal_bar.ts_ns)
         && window.hold_entries
     {
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+        let gate_detail = format!(
             "strategy gate | {} | session hold blocks entries | signal {} | bar_ts {} | session_open {} | minutes_to_close {} | actual_qty {} | effective_qty {}",
             active_native_slug(session),
             signal.label(),
@@ -180,6 +206,23 @@ pub(super) async fn maybe_run_execution_strategy(
                 .unwrap_or_else(|| "n/a".to_string()),
             actual_market_qty,
             current_qty
+        );
+        let _ = event_tx.send(ServiceEvent::DebugLog(format_ironbeam_strategy_decision(
+            session,
+            IronbeamStrategyDecisionDebug {
+                decision: "session hold blocked entries",
+                signal: Some(signal),
+                bar_ts: Some(signal_bar.ts_ns),
+                actual_qty: actual_market_qty,
+                effective_qty: current_qty,
+                target_qty: target_qty_for_signal(
+                    signal,
+                    current_qty,
+                    session.execution_config.order_qty,
+                ),
+                strategy_detail: &debug_summary,
+                gate_detail,
+            },
         )));
         if actual_market_qty != 0 {
             match dispatch_target_position_order(
@@ -235,14 +278,26 @@ pub(super) async fn maybe_run_execution_strategy(
     let Some(target_qty) =
         target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
     else {
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "strategy gate | {} | no target for signal {} | actual_qty {} | effective_qty {} | order_qty {} | {}",
+        let gate_detail = format!(
+            "strategy gate | {} | no target for signal {} | actual_qty {} | effective_qty {} | order_qty {}",
             active_native_slug(session),
             signal.label(),
             actual_market_qty,
             current_qty,
-            session.execution_config.order_qty,
-            debug_summary
+            session.execution_config.order_qty
+        );
+        let _ = event_tx.send(ServiceEvent::DebugLog(format_ironbeam_strategy_decision(
+            session,
+            IronbeamStrategyDecisionDebug {
+                decision: "no target",
+                signal: Some(signal),
+                bar_ts: Some(signal_bar.ts_ns),
+                actual_qty: actual_market_qty,
+                effective_qty: current_qty,
+                target_qty: None,
+                strategy_detail: &debug_summary,
+                gate_detail,
+            },
         )));
         sync_execution_protection(client, session, latency, internal_tx, Some(&signal_bar)).await?;
         rebuild_account_snapshots(session);
@@ -250,14 +305,26 @@ pub(super) async fn maybe_run_execution_strategy(
     };
 
     if target_qty == current_qty {
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "strategy gate | {} | target already current | signal {} | target_qty {} | actual_qty {} | effective_qty {} | {}",
+        let gate_detail = format!(
+            "strategy gate | {} | target already current | signal {} | target_qty {} | actual_qty {} | effective_qty {}",
             active_native_slug(session),
             signal.label(),
             target_qty,
             actual_market_qty,
-            current_qty,
-            debug_summary
+            current_qty
+        );
+        let _ = event_tx.send(ServiceEvent::DebugLog(format_ironbeam_strategy_decision(
+            session,
+            IronbeamStrategyDecisionDebug {
+                decision: "target already current",
+                signal: Some(signal),
+                bar_ts: Some(signal_bar.ts_ns),
+                actual_qty: actual_market_qty,
+                effective_qty: current_qty,
+                target_qty: Some(target_qty),
+                strategy_detail: &debug_summary,
+                gate_detail,
+            },
         )));
         sync_execution_protection(client, session, latency, internal_tx, Some(&signal_bar)).await?;
         rebuild_account_snapshots(session);
@@ -291,14 +358,26 @@ pub(super) async fn maybe_run_execution_strategy(
     {
         OrderDispatchOutcome::NoOp { message } => {
             session.execution_runtime.last_summary = message.clone();
-            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-                "strategy dispatch noop | {} | target_qty {} | actual_qty {} | effective_qty {} | message {} | {}",
+            let gate_detail = format!(
+                "strategy dispatch noop | {} | target_qty {} | actual_qty {} | effective_qty {} | message {}",
                 active_native_slug(session),
                 target_qty,
                 actual_market_qty,
                 current_qty,
-                message,
-                debug_summary
+                message
+            );
+            let _ = event_tx.send(ServiceEvent::DebugLog(format_ironbeam_strategy_decision(
+                session,
+                IronbeamStrategyDecisionDebug {
+                    decision: "dispatch noop",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty: actual_market_qty,
+                    effective_qty: current_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                },
             )));
             let _ = event_tx.send(ServiceEvent::Status(message));
         }
@@ -480,6 +559,77 @@ fn latest_strategy_bar_ts(session: &IronbeamSession) -> Option<i64> {
     strategy_bars(session).last().map(|bar| bar.ts_ns)
 }
 
+fn strategy_bar_debug_position(
+    session: &IronbeamSession,
+    signal_bar_ts: Option<i64>,
+) -> (Option<String>, Option<String>) {
+    let bars = strategy_bars(session);
+    let bar_count = Some(bars.len().to_string());
+    let bar_index = signal_bar_ts.and_then(|ts| {
+        bars.iter()
+            .position(|bar| bar.ts_ns == ts)
+            .map(|idx| idx + 1)
+    });
+    (bar_index.map(|idx| idx.to_string()), bar_count)
+}
+
+fn debug_pending_target(session: &IronbeamSession) -> String {
+    session
+        .execution_runtime
+        .pending_target_qty
+        .map(|qty| qty.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn debug_target_qty(target_qty: Option<i32>) -> String {
+    target_qty
+        .map(|qty| qty.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+struct IronbeamStrategyDecisionDebug<'a> {
+    decision: &'a str,
+    signal: Option<StrategySignal>,
+    bar_ts: Option<i64>,
+    actual_qty: i32,
+    effective_qty: i32,
+    target_qty: Option<i32>,
+    strategy_detail: &'a str,
+    gate_detail: String,
+}
+
+fn format_ironbeam_strategy_decision(
+    session: &IronbeamSession,
+    debug: IronbeamStrategyDecisionDebug<'_>,
+) -> String {
+    let (bar_index, bar_count) = strategy_bar_debug_position(session, debug.bar_ts);
+    format_strategy_decision(&StrategyDecisionDebug {
+        strategy: Some(active_native_slug(session).to_string()),
+        broker: Some("ironbeam".to_string()),
+        path: Some("guarded".to_string()),
+        decision: Some(debug.decision.to_string()),
+        timing: Some(active_signal_timing_label(session).to_string()),
+        signal_delay_bars: Some(
+            session
+                .execution_config
+                .native_signal_delay_bars
+                .to_string(),
+        ),
+        bar_ts: debug.bar_ts.map(|ts| ts.to_string()),
+        bar_index,
+        bar_count,
+        fingerprint: None,
+        actual_qty: Some(debug.actual_qty.to_string()),
+        effective_qty: Some(debug.effective_qty.to_string()),
+        pending_target: Some(debug_pending_target(session)),
+        target_qty: Some(debug_target_qty(debug.target_qty)),
+        signal: debug.signal.map(|signal| signal.label().to_string()),
+        reason: Some(debug.decision.to_string()),
+        strategy_detail: Some(debug.strategy_detail.to_string()),
+        gate_detail: Some(debug.gate_detail),
+    })
+}
+
 fn active_native_slug(session: &IronbeamSession) -> &'static str {
     session.execution_config.native_strategy.slug()
 }
@@ -522,8 +672,11 @@ fn evaluate_active_execution_strategy(
                 .execution_config
                 .native_hma
                 .evaluate(bars, side_from_signed_qty(current_qty));
-            let summary = evaluation.summary();
-            (evaluation.signal, summary.clone(), summary)
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
         }
         NativeStrategyKind::EmaCross => {
             let evaluation = session
@@ -541,8 +694,11 @@ fn evaluate_active_execution_strategy(
                 .execution_config
                 .native_hma_cross
                 .evaluate(bars, side_from_signed_qty(current_qty));
-            let summary = evaluation.summary();
-            (evaluation.signal, summary.clone(), summary)
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
         }
     }
 }
