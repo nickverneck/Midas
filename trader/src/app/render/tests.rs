@@ -156,6 +156,13 @@ fn enable_tradovate_controls(app: &mut App) {
     };
 }
 
+fn select_ready_contract(app: &mut App) {
+    app.contract_results = vec![contract(99, "ESZ6")];
+    app.selected_contract = 0;
+    app.market.contract_id = Some(99);
+    app.market.contract_name = Some("ESZ6".to_string());
+}
+
 fn expect_select_account(rx: &mut UnboundedReceiver<ServiceCommand>, account_id: i64) {
     match rx.try_recv().expect("expected select-account command") {
         ServiceCommand::SelectAccount { account_id: actual } => {
@@ -1085,13 +1092,13 @@ fn monitor_only_strategy_setup_removes_arm_wording() {
     assert!(
         setup
             .iter()
-            .any(|line| line.contains("Continue To Dashboard (Monitor Only)"))
+            .any(|line| line.contains("Continue / Monitor Only"))
     );
     assert!(setup.iter().all(|line| !line.contains("Arm Strategy")));
     assert!(
         notes
             .iter()
-            .any(|line| line.contains("dashboard in monitor mode"))
+            .any(|line| line.contains("dashboard without arming"))
     );
     assert!(
         preview
@@ -1106,11 +1113,99 @@ fn monitor_only_strategy_setup_removes_arm_wording() {
 }
 
 #[test]
+fn strategy_readiness_reports_ready_to_arm_with_account_and_contract() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
+
+    let readiness = app.strategy_readiness();
+    let setup = strategy_setup_text(&app);
+    let preview = rendered_text(app.strategy_preview_lines());
+
+    assert_eq!(readiness.status, StrategyReadinessStatus::ReadyToArm);
+    assert!(
+        setup
+            .iter()
+            .any(|line| line.contains("Continue / Arm Native Strategy"))
+    );
+    assert!(preview.iter().any(|line| line == "Readiness: Ready to arm"));
+}
+
+#[test]
+fn strategy_continue_without_selected_contract_opens_monitor_only_without_arming() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.focus = Focus::StrategyContinue;
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Dashboard);
+    expect_select_account(&mut cmd_rx, 1);
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[test]
+fn strategy_readiness_previews_pre_arm_adjustments() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_execution_path = NativeExecutionPath::HmaDirect;
+    app.strategy.native_reversal_mode = NativeReversalMode::Direct;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+
+    let preview = rendered_text(app.strategy_preview_lines());
+
+    assert!(preview.iter().any(|line| line == "Readiness: Ready to arm"));
+    assert!(preview.iter().any(|line| line.contains("CloseAll > Enter")));
+    assert!(preview.iter().any(|line| line.contains("Guarded")));
+}
+
+#[test]
+fn invalid_crossover_lengths_need_attention_and_do_not_arm() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::StrategyContinue;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_ema.fast_length = 20;
+    app.strategy.native_ema.slow_length = 20;
+
+    let setup = strategy_setup_text(&app);
+    let preview = rendered_text(app.strategy_preview_lines());
+
+    assert!(
+        setup
+            .iter()
+            .any(|line| line.contains("Review Strategy Setup"))
+    );
+    assert!(
+        preview
+            .iter()
+            .any(|line| line == "Readiness: Needs attention")
+    );
+    assert!(preview.iter().any(|line| line.contains("Fast EMA Length")));
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Strategy);
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[test]
 fn strategy_continue_applies_draft_config_and_arms() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
     enable_tradovate_controls(&mut app);
     app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
     app.screen = Screen::Strategy;
     app.focus = Focus::NativeReversalMode;
 
@@ -2454,6 +2549,7 @@ fn strategy_continue_syncs_selected_account_before_arming() {
     enable_tradovate_controls(&mut app);
     app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
     app.selected_account = 1;
+    select_ready_contract(&mut app);
     app.focus = Focus::StrategyContinue;
 
     app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
@@ -2475,6 +2571,7 @@ fn strategy_continue_forces_guarded_when_settings_need_order_strategy_path() {
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
     enable_tradovate_controls(&mut app);
     app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
     app.focus = Focus::StrategyContinue;
     app.strategy.kind = StrategyKind::Native;
     app.strategy.native_strategy = NativeStrategyKind::HmaCross;
@@ -2508,6 +2605,7 @@ fn strategy_continue_forces_closeall_when_protection_needs_broker_owned_reversal
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
     enable_tradovate_controls(&mut app);
     app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
     app.focus = Focus::StrategyContinue;
     app.strategy.kind = StrategyKind::Native;
     app.strategy.native_strategy = NativeStrategyKind::EmaCross;

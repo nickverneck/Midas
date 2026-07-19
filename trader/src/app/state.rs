@@ -19,6 +19,39 @@ struct DisplayedAutoTrail {
     first_stop_price: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrategyReadinessStatus {
+    ReadyToArm,
+    MonitorOnly,
+    PreviewOnly,
+    NeedsAttention,
+}
+
+impl StrategyReadinessStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadyToArm => "Ready to arm",
+            Self::MonitorOnly => "Monitor only",
+            Self::PreviewOnly => "Preview only",
+            Self::NeedsAttention => "Needs attention",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrategyReadiness {
+    status: StrategyReadinessStatus,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+    adjustments: Vec<String>,
+}
+
+impl StrategyReadiness {
+    fn can_arm(&self) -> bool {
+        self.status == StrategyReadinessStatus::ReadyToArm
+    }
+}
+
 impl LogEntry {
     fn render_line(&self) -> String {
         self.render_line_with_message(&self.message)
@@ -942,6 +975,142 @@ impl App {
             format_latency_ms(self.latency.last_fill_ms),
             format_age_ms(self.market_update_age_ms()),
         )
+    }
+
+    fn strategy_readiness(&self) -> StrategyReadiness {
+        let mut blockers = Vec::new();
+        let mut warnings = Vec::new();
+        let mut adjustments = Vec::new();
+
+        if self.strategy.kind != StrategyKind::Native {
+            return StrategyReadiness {
+                status: StrategyReadinessStatus::PreviewOnly,
+                blockers: vec![format!(
+                    "{} is not executable from the TUI yet.",
+                    self.strategy.kind.label()
+                )],
+                warnings,
+                adjustments,
+            };
+        }
+
+        if self.strategy.order_qty <= 0 {
+            blockers.push("Order Qty must be at least 1.".to_string());
+        }
+
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                if self.strategy.native_hma.hma_length < 2 {
+                    blockers.push("HMA Length must be at least 2.".to_string());
+                }
+                if self.strategy.native_hma.angle_lookback == 0 {
+                    blockers.push("Angle Lookback must be at least 1.".to_string());
+                }
+                if self.strategy.native_hma.bars_required_to_trade == 0 {
+                    blockers.push("Bars Required must be at least 1.".to_string());
+                }
+            }
+            NativeStrategyKind::EmaCross => {
+                let fast = self.strategy.native_ema.fast_length;
+                let slow = self.strategy.native_ema.slow_length;
+                if fast >= slow {
+                    blockers.push(format!(
+                        "Fast EMA Length ({fast}) must be less than Slow EMA Length ({slow})."
+                    ));
+                }
+            }
+            NativeStrategyKind::HmaCross => {
+                let fast = self.strategy.native_hma_cross.fast_length;
+                let slow = self.strategy.native_hma_cross.slow_length;
+                if fast >= slow {
+                    blockers.push(format!(
+                        "Fast HMA Length ({fast}) must be less than Slow HMA Length ({slow})."
+                    ));
+                }
+            }
+        }
+
+        if self.strategy.native_signal_timing == NativeSignalTiming::ClosedBar
+            && self.market.bars.is_empty()
+        {
+            warnings.push("Closed-bar timing will wait for completed bars.".to_string());
+        }
+        if self.native_protection_controls_visible() && !self.active_native_uses_broker_owned_protection() {
+            warnings.push("No TP/SL/trailing protection is configured.".to_string());
+        }
+
+        if self.active_native_uses_broker_owned_protection()
+            && !self.capabilities.native_protection
+        {
+            blockers.push("Native protection is unavailable for this engine.".to_string());
+        } else {
+            if self.active_native_uses_broker_owned_protection()
+                && self.strategy.native_reversal_mode == NativeReversalMode::Direct
+            {
+                adjustments.push(
+                    "Direct reversal will switch to CloseAll > Enter for broker-owned protection."
+                        .to_string(),
+                );
+            }
+            if self.active_native_requires_guarded_path()
+                && self.strategy.native_execution_path != NativeExecutionPath::Guarded
+            {
+                adjustments.push(
+                    "Execution Path will switch to Guarded for this reversal/protection setup."
+                        .to_string(),
+                );
+            }
+        }
+
+        if !blockers.is_empty() {
+            return StrategyReadiness {
+                status: StrategyReadinessStatus::NeedsAttention,
+                blockers,
+                warnings,
+                adjustments,
+            };
+        }
+
+        if !self.automated_strategy_affordance_visible() {
+            blockers.push(format!(
+                "{} automation is unavailable.",
+                self.selected_broker.label()
+            ));
+        }
+        if self.accounts.get(self.selected_account).is_none() {
+            blockers.push("Select an account before arming.".to_string());
+        }
+        if !self.selected_contract_ready() {
+            blockers.push("Select a contract before arming.".to_string());
+        }
+
+        StrategyReadiness {
+            status: if blockers.is_empty() {
+                StrategyReadinessStatus::ReadyToArm
+            } else {
+                StrategyReadinessStatus::MonitorOnly
+            },
+            blockers,
+            warnings,
+            adjustments,
+        }
+    }
+
+    fn selected_contract_ready(&self) -> bool {
+        self.contract_results.get(self.selected_contract).is_some()
+            || self.market.contract_id.is_some()
+            || self.market.contract_name.is_some()
+    }
+
+    fn strategy_continue_label(&self) -> String {
+        match self.strategy_readiness().status {
+            StrategyReadinessStatus::ReadyToArm => {
+                "[Enter] Continue / Arm Native Strategy".to_string()
+            }
+            StrategyReadinessStatus::MonitorOnly => "[Enter] Continue / Monitor Only".to_string(),
+            StrategyReadinessStatus::PreviewOnly => "[Enter] Continue / Preview Only".to_string(),
+            StrategyReadinessStatus::NeedsAttention => "[Enter] Review Strategy Setup".to_string(),
+        }
     }
 
     fn sync_execution_strategy_config(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {

@@ -347,13 +347,25 @@ impl App {
             }
             Focus::StrategyContinue => {
                 if key.code == KeyCode::Enter {
+                    let readiness = self.strategy_readiness();
+                    if readiness.status == StrategyReadinessStatus::NeedsAttention {
+                        self.status = readiness.blockers.first().cloned().unwrap_or_else(|| {
+                            "Review strategy setup before continuing.".to_string()
+                        });
+                        self.push_log(format!("Strategy setup needs attention: {}", self.status));
+                        return;
+                    }
+
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
                     self.sync_selected_account(cmd_tx);
-                    if self.automated_strategy_affordance_visible() {
+                    if readiness.can_arm() {
                         self.arm_native_strategy(cmd_tx);
                     } else {
-                        self.push_log("Opening the dashboard in monitor mode.".to_string());
+                        self.push_log(format!(
+                            "Opening the dashboard in {} mode.",
+                            readiness.status.label().to_ascii_lowercase()
+                        ));
                     }
                     self.push_log(format!(
                         "Strategy selected: {}",

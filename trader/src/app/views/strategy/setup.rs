@@ -324,13 +324,8 @@ impl App {
         }
 
         lines.push(Line::from(""));
-        let continue_label = if self.automated_strategy_affordance_visible() {
-            "[Enter] Continue To Dashboard / Arm Strategy"
-        } else {
-            "[Enter] Continue To Dashboard (Monitor Only)"
-        };
         lines.push(styled_line(
-            continue_label.to_string(),
+            self.strategy_continue_label(),
             self.focus == Focus::StrategyContinue,
         ));
         lines
@@ -355,12 +350,20 @@ impl App {
                     Line::from("Blockout can flatten before close and hold until reopen."),
                     Line::from("Controls: Up/Down move, Left/Right edit."),
                 ]);
-                if self.automated_strategy_affordance_visible() {
-                    lines.push(Line::from("Enter on Continue arms the strategy."));
-                } else {
-                    lines.push(Line::from(
-                        "Enter on Continue opens the dashboard in monitor mode.",
-                    ));
+                match self.strategy_readiness().status {
+                    StrategyReadinessStatus::ReadyToArm => {
+                        lines.push(Line::from("Enter on Continue arms the strategy."));
+                    }
+                    StrategyReadinessStatus::NeedsAttention => {
+                        lines.push(Line::from(
+                            "Enter on Continue stays here until setup is ready.",
+                        ));
+                    }
+                    StrategyReadinessStatus::MonitorOnly | StrategyReadinessStatus::PreviewOnly => {
+                        lines.push(Line::from(
+                            "Enter on Continue opens the dashboard without arming.",
+                        ));
+                    }
                 }
             }
             StrategyKind::Lua => lines.extend([
@@ -379,6 +382,7 @@ impl App {
     }
 
     pub(in crate::app) fn strategy_preview_lines(&self) -> Vec<Line<'static>> {
+        let readiness = self.strategy_readiness();
         let mut lines = vec![
             Line::from(format!("Selected: {}", self.strategy.summary_label())),
             Line::from(match self.strategy.kind {
@@ -400,7 +404,23 @@ impl App {
                 }
             }),
             Line::from(format!("Runtime: {}", self.strategy_runtime_summary())),
+            Line::from(format!("Readiness: {}", readiness.status.label())),
         ];
+
+        let blocker_prefix = match readiness.status {
+            StrategyReadinessStatus::NeedsAttention => "Needs attention",
+            StrategyReadinessStatus::PreviewOnly => "Preview only",
+            _ => "Monitor",
+        };
+        for reason in readiness.blockers.iter().take(2) {
+            lines.push(Line::from(format!("{blocker_prefix}: {reason}")));
+        }
+        for adjustment in readiness.adjustments.iter().take(2) {
+            lines.push(Line::from(format!("Will adjust on arm: {adjustment}")));
+        }
+        for warning in readiness.warnings.iter().take(2) {
+            lines.push(Line::from(format!("Warning: {warning}")));
+        }
 
         if self.strategy.kind == StrategyKind::Native {
             lines.push(Line::from(self.native_summary_for_display()));
