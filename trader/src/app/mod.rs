@@ -20,8 +20,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Cell, Chart, Dataset, GraphType, List, ListItem, ListState, Paragraph,
-    Row, Table, Tabs, Wrap,
+    Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, ListState,
+    Paragraph, Row, Table, Tabs, Wrap,
     canvas::{Canvas, Line as CanvasLine},
 };
 use std::collections::VecDeque;
@@ -45,6 +45,7 @@ pub struct App {
     engine_summaries: Vec<EngineSummary>,
     selected_engine: usize,
     engine_creation_enabled: bool,
+    pending_engine_lifecycle_confirmation: Option<EngineLifecycleConfirmation>,
     pending_engine_selection_action: Option<EngineSelectionAction>,
     engine_socket_path: Option<PathBuf>,
     active_engine_key: Option<EngineKey>,
@@ -165,6 +166,59 @@ pub(crate) enum EngineSelectionAction {
         socket_path: PathBuf,
     },
     CreateNew,
+    Refresh,
+    Kill {
+        id: u32,
+    },
+    CloseAndKill {
+        id: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineLifecycleAction {
+    Kill,
+    CloseAndKill,
+}
+
+impl EngineLifecycleAction {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Kill => "Confirm Kill Engine",
+            Self::CloseAndKill => "Confirm Close And Kill",
+        }
+    }
+
+    fn status_verb(self) -> &'static str {
+        match self {
+            Self::Kill => "kill",
+            Self::CloseAndKill => "close and kill",
+        }
+    }
+
+    fn running_message(self, id: u32) -> String {
+        match self {
+            Self::Kill => format!("Killing engine {id}..."),
+            Self::CloseAndKill => {
+                format!("Closing the selected market and killing engine {id}...")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineLifecycleConfirmation {
+    action: EngineLifecycleAction,
+    engine_key: EngineKey,
+    id: u32,
+    socket_path: PathBuf,
+    state: EngineConnectionState,
+    broker_mode: String,
+    account: String,
+    instrument: String,
+    position: String,
+    strategy: String,
+    latest_status: String,
 }
 
 #[derive(Debug, Clone, Default)]

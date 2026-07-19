@@ -18,7 +18,7 @@ impl App {
         };
         let help = match self.screen {
             Screen::EngineSelect => {
-                "Up/Down/Left/Right choose engine | Enter attach/create | F5/Ctrl+S save logs | q quit"
+                "Up/Down/Left/Right choose engine | Enter attach/create | r refresh | F5/Ctrl+S save logs | q quit"
             }
             Screen::BrokerSelect => {
                 "Up/Down/Left/Right choose broker | Enter open login/token options | F6 stats | F5/Ctrl+S save logs | q quit"

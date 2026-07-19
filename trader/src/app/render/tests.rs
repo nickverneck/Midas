@@ -17,6 +17,10 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn ctrl_key(ch: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+}
+
 fn line_span_with_fg(line: &Line<'_>, content: &str, color: Color) -> bool {
     line.spans
         .iter()
@@ -296,6 +300,154 @@ fn engine_picker_enter_on_stale_engine_stays_on_picker() {
 
     assert_eq!(app.screen, Screen::EngineSelect);
     assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("stale"));
+}
+
+#[test]
+fn engine_picker_ctrl_k_opens_kill_confirmation_without_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(ctrl_key('k'));
+
+    let confirmation = app
+        .pending_engine_lifecycle_confirmation
+        .as_ref()
+        .expect("expected kill confirmation");
+    assert_eq!(confirmation.action, EngineLifecycleAction::Kill);
+    assert_eq!(confirmation.id, 10);
+    assert_eq!(confirmation.state, EngineConnectionState::Observing);
+    assert_eq!(
+        confirmation.socket_path,
+        PathBuf::from("/tmp/trader-engine-10.sock")
+    );
+    assert!(app.take_engine_selection_action().is_none());
+}
+
+#[test]
+fn engine_picker_plain_k_and_x_do_not_start_destructive_actions() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(key(KeyCode::Char('k')));
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+
+    app.handle_engine_select_key(key(KeyCode::Char('x')));
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+}
+
+#[test]
+fn engine_picker_kill_cancel_emits_no_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(ctrl_key('k'));
+    app.handle_engine_select_key(key(KeyCode::Esc));
+
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("Canceled kill"));
+}
+
+#[test]
+fn engine_picker_kill_confirm_emits_kill_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(ctrl_key('k'));
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert_eq!(
+        app.take_engine_selection_action(),
+        Some(EngineSelectionAction::Kill { id: 10 })
+    );
+}
+
+#[test]
+fn engine_picker_ctrl_x_opens_close_and_kill_confirmation_for_live_engine() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        false,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key,
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            runtime: ExecutionRuntimeSnapshot {
+                armed: true,
+                last_summary: "armed and tracking".to_string(),
+                ..ExecutionRuntimeSnapshot::default()
+            },
+            selected_account_id: Some(7),
+            selected_contract_name: Some("ESZ6".to_string()),
+            market_position_qty: 3,
+            ..ExecutionStateSnapshot::default()
+        }),
+        false,
+        &cmd_tx,
+    );
+
+    app.handle_engine_select_key(ctrl_key('x'));
+
+    let confirmation = app
+        .pending_engine_lifecycle_confirmation
+        .as_ref()
+        .expect("expected close-and-kill confirmation");
+    assert_eq!(confirmation.action, EngineLifecycleAction::CloseAndKill);
+    assert_eq!(confirmation.id, 10);
+    assert!(confirmation.broker_mode.contains("Tradovate"));
+    assert_eq!(confirmation.instrument, "ESZ6");
+    assert_eq!(confirmation.position, "3");
+    assert_eq!(confirmation.latest_status, "armed and tracking");
+    assert!(app.take_engine_selection_action().is_none());
+}
+
+#[test]
+fn engine_picker_close_and_kill_cancel_emits_no_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(ctrl_key('x'));
+    app.handle_engine_select_key(key(KeyCode::Char('n')));
+
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("Canceled close and kill"));
+}
+
+#[test]
+fn engine_picker_close_and_kill_confirm_emits_action() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(ctrl_key('x'));
+    app.handle_engine_select_key(key(KeyCode::Char('y')));
+
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert_eq!(
+        app.take_engine_selection_action(),
+        Some(EngineSelectionAction::CloseAndKill { id: 10 })
+    );
+}
+
+#[test]
+fn engine_picker_close_and_kill_refuses_stale_engine() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, false)]);
+
+    app.handle_engine_select_key(ctrl_key('x'));
+
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("Cannot close and kill engine 10"));
     assert!(app.status.contains("stale"));
 }
 

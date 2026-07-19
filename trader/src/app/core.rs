@@ -22,6 +22,7 @@ impl App {
             engine_summaries: Vec::new(),
             selected_engine: 0,
             engine_creation_enabled: true,
+            pending_engine_lifecycle_confirmation: None,
             pending_engine_selection_action: None,
             engine_socket_path: None,
             active_engine_key: None,
@@ -86,7 +87,20 @@ impl App {
     }
 
     pub fn set_running_engines(&mut self, engines: Vec<RunningEngine>) {
-        self.engine_summaries = engines.iter().map(EngineSummary::from_running_engine).collect();
+        let mut previous = std::mem::take(&mut self.engine_summaries);
+        self.engine_summaries = engines
+            .iter()
+            .map(|engine| {
+                let key = EngineKey::from_socket_path(&engine.socket_path);
+                if let Some(index) = previous.iter().position(|summary| summary.key == key) {
+                    let mut summary = previous.swap_remove(index);
+                    summary.refresh_from_running_engine(engine);
+                    summary
+                } else {
+                    EngineSummary::from_running_engine(engine)
+                }
+            })
+            .collect();
         self.running_engines = engines;
         if self.selected_engine > self.engine_summaries.len() {
             self.selected_engine = self.engine_summaries.len();
@@ -101,6 +115,7 @@ impl App {
         self.pending_engine_selection_action.take()
     }
 
+    #[cfg(test)]
     pub fn enter_engine_session(&mut self, socket_path: PathBuf) {
         let engine_key = EngineKey::from_socket_path(&socket_path);
         self.enter_engine_session_for_key(engine_key, socket_path);

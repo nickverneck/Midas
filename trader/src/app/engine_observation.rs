@@ -122,6 +122,28 @@ impl EngineSummary {
         }
     }
 
+    pub(crate) fn refresh_from_running_engine(&mut self, engine: &RunningEngine) {
+        self.key = EngineKey::from_socket_path(&engine.socket_path);
+        self.id = Some(engine.id);
+        self.socket_path = engine.socket_path.clone();
+        if engine.socket_is_live {
+            if matches!(
+                self.connection_state,
+                EngineConnectionState::Stale | EngineConnectionState::Closed
+            ) {
+                self.connection_state = EngineConnectionState::Observing;
+            }
+        } else {
+            self.connection_state = EngineConnectionState::Stale;
+            if self.latest_status.is_none() {
+                self.latest_status = Some(format!(
+                    "Socket {} is unavailable.",
+                    self.socket_path.display()
+                ));
+            }
+        }
+    }
+
     pub(crate) fn apply_event(&mut self, event: &ServiceEvent) {
         match event {
             ServiceEvent::Status(message) => {
