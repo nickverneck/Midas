@@ -531,6 +531,7 @@ impl MinuteBarBuilder {
                     high: price,
                     low: price,
                     close: price,
+                    volume: None,
                 });
             }
             None => {
@@ -541,6 +542,7 @@ impl MinuteBarBuilder {
                     high: price,
                     low: price,
                     close: price,
+                    volume: None,
                 });
             }
         }
@@ -579,6 +581,7 @@ impl RangeBarBuilder {
             high: price,
             low: price,
             close: price,
+            volume: None,
         });
 
         loop {
@@ -601,6 +604,7 @@ impl RangeBarBuilder {
                     high: close,
                     low: close,
                     close,
+                    volume: None,
                 };
                 if price <= close + EPSILON {
                     break;
@@ -620,6 +624,7 @@ impl RangeBarBuilder {
                     high: close,
                     low: close,
                     close,
+                    volume: None,
                 };
                 if price >= close - EPSILON {
                     break;

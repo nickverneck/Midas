@@ -158,6 +158,7 @@ fn parse_time_bars(items: &[Value]) -> Vec<Bar> {
                 high: pick_number(item, &["h", "high"])?,
                 low: pick_number(item, &["l", "low"])?,
                 close: pick_number(item, &["c", "close"])?,
+                volume: None,
             })
         })
         .collect::<Vec<_>>();

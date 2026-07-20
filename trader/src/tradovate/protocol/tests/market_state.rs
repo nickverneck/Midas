@@ -117,6 +117,7 @@ fn fallback_unrealized_pnl_uses_latest_close_and_value_per_point() {
             high: 6730.0,
             low: 6724.0,
             close: 6727.25,
+            volume: None,
         }],
         trade_markers: Vec::new(),
         session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
@@ -148,6 +149,7 @@ fn fallback_unrealized_pnl_ignores_duplicate_symbol_only_position_records() {
             high: 6730.0,
             low: 6724.0,
             close: 6727.25,
+            volume: None,
         }],
         value_per_point: Some(50.0),
         ..MarketSnapshot::default()
@@ -186,6 +188,7 @@ fn build_market_update_emits_snapshot_then_forming_delta() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     };
     let forming_bar = Bar {
         ts_ns: 2,
@@ -193,6 +196,7 @@ fn build_market_update_emits_snapshot_then_forming_delta() {
         high: 5002.0,
         low: 5000.25,
         close: 5001.5,
+        volume: None,
     };
     let mut series = LiveSeries::new();
     series.closed_bars.push(closed_bar.clone());
@@ -254,6 +258,7 @@ fn build_market_update_applies_heikin_ashi_before_snapshot_consumers() {
         high: 14.0,
         low: 8.0,
         close: 12.0,
+        volume: Some(100.0),
     });
     series.closed_bars.push(Bar {
         ts_ns: 2,
@@ -261,6 +266,7 @@ fn build_market_update_applies_heikin_ashi_before_snapshot_consumers() {
         high: 16.0,
         low: 11.0,
         close: 15.0,
+        volume: Some(150.0),
     });
 
     let update = build_market_update(
@@ -292,6 +298,7 @@ fn build_market_update_applies_heikin_ashi_before_snapshot_consumers() {
                         high: 14.0,
                         low: 8.0,
                         close: 11.0,
+                        volume: Some(100.0),
                     },
                     Bar {
                         ts_ns: 2,
@@ -299,6 +306,7 @@ fn build_market_update_applies_heikin_ashi_before_snapshot_consumers() {
                         high: 16.0,
                         low: 11.0,
                         close: 13.5,
+                        volume: Some(150.0),
                     },
                 ]
             );
@@ -315,6 +323,7 @@ fn apply_market_update_keeps_bars_incremental() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     };
     let forming_bar = Bar {
         ts_ns: 2,
@@ -322,6 +331,7 @@ fn apply_market_update_keeps_bars_incremental() {
         high: 5002.0,
         low: 5000.25,
         close: 5001.5,
+        volume: None,
     };
     let next_forming_bar = Bar {
         ts_ns: 3,
@@ -329,6 +339,7 @@ fn apply_market_update_keeps_bars_incremental() {
         high: 5003.0,
         low: 5001.0,
         close: 5002.5,
+        volume: None,
     };
     let marker = TradeMarker {
         fill_id: Some(7),
@@ -394,6 +405,7 @@ fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
         high: 5001.0 + ts_ns as f64,
         low: 4999.0 + ts_ns as f64,
         close: 5000.5 + ts_ns as f64,
+        volume: None,
     };
 
     let mut market = MarketSnapshot {
@@ -430,6 +442,7 @@ fn display_market_snapshot_trims_to_recent_closed_bars_and_keeps_forming_bar() {
         high: 5001.0 + ts_ns as f64,
         low: 4999.0 + ts_ns as f64,
         close: 5000.5 + ts_ns as f64,
+        volume: None,
     };
 
     let mut bars = (1..=300).map(bar).collect::<Vec<_>>();

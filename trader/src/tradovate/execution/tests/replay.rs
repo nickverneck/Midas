@@ -51,6 +51,7 @@ fn replay_trailing_stop_sync_does_not_queue_software_updates() {
         high: 101.5,
         low: 99.75,
         close: 101.0,
+        volume: None,
     };
     sync_execution_protection(&mut session, &broker_tx, Some(&first_bar))
         .expect("broker-owned trailing sync should not queue a software stop update");
@@ -65,6 +66,7 @@ fn replay_trailing_stop_sync_does_not_queue_software_updates() {
         high: 101.25,
         low: 100.0,
         close: 100.5,
+        volume: None,
     };
     sync_execution_protection(&mut session, &broker_tx, Some(&weaker_bar))
         .expect("weaker bar should be a no-op");
@@ -88,6 +90,7 @@ fn replay_trailing_stop_sync_does_not_queue_software_updates() {
         high: 102.0,
         low: 100.5,
         close: 101.75,
+        volume: None,
     };
     sync_execution_protection(&mut session, &broker_tx, Some(&stronger_bar))
         .expect("stronger bar should still leave broker-owned trail alone");

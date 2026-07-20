@@ -284,9 +284,9 @@ impl BarType {
                 "withHistogram": false
             }),
             BarKind::Second => json!({
-                "underlyingType": "Custom",
+                "underlyingType": "Tick",
                 "elementSize": self.value,
-                "elementSizeUnit": "UnderlyingUnits",
+                "elementSizeUnit": "Seconds",
                 "withHistogram": false
             }),
             BarKind::Volume => json!({
@@ -367,6 +367,7 @@ fn heikin_ashi_bars(bars: &[Bar]) -> Vec<Bar> {
             high: ha_high,
             low: ha_low,
             close: ha_close,
+            volume: bar.volume,
         });
 
         previous_open = Some(ha_open);
@@ -388,6 +389,7 @@ mod tests {
             high: 12.0,
             low: 9.0,
             close: 11.0,
+            volume: Some(125.0),
         }];
 
         assert_eq!(
@@ -405,6 +407,7 @@ mod tests {
                 high: 14.0,
                 low: 8.0,
                 close: 12.0,
+                volume: Some(100.0),
             },
             Bar {
                 ts_ns: 2,
@@ -412,6 +415,7 @@ mod tests {
                 high: 16.0,
                 low: 11.0,
                 close: 15.0,
+                volume: Some(150.0),
             },
         ];
 
@@ -426,6 +430,7 @@ mod tests {
                     high: 14.0,
                     low: 8.0,
                     close: 11.0,
+                    volume: Some(100.0),
                 },
                 Bar {
                     ts_ns: 2,
@@ -433,6 +438,7 @@ mod tests {
                     high: 16.0,
                     low: 11.0,
                     close: 13.5,
+                    volume: Some(150.0),
                 },
             ]
         );
@@ -452,9 +458,9 @@ mod tests {
         assert_eq!(
             BarType::second(15).chart_description(),
             json!({
-                "underlyingType": "Custom",
+                "underlyingType": "Tick",
                 "elementSize": 15,
-                "elementSizeUnit": "UnderlyingUnits",
+                "elementSizeUnit": "Seconds",
                 "withHistogram": false
             })
         );
@@ -564,6 +570,8 @@ pub struct Bar {
     pub high: f64,
     pub low: f64,
     pub close: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

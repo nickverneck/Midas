@@ -622,6 +622,7 @@ mod tests {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         }
     }
 

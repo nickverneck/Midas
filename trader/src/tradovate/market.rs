@@ -452,7 +452,24 @@ async fn market_data_worker_inner(
                         continue;
                     }
 
-                    if status == Some(200) && response_id == chart_req_id {
+                    let is_chart_response = chart_req_id.is_some() && response_id == chart_req_id;
+
+                    if is_chart_response
+                        && !status.is_some_and(|code| (200..300).contains(&code))
+                    {
+                        let message = parse_socket_response(&item).expect_err(
+                            "non-success chart response should produce websocket error text",
+                        );
+                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                            "market data chart request failed for {} {} bars: {}",
+                            contract.name,
+                            bar_type.mode_label(candle_mode),
+                            message
+                        )));
+                        continue;
+                    }
+
+                    if status == Some(200) && is_chart_response {
                         if let Some(d) = item.get("d") {
                             historical_id = d.get("historicalId").and_then(Value::as_i64).or(historical_id);
                             realtime_id = d.get("realtimeId").and_then(Value::as_i64).or(realtime_id);

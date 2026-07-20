@@ -151,26 +151,34 @@ impl App {
                             ),
                             self.focus == Focus::HmaTrailingStop,
                         ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Trigger Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::HmaTrailTriggerTicks,
-                                    format!("{:.0}", self.strategy.native_hma.trail_trigger_ticks),
-                                )
-                            ),
-                            self.focus == Focus::HmaTrailTriggerTicks,
-                        ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Offset Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::HmaTrailOffsetTicks,
-                                    format!("{:.0}", self.strategy.native_hma.trail_offset_ticks),
-                                )
-                            ),
-                            self.focus == Focus::HmaTrailOffsetTicks,
-                        ));
+                        if self.strategy.native_hma.use_trailing_stop {
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Trigger Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::HmaTrailTriggerTicks,
+                                        format!(
+                                            "{:.0}",
+                                            self.strategy.native_hma.trail_trigger_ticks
+                                        ),
+                                    )
+                                ),
+                                self.focus == Focus::HmaTrailTriggerTicks,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Offset Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::HmaTrailOffsetTicks,
+                                        format!(
+                                            "{:.0}",
+                                            self.strategy.native_hma.trail_offset_ticks
+                                        ),
+                                    )
+                                ),
+                                self.focus == Focus::HmaTrailOffsetTicks,
+                            ));
+                        }
                     }
                 }
                 NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
@@ -258,26 +266,28 @@ impl App {
                             format!("Trailing Stop: {}", bool_label(use_trailing_stop)),
                             self.focus == Focus::EmaTrailingStop,
                         ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Trigger Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::EmaTrailTriggerTicks,
-                                    format!("{:.0}", trail_trigger_ticks),
-                                )
-                            ),
-                            self.focus == Focus::EmaTrailTriggerTicks,
-                        ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Offset Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::EmaTrailOffsetTicks,
-                                    format!("{:.0}", trail_offset_ticks),
-                                )
-                            ),
-                            self.focus == Focus::EmaTrailOffsetTicks,
-                        ));
+                        if use_trailing_stop {
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Trigger Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::EmaTrailTriggerTicks,
+                                        format!("{:.0}", trail_trigger_ticks),
+                                    )
+                                ),
+                                self.focus == Focus::EmaTrailTriggerTicks,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Offset Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::EmaTrailOffsetTicks,
+                                        format!("{:.0}", trail_offset_ticks),
+                                    )
+                                ),
+                                self.focus == Focus::EmaTrailOffsetTicks,
+                            ));
+                        }
                     }
                 }
             }

@@ -59,13 +59,22 @@ impl App {
                         },
                     ];
                     if show_protection {
-                        detail.push(Line::from(format!(
-                            "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
-                            self.strategy.native_hma.take_profit_ticks,
-                            self.strategy.native_hma.stop_loss_ticks,
-                            self.strategy.native_hma.trail_trigger_ticks,
-                            self.strategy.native_hma.trail_offset_ticks,
-                        )));
+                        let risk = if self.strategy.native_hma.use_trailing_stop {
+                            format!(
+                                "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
+                                self.strategy.native_hma.take_profit_ticks,
+                                self.strategy.native_hma.stop_loss_ticks,
+                                self.strategy.native_hma.trail_trigger_ticks,
+                                self.strategy.native_hma.trail_offset_ticks,
+                            )
+                        } else {
+                            format!(
+                                "Risk: tp_ticks={:.0} sl_ticks={:.0}",
+                                self.strategy.native_hma.take_profit_ticks,
+                                self.strategy.native_hma.stop_loss_ticks,
+                            )
+                        };
+                        detail.push(Line::from(risk));
                     }
                     detail.extend([
                         Line::from(""),
@@ -116,13 +125,22 @@ impl App {
                         },
                     ];
                     if show_protection {
-                        detail.push(Line::from(format!(
-                            "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
-                            self.strategy.native_ema.take_profit_ticks,
-                            self.strategy.native_ema.stop_loss_ticks,
-                            self.strategy.native_ema.trail_trigger_ticks,
-                            self.strategy.native_ema.trail_offset_ticks,
-                        )));
+                        let risk = if self.strategy.native_ema.use_trailing_stop {
+                            format!(
+                                "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
+                                self.strategy.native_ema.take_profit_ticks,
+                                self.strategy.native_ema.stop_loss_ticks,
+                                self.strategy.native_ema.trail_trigger_ticks,
+                                self.strategy.native_ema.trail_offset_ticks,
+                            )
+                        } else {
+                            format!(
+                                "Risk: tp_ticks={:.0} sl_ticks={:.0}",
+                                self.strategy.native_ema.take_profit_ticks,
+                                self.strategy.native_ema.stop_loss_ticks,
+                            )
+                        };
+                        detail.push(Line::from(risk));
                     }
                     detail.extend([
                         Line::from(""),
@@ -169,13 +187,22 @@ impl App {
                         },
                     ];
                     if show_protection {
-                        detail.push(Line::from(format!(
-                            "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
-                            self.strategy.native_hma_cross.take_profit_ticks,
-                            self.strategy.native_hma_cross.stop_loss_ticks,
-                            self.strategy.native_hma_cross.trail_trigger_ticks,
-                            self.strategy.native_hma_cross.trail_offset_ticks,
-                        )));
+                        let risk = if self.strategy.native_hma_cross.use_trailing_stop {
+                            format!(
+                                "Risk: tp_ticks={:.0} sl_ticks={:.0} trail_trigger={:.0} trail_offset={:.0}",
+                                self.strategy.native_hma_cross.take_profit_ticks,
+                                self.strategy.native_hma_cross.stop_loss_ticks,
+                                self.strategy.native_hma_cross.trail_trigger_ticks,
+                                self.strategy.native_hma_cross.trail_offset_ticks,
+                            )
+                        } else {
+                            format!(
+                                "Risk: tp_ticks={:.0} sl_ticks={:.0}",
+                                self.strategy.native_hma_cross.take_profit_ticks,
+                                self.strategy.native_hma_cross.stop_loss_ticks,
+                            )
+                        };
+                        detail.push(Line::from(risk));
                     }
                     detail.extend([
                         Line::from(""),

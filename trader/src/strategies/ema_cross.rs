@@ -458,6 +458,7 @@ mod tests {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         }
     }
 
@@ -517,6 +518,7 @@ mod tests {
                     high: 101.5,
                     low: 99.75,
                     close: 101.0,
+                    volume: None,
                 },
                 Some(0.25),
             )

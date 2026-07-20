@@ -1,6 +1,6 @@
 const SESSION_STATS_DELTA_EPSILON: f64 = 0.005;
 const SESSION_STATS_FEE_MATCH_EPSILON: f64 = 0.015;
-const SESSION_STATS_KNOWN_FEE_AMOUNTS: &[f64] = &[0.35, 0.56, 0.91];
+const SESSION_STATS_KNOWN_FEE_AMOUNTS: &[f64] = &[0.35, 0.56, 0.91, 2.88];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionStatSource {

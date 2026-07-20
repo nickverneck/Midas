@@ -20,6 +20,73 @@ fn parse_bar_accepts_minute_precision_utc_timestamp() {
 
     assert_eq!(bar.ts_ns, expected_ts);
     assert_eq!(bar.close, 6738.0);
+    assert_eq!(bar.volume, None);
+}
+
+#[test]
+fn parse_bar_reads_total_volume() {
+    let bar = parse_bar(&json!({
+        "timestamp": "2026-03-11T22:38Z",
+        "open": 6738.5,
+        "high": 6739.5,
+        "low": 6736.75,
+        "close": 6738.0,
+        "volume": 1200
+    }))
+    .expect("bar should parse");
+
+    assert_eq!(bar.volume, Some(1200.0));
+}
+
+#[test]
+fn parse_bar_sums_up_and_down_volume_when_total_is_absent() {
+    let bar = parse_bar(&json!({
+        "timestamp": "2026-03-11T22:38Z",
+        "open": 6738.5,
+        "high": 6739.5,
+        "low": 6736.75,
+        "close": 6738.0,
+        "upVolume": "725",
+        "downVolume": 475
+    }))
+    .expect("bar should parse");
+
+    assert_eq!(bar.volume, Some(1200.0));
+}
+
+#[test]
+fn parse_bar_sums_bid_and_offer_volume_when_other_totals_are_absent() {
+    let bar = parse_bar(&json!({
+        "timestamp": "2026-03-11T22:38Z",
+        "open": 6738.5,
+        "high": 6739.5,
+        "low": 6736.75,
+        "close": 6738.0,
+        "bidVolume": 480,
+        "offerVolume": "720"
+    }))
+    .expect("bar should parse");
+
+    assert_eq!(bar.volume, Some(1200.0));
+}
+
+#[test]
+fn parse_bar_prefers_total_volume_over_directional_fallbacks() {
+    let bar = parse_bar(&json!({
+        "timestamp": "2026-03-11T22:38Z",
+        "open": 6738.5,
+        "high": 6739.5,
+        "low": 6736.75,
+        "close": 6738.0,
+        "volume": 900,
+        "upVolume": 725,
+        "downVolume": 475,
+        "bidVolume": 480,
+        "offerVolume": 720
+    }))
+    .expect("bar should parse");
+
+    assert_eq!(bar.volume, Some(900.0));
 }
 
 #[test]

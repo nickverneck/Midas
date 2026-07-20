@@ -1024,6 +1024,7 @@ fn strategy_setup_scrolls_focused_option_into_short_panel() {
     enable_tradovate_controls(&mut app);
     app.strategy.native_strategy = NativeStrategyKind::EmaCross;
     app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    app.strategy.native_ema.use_trailing_stop = true;
     app.focus = Focus::EmaTrailOffsetTicks;
 
     let lines = app.strategy_setup_lines();
@@ -1330,6 +1331,131 @@ fn strategy_protection_controls_hide_for_direct_reversal() {
 }
 
 #[test]
+fn trailing_stop_tick_fields_show_only_when_trailing_stop_is_enabled() {
+    let mut hma_app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut hma_app);
+    hma_app.strategy.kind = StrategyKind::Native;
+    hma_app.strategy.native_strategy = NativeStrategyKind::HmaAngle;
+    hma_app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    hma_app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    hma_app.strategy.native_hma.use_trailing_stop = false;
+
+    let hma_focus_order = hma_app.strategy_focus_order();
+    assert!(hma_focus_order.contains(&Focus::HmaTrailingStop));
+    assert!(!hma_focus_order.contains(&Focus::HmaTrailTriggerTicks));
+    assert!(!hma_focus_order.contains(&Focus::HmaTrailOffsetTicks));
+
+    let hma_setup_text = strategy_setup_text(&hma_app);
+    assert!(
+        hma_setup_text
+            .iter()
+            .any(|line| line.contains("Trailing Stop"))
+    );
+    assert!(
+        hma_setup_text
+            .iter()
+            .all(|line| !line.contains("Trail Trigger Ticks"))
+    );
+    assert!(
+        hma_setup_text
+            .iter()
+            .all(|line| !line.contains("Trail Offset Ticks"))
+    );
+
+    let hma_detail_text = rendered_text(hma_app.strategy_detail_lines());
+    assert!(
+        hma_detail_text
+            .iter()
+            .all(|line| !line.contains("trail_trigger"))
+    );
+    assert!(
+        hma_detail_text
+            .iter()
+            .all(|line| !line.contains("trail_offset"))
+    );
+
+    hma_app.strategy.native_hma.use_trailing_stop = true;
+    let hma_focus_order = hma_app.strategy_focus_order();
+    assert!(hma_focus_order.contains(&Focus::HmaTrailTriggerTicks));
+    assert!(hma_focus_order.contains(&Focus::HmaTrailOffsetTicks));
+    let hma_setup_text = strategy_setup_text(&hma_app);
+    assert!(
+        hma_setup_text
+            .iter()
+            .any(|line| line.contains("Trail Trigger Ticks"))
+    );
+    assert!(
+        hma_setup_text
+            .iter()
+            .any(|line| line.contains("Trail Offset Ticks"))
+    );
+
+    let mut ema_app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut ema_app);
+    ema_app.strategy.kind = StrategyKind::Native;
+    ema_app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    ema_app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    ema_app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    ema_app.strategy.native_ema.use_trailing_stop = false;
+
+    let ema_focus_order = ema_app.strategy_focus_order();
+    assert!(ema_focus_order.contains(&Focus::EmaTrailingStop));
+    assert!(!ema_focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(!ema_focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+    let ema_setup_text = strategy_setup_text(&ema_app);
+    assert!(
+        ema_setup_text
+            .iter()
+            .any(|line| line.contains("Trailing Stop"))
+    );
+    assert!(
+        ema_setup_text
+            .iter()
+            .all(|line| !line.contains("Trail Trigger Ticks"))
+    );
+    assert!(
+        ema_setup_text
+            .iter()
+            .all(|line| !line.contains("Trail Offset Ticks"))
+    );
+
+    ema_app.strategy.native_ema.use_trailing_stop = true;
+    let ema_focus_order = ema_app.strategy_focus_order();
+    assert!(ema_focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(ema_focus_order.contains(&Focus::EmaTrailOffsetTicks));
+    let ema_setup_text = strategy_setup_text(&ema_app);
+    assert!(
+        ema_setup_text
+            .iter()
+            .any(|line| line.contains("Trail Trigger Ticks"))
+    );
+    assert!(
+        ema_setup_text
+            .iter()
+            .any(|line| line.contains("Trail Offset Ticks"))
+    );
+
+    let mut hma_cross_app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut hma_cross_app);
+    hma_cross_app.strategy.kind = StrategyKind::Native;
+    hma_cross_app.strategy.native_strategy = NativeStrategyKind::HmaCross;
+    hma_cross_app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    hma_cross_app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    hma_cross_app.strategy.native_hma_cross.use_trailing_stop = false;
+
+    let hma_cross_focus_order = hma_cross_app.strategy_focus_order();
+    assert!(hma_cross_focus_order.contains(&Focus::EmaTrailingStop));
+    assert!(!hma_cross_focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(!hma_cross_focus_order.contains(&Focus::EmaTrailOffsetTicks));
+
+    hma_cross_app.strategy.native_hma_cross.use_trailing_stop = true;
+    let hma_cross_focus_order = hma_cross_app.strategy_focus_order();
+    assert!(hma_cross_focus_order.contains(&Focus::EmaTrailTriggerTicks));
+    assert!(hma_cross_focus_order.contains(&Focus::EmaTrailOffsetTicks));
+}
+
+#[test]
 fn strategy_protection_controls_show_for_broker_owned_reversal_modes() {
     for reversal_mode in [
         NativeReversalMode::FlattenConfirmEnter,
@@ -1341,6 +1467,7 @@ fn strategy_protection_controls_show_for_broker_owned_reversal_modes() {
         app.strategy.native_strategy = NativeStrategyKind::HmaAngle;
         app.strategy.native_execution_path = NativeExecutionPath::Guarded;
         app.strategy.native_reversal_mode = reversal_mode;
+        app.strategy.native_hma.use_trailing_stop = true;
 
         let focus_order = app.strategy_focus_order();
         assert!(focus_order.contains(&Focus::HmaTakeProfitTicks));
@@ -1991,6 +2118,103 @@ fn session_stats_filters_fee_only_and_mixed_fee_balance_deltas() {
     assert!(body.contains("kind=fee"));
     assert!(body.contains("trade_delta=+6.25 fee_delta=-0.56"));
     assert!(body.contains("trade_delta=-7.50 fee_delta=-0.91"));
+}
+
+#[test]
+fn session_stats_classifies_es_commissions_as_fees() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.market.tick_size = Some(0.25);
+    app.market.value_per_point = Some(50.0);
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    for snapshot in [
+        balance_snapshot_with_position(7, "SIM", 1_000.00, 0.0),
+        balance_snapshot_with_position(7, "SIM", 997.12, 1.0),
+        balance_snapshot_with_position(7, "SIM", 1_056.74, 0.0),
+        balance_snapshot_with_position(7, "SIM", 1_053.86, -1.0),
+        balance_snapshot_with_position(7, "SIM", 1_025.98, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.wins, 1);
+    assert_eq!(stats.losses, 1);
+    assert_eq!(stats.flat_moves, 0);
+    assert_eq!(stats.fee_events, 4);
+    assert_eq!(stats.event_count(), 4);
+    assert_money_eq(stats.session_pnl(), 25.98);
+    assert_money_eq(stats.trade_pnl_ex_fees(), 37.50);
+    assert_money_eq(stats.total_fees, -11.52);
+    assert_money_eq(stats.long_side.pnl, 62.50);
+    assert_money_eq(stats.short_side.pnl, -25.00);
+    assert_eq!(stats.long_side.wins, 1);
+    assert_eq!(stats.short_side.losses, 1);
+    assert_eq!(stats.events[0].kind, SessionBalanceEventKind::Fee);
+    assert_eq!(stats.events[1].kind, SessionBalanceEventKind::Mixed);
+    assert_eq!(stats.events[2].kind, SessionBalanceEventKind::Fee);
+    assert_eq!(stats.events[3].kind, SessionBalanceEventKind::Mixed);
+    assert_money_eq(stats.events[0].trade_delta, 0.0);
+    assert_money_eq(stats.events[0].fee_delta, -2.88);
+    assert_money_eq(stats.events[1].trade_delta, 62.50);
+    assert_money_eq(stats.events[1].fee_delta, -2.88);
+    assert_money_eq(stats.events[2].trade_delta, 0.0);
+    assert_money_eq(stats.events[2].fee_delta, -2.88);
+    assert_money_eq(stats.events[3].trade_delta, -25.00);
+    assert_money_eq(stats.events[3].fee_delta, -2.88);
+
+    let account_lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("Trade PnL Ex Fees: +37.50  Fees: -11.52 (4)"))
+    );
+    assert!(
+        account_lines
+            .iter()
+            .any(|line| line.contains("Wins: 1  Losses: 1  Flats: 0  Fee Events: 4"))
+    );
+
+    let event_text = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("fee trade 0.00 fees -2.88"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("mixed trade +62.50 fees -2.88"))
+    );
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line.contains("mixed trade -25.00 fees -2.88"))
+    );
+
+    let body = app.build_persisted_log_body("20260403T120000Z");
+    assert!(body.contains("fee_events: 4"));
+    assert!(body.contains("total_fees: -11.52"));
+    assert!(body.contains("trade_pnl_ex_fees: +37.50"));
+    assert!(body.contains("trade_delta=+62.50 fee_delta=-2.88"));
+    assert!(body.contains("trade_delta=-25.00 fee_delta=-2.88"));
 }
 
 #[test]

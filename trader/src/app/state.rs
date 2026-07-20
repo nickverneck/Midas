@@ -338,9 +338,13 @@ impl App {
                             Focus::HmaTakeProfitTicks,
                             Focus::HmaStopLossTicks,
                             Focus::HmaTrailingStop,
-                            Focus::HmaTrailTriggerTicks,
-                            Focus::HmaTrailOffsetTicks,
                         ]);
+                        if self.strategy.native_hma.use_trailing_stop {
+                            order.extend([
+                                Focus::HmaTrailTriggerTicks,
+                                Focus::HmaTrailOffsetTicks,
+                            ]);
+                        }
                     }
                 }
                 NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
@@ -354,9 +358,19 @@ impl App {
                             Focus::EmaTakeProfitTicks,
                             Focus::EmaStopLossTicks,
                             Focus::EmaTrailingStop,
-                            Focus::EmaTrailTriggerTicks,
-                            Focus::EmaTrailOffsetTicks,
                         ]);
+                        let use_trailing_stop = match self.strategy.native_strategy {
+                            NativeStrategyKind::HmaCross => {
+                                self.strategy.native_hma_cross.use_trailing_stop
+                            }
+                            _ => self.strategy.native_ema.use_trailing_stop,
+                        };
+                        if use_trailing_stop {
+                            order.extend([
+                                Focus::EmaTrailTriggerTicks,
+                                Focus::EmaTrailOffsetTicks,
+                            ]);
+                        }
                     }
                 }
             }
