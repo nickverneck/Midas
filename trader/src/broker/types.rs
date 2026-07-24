@@ -143,17 +143,25 @@ pub struct AccountInfo {
 pub enum BarKind {
     Minute,
     Second,
+    Tick,
     Volume,
     Range,
 }
 
 impl BarKind {
-    const ALL: [Self; 4] = [Self::Minute, Self::Second, Self::Volume, Self::Range];
+    const ALL: [Self; 5] = [
+        Self::Minute,
+        Self::Second,
+        Self::Tick,
+        Self::Volume,
+        Self::Range,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Minute => "Minute",
             Self::Second => "Seconds",
+            Self::Tick => "Tick Count",
             Self::Volume => "Volume",
             Self::Range => "Range",
         }
@@ -163,6 +171,7 @@ impl BarKind {
         match self {
             Self::Minute => "Min",
             Self::Second => "Sec",
+            Self::Tick => "Tick",
             Self::Volume => "Vol",
             Self::Range => "Range",
         }
@@ -199,6 +208,10 @@ impl BarType {
 
     pub fn second(value: u32) -> Self {
         Self::new(BarKind::Second, value)
+    }
+
+    pub fn tick(value: u32) -> Self {
+        Self::new(BarKind::Tick, value)
     }
 
     pub fn volume(value: u32) -> Self {
@@ -249,6 +262,7 @@ impl BarType {
         match self.kind.next() {
             BarKind::Minute => Self::minute(self.value),
             BarKind::Second => Self::second(self.value),
+            BarKind::Tick => Self::tick(self.value),
             BarKind::Volume => Self::volume(self.value),
             BarKind::Range => Self::range(self.value),
         }
@@ -258,6 +272,7 @@ impl BarType {
         match self.kind.previous() {
             BarKind::Minute => Self::minute(self.value),
             BarKind::Second => Self::second(self.value),
+            BarKind::Tick => Self::tick(self.value),
             BarKind::Volume => Self::volume(self.value),
             BarKind::Range => Self::range(self.value),
         }
@@ -284,7 +299,13 @@ impl BarType {
                 "withHistogram": false
             }),
             BarKind::Second => json!({
-                "underlyingType": "Custom",
+                "underlyingType": "Tick",
+                "elementSize": self.value,
+                "elementSizeUnit": "Seconds",
+                "withHistogram": false
+            }),
+            BarKind::Tick => json!({
+                "underlyingType": "Tick",
                 "elementSize": self.value,
                 "elementSizeUnit": "UnderlyingUnits",
                 "withHistogram": false
@@ -367,6 +388,7 @@ fn heikin_ashi_bars(bars: &[Bar]) -> Vec<Bar> {
             high: ha_high,
             low: ha_low,
             close: ha_close,
+            volume: bar.volume,
         });
 
         previous_open = Some(ha_open);
@@ -388,6 +410,7 @@ mod tests {
             high: 12.0,
             low: 9.0,
             close: 11.0,
+            volume: Some(125.0),
         }];
 
         assert_eq!(
@@ -405,6 +428,7 @@ mod tests {
                 high: 14.0,
                 low: 8.0,
                 close: 12.0,
+                volume: Some(100.0),
             },
             Bar {
                 ts_ns: 2,
@@ -412,6 +436,7 @@ mod tests {
                 high: 16.0,
                 low: 11.0,
                 close: 15.0,
+                volume: Some(150.0),
             },
         ];
 
@@ -426,6 +451,7 @@ mod tests {
                     high: 14.0,
                     low: 8.0,
                     close: 11.0,
+                    volume: Some(100.0),
                 },
                 Bar {
                     ts_ns: 2,
@@ -433,6 +459,7 @@ mod tests {
                     high: 16.0,
                     low: 11.0,
                     close: 13.5,
+                    volume: Some(150.0),
                 },
             ]
         );
@@ -452,8 +479,17 @@ mod tests {
         assert_eq!(
             BarType::second(15).chart_description(),
             json!({
-                "underlyingType": "Custom",
+                "underlyingType": "Tick",
                 "elementSize": 15,
+                "elementSizeUnit": "Seconds",
+                "withHistogram": false
+            })
+        );
+        assert_eq!(
+            BarType::tick(100).chart_description(),
+            json!({
+                "underlyingType": "Tick",
+                "elementSize": 100,
                 "elementSizeUnit": "UnderlyingUnits",
                 "withHistogram": false
             })
@@ -564,6 +600,8 @@ pub struct Bar {
     pub high: f64,
     pub low: f64,
     pub close: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

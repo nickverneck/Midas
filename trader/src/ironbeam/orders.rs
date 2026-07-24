@@ -40,6 +40,7 @@ enum ProtectionOrderKind {
     StopLoss,
 }
 
+#[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
 pub(super) async fn dispatch_manual_order(
     client: &Client,
     session: &mut IronbeamSession,

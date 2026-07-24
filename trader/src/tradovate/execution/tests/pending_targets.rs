@@ -27,6 +27,7 @@ fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     }];
     session.market.history_loaded = 1;
 
@@ -85,6 +86,7 @@ fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     }];
     session.market.history_loaded = 1;
 
@@ -152,6 +154,7 @@ fn strategy_loop_keeps_pending_target_during_broker_path_grace_after_ack() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     }];
     session.market.history_loaded = 1;
 
@@ -207,6 +210,7 @@ fn strategy_loop_keeps_market_order_pending_target_during_position_sync_grace() 
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     }];
     session.market.history_loaded = 1;
 
@@ -258,6 +262,7 @@ fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace(
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     }];
     session.market.history_loaded = 1;
 
@@ -304,6 +309,7 @@ fn strategy_loop_rechecks_latest_bar_when_pending_target_reaches_with_live_broke
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
     session.user_store.positions.insert(
@@ -422,6 +428,7 @@ fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_ex
         high: 5001.0,
         low: 4999.0,
         close: 5000.5,
+        volume: None,
     }];
     session.market.history_loaded = 1;
 

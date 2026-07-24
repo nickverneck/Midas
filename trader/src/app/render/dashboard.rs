@@ -33,8 +33,11 @@ impl App {
                         self.set_replay_speed(cmd_tx, ReplaySpeed::Realtime);
                         return;
                     }
+                    #[cfg(feature = "manual-orders")]
                     'b' => Some(ManualOrderAction::Buy),
+                    #[cfg(feature = "manual-orders")]
                     's' => Some(ManualOrderAction::Sell),
+                    #[cfg(feature = "manual-orders")]
                     'c' => Some(ManualOrderAction::Close),
                     _ => None,
                 }
@@ -43,11 +46,7 @@ impl App {
         };
 
         if let Some(action) = action {
-            if !self.capabilities.manual_orders {
-                self.push_log(format!(
-                    "{} manual order routing is not enabled yet.",
-                    self.selected_broker.label()
-                ));
+            if !self.manual_order_affordance_visible() {
                 return;
             }
             self.sync_selected_account(cmd_tx);

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import AnalyzerBarSettingsCard from "./AnalyzerBarSettingsCard.svelte";
 	import AnalyzerEnvironmentCard from "./AnalyzerEnvironmentCard.svelte";
 	import AnalyzerHeader from "./AnalyzerHeader.svelte";
 	import DatasetCard from "./DatasetCard.svelte";
@@ -22,8 +23,12 @@
 		invalidAnalyzerMaxPosition: boolean;
 		invalidAnalyzerCommission: boolean;
 		invalidAnalyzerSlippage: boolean;
+		invalidAnalyzerFillSeed: boolean;
+		invalidAnalyzerFillMaxAdverseTicks: boolean;
+		invalidAnalyzerFillTickValueUsd: boolean;
 		invalidAnalyzerMargin: boolean;
 		invalidAnalyzerContractMultiplier: boolean;
+		invalidAnalyzerVolumeBarSize: boolean;
 	};
 
 	type HeatmapMetricOption = { value: keyof AnalyzerMetrics; label: string };
@@ -126,12 +131,19 @@
 			datasetPathInvalid={datasetPathInvalid}
 			onBrowse={onBrowseDataset}
 		/>
+		<AnalyzerBarSettingsCard
+			{analyzer}
+			invalidVolumeBarSize={validation.invalidAnalyzerVolumeBarSize}
+		/>
 		<AnalyzerEnvironmentCard
 			{analyzerEnv}
 			invalidAnalyzerInitialBalance={validation.invalidAnalyzerInitialBalance}
 			invalidAnalyzerMaxPosition={validation.invalidAnalyzerMaxPosition}
 			invalidAnalyzerCommission={validation.invalidAnalyzerCommission}
 			invalidAnalyzerSlippage={validation.invalidAnalyzerSlippage}
+			invalidAnalyzerFillSeed={validation.invalidAnalyzerFillSeed}
+			invalidAnalyzerFillMaxAdverseTicks={validation.invalidAnalyzerFillMaxAdverseTicks}
+			invalidAnalyzerFillTickValueUsd={validation.invalidAnalyzerFillTickValueUsd}
 			invalidAnalyzerMargin={validation.invalidAnalyzerMargin}
 			invalidAnalyzerContractMultiplier={validation.invalidAnalyzerContractMultiplier}
 		/>

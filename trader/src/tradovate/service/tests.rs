@@ -113,6 +113,7 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
         high: 6401.0,
         low: 6399.0,
         close: 6400.5,
+        volume: None,
     }];
     let key = StrategyProtectionKey {
         account_id: 42,
@@ -285,6 +286,7 @@ async fn pending_target_watchdog_respects_order_strategy_position_sync_grace() {
         high: 6401.0,
         low: 6399.0,
         close: 6400.5,
+        volume: None,
     }];
     session.order_latency_tracker = Some(OrderLatencyTracker {
         started_at: time::Instant::now() - Duration::from_secs(3),

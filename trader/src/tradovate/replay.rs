@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(feature = "replay")]
+use crate::replay_cache::{ReplayCacheLibrary, ReplayCacheLoadedServerBars};
+#[cfg(feature = "replay")]
 use anyhow::{Context, Result, bail};
 #[cfg(not(feature = "replay"))]
 use anyhow::{Result, bail};
@@ -27,22 +29,24 @@ pub(crate) struct ReplayState {
     #[cfg(feature = "replay")]
     market_specs: MarketSpecs,
     #[cfg(feature = "replay")]
-    minute1_bars: Arc<[Bar]>,
-    #[cfg(feature = "replay")]
-    range1_bars: Arc<[Bar]>,
+    data: ReplayDataSource,
 }
 
-pub(crate) async fn load_replay_state(cfg: &AppConfig) -> Result<ReplayState> {
+pub(crate) async fn load_replay_state(
+    cfg: &AppConfig,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+) -> Result<ReplayState> {
     #[cfg(not(feature = "replay"))]
     {
-        let _ = cfg;
+        let _ = (cfg, bar_type, candle_mode);
         bail!("replay mode is not enabled in this build; rebuild with `--features replay`");
     }
 
     #[cfg(feature = "replay")]
     {
-        let replay_path = cfg.replay_file_path.clone();
-        tokio::task::spawn_blocking(move || load_replay_state_blocking(&replay_path))
+        let cfg = cfg.clone();
+        tokio::task::spawn_blocking(move || load_replay_state_blocking(&cfg, bar_type, candle_mode))
             .await
             .context("join replay parser task")?
     }
@@ -153,7 +157,21 @@ pub(crate) fn spawn_replay_market_task(
 }
 
 #[cfg(feature = "replay")]
-fn load_replay_state_blocking(path: &Path) -> Result<ReplayState> {
+fn load_replay_state_blocking(
+    cfg: &AppConfig,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+) -> Result<ReplayState> {
+    let library = ReplayCacheLibrary::scan(&cfg.replay_cache_dir);
+    if let Some(cached) = library.load_first_server_bars_jsonl(bar_type, candle_mode, None)? {
+        return replay_state_from_cached_server_bars(cached, bar_type, candle_mode);
+    }
+
+    load_local_tick_replay_state_blocking(&cfg.replay_file_path)
+}
+
+#[cfg(feature = "replay")]
+fn load_local_tick_replay_state_blocking(path: &Path) -> Result<ReplayState> {
     let resolved_path = resolve_replay_path(path)?;
     let file = File::open(&resolved_path)
         .with_context(|| format!("open replay file {}", resolved_path.display()))?;
@@ -161,8 +179,7 @@ fn load_replay_state_blocking(path: &Path) -> Result<ReplayState> {
     let contract_name = infer_contract_name(&resolved_path);
     let tick_size = infer_tick_size(&contract_name);
     let value_per_point = infer_value_per_point(&contract_name);
-    let mut minute_builder = MinuteBarBuilder::default();
-    let mut range_builder = RangeBarBuilder::new(tick_size.max(0.01));
+    let mut ticks = Vec::new();
 
     let mut line_count = 0usize;
     for line in reader.lines() {
@@ -176,23 +193,14 @@ fn load_replay_state_blocking(path: &Path) -> Result<ReplayState> {
                 resolved_path.display()
             )
         })?;
-        minute_builder.push_tick(tick.ts_ns, tick.last);
-        range_builder.push_tick(tick.ts_ns, tick.last);
+        ticks.push(tick);
         line_count = line_count.saturating_add(1);
     }
 
     if line_count == 0 {
         bail!("replay file {} contained no ticks", resolved_path.display());
     }
-
-    let minute1_bars = minute_builder.finish();
-    let range1_bars = range_builder.finish();
-    if minute1_bars.is_empty() || range1_bars.is_empty() {
-        bail!(
-            "replay file {} did not produce minute/range bars",
-            resolved_path.display()
-        );
-    }
+    ticks.sort_by_key(|tick| tick.ts_ns);
 
     let contract_id = replay_contract_id(&resolved_path);
     let description = format!("Replay Dataset ({})", resolved_path.display());
@@ -226,8 +234,81 @@ fn load_replay_state_blocking(path: &Path) -> Result<ReplayState> {
             value_per_point: Some(value_per_point),
             tick_size: Some(tick_size),
         },
-        minute1_bars: Arc::from(minute1_bars.into_boxed_slice()),
-        range1_bars: Arc::from(range1_bars.into_boxed_slice()),
+        data: ReplayDataSource::LocalTicks(Arc::from(ticks.into_boxed_slice())),
+    })
+}
+
+#[cfg(feature = "replay")]
+fn replay_state_from_cached_server_bars(
+    cached: ReplayCacheLoadedServerBars,
+    requested_bar_type: BarType,
+    requested_candle_mode: CandleMode,
+) -> Result<ReplayState> {
+    let contract_name = if cached.manifest.contract.symbol.trim().is_empty() {
+        "Replay Cache".to_string()
+    } else {
+        cached.manifest.contract.symbol.clone()
+    };
+    let contract_id = cached
+        .manifest
+        .contract
+        .id
+        .unwrap_or_else(|| replay_contract_id(&cached.data_path));
+    let data_bar_type = cached
+        .file
+        .market_shape
+        .bar_type
+        .unwrap_or(requested_bar_type);
+    let source_label = format!("cache {}", cached.manifest.display_name);
+    let description = format!("Cached Replay Dataset ({})", cached.manifest.display_name);
+    let session_profile = match cached.file.market_shape.session_template.as_deref() {
+        Some(template) if template.eq_ignore_ascii_case("rth") => {
+            InstrumentSessionProfile::EquityRth
+        }
+        _ => InstrumentSessionProfile::FuturesGlobex,
+    };
+    let bars = cached.bars;
+    if bars.is_empty() {
+        bail!(
+            "cached replay dataset {} contained no bars",
+            cached.data_path.display()
+        );
+    }
+
+    Ok(ReplayState {
+        contract: ContractSuggestion {
+            id: contract_id,
+            name: contract_name,
+            description,
+            raw: json!({
+                "source": "replay-cache",
+                "manifestPath": cached.manifest_path.display().to_string(),
+                "dataPath": cached.data_path.display().to_string(),
+                "requestedBarType": requested_bar_type,
+                "requestedCandleMode": requested_candle_mode,
+            }),
+        },
+        account: AccountInfo {
+            id: 1,
+            name: "REPLAY".to_string(),
+            raw: json!({
+                "id": 1,
+                "name": "REPLAY",
+                "source": "replay-cache",
+                "startingBalance": 100000.0,
+                "balance": 100000.0,
+            }),
+        },
+        market_specs: MarketSpecs {
+            session_profile: Some(session_profile),
+            value_per_point: Some(cached.manifest.tick_specs.value_per_point),
+            tick_size: Some(cached.manifest.tick_specs.tick_size),
+        },
+        data: ReplayDataSource::CachedServerBars {
+            bars: Arc::from(bars.into_boxed_slice()),
+            bar_type: data_bar_type,
+            source_label,
+        },
     })
 }
 
@@ -292,7 +373,7 @@ async fn replay_market_worker_inner(
     replay_speed_rx: &mut tokio::sync::watch::Receiver<ReplaySpeed>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let bars = replay.bars_for_type(bar_type);
+    let bars = replay.bars_for_type(bar_type)?;
     if bars.is_empty() {
         bail!("no {} bars available in replay dataset", bar_type.label());
     }
@@ -439,15 +520,67 @@ fn scale_duration(duration: Duration, factor: f64) -> Duration {
 
 #[cfg(feature = "replay")]
 impl ReplayState {
-    fn bars_for_type(&self, bar_type: BarType) -> &[Bar] {
-        if bar_type == BarType::minute(1) {
-            &self.minute1_bars
-        } else if bar_type == BarType::range(1) {
-            &self.range1_bars
-        } else {
-            &[]
+    fn bars_for_type(&self, bar_type: BarType) -> Result<Vec<Bar>> {
+        match &self.data {
+            ReplayDataSource::LocalTicks(ticks) => {
+                let ticks = ticks.as_ref();
+                match bar_type.kind() {
+                    BarKind::Minute => {
+                        let interval = i64::from(bar_type.value()) * 60 * 1_000_000_000;
+                        Ok(build_time_bars(ticks, interval.max(1)))
+                    }
+                    BarKind::Second => {
+                        let interval = i64::from(bar_type.value()) * 1_000_000_000;
+                        Ok(build_time_bars(ticks, interval.max(1)))
+                    }
+                    BarKind::Tick => {
+                        let mut bars = build_tick_count_bars(ticks, bar_type.value());
+                        make_bar_timestamps_strictly_increasing(&mut bars);
+                        Ok(bars)
+                    }
+                    BarKind::Range => {
+                        let mut bars = build_range_bars(
+                            ticks,
+                            self.market_specs.tick_size.unwrap_or(0.25).max(0.01)
+                                * f64::from(bar_type.value()),
+                        );
+                        make_bar_timestamps_strictly_increasing(&mut bars);
+                        Ok(bars)
+                    }
+                    BarKind::Volume => {
+                        bail!(
+                            "volume bars require trade size; local replay file only has trusted last prices"
+                        )
+                    }
+                }
+            }
+            ReplayDataSource::CachedServerBars {
+                bars,
+                bar_type: cached_bar_type,
+                source_label,
+            } => {
+                if *cached_bar_type != bar_type {
+                    bail!(
+                        "cached server-bar replay from {source_label} contains {}; requested {}",
+                        cached_bar_type.label(),
+                        bar_type.label()
+                    );
+                }
+                Ok(bars.as_ref().to_vec())
+            }
         }
     }
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+enum ReplayDataSource {
+    LocalTicks(Arc<[ReplayTick]>),
+    CachedServerBars {
+        bars: Arc<[Bar]>,
+        bar_type: BarType,
+        source_label: String,
+    },
 }
 
 #[cfg(feature = "replay")]
@@ -503,19 +636,68 @@ fn parse_tick_line(line: &str) -> Result<ReplayTick> {
 }
 
 #[cfg(feature = "replay")]
-#[derive(Default)]
-struct MinuteBarBuilder {
-    current_minute_ts_ns: Option<i64>,
+fn build_time_bars(ticks: &[ReplayTick], interval_ns: i64) -> Vec<Bar> {
+    let mut builder = TimeBarBuilder::new(interval_ns);
+    for tick in ticks {
+        builder.push_tick(tick.ts_ns, tick.last);
+    }
+    builder.finish()
+}
+
+#[cfg(feature = "replay")]
+fn build_tick_count_bars(ticks: &[ReplayTick], ticks_per_bar: u32) -> Vec<Bar> {
+    let mut builder = TickCountBarBuilder::new(ticks_per_bar);
+    for tick in ticks {
+        builder.push_tick(tick.ts_ns, tick.last);
+    }
+    builder.finish()
+}
+
+#[cfg(feature = "replay")]
+fn build_range_bars(ticks: &[ReplayTick], range_size: f64) -> Vec<Bar> {
+    let mut builder = RangeBarBuilder::new(range_size);
+    for tick in ticks {
+        builder.push_tick(tick.ts_ns, tick.last);
+    }
+    builder.finish()
+}
+
+#[cfg(feature = "replay")]
+fn make_bar_timestamps_strictly_increasing(bars: &mut [Bar]) {
+    let mut last_ts = None::<i64>;
+    for bar in bars {
+        if let Some(last) = last_ts
+            && bar.ts_ns <= last
+        {
+            bar.ts_ns = last.saturating_add(1);
+        }
+        last_ts = Some(bar.ts_ns);
+    }
+}
+
+#[cfg(feature = "replay")]
+struct TimeBarBuilder {
+    interval_ns: i64,
+    current_period_ts_ns: Option<i64>,
     current_bar: Option<Bar>,
     bars: Vec<Bar>,
 }
 
 #[cfg(feature = "replay")]
-impl MinuteBarBuilder {
+impl TimeBarBuilder {
+    fn new(interval_ns: i64) -> Self {
+        Self {
+            interval_ns: interval_ns.max(1),
+            current_period_ts_ns: None,
+            current_bar: None,
+            bars: Vec::new(),
+        }
+    }
+
     fn push_tick(&mut self, ts_ns: i64, price: f64) {
-        let minute_ts_ns = ts_ns - ts_ns.rem_euclid(60 * 1_000_000_000);
+        let period_ts_ns = ts_ns - ts_ns.rem_euclid(self.interval_ns);
         match self.current_bar.as_mut() {
-            Some(current) if self.current_minute_ts_ns == Some(minute_ts_ns) => {
+            Some(current) if self.current_period_ts_ns == Some(period_ts_ns) => {
                 current.high = current.high.max(price);
                 current.low = current.low.min(price);
                 current.close = price;
@@ -524,25 +706,79 @@ impl MinuteBarBuilder {
                 if let Some(current) = self.current_bar.take() {
                     self.bars.push(current);
                 }
-                self.current_minute_ts_ns = Some(minute_ts_ns);
+                self.current_period_ts_ns = Some(period_ts_ns);
                 self.current_bar = Some(Bar {
-                    ts_ns: minute_ts_ns,
+                    ts_ns: period_ts_ns,
                     open: price,
                     high: price,
                     low: price,
                     close: price,
+                    volume: None,
                 });
             }
             None => {
-                self.current_minute_ts_ns = Some(minute_ts_ns);
+                self.current_period_ts_ns = Some(period_ts_ns);
                 self.current_bar = Some(Bar {
-                    ts_ns: minute_ts_ns,
+                    ts_ns: period_ts_ns,
                     open: price,
                     high: price,
                     low: price,
                     close: price,
+                    volume: None,
                 });
             }
+        }
+    }
+
+    fn finish(mut self) -> Vec<Bar> {
+        if let Some(current) = self.current_bar.take() {
+            self.bars.push(current);
+        }
+        self.bars
+    }
+}
+
+#[cfg(feature = "replay")]
+struct TickCountBarBuilder {
+    ticks_per_bar: usize,
+    current_tick_count: usize,
+    current_bar: Option<Bar>,
+    bars: Vec<Bar>,
+}
+
+#[cfg(feature = "replay")]
+impl TickCountBarBuilder {
+    fn new(ticks_per_bar: u32) -> Self {
+        Self {
+            ticks_per_bar: ticks_per_bar.max(1) as usize,
+            current_tick_count: 0,
+            current_bar: None,
+            bars: Vec::new(),
+        }
+    }
+
+    fn push_tick(&mut self, ts_ns: i64, price: f64) {
+        if self.current_bar.is_none() || self.current_tick_count >= self.ticks_per_bar {
+            if let Some(current) = self.current_bar.take() {
+                self.bars.push(current);
+            }
+            self.current_tick_count = 0;
+            self.current_bar = Some(Bar {
+                ts_ns,
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+                volume: None,
+            });
+        }
+
+        if let Some(current) = self.current_bar.as_mut() {
+            current.ts_ns = ts_ns;
+            current.high = current.high.max(price);
+            current.low = current.low.min(price);
+            current.close = price;
+            self.current_tick_count = self.current_tick_count.saturating_add(1);
         }
     }
 
@@ -579,6 +815,7 @@ impl RangeBarBuilder {
             high: price,
             low: price,
             close: price,
+            volume: None,
         });
 
         loop {
@@ -601,6 +838,7 @@ impl RangeBarBuilder {
                     high: close,
                     low: close,
                     close,
+                    volume: None,
                 };
                 if price <= close + EPSILON {
                     break;
@@ -620,6 +858,7 @@ impl RangeBarBuilder {
                     high: close,
                     low: close,
                     close,
+                    volume: None,
                 };
                 if price >= close - EPSILON {
                     break;
@@ -703,6 +942,23 @@ fn infer_value_per_point(contract_name: &str) -> f64 {
 #[cfg(all(test, feature = "replay"))]
 mod replay_tests {
     use super::*;
+    use crate::replay_cache::{
+        ReplayCacheContract, ReplayCacheInstrument, ReplayCacheServerBarsWrite,
+        ReplayCacheSourceKind, ReplayCacheTickSpecs, write_server_bars_jsonl_cache,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn dt(raw: &str) -> chrono::DateTime<chrono::Utc> {
+        raw.parse().expect("valid timestamp")
+    }
+
+    fn temp_cache_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("trader-replay-state-{name}-{nonce}"))
+    }
 
     #[test]
     fn parse_tick_line_reads_ninjatrader_last_format() {
@@ -713,12 +969,12 @@ mod replay_tests {
     }
 
     #[test]
-    fn minute_bar_builder_groups_ticks_by_minute() {
-        let mut builder = MinuteBarBuilder::default();
+    fn time_bar_builder_groups_ticks_by_interval() {
+        let mut builder = TimeBarBuilder::new(2_000_000_000);
         let base = 1_700_000_000_000_000_000i64;
         builder.push_tick(base, 100.0);
         builder.push_tick(base + 1_000_000_000, 101.0);
-        builder.push_tick(base + 60_000_000_000, 99.5);
+        builder.push_tick(base + 2_000_000_000, 99.5);
         let bars = builder.finish();
 
         assert_eq!(bars.len(), 2);
@@ -726,6 +982,23 @@ mod replay_tests {
         assert_eq!(bars[0].high, 101.0);
         assert_eq!(bars[0].close, 101.0);
         assert_eq!(bars[1].open, 99.5);
+    }
+
+    #[test]
+    fn tick_count_bar_builder_groups_by_number_of_ticks() {
+        let mut builder = TickCountBarBuilder::new(2);
+        let base = 1_700_000_000_000_000_000i64;
+        builder.push_tick(base, 100.0);
+        builder.push_tick(base + 1, 101.0);
+        builder.push_tick(base + 2, 99.5);
+        let bars = builder.finish();
+
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].open, 100.0);
+        assert_eq!(bars[0].high, 101.0);
+        assert_eq!(bars[0].close, 101.0);
+        assert_eq!(bars[1].open, 99.5);
+        assert_eq!(bars[1].close, 99.5);
     }
 
     #[test]
@@ -741,6 +1014,114 @@ mod replay_tests {
         assert_eq!(bars[0].open, 100.0);
         assert_eq!(bars[0].close, 100.25);
         assert_eq!(bars[1].open, 100.25);
+    }
+
+    #[test]
+    fn replay_state_derives_requested_local_file_bar_types() {
+        let base = 1_700_000_000_000_000_000i64;
+        let state = ReplayState {
+            contract: ContractSuggestion {
+                id: 1,
+                name: "MESU6".to_string(),
+                description: "test replay".to_string(),
+                raw: json!({}),
+            },
+            account: AccountInfo {
+                id: 1,
+                name: "REPLAY".to_string(),
+                raw: json!({}),
+            },
+            market_specs: MarketSpecs {
+                session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+                value_per_point: Some(5.0),
+                tick_size: Some(0.25),
+            },
+            data: ReplayDataSource::LocalTicks(Arc::from(
+                vec![
+                    ReplayTick {
+                        ts_ns: base,
+                        last: 100.0,
+                    },
+                    ReplayTick {
+                        ts_ns: base + 1_000_000_000,
+                        last: 100.25,
+                    },
+                    ReplayTick {
+                        ts_ns: base + 60_000_000_000,
+                        last: 100.5,
+                    },
+                ]
+                .into_boxed_slice(),
+            )),
+        };
+
+        assert_eq!(state.bars_for_type(BarType::second(2)).unwrap().len(), 2);
+        assert_eq!(state.bars_for_type(BarType::minute(1)).unwrap().len(), 2);
+        assert_eq!(state.bars_for_type(BarType::tick(2)).unwrap().len(), 2);
+        assert!(state.bars_for_type(BarType::range(1)).unwrap().len() >= 2);
+        assert!(
+            state
+                .bars_for_type(BarType::volume(100))
+                .expect_err("volume is unsupported for price-only replay")
+                .to_string()
+                .contains("volume bars require trade size")
+        );
+    }
+
+    #[test]
+    fn replay_state_keeps_duplicate_timestamp_derived_bars_distinct() {
+        let base = 1_700_000_000_000_000_000i64;
+        let state = ReplayState {
+            contract: ContractSuggestion {
+                id: 1,
+                name: "MESU6".to_string(),
+                description: "test replay".to_string(),
+                raw: json!({}),
+            },
+            account: AccountInfo {
+                id: 1,
+                name: "REPLAY".to_string(),
+                raw: json!({}),
+            },
+            market_specs: MarketSpecs {
+                session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+                value_per_point: Some(5.0),
+                tick_size: Some(0.25),
+            },
+            data: ReplayDataSource::LocalTicks(Arc::from(
+                vec![
+                    ReplayTick {
+                        ts_ns: base,
+                        last: 100.0,
+                    },
+                    ReplayTick {
+                        ts_ns: base,
+                        last: 100.25,
+                    },
+                    ReplayTick {
+                        ts_ns: base,
+                        last: 101.0,
+                    },
+                ]
+                .into_boxed_slice(),
+            )),
+        };
+
+        let tick_bars = state.bars_for_type(BarType::tick(1)).unwrap();
+        assert_eq!(tick_bars.len(), 3);
+        assert!(
+            tick_bars
+                .windows(2)
+                .all(|window| window[0].ts_ns < window[1].ts_ns)
+        );
+
+        let range_bars = state.bars_for_type(BarType::range(1)).unwrap();
+        assert!(range_bars.len() >= 3);
+        assert!(
+            range_bars
+                .windows(2)
+                .all(|window| window[0].ts_ns < window[1].ts_ns)
+        );
     }
 
     #[test]
@@ -788,6 +1169,109 @@ mod replay_tests {
 
         let zero_gap = replay_gap_duration(Some(61_000_000_000), 61_000_000_000, 5);
         assert_eq!(zero_gap, Duration::ZERO);
+    }
+
+    #[test]
+    fn cached_server_bar_state_serves_only_cached_bar_shape() {
+        let base = 1_700_000_000_000_000_000i64;
+        let state = ReplayState {
+            contract: ContractSuggestion {
+                id: 1,
+                name: "MESU6".to_string(),
+                description: "cached replay".to_string(),
+                raw: json!({}),
+            },
+            account: AccountInfo {
+                id: 1,
+                name: "REPLAY".to_string(),
+                raw: json!({}),
+            },
+            market_specs: MarketSpecs {
+                session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+                value_per_point: Some(5.0),
+                tick_size: Some(0.25),
+            },
+            data: ReplayDataSource::CachedServerBars {
+                bar_type: BarType::volume(6500),
+                source_label: "cache fixture".to_string(),
+                bars: Arc::from(
+                    vec![Bar {
+                        ts_ns: base,
+                        open: 100.0,
+                        high: 101.0,
+                        low: 99.0,
+                        close: 100.5,
+                        volume: Some(6500.0),
+                    }]
+                    .into_boxed_slice(),
+                ),
+            },
+        };
+
+        assert_eq!(state.bars_for_type(BarType::volume(6500)).unwrap().len(), 1);
+        assert!(
+            state
+                .bars_for_type(BarType::minute(1))
+                .expect_err("cached server bars are exact-shape data")
+                .to_string()
+                .contains("contains 6500 Vol; requested 1 Min")
+        );
+    }
+
+    #[test]
+    fn load_replay_state_prefers_matching_cached_server_bars() {
+        let cache_root = temp_cache_dir("cache-load");
+        write_server_bars_jsonl_cache(ReplayCacheServerBarsWrite {
+            cache_root: cache_root.clone(),
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "MES".to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "MESU6".to_string(),
+                id: Some(25866054),
+                expiration: None,
+            },
+            request_start: dt("2026-07-23T00:00:00Z"),
+            request_end: dt("2026-07-24T00:00:00Z"),
+            source_kind: ReplayCacheSourceKind::ServerBars,
+            download_request: json!({"source": "unit-test"}),
+            bar_type: BarType::minute(1),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 5.0,
+            },
+            session_template: Some("Globex".to_string()),
+            bars: vec![Bar {
+                ts_ns: dt("2026-07-23T00:00:00Z")
+                    .timestamp_nanos_opt()
+                    .expect("timestamp ns"),
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.5,
+                volume: Some(1000.0),
+            }],
+            warnings: Vec::new(),
+            notes: None,
+        })
+        .expect("write cache");
+
+        let mut cfg = AppConfig::default();
+        cfg.replay_cache_dir = cache_root;
+        cfg.replay_file_path = PathBuf::from("/tmp/trader-replay-missing-local.Last.txt");
+        let state = load_replay_state_blocking(&cfg, BarType::minute(1), CandleMode::HeikinAshi)
+            .expect("load replay state from cache");
+
+        assert_eq!(replay_contract(&state).name, "MESU6");
+        let bars = state
+            .bars_for_type(BarType::minute(1))
+            .expect("cached bars");
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].volume, Some(1000.0));
     }
 
     #[test]

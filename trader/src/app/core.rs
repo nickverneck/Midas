@@ -9,15 +9,27 @@ impl App {
             default_broker()
         };
         let form = FormState::from_config(&config);
+        #[cfg(feature = "replay")]
+        let replay_cache_library = ReplayCacheLibrary::scan(&config.replay_cache_dir);
         let mut app = Self {
             base_config: config,
+            #[cfg(feature = "replay")]
+            replay_cache_library,
             available_brokers,
             selected_broker,
             capabilities: BrokerCapabilities::default(),
             form,
             strategy: StrategyState::new(),
-            screen: Screen::Login,
-            focus: Focus::Env,
+            screen: Screen::EngineSelect,
+            focus: Focus::EngineList,
+            running_engines: Vec::new(),
+            engine_summaries: Vec::new(),
+            selected_engine: 0,
+            engine_creation_enabled: true,
+            pending_engine_lifecycle_confirmation: None,
+            pending_engine_selection_action: None,
+            engine_socket_path: None,
+            active_engine_key: None,
             should_quit: false,
             status: "Idle".to_string(),
             accounts: Vec::new(),
@@ -31,6 +43,7 @@ impl App {
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
             persisted_logs: VecDeque::new(),
+            last_saved_log_path: None,
             session_stats: SessionStatsState::new(session_stats_enabled),
             session_stats_show_fees: true,
             dashboard_visuals_enabled: false,
@@ -43,14 +56,7 @@ impl App {
             last_market_update_at: None,
         };
         app.normalize_market_controls_for_broker();
-        if app.available_brokers.len() > 1 {
-            app.screen = Screen::BrokerSelect;
-            app.focus = Focus::BrokerList;
-            app.status = format!(
-                "Select a broker to continue. Current: {}",
-                app.selected_broker.label()
-            );
-        }
+        app.status = "Select an engine to continue or create a new one.".to_string();
         app.push_log(
             format!(
                 "Broker support compiled in: {}.",
@@ -61,14 +67,14 @@ impl App {
                     .join(", ")
             ),
         );
-        app.push_log("Dashboard hotkeys enabled: b buy, s sell, c close, v visuals.".to_string());
+        app.push_log("Dashboard visual overlays can be toggled with v.".to_string());
         app.push_log(
             "Native HMA Angle and EMA Crossover strategies can auto-trade on closed bars or live forming bars once armed from Strategy."
                 .to_string(),
         );
         app.push_log(
             if app.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay") {
-                "Replay mode available from Login: local ES tick data can stream 1 Range or 1 Min bars."
+                "Replay mode available on F7: local price ticks can derive seconds, minutes, tick-count, and range bars."
             } else {
                 "Replay mode is only available on Tradovate builds with `--features replay`."
             }
@@ -83,6 +89,91 @@ impl App {
             .to_string(),
         );
         app
+    }
+
+    pub fn set_running_engines(&mut self, engines: Vec<RunningEngine>) {
+        let mut previous = std::mem::take(&mut self.engine_summaries);
+        self.engine_summaries = engines
+            .iter()
+            .map(|engine| {
+                let key = EngineKey::from_socket_path(&engine.socket_path);
+                if let Some(index) = previous.iter().position(|summary| summary.key == key) {
+                    let mut summary = previous.swap_remove(index);
+                    summary.refresh_from_running_engine(engine);
+                    summary
+                } else {
+                    EngineSummary::from_running_engine(engine)
+                }
+            })
+            .collect();
+        self.running_engines = engines;
+        self.clamp_selected_engine();
+    }
+
+    pub fn set_engine_creation_enabled(&mut self, enabled: bool) {
+        self.engine_creation_enabled = enabled;
+        self.clamp_selected_engine();
+    }
+
+    pub(crate) fn take_engine_selection_action(&mut self) -> Option<EngineSelectionAction> {
+        self.pending_engine_selection_action.take()
+    }
+
+    #[cfg(test)]
+    pub fn enter_engine_session(&mut self, socket_path: PathBuf) {
+        let engine_key = EngineKey::from_socket_path(&socket_path);
+        self.enter_engine_session_for_key(engine_key, socket_path);
+    }
+
+    pub fn enter_engine_session_for_key(&mut self, engine_key: EngineKey, socket_path: PathBuf) {
+        self.observe_live_engine_socket(socket_path.clone());
+        self.active_engine_key = Some(engine_key);
+        self.engine_socket_path = Some(socket_path.clone());
+        self.move_to_initial_broker_screen();
+        self.push_log(format!("Attached to engine socket {}.", socket_path.display()));
+    }
+
+    pub fn leave_active_engine_session(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.active_engine_key = None;
+        self.engine_socket_path = None;
+        self.screen = Screen::EngineSelect;
+        self.focus = Focus::EngineList;
+        self.capabilities = BrokerCapabilities::default();
+        self.session_kind = SessionKind::Live;
+        self.accounts.clear();
+        self.account_snapshots.clear();
+        self.contract_results.clear();
+        self.market = MarketSnapshot::default();
+        self.strategy_runtime = StrategyRuntimeState::default();
+        self.latency = LatencySnapshot::default();
+        self.replay_speed = ReplaySpeed::default();
+        self.last_market_update_at = None;
+        self.status = message.clone();
+        self.push_log(message);
+    }
+
+    pub fn observe_live_engine_socket(&mut self, socket_path: PathBuf) {
+        let key = EngineKey::from_socket_path(&socket_path);
+        if self.engine_summaries.iter().any(|summary| summary.key == key) {
+            return;
+        }
+        self.engine_summaries.push(EngineSummary::live_socket(socket_path));
+    }
+
+    fn move_to_initial_broker_screen(&mut self) {
+        if self.available_brokers.len() > 1 {
+            self.screen = Screen::BrokerSelect;
+            self.focus = Focus::BrokerList;
+            self.status = format!(
+                "Select a broker to continue. Current: {}",
+                self.selected_broker.label()
+            );
+        } else {
+            self.screen = Screen::Login;
+            self.focus = Focus::Env;
+            self.status = format!("Login for {}", self.selected_broker.label());
+        }
     }
 
     pub fn awaiting_broker_selection(&self) -> bool {
@@ -161,7 +252,10 @@ impl App {
                 self.push_log(self.status.clone());
             }
             ServiceEvent::Disconnected => {
-                if self.awaiting_broker_selection() {
+                if self.engine_socket_path.is_none() {
+                    self.screen = Screen::EngineSelect;
+                    self.focus = Focus::EngineList;
+                } else if self.available_brokers.len() > 1 {
                     self.screen = Screen::BrokerSelect;
                     self.focus = Focus::BrokerList;
                 } else {
@@ -233,6 +327,44 @@ impl App {
             ServiceEvent::ReplaySpeedUpdated(speed) => {
                 self.replay_speed = speed;
             }
+        }
+    }
+
+    pub fn handle_engine_service_event(
+        &mut self,
+        engine_key: EngineKey,
+        event: ServiceEvent,
+        is_active_detail: bool,
+        cmd_tx: &UnboundedSender<ServiceCommand>,
+    ) {
+        if let Some(summary) = self
+            .engine_summaries
+            .iter_mut()
+            .find(|summary| summary.key == engine_key)
+        {
+            summary.apply_event(&event);
+        }
+
+        if is_active_detail {
+            self.handle_service_event(event, cmd_tx);
+        }
+    }
+
+    pub fn handle_engine_receiver_closed(
+        &mut self,
+        engine_key: &EngineKey,
+        is_active_detail: bool,
+    ) {
+        let message = self.engine_receiver_closed_message(engine_key);
+        if let Some(summary) = self
+            .engine_summaries
+            .iter_mut()
+            .find(|summary| &summary.key == engine_key)
+        {
+            summary.mark_receiver_closed(message.clone());
+        }
+        if is_active_detail {
+            self.leave_active_engine_session(message);
         }
     }
 }

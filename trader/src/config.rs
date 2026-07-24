@@ -138,6 +138,7 @@ pub struct AppConfig {
     pub candle_mode: CandleMode,
     pub autoconnect: bool,
     pub replay_file_path: PathBuf,
+    pub replay_cache_dir: PathBuf,
     pub replay_bar_interval_ms: u64,
 }
 
@@ -168,6 +169,7 @@ impl Default for AppConfig {
             candle_mode: CandleMode::Standard,
             autoconnect: false,
             replay_file_path: PathBuf::from("trader/market replay/ES 06-26.Last.txt"),
+            replay_cache_dir: default_replay_cache_dir(),
             replay_bar_interval_ms: 5,
         }
     }
@@ -278,6 +280,9 @@ impl AppConfig {
             env_string_any(&["TRADER_REPLAY_FILE_PATH", "MIDAS_TUI_REPLAY_FILE_PATH"])
         {
             self.replay_file_path = PathBuf::from(raw);
+        }
+        if let Some(raw) = env_string_any(&["TRADER_DATA_CACHE_DIR"]) {
+            self.replay_cache_dir = PathBuf::from(raw);
         }
         if let Some(raw) = env_parse_any::<u64>(&[
             "TRADER_REPLAY_BAR_INTERVAL_MS",
@@ -390,6 +395,58 @@ fn env_bool_any(keys: &[&str]) -> Result<Option<bool>> {
         other => bail!("invalid boolean value `{other}` for {}", keys.join(" / ")),
     };
     Ok(Some(parsed))
+}
+
+fn default_replay_cache_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".local/share/trader/replay-cache")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("trader-config-{name}-{nonce}.toml"))
+    }
+
+    #[test]
+    fn config_loads_replay_cache_dir_from_file() {
+        let path = temp_config_path("cache-root");
+        let cache_dir = std::env::temp_dir().join("trader-cache-configured");
+        fs::write(
+            &path,
+            format!("replay_cache_dir = '{}'\n", cache_dir.display()),
+        )
+        .expect("write config");
+
+        let config = AppConfig::load(Some(&path)).expect("load config");
+
+        assert_eq!(config.replay_cache_dir, cache_dir);
+    }
+
+    #[test]
+    fn default_replay_cache_dir_lives_outside_repo() {
+        let config = AppConfig::default();
+
+        assert!(
+            config
+                .replay_cache_dir
+                .ends_with(".local/share/trader/replay-cache")
+        );
+        assert!(
+            !config
+                .replay_cache_dir
+                .starts_with(env!("CARGO_MANIFEST_DIR"))
+        );
+    }
 }
 
 fn env_parse_any<T>(keys: &[&str]) -> Result<Option<T>>

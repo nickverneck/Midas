@@ -41,6 +41,21 @@ pub struct HmaAngleEvaluation {
     pub angle: Option<f64>,
     pub latest_close: Option<f64>,
     pub latest_hma: Option<f64>,
+    pub bars_len: usize,
+    pub warmup_bars: usize,
+    pub current_side: Option<PositionSide>,
+    pub min_angle: f64,
+    pub angle_lookback: usize,
+    pub longs_only: bool,
+    pub inverted: bool,
+    pub atr: Option<f64>,
+    pub slope: Option<f64>,
+    pub lookback_hma: Option<f64>,
+    pub raw_buy_signal: bool,
+    pub raw_sell_signal: bool,
+    pub effective_buy_signal: bool,
+    pub effective_sell_signal: bool,
+    pub hold_reason: Option<&'static str>,
 }
 
 impl HmaAngleEvaluation {
@@ -56,6 +71,31 @@ impl HmaAngleEvaluation {
             parts.push(format!("HMA: {:.2}", hma));
         }
         parts.join(" | ")
+    }
+
+    pub fn debug_summary(&self) -> String {
+        format!(
+            "Signal: {} | reason: {} | bars: {}/{} | side: {:?} | longs_only: {} | inverted: {} | close: {} | hma: {} | lookback_hma: {} | angle: {} | atr: {} | slope: {} | min_angle: {:.6} | angle_lookback: {} | raw_cross buy={} sell={} | effective_cross buy={} sell={}",
+            self.signal.label(),
+            self.hold_reason.unwrap_or("signal_ready"),
+            self.bars_len,
+            self.warmup_bars,
+            self.current_side,
+            self.longs_only,
+            self.inverted,
+            fmt_price(self.latest_close),
+            fmt_price(self.latest_hma),
+            fmt_price(self.lookback_hma),
+            fmt_price(self.angle),
+            fmt_price(self.atr),
+            fmt_price(self.slope),
+            self.min_angle,
+            self.angle_lookback,
+            self.raw_buy_signal,
+            self.raw_sell_signal,
+            self.effective_buy_signal,
+            self.effective_sell_signal
+        )
     }
 }
 
@@ -92,6 +132,21 @@ impl HmaAngleConfig {
                 angle: None,
                 latest_close: None,
                 latest_hma: None,
+                bars_len: bars.len(),
+                warmup_bars,
+                current_side,
+                min_angle: self.min_angle,
+                angle_lookback: self.angle_lookback,
+                longs_only: self.longs_only,
+                inverted: self.inverted,
+                atr: None,
+                slope: None,
+                lookback_hma: None,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("no_bars"),
             };
         };
 
@@ -101,6 +156,21 @@ impl HmaAngleConfig {
                 angle: None,
                 latest_close: Some(last_bar.close),
                 latest_hma: None,
+                bars_len: bars.len(),
+                warmup_bars,
+                current_side,
+                min_angle: self.min_angle,
+                angle_lookback: self.angle_lookback,
+                longs_only: self.longs_only,
+                inverted: self.inverted,
+                atr: None,
+                slope: None,
+                lookback_hma: None,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("not_enough_bars"),
             };
         }
 
@@ -122,6 +192,24 @@ impl HmaAngleConfig {
                 angle: None,
                 latest_close: Some(last_bar.close),
                 latest_hma: zero_hma.get(idx).copied().filter(|value| value.is_finite()),
+                bars_len: bars.len(),
+                warmup_bars,
+                current_side,
+                min_angle: self.min_angle,
+                angle_lookback: self.angle_lookback,
+                longs_only: self.longs_only,
+                inverted: self.inverted,
+                atr: atr_14.get(idx).copied().filter(|value| value.is_finite()),
+                slope: None,
+                lookback_hma: zero_hma
+                    .get(idx.saturating_sub(self.angle_lookback))
+                    .copied()
+                    .filter(|value| value.is_finite()),
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("warming_up"),
             };
         }
 
@@ -137,6 +225,21 @@ impl HmaAngleConfig {
                 angle: None,
                 latest_close: Some(last_bar.close),
                 latest_hma: Some(zero_hma[idx]),
+                bars_len: bars.len(),
+                warmup_bars,
+                current_side,
+                min_angle: self.min_angle,
+                angle_lookback: self.angle_lookback,
+                longs_only: self.longs_only,
+                inverted: self.inverted,
+                atr: atr.is_finite().then_some(atr),
+                slope: None,
+                lookback_hma: lookback_hma.is_finite().then_some(lookback_hma),
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("invalid_angle_inputs"),
             };
         }
 
@@ -150,24 +253,54 @@ impl HmaAngleConfig {
         let angle = slope.atan().to_degrees();
         let is_steep_enough = angle.abs() >= self.min_angle;
 
-        let mut buy_signal = cross_above(prev_close, prev_hma, curr_close, curr_hma)
+        let raw_buy_signal = cross_above(prev_close, prev_hma, curr_close, curr_hma)
             && is_steep_enough
             && angle > 0.0;
-        let mut sell_signal = cross_below(prev_close, prev_hma, curr_close, curr_hma)
+        let raw_sell_signal = cross_below(prev_close, prev_hma, curr_close, curr_hma)
             && is_steep_enough
             && angle < 0.0;
+        let mut buy_signal = raw_buy_signal;
+        let mut sell_signal = raw_sell_signal;
 
         if self.inverted {
             std::mem::swap(&mut buy_signal, &mut sell_signal);
         }
 
         let signal = resolve_signal(buy_signal, sell_signal, current_side, self.longs_only);
+        let hold_reason = if signal != StrategySignal::Hold {
+            None
+        } else if buy_signal && current_side == Some(PositionSide::Long) {
+            Some("buy_signal_already_long")
+        } else if sell_signal && current_side == Some(PositionSide::Short) {
+            Some("sell_signal_already_short")
+        } else if sell_signal && self.longs_only && current_side != Some(PositionSide::Long) {
+            Some("short_signal_longs_only_flat")
+        } else if !buy_signal && !sell_signal {
+            Some("no_effective_cross")
+        } else {
+            Some("hold")
+        };
 
         HmaAngleEvaluation {
             signal,
             angle: Some(angle),
             latest_close: Some(curr_close),
             latest_hma: Some(curr_hma),
+            bars_len: bars.len(),
+            warmup_bars,
+            current_side,
+            min_angle: self.min_angle,
+            angle_lookback: self.angle_lookback,
+            longs_only: self.longs_only,
+            inverted: self.inverted,
+            atr: Some(atr),
+            slope: Some(slope),
+            lookback_hma: Some(lookback_hma),
+            raw_buy_signal,
+            raw_sell_signal,
+            effective_buy_signal: buy_signal,
+            effective_sell_signal: sell_signal,
+            hold_reason,
         }
     }
 
@@ -344,6 +477,12 @@ fn signed_qty_to_side(signed_qty: i32) -> Option<PositionSide> {
     }
 }
 
+fn fmt_price(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn resolve_signal(
     buy_signal: bool,
     sell_signal: bool,
@@ -501,6 +640,32 @@ mod tests {
     }
 
     #[test]
+    fn debug_summary_includes_angle_inputs_and_warmup_reason() {
+        let config = HmaAngleConfig {
+            hma_length: 16,
+            min_angle: 3.0,
+            angle_lookback: 4,
+            longs_only: true,
+            inverted: true,
+            ..HmaAngleConfig::default()
+        };
+
+        let evaluation = config.evaluate(&[], Some(PositionSide::Long));
+        let debug = evaluation.debug_summary();
+
+        assert!(debug.contains("Signal: Hold"));
+        assert!(debug.contains("reason: no_bars"));
+        assert!(debug.contains("bars: 0/50"));
+        assert!(debug.contains("side: Some(Long)"));
+        assert!(debug.contains("longs_only: true"));
+        assert!(debug.contains("inverted: true"));
+        assert!(debug.contains("min_angle: 3.000000"));
+        assert!(debug.contains("angle_lookback: 4"));
+        assert!(debug.contains("atr: n/a"));
+        assert!(debug.contains("slope: n/a"));
+    }
+
+    #[test]
     fn take_profit_offset_follows_tick_size() {
         let config = HmaAngleConfig {
             take_profit_ticks: 8.0,
@@ -546,6 +711,7 @@ mod tests {
                     high: 101.5,
                     low: 99.75,
                     close: 101.0,
+                    volume: None,
                 },
                 Some(0.25),
             )
@@ -573,6 +739,7 @@ mod tests {
                 high: 101.25,
                 low: 100.0,
                 close: 101.0,
+                volume: None,
             },
             Some(0.25),
         );

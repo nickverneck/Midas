@@ -11,7 +11,7 @@ impl App {
             Line::from(format!("Accounts loaded: {}", self.accounts.len())),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
         ];
-        if self.bar_type.supports_candle_mode() {
+        if self.candle_mode_controls_visible() {
             lines.push(Line::from(format!("Candles: {}", self.candle_mode.label())));
         }
         lines.extend([
@@ -47,7 +47,7 @@ impl App {
                 None => "Selected contract: none".to_string(),
             }),
         ];
-        if self.bar_type.supports_candle_mode() {
+        if self.candle_mode_controls_visible() {
             lines.insert(
                 3,
                 Line::from(format!("Candles: {}", self.candle_mode.label())),

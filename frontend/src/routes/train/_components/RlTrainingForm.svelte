@@ -31,6 +31,12 @@
 		onBrowseParquet,
 		onApplyFuturesPreset
 	}: Props = $props();
+
+	const volumeBarSizeInvalid = () => {
+		if (params["bar-kind"] !== "volume") return false;
+		const value = Number(params["volume-bar-size"]);
+		return !Number.isFinite(value) || value <= 0;
+	};
 </script>
 
 <div class="space-y-4">
@@ -86,6 +92,43 @@
 					<option value="full">Full file</option>
 				</select>
 			</div>
+			<div class="grid gap-2">
+				<Label for="rl-bar-kind">Bar Type</Label>
+				<select id="rl-bar-kind" bind:value={params["bar-kind"]} class={nativeSelectClass}>
+					<option value="price-action">Price-action</option>
+					<option value="volume">Volume</option>
+				</select>
+			</div>
+			<div class="grid gap-2">
+				<Label for="rl-price-source">Price Source</Label>
+				<select id="rl-price-source" bind:value={params["price-source"]} class={nativeSelectClass}>
+					<option value="ohlc">OHLC</option>
+					<option value="heikin-ashi">Heikin-Ashi</option>
+				</select>
+				<p class="text-xs text-muted-foreground">
+					Heikin-Ashi affects features; fills remain raw OHLC.
+				</p>
+			</div>
+			{#if params["bar-kind"] === "volume"}
+				<div class="grid gap-2 md:col-span-2">
+					<Label for="rl-volume-bar-size">Volume Bar Size</Label>
+					<Input
+						id="rl-volume-bar-size"
+						type="number"
+						min="1"
+						step="1"
+						required
+						aria-invalid={volumeBarSizeInvalid()}
+						bind:value={params["volume-bar-size"]}
+						placeholder="Contracts per bar"
+					/>
+					{#if volumeBarSizeInvalid()}
+						<p class="text-xs text-destructive">Enter a volume bar size greater than 0.</p>
+					{:else}
+						<p class="text-xs text-muted-foreground">Required for volume bars.</p>
+					{/if}
+				</div>
+			{/if}
 			{#if dataMode === "windowed"}
 				<div class="grid gap-2">
 					<Label for="rl-window">Window Size</Label>

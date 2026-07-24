@@ -197,11 +197,12 @@ async fn enter_replay_mode(
     let candle_mode = bar_type.effective_candle_mode(candle_mode);
     reset_state_for_new_session(state, market_tx);
     let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Loading replay dataset from {}...",
+        "Loading replay dataset for {} from cache or {}...",
+        bar_type.mode_label(candle_mode),
         cfg.replay_file_path.display()
     )));
 
-    let replay = replay::load_replay_state(&cfg).await?;
+    let replay = replay::load_replay_state(&cfg, bar_type, candle_mode).await?;
     let accounts = replay::replay_accounts(&replay);
     let contract = replay::replay_contract(&replay);
     let selected_account_id = accounts.first().map(|account| account.id);
@@ -451,24 +452,38 @@ fn manual_order(
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
 ) -> Result<()> {
-    let broker_tx = state.broker_tx.clone();
-    let Some(session) = state.session.as_mut() else {
-        bail!("connect first");
-    };
-    match dispatch_manual_order(session, &broker_tx, action)? {
-        MarketOrderDispatchOutcome::NoOp { message } => {
-            let _ = event_tx.send(ServiceEvent::Status(message));
-        }
-        MarketOrderDispatchOutcome::Queued { target_qty } => {
-            if let Some(target_qty) = target_qty {
-                session.execution_runtime.pending_target_qty = Some(target_qty);
-                session.execution_runtime.last_summary =
-                    "Manual close requested; waiting for flat position.".to_string();
-                emit_execution_state(event_tx, session);
+    #[cfg(not(feature = "manual-orders"))]
+    {
+        let _ = action;
+        let _ = state;
+        let _ = event_tx.send(ServiceEvent::Error(
+            "Manual order commands are disabled; rebuild with --features manual-orders."
+                .to_string(),
+        ));
+        return Ok(());
+    }
+
+    #[cfg(feature = "manual-orders")]
+    {
+        let broker_tx = state.broker_tx.clone();
+        let Some(session) = state.session.as_mut() else {
+            bail!("connect first");
+        };
+        match dispatch_manual_order(session, &broker_tx, action)? {
+            MarketOrderDispatchOutcome::NoOp { message } => {
+                let _ = event_tx.send(ServiceEvent::Status(message));
+            }
+            MarketOrderDispatchOutcome::Queued { target_qty } => {
+                if let Some(target_qty) = target_qty {
+                    session.execution_runtime.pending_target_qty = Some(target_qty);
+                    session.execution_runtime.last_summary =
+                        "Manual close requested; waiting for flat position.".to_string();
+                    emit_execution_state(event_tx, session);
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn set_target_position(

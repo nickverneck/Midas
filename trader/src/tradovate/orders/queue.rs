@@ -30,6 +30,7 @@ pub(crate) fn enqueue_market_order(
     Ok(())
 }
 
+#[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
 pub(super) fn enqueue_liquidation(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,

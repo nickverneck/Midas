@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 use clap::Parser;
 #[cfg(feature = "torch")]
+use midas_env::bars::BarSelection;
+#[cfg(feature = "torch")]
 use midas_env::env::{EnvConfig, MarginMode};
 use midas_env::ml::{self, MlBackend, TrainerKind};
 #[cfg(feature = "torch")]
@@ -115,25 +117,9 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     let mut rng = StdRng::seed_from_u64(seed);
 
     let (train_path, val_path, test_path) = common::resolve_paths(&args)?;
-    let train = data::load_dataset(&train_path, args.globex && !args.rth)?;
-    let val = data::load_dataset(&val_path, args.globex && !args.rth)?;
-    let test = data::load_dataset(&test_path, args.globex && !args.rth)?;
-
-    let (margin_cfg, session_cfg) = common::load_symbol_config(&args.symbol_config, &train.symbol)?;
-    let margin_mode = match args.margin_mode.as_str() {
-        "per-contract" => MarginMode::PerContract,
-        "price" => MarginMode::Price,
-        _ => common::infer_margin_mode(&train.symbol, margin_cfg),
-    };
-    let contract_multiplier = if args.contract_multiplier > 0.0 {
-        args.contract_multiplier
-    } else {
-        1.0
-    };
-    let margin_per_contract = args
-        .margin_per_contract
-        .or(margin_cfg)
-        .unwrap_or_else(|| common::infer_margin(&train.symbol));
+    let train_symbol = data::read_symbol(&train_path)
+        .with_context(|| format!("read symbol from {}", train_path.display()))?;
+    let (margin_cfg, session_cfg) = common::load_symbol_config(&args.symbol_config, &train_symbol)?;
     let use_globex = if let Some(session) = session_cfg {
         match session.as_str() {
             "rth" => false,
@@ -143,6 +129,44 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     } else {
         !args.rth
     };
+    let bar_selection = BarSelection {
+        bar_kind: args.bar_kind,
+        volume_bar_size: args.volume_bar_size,
+        price_source: args.price_source,
+    };
+    let train = data::load_dataset_with_schema_and_bars(
+        &train_path,
+        use_globex,
+        data::ObservationSchema::NormalizedV2,
+        bar_selection,
+    )?;
+    let val = data::load_dataset_with_schema_and_bars(
+        &val_path,
+        use_globex,
+        data::ObservationSchema::NormalizedV2,
+        bar_selection,
+    )?;
+    let test = data::load_dataset_with_schema_and_bars(
+        &test_path,
+        use_globex,
+        data::ObservationSchema::NormalizedV2,
+        bar_selection,
+    )?;
+
+    let margin_mode = match args.margin_mode.as_str() {
+        "per-contract" => MarginMode::PerContract,
+        "price" => MarginMode::Price,
+        _ => common::infer_margin_mode(&train_symbol, margin_cfg),
+    };
+    let contract_multiplier = if args.contract_multiplier > 0.0 {
+        args.contract_multiplier
+    } else {
+        1.0
+    };
+    let margin_per_contract = args
+        .margin_per_contract
+        .or(margin_cfg)
+        .unwrap_or_else(|| common::infer_margin(&train_symbol));
 
     let train = train.with_session(use_globex);
     let val = val.with_session(use_globex);

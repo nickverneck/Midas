@@ -151,26 +151,34 @@ impl App {
                             ),
                             self.focus == Focus::HmaTrailingStop,
                         ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Trigger Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::HmaTrailTriggerTicks,
-                                    format!("{:.0}", self.strategy.native_hma.trail_trigger_ticks),
-                                )
-                            ),
-                            self.focus == Focus::HmaTrailTriggerTicks,
-                        ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Offset Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::HmaTrailOffsetTicks,
-                                    format!("{:.0}", self.strategy.native_hma.trail_offset_ticks),
-                                )
-                            ),
-                            self.focus == Focus::HmaTrailOffsetTicks,
-                        ));
+                        if self.strategy.native_hma.use_trailing_stop {
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Trigger Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::HmaTrailTriggerTicks,
+                                        format!(
+                                            "{:.0}",
+                                            self.strategy.native_hma.trail_trigger_ticks
+                                        ),
+                                    )
+                                ),
+                                self.focus == Focus::HmaTrailTriggerTicks,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Offset Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::HmaTrailOffsetTicks,
+                                        format!(
+                                            "{:.0}",
+                                            self.strategy.native_hma.trail_offset_ticks
+                                        ),
+                                    )
+                                ),
+                                self.focus == Focus::HmaTrailOffsetTicks,
+                            ));
+                        }
                     }
                 }
                 NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
@@ -258,26 +266,28 @@ impl App {
                             format!("Trailing Stop: {}", bool_label(use_trailing_stop)),
                             self.focus == Focus::EmaTrailingStop,
                         ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Trigger Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::EmaTrailTriggerTicks,
-                                    format!("{:.0}", trail_trigger_ticks),
-                                )
-                            ),
-                            self.focus == Focus::EmaTrailTriggerTicks,
-                        ));
-                        lines.push(styled_line(
-                            format!(
-                                "Trail Offset Ticks: {}",
-                                self.strategy_numeric_value(
-                                    Focus::EmaTrailOffsetTicks,
-                                    format!("{:.0}", trail_offset_ticks),
-                                )
-                            ),
-                            self.focus == Focus::EmaTrailOffsetTicks,
-                        ));
+                        if use_trailing_stop {
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Trigger Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::EmaTrailTriggerTicks,
+                                        format!("{:.0}", trail_trigger_ticks),
+                                    )
+                                ),
+                                self.focus == Focus::EmaTrailTriggerTicks,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Offset Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::EmaTrailOffsetTicks,
+                                        format!("{:.0}", trail_offset_ticks),
+                                    )
+                                ),
+                                self.focus == Focus::EmaTrailOffsetTicks,
+                            ));
+                        }
                     }
                 }
             }
@@ -325,16 +335,14 @@ impl App {
 
         lines.push(Line::from(""));
         lines.push(styled_line(
-            "[Enter] Continue To Dashboard / Arm Strategy".to_string(),
+            self.strategy_continue_label(),
             self.focus == Focus::StrategyContinue,
         ));
         lines
     }
 
     pub(in crate::app) fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(
-            "Backend order: Native Rust > Lua > Machine Learning.",
-        )];
+        let mut lines = vec![Line::from("TUI strategy setup supports Native Rust.")];
 
         match self.strategy.kind {
             StrategyKind::Native => {
@@ -351,20 +359,31 @@ impl App {
                 lines.extend([
                     Line::from("Blockout can flatten before close and hold until reopen."),
                     Line::from("Controls: Up/Down move, Left/Right edit."),
-                    Line::from("Enter on Continue arms the strategy."),
                 ]);
+                match self.strategy_readiness().status {
+                    StrategyReadinessStatus::ReadyToArm => {
+                        lines.push(Line::from("Enter on Continue arms the strategy."));
+                    }
+                    StrategyReadinessStatus::NeedsAttention => {
+                        lines.push(Line::from(
+                            "Enter on Continue stays here until setup is ready.",
+                        ));
+                    }
+                    StrategyReadinessStatus::MonitorOnly | StrategyReadinessStatus::PreviewOnly => {
+                        lines.push(Line::from(
+                            "Enter on Continue opens the dashboard without arming.",
+                        ));
+                    }
+                }
             }
             StrategyKind::Lua => lines.extend([
                 Line::from("Lua can load from file or editor."),
-                Line::from("Native stays higher priority than Lua."),
-                Line::from("ML remains selection-only for now."),
-                Line::from("Controls: Up/Down move, Enter loads or arms."),
+                Line::from("Controls: Up/Down move, Enter loads or continues."),
                 Line::from("Lua normal: h/j/k/l move, i/a/o/x edit."),
                 Line::from("Lua insert: type, Enter newline, Esc exit."),
             ]),
             StrategyKind::MachineLearning => lines.extend([
-                Line::from("ML stays selection-only for now."),
-                Line::from("Native and Lua remain higher priority."),
+                Line::from("Machine Learning strategies are not available in the TUI."),
                 Line::from("Controls: Up/Down move, Enter continues."),
             ]),
         }
@@ -373,11 +392,18 @@ impl App {
     }
 
     pub(in crate::app) fn strategy_preview_lines(&self) -> Vec<Line<'static>> {
+        let readiness = self.strategy_readiness();
         let mut lines = vec![
             Line::from(format!("Selected: {}", self.strategy.summary_label())),
             Line::from(match self.strategy.kind {
+                StrategyKind::Native if self.automated_strategy_affordance_visible() => {
+                    format!(
+                        "Native Rust {} is active and can submit automated market orders.",
+                        self.strategy.native_strategy.label()
+                    )
+                }
                 StrategyKind::Native => format!(
-                    "Native Rust {} is active and can submit automated market orders.",
+                    "Native Rust {} is active for monitor-only observation.",
                     self.strategy.native_strategy.label()
                 ),
                 StrategyKind::Lua => {
@@ -388,7 +414,23 @@ impl App {
                 }
             }),
             Line::from(format!("Runtime: {}", self.strategy_runtime_summary())),
+            Line::from(format!("Readiness: {}", readiness.status.label())),
         ];
+
+        let blocker_prefix = match readiness.status {
+            StrategyReadinessStatus::NeedsAttention => "Needs attention",
+            StrategyReadinessStatus::PreviewOnly => "Preview only",
+            _ => "Monitor",
+        };
+        for reason in readiness.blockers.iter().take(2) {
+            lines.push(Line::from(format!("{blocker_prefix}: {reason}")));
+        }
+        for adjustment in readiness.adjustments.iter().take(2) {
+            lines.push(Line::from(format!("Will adjust on arm: {adjustment}")));
+        }
+        for warning in readiness.warnings.iter().take(2) {
+            lines.push(Line::from(format!("Warning: {warning}")));
+        }
 
         if self.strategy.kind == StrategyKind::Native {
             lines.push(Line::from(self.native_summary_for_display()));

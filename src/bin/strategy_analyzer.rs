@@ -9,8 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use midas_env::backtesting::{compute_metrics, equity_returns};
+use midas_env::bars::{BarInput, BarKind, BarSelection, PriceSource, prepare_bars};
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
 use midas_env::features::{alma, ema, hma, kama, sma, wma};
+use midas_env::fill::{FillModelConfig, derive_seed};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -32,11 +34,19 @@ struct AnalyzerConfig {
     max_position: i32,
     commission_round_turn: f64,
     slippage_per_contract: f64,
+    #[serde(default)]
+    fill_model: FillModelConfig,
     margin_per_contract: f64,
     contract_multiplier: f64,
     margin_mode: String,
     enforce_margin: bool,
     globex: Option<bool>,
+    #[serde(default)]
+    bar_kind: BarKind,
+    #[serde(default)]
+    volume_bar_size: Option<f64>,
+    #[serde(default)]
+    price_source: PriceSource,
     signal: SignalConfig,
     take_profit: Option<RangeF>,
     stop_loss: Option<RangeF>,
@@ -178,8 +188,8 @@ struct MetricsPayload {
 
 #[derive(Debug)]
 struct MarketData {
-    close: Vec<f64>,
-    datetime_ns: Vec<i64>,
+    signal_close: Vec<f64>,
+    execution_close: Vec<f64>,
     session_open: Vec<bool>,
     minutes_to_close: Vec<f64>,
     margin_ok: Vec<bool>,
@@ -209,11 +219,24 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
     }
 
     let df = load_parquet_slice(&file_path, cfg.offset.unwrap_or(0), cfg.limit)?;
-    let data = extract_data(&df, cfg.globex.unwrap_or(false))?;
+    let data = extract_data(
+        &df,
+        cfg.globex.unwrap_or(false),
+        BarSelection {
+            bar_kind: cfg.bar_kind,
+            volume_bar_size: cfg.volume_bar_size,
+            price_source: cfg.price_source,
+        },
+    )?;
 
-    if data.close.len() < 2 {
+    if data.execution_close.len() < 2 {
         bail!("not enough bars to run analyzer");
     }
+
+    cfg.fill_model
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .with_context(|| "validate fill model")?;
 
     let sweep_values_a = build_indicator_sweep_values(&cfg.signal.indicator_a, "indicatorA")?;
     let sweep_values_b = build_indicator_sweep_values(&cfg.signal.indicator_b, "indicatorB")?;
@@ -252,6 +275,7 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
     let base_env = EnvConfig {
         commission_round_turn: cfg.commission_round_turn,
         slippage_per_contract: cfg.slippage_per_contract,
+        fill_model: cfg.fill_model,
         max_position: cfg.max_position,
         margin_per_contract: cfg.margin_per_contract,
         margin_mode: match cfg.margin_mode.as_str() {
@@ -264,10 +288,10 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         ..EnvConfig::default()
     };
 
-    let series_a = precompute_series(&cfg.signal.indicator_a, &sweep_values_a, &data.close)?;
-    let series_b = precompute_series(&cfg.signal.indicator_b, &sweep_values_b, &data.close)?;
+    let series_a = precompute_series(&cfg.signal.indicator_a, &sweep_values_a, &data.signal_close)?;
+    let series_b = precompute_series(&cfg.signal.indicator_b, &sweep_values_b, &data.signal_close)?;
 
-    let prices = Arc::new(data.close);
+    let execution_prices = Arc::new(data.execution_close);
     let session_open = Arc::new(data.session_open);
     let margin_ok = Arc::new(data.margin_ok);
     let minutes_to_close = Arc::new(data.minutes_to_close);
@@ -277,6 +301,7 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
     let results: Vec<AnalyzerCell> = combos
         .par_iter()
         .map(|combo| {
+            let env_cfg = env_config_for_combo(&base_env, combo);
             let series_a = series_a
                 .get(&sweep_value_key(combo.a_value))
                 .expect("missing indicator A series");
@@ -284,10 +309,10 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
                 .get(&sweep_value_key(combo.b_value))
                 .expect("missing indicator B series");
             let metrics = run_strategy(
-                &prices,
+                &execution_prices,
                 series_a,
                 series_b,
-                &base_env,
+                &env_cfg,
                 cfg.initial_balance,
                 cfg.signal.buy_action,
                 cfg.signal.sell_action,
@@ -568,6 +593,32 @@ fn build_combos(
     combos
 }
 
+fn env_config_for_combo(base_env: &EnvConfig, combo: &Combo) -> EnvConfig {
+    let mut env_cfg = base_env.clone();
+    if env_cfg.fill_model.is_random_adverse() {
+        env_cfg.fill_model = env_cfg
+            .fill_model
+            .with_seed(fill_seed_for_combo(env_cfg.fill_model.seed, combo));
+    }
+    env_cfg
+}
+
+fn fill_seed_for_combo(base_seed: u64, combo: &Combo) -> u64 {
+    derive_seed(
+        base_seed,
+        &[
+            combo.a_value.to_bits(),
+            combo.b_value.to_bits(),
+            optional_f64_seed_component(combo.take_profit, 0xa77a_cafe_0000_0000),
+            optional_f64_seed_component(combo.stop_loss, 0x5709_1055_0000_0000),
+        ],
+    )
+}
+
+fn optional_f64_seed_component(value: Option<f64>, none_marker: u64) -> u64 {
+    value.map(f64::to_bits).unwrap_or(none_marker)
+}
+
 fn run_strategy(
     prices: &[f64],
     series_a: &[f64],
@@ -823,40 +874,84 @@ fn load_parquet_slice(path: &PathBuf, offset: usize, limit: Option<usize>) -> Re
     Ok(df)
 }
 
-fn extract_data(df: &DataFrame, globex: bool) -> Result<MarketData> {
+fn extract_data(df: &DataFrame, globex: bool, selection: BarSelection) -> Result<MarketData> {
     let close = series_to_f64(df.column("close")?.as_materialized_series())?;
+    let open = if df.column("open").is_ok() {
+        series_to_f64(df.column("open")?.as_materialized_series())?
+    } else {
+        close.clone()
+    };
+    let high = series_to_f64(df.column("high")?.as_materialized_series())?;
+    let low = series_to_f64(df.column("low")?.as_materialized_series())?;
+    let volume = df
+        .column("volume")
+        .ok()
+        .map(|c| series_to_f64(c.as_materialized_series()))
+        .transpose()?;
 
-    let datetime_ns = df
+    let raw_datetime_ns = df
         .column("date")
         .ok()
         .map(|c| series_to_i64(c.as_materialized_series()))
-        .transpose()?
-        .unwrap_or_else(|| vec![0_i64; close.len()]);
+        .transpose()?;
 
-    let session_open = df
+    let raw_session_open_from_df = df
         .column("session_open")
         .ok()
         .map(|c| series_to_bool(c.as_materialized_series()))
-        .transpose()?
-        .unwrap_or_else(|| build_session_mask(&datetime_ns, globex));
+        .transpose()?;
 
-    let minutes_to_close = df
+    let raw_minutes_to_close_from_df = df
         .column("minutes_to_close")
         .ok()
         .map(|c| series_to_f64(c.as_materialized_series()))
-        .transpose()?
-        .unwrap_or_else(|| build_minutes_to_close(&datetime_ns, globex));
+        .transpose()?;
 
-    let margin_ok = df
+    let raw_margin_ok = df
         .column("margin_ok")
         .ok()
         .map(|c| series_to_bool(c.as_materialized_series()))
-        .transpose()?
-        .unwrap_or_else(|| vec![true; close.len()]);
+        .transpose()?;
+
+    let raw_session_open = raw_session_open_from_df.or_else(|| {
+        raw_datetime_ns
+            .as_ref()
+            .map(|dt| build_session_mask(dt, globex))
+    });
+    let raw_minutes_to_close = raw_minutes_to_close_from_df.or_else(|| {
+        raw_datetime_ns
+            .as_ref()
+            .map(|dt| build_minutes_to_close(dt, globex))
+    });
+
+    let prepared = prepare_bars(
+        BarInput {
+            open: &open,
+            high: &high,
+            low: &low,
+            close: &close,
+            volume: volume.as_deref(),
+            datetime_ns: raw_datetime_ns.as_deref(),
+            session_open: raw_session_open.as_deref(),
+            minutes_to_close: raw_minutes_to_close.as_deref(),
+            margin_ok: raw_margin_ok.as_deref(),
+        },
+        selection,
+    )?;
+
+    let len = prepared.execution_close.len();
+    let datetime_ns = prepared.datetime_ns.unwrap_or_else(|| vec![0_i64; len]);
+    let session_open = prepared
+        .session_open
+        .unwrap_or_else(|| build_session_mask(&datetime_ns, globex));
+    let minutes_to_close = prepared
+        .minutes_to_close
+        .unwrap_or_else(|| build_minutes_to_close(&datetime_ns, globex));
+    let margin_ok = prepared.margin_ok.unwrap_or_else(|| vec![true; len]);
 
     Ok(MarketData {
-        close,
-        datetime_ns,
+        signal_close: prepared.signal_close,
+        execution_close: prepared.execution_close,
         session_open,
         minutes_to_close,
         margin_ok,

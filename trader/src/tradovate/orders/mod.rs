@@ -22,9 +22,11 @@ pub(super) use api::{
     cancel_order_by_id, cancel_orders_by_id, interrupt_order_strategy_by_id, request_order_json,
 };
 pub(super) use builders::native_order_strategy_enabled;
+#[cfg(any(feature = "manual-orders", test))]
+pub(super) use dispatch::dispatch_manual_order;
 pub(super) use dispatch::{
-    MarketOrderDispatchOutcome, dispatch_manual_order,
-    dispatch_profile_legacy_order_strategy_target, dispatch_target_position_order,
+    MarketOrderDispatchOutcome, dispatch_profile_legacy_order_strategy_target,
+    dispatch_target_position_order,
 };
 pub(super) use protection::{
     collect_live_protection_orders, recover_live_protection_order,

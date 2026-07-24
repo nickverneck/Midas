@@ -39,7 +39,7 @@ impl App {
                     return;
                 }
                 KeyCode::Right => {
-                    self.focus = Focus::BarTypeToggle;
+                    self.focus = self.next_selection_focus();
                     return;
                 }
                 _ => {}
@@ -119,30 +119,24 @@ impl App {
             }
             Focus::BarTypeToggle => match key.code {
                 KeyCode::Left | KeyCode::Right => {
-                    if self.broker_supports_bar_type_selection() {
+                    if self.bar_type_controls_visible() {
                         self.bar_type = match key.code {
                             KeyCode::Left => self.bar_type.previous_kind(),
                             _ => self.bar_type.next_kind(),
                         };
-                    } else {
-                        self.bar_type = BarType::default();
-                        self.status = format!(
-                            "{} currently supports 1-minute bars only.",
-                            self.selected_broker.label()
-                        );
                     }
                     return;
                 }
                 KeyCode::Up => {
-                    self.focus = Focus::AccountList;
+                    self.focus = self.prev_selection_focus();
                     return;
                 }
                 KeyCode::Down => {
-                    self.focus = Focus::BarValue;
+                    self.focus = self.next_selection_focus();
                     return;
                 }
                 KeyCode::Enter => {
-                    self.focus = Focus::BarValue;
+                    self.focus = self.next_selection_focus();
                     return;
                 }
                 _ => {}
@@ -150,7 +144,7 @@ impl App {
             Focus::BarValue => {
                 match key.code {
                     KeyCode::Up => {
-                        self.focus = Focus::BarTypeToggle;
+                        self.focus = self.prev_selection_focus();
                         return;
                     }
                     KeyCode::Down | KeyCode::Enter => {
@@ -160,12 +154,8 @@ impl App {
                     _ => {}
                 }
 
-                if !self.broker_supports_bar_type_selection() {
+                if !self.bar_type_controls_visible() {
                     self.bar_type = BarType::default();
-                    self.status = format!(
-                        "{} currently supports 1-minute bars only.",
-                        self.selected_broker.label()
-                    );
                     return;
                 }
 
@@ -186,37 +176,30 @@ impl App {
             }
             Focus::CandleModeToggle => match key.code {
                 KeyCode::Left | KeyCode::Right => {
-                    if !self.bar_type.supports_candle_mode() {
+                    if !self.candle_mode_controls_visible() {
                         self.candle_mode = CandleMode::Standard;
                         self.focus = Focus::InstrumentQuery;
                         return;
                     }
-                    if self.broker_supports_heikin_ashi() {
-                        self.candle_mode = self.candle_mode.toggle();
-                    } else {
-                        self.candle_mode = CandleMode::Standard;
-                        self.status = format!(
-                            "{} currently supports standard candles only.",
-                            self.selected_broker.label()
-                        );
-                    }
+                    self.candle_mode = self.candle_mode.toggle();
                     return;
                 }
                 KeyCode::Up => {
-                    self.focus = Focus::BarValue;
+                    self.focus = self.prev_selection_focus();
                     return;
                 }
                 KeyCode::Down => {
-                    self.focus = Focus::InstrumentQuery;
+                    self.focus = self.next_selection_focus();
                     return;
                 }
                 KeyCode::Enter => {
-                    self.focus = Focus::InstrumentQuery;
+                    self.focus = self.next_selection_focus();
                     return;
                 }
                 _ => {}
             },
-            Focus::AccountList
+            Focus::EngineList
+            | Focus::AccountList
             | Focus::ContractList
             | Focus::Env
             | Focus::AuthMode
@@ -327,26 +310,31 @@ impl App {
             ])
             .split(columns[1]);
 
-        let mut search_lines = vec![
-            styled_line(
-                format!("Bar Type: {}", self.bar_type.kind().label()),
-                self.focus == Focus::BarTypeToggle,
-            ),
-            styled_line(
-                format!("Value: {}", self.bar_value_text()),
-                self.focus == Focus::BarValue,
-            ),
-        ];
-        if self.bar_type.supports_candle_mode() {
+        let mut search_lines = Vec::new();
+        if self.bar_type_controls_visible() {
+            search_lines.extend([
+                styled_line(
+                    format!("Bar Type: {}", self.bar_type.kind().label()),
+                    self.focus == Focus::BarTypeToggle,
+                ),
+                styled_line(
+                    format!("Value: {}", self.bar_value_text()),
+                    self.focus == Focus::BarValue,
+                ),
+            ]);
+        }
+        if self.candle_mode_controls_visible() {
             search_lines.push(styled_line(
                 format!("Candles: {}", self.candle_mode.label()),
                 self.focus == Focus::CandleModeToggle,
             ));
         }
-        let help = if self.bar_type.supports_candle_mode() {
+        let help = if self.bar_type_controls_visible() && self.candle_mode_controls_visible() {
             "Use Left/Right on bar type and candles, digits for value, Enter or Down advances. Enter on Query searches."
-        } else {
+        } else if self.bar_type_controls_visible() {
             "Use Left/Right on bar type, digits for value, Enter or Down advances. Enter on Query searches."
+        } else {
+            "Enter on Query searches. Enter on a contract subscribes to bars."
         };
         search_lines.extend([
             styled_line(

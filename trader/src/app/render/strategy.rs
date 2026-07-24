@@ -23,10 +23,10 @@ impl App {
         match self.focus {
             Focus::StrategyKind => match key.code {
                 KeyCode::Left => {
-                    self.strategy.kind = self.strategy.kind.prev();
+                    self.strategy.kind = self.prev_visible_strategy_kind();
                 }
                 KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.strategy.kind = self.strategy.kind.next();
+                    self.strategy.kind = self.next_visible_strategy_kind();
                 }
                 _ => {}
             },
@@ -347,15 +347,24 @@ impl App {
             }
             Focus::StrategyContinue => {
                 if key.code == KeyCode::Enter {
+                    let readiness = self.strategy_readiness();
+                    if readiness.status == StrategyReadinessStatus::NeedsAttention {
+                        self.status = readiness.blockers.first().cloned().unwrap_or_else(|| {
+                            "Review strategy setup before continuing.".to_string()
+                        });
+                        self.push_log(format!("Strategy setup needs attention: {}", self.status));
+                        return;
+                    }
+
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
                     self.sync_selected_account(cmd_tx);
-                    if self.capabilities.automated_orders {
+                    if readiness.can_arm() {
                         self.arm_native_strategy(cmd_tx);
                     } else {
                         self.push_log(format!(
-                            "{} automation is not enabled yet; opening the dashboard in monitor mode.",
-                            self.selected_broker.label()
+                            "Opening the dashboard in {} mode.",
+                            readiness.status.label().to_ascii_lowercase()
                         ));
                     }
                     self.push_log(format!(
@@ -370,7 +379,8 @@ impl App {
                     }
                 }
             }
-            Focus::Env
+            Focus::EngineList
+            | Focus::Env
             | Focus::AuthMode
             | Focus::LogMode
             | Focus::TokenOverride

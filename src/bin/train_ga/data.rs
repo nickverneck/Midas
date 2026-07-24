@@ -1,5 +1,6 @@
 use anyhow::Result;
-use polars::prelude::{AnyValue, SerReader, Series};
+use midas_env::bars::{BarInput, BarSelection, PreparedBars, prepare_bars};
+use polars::prelude::{AnyValue, DataFrame, SerReader, Series};
 
 #[derive(Clone)]
 pub struct DataSet {
@@ -7,6 +8,8 @@ pub struct DataSet {
     pub close: Vec<f64>,
     pub _high: Vec<f64>,
     pub _low: Vec<f64>,
+    signal_open: Vec<f64>,
+    signal_close: Vec<f64>,
     pub volume: Option<Vec<f64>>,
     pub datetime_ns: Option<Vec<i64>>,
     pub session_open: Option<Vec<bool>>,
@@ -14,6 +17,7 @@ pub struct DataSet {
     pub margin_ok: Vec<bool>,
     pub feature_cols: Vec<Vec<f64>>,
     pub obs_dim: usize,
+    #[allow(dead_code)]
     pub symbol: String,
     session_from_parquet: bool,
 }
@@ -31,7 +35,22 @@ impl DataSet {
     }
 }
 
+#[allow(dead_code)]
 pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
+    load_dataset_with_bars(path, globex, BarSelection::default())
+}
+
+pub fn read_symbol(path: &std::path::Path) -> Result<String> {
+    let file = std::fs::File::open(path)?;
+    let df = polars::prelude::ParquetReader::new(file).finish()?;
+    extract_symbol(&df)
+}
+
+pub fn load_dataset_with_bars(
+    path: &std::path::Path,
+    globex: bool,
+    bar_selection: BarSelection,
+) -> Result<DataSet> {
     let file = std::fs::File::open(path)?;
     let df = polars::prelude::ParquetReader::new(file).finish()?;
     let open = if df.column("open").is_ok() {
@@ -62,39 +81,98 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         .ok()
         .map(|c| series_to_f64(c.as_materialized_series()))
         .transpose()?;
+    let margin_ok_from_df: Option<Vec<bool>> = df
+        .column("margin_ok")
+        .ok()
+        .map(|c| series_to_bool(c.as_materialized_series()))
+        .transpose()?;
     let session_from_parquet = session_open_from_df.is_some() && minutes_to_close_from_df.is_some();
-    let symbol = match df.column("symbol")?.get(0)? {
-        AnyValue::String(s) => s.to_string(),
-        _ => "UNKNOWN".to_string(),
+    let symbol = extract_symbol(&df)?;
+    let (raw_session_open, raw_minutes_to_close) = if session_from_parquet {
+        (session_open_from_df, minutes_to_close_from_df)
+    } else {
+        (
+            datetime_ns
+                .as_ref()
+                .map(|dt| build_session_mask(dt, globex)),
+            datetime_ns
+                .as_ref()
+                .map(|dt| build_minutes_to_close(dt, globex)),
+        )
     };
 
+    let prepared = prepare_bars(
+        BarInput {
+            open: &open,
+            high: &high,
+            low: &low,
+            close: &close,
+            volume: volume.as_deref(),
+            datetime_ns: datetime_ns.as_deref(),
+            session_open: raw_session_open.as_deref(),
+            minutes_to_close: raw_minutes_to_close.as_deref(),
+            margin_ok: margin_ok_from_df.as_deref(),
+        },
+        bar_selection,
+    )?;
+
+    let PreparedBars {
+        execution_open,
+        execution_high,
+        execution_low,
+        execution_close,
+        signal_open,
+        signal_high,
+        signal_low,
+        signal_close,
+        volume,
+        datetime_ns,
+        session_open: prepared_session_open,
+        minutes_to_close: prepared_minutes_to_close,
+        margin_ok: prepared_margin_ok,
+    } = prepared;
+
     let feats = midas_env::features::compute_features_ohlcv(
-        &close,
-        Some(&high),
-        Some(&low),
+        &signal_close,
+        Some(&signal_high),
+        Some(&signal_low),
         volume.as_deref(),
     );
-    let feature_cols = ordered_feature_cols(feats, &open, &close, &high, &low, volume.as_deref())?;
+    let feature_cols = ordered_feature_cols(
+        feats,
+        &signal_open,
+        &signal_close,
+        &signal_high,
+        &signal_low,
+        volume.as_deref(),
+    )?;
 
-    let session_open = session_open_from_df.or_else(|| {
+    let session_open = prepared_session_open.or_else(|| {
         datetime_ns
             .as_ref()
             .map(|dt| build_session_mask(dt, globex))
     });
-    let minutes_to_close = minutes_to_close_from_df.or_else(|| {
+    let minutes_to_close = prepared_minutes_to_close.or_else(|| {
         datetime_ns
             .as_ref()
             .map(|dt| build_minutes_to_close(dt, globex))
     });
-    let margin_ok = vec![true; close.len()];
+    let margin_ok = prepared_margin_ok.unwrap_or_else(|| vec![true; execution_close.len()]);
 
-    let obs_dim = observation_len(&open, &close, volume.as_deref(), &feature_cols);
+    let obs_dim = observation_len(
+        &signal_open,
+        &signal_close,
+        volume.as_deref(),
+        &feature_cols,
+    );
 
     Ok(DataSet {
-        open,
-        close,
-        _high: high,
-        _low: low,
+        open: execution_open,
+        close: execution_close,
+        _high: execution_high,
+        _low: execution_low,
+        signal_open,
+        signal_close,
         volume,
         datetime_ns,
         session_open,
@@ -105,6 +183,14 @@ pub fn load_dataset(path: &std::path::Path, globex: bool) -> Result<DataSet> {
         symbol,
         session_from_parquet,
     })
+}
+
+fn extract_symbol(df: &DataFrame) -> Result<String> {
+    let symbol = match df.column("symbol")?.get(0)? {
+        AnyValue::String(s) => s.to_string(),
+        _ => "UNKNOWN".to_string(),
+    };
+    Ok(symbol)
 }
 
 pub fn dump_dataset_stats(label: &str, data: &DataSet) {
@@ -156,9 +242,13 @@ pub fn build_observation(
 
     let prev_idx = idx.saturating_sub(1);
     let prev_prev_idx = idx.saturating_sub(2);
-    let prev_close = data.close.get(prev_idx).copied().unwrap_or(f64::NAN);
-    let prev_prev_close = data.close.get(prev_prev_idx).copied().unwrap_or(f64::NAN);
-    let open_t = data.open.get(idx).copied().unwrap_or(f64::NAN);
+    let prev_close = data.signal_close.get(prev_idx).copied().unwrap_or(f64::NAN);
+    let prev_prev_close = data
+        .signal_close
+        .get(prev_prev_idx)
+        .copied()
+        .unwrap_or(f64::NAN);
+    let open_t = data.signal_open.get(idx).copied().unwrap_or(f64::NAN);
 
     obs.push(relative_change(open_t, prev_close));
     obs.push(relative_change(prev_close, prev_prev_close));

@@ -1,8 +1,10 @@
 //! Library entry for optional Python bindings.
 
 pub mod backtesting;
+pub mod bars;
 pub mod env;
 pub mod features;
+pub mod fill;
 pub mod ml;
 pub mod sampler;
 pub mod script;

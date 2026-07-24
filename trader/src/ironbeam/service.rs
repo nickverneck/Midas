@@ -10,9 +10,11 @@ use super::execution::{
     arm_execution_strategy, disarm_execution_strategy, handle_execution_account_sync,
     maybe_run_execution_strategy,
 };
+#[cfg(feature = "manual-orders")]
+use super::orders::dispatch_manual_order;
 use super::orders::{
-    dispatch_manual_order, dispatch_target_position_order, refresh_managed_protection,
-    selected_protection_prices, sync_native_protection,
+    dispatch_target_position_order, refresh_managed_protection, selected_protection_prices,
+    sync_native_protection,
 };
 use super::state::{InternalEvent, IronbeamSession, IronbeamState, OrderDispatchOutcome};
 use super::stream::{apply_stream_payload, run_market_stream};
@@ -278,32 +280,43 @@ async fn handle_command(
             let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(ReplaySpeed::default()));
         }
         ServiceCommand::ManualOrder { action } => {
-            let session = require_session_mut(state.session.as_mut())?;
-            match dispatch_manual_order(
-                &state.client,
-                session,
-                &mut state.latency,
-                internal_tx,
-                action,
-            )
-            .await?
+            #[cfg(feature = "manual-orders")]
             {
-                OrderDispatchOutcome::NoOp { message } => {
-                    let _ = event_tx.send(ServiceEvent::Status(message));
-                }
-                OrderDispatchOutcome::Queued { target_qty } => {
-                    if let Some(target_qty) = target_qty {
-                        session
-                            .execution_runtime
-                            .set_pending_target(Some(target_qty));
-                        session.execution_runtime.last_summary =
-                            "Manual close requested; waiting for Ironbeam fill.".to_string();
+                let session = require_session_mut(state.session.as_mut())?;
+                match dispatch_manual_order(
+                    &state.client,
+                    session,
+                    &mut state.latency,
+                    internal_tx,
+                    action,
+                )
+                .await?
+                {
+                    OrderDispatchOutcome::NoOp { message } => {
+                        let _ = event_tx.send(ServiceEvent::Status(message));
                     }
-                    emit_execution_state(event_tx, session);
+                    OrderDispatchOutcome::Queued { target_qty } => {
+                        if let Some(target_qty) = target_qty {
+                            session
+                                .execution_runtime
+                                .set_pending_target(Some(target_qty));
+                            session.execution_runtime.last_summary =
+                                "Manual close requested; waiting for Ironbeam fill.".to_string();
+                        }
+                        emit_execution_state(event_tx, session);
+                    }
                 }
+                emit_account_snapshots(event_tx, session);
+                let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             }
-            emit_account_snapshots(event_tx, session);
-            let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+            #[cfg(not(feature = "manual-orders"))]
+            {
+                let _ = action;
+                let _ = event_tx.send(ServiceEvent::Error(
+                    "Manual order commands are disabled; rebuild with --features manual-orders."
+                        .to_string(),
+                ));
+            }
         }
         ServiceCommand::SetTargetPosition {
             target_qty,
@@ -489,7 +502,7 @@ async fn handle_internal(
 fn ironbeam_capabilities() -> BrokerCapabilities {
     BrokerCapabilities {
         replay: false,
-        manual_orders: true,
+        manual_orders: cfg!(feature = "manual-orders"),
         automated_orders: true,
         native_protection: true,
     }

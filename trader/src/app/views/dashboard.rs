@@ -31,7 +31,7 @@ impl App {
             }),
             Line::from(format!("Bar Type: {}", self.bar_type.label())),
         ]);
-        if self.bar_type.supports_candle_mode() {
+        if self.candle_mode_controls_visible() {
             lines.push(Line::from(format!("Candles: {}", self.candle_mode.label())));
         }
         lines.extend([
@@ -89,17 +89,31 @@ impl App {
         } else {
             "SL"
         };
+        let mut keys = Vec::new();
+        if self.manual_order_affordance_visible() {
+            keys.push("b/s/c");
+        }
+        keys.push("v");
+        if self.automated_strategy_affordance_visible() {
+            keys.push("d");
+        }
+        if self.session_kind == SessionKind::Replay {
+            keys.extend(["[/]", "0"]);
+        }
         let hotkeys = if self.session_kind == SessionKind::Replay {
             format!(
-                "Order {} {} | Keys b/s/c/v d [/] 0 ({})",
+                "Order {} {} | Keys {} ({})",
                 self.base_config.order_qty,
                 self.base_config.time_in_force,
+                keys.join(" "),
                 self.replay_speed.label(),
             )
         } else {
             format!(
-                "Order {} {} | Keys b/s/c/v d",
-                self.base_config.order_qty, self.base_config.time_in_force
+                "Order {} {} | Keys {}",
+                self.base_config.order_qty,
+                self.base_config.time_in_force,
+                keys.join(" ")
             )
         };
 

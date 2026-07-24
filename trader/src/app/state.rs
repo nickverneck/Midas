@@ -19,15 +19,140 @@ struct DisplayedAutoTrail {
     first_stop_price: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrategyReadinessStatus {
+    ReadyToArm,
+    MonitorOnly,
+    PreviewOnly,
+    NeedsAttention,
+}
+
+impl StrategyReadinessStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadyToArm => "Ready to arm",
+            Self::MonitorOnly => "Monitor only",
+            Self::PreviewOnly => "Preview only",
+            Self::NeedsAttention => "Needs attention",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrategyReadiness {
+    status: StrategyReadinessStatus,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+    adjustments: Vec<String>,
+}
+
+impl StrategyReadiness {
+    fn can_arm(&self) -> bool {
+        self.status == StrategyReadinessStatus::ReadyToArm
+    }
+}
+
 impl LogEntry {
     fn render_line(&self) -> String {
+        self.render_line_with_message(&self.message)
+    }
+
+    fn render_persisted_line(&self) -> String {
+        let message = sanitize_persisted_log_message(&self.message);
+        self.render_line_with_message(&message)
+    }
+
+    fn render_line_with_message(&self, message: &str) -> String {
         format!(
             "[{} | {}] {}",
             self.timestamp.format("%H:%M:%S%.3f"),
             format_log_elapsed(self.elapsed_since_previous),
-            self.message
+            message
         )
     }
+}
+
+fn sanitize_persisted_log_message(message: &str) -> String {
+    if let Some(prefix) = raw_http_failure_prefix(message) {
+        return format!("{prefix}[redacted broker response]");
+    }
+    redact_structured_log_segments(message)
+}
+
+fn raw_http_failure_prefix(message: &str) -> Option<&str> {
+    let body_start = message.find("): ")?;
+    let before_status = &message[..body_start];
+    if before_status.contains(" failed (") {
+        Some(&message[..body_start + "): ".len()])
+    } else {
+        None
+    }
+}
+
+fn redact_structured_log_segments(message: &str) -> String {
+    let mut redacted = String::with_capacity(message.len());
+    let mut index = 0;
+    while index < message.len() {
+        let rest = &message[index..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '{' || (ch == '[' && starts_like_json_array(rest)) {
+            if let Some(end) = structured_segment_end(rest, ch) {
+                redacted.push_str("[redacted structured data]");
+                index += end;
+                continue;
+            }
+        }
+        redacted.push(ch);
+        index += ch.len_utf8();
+    }
+    redacted
+}
+
+fn starts_like_json_array(segment: &str) -> bool {
+    let Some(rest) = segment.strip_prefix('[') else {
+        return false;
+    };
+    matches!(
+        rest.chars().find(|ch| !ch.is_whitespace()),
+        Some('{' | '[' | '"' | ']' | '-' | '0'..='9' | 't' | 'f' | 'n')
+    )
+}
+
+fn structured_segment_end(segment: &str, opener: char) -> Option<usize> {
+    let closer = match opener {
+        '{' => '}',
+        '[' => ']',
+        _ => return None,
+    };
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in segment.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            value if value == opener => depth += 1,
+            value if value == closer => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn format_log_elapsed(duration: Option<std::time::Duration>) -> String {
@@ -50,6 +175,73 @@ impl App {
 
     fn broker_supports_heikin_ashi(&self) -> bool {
         self.selected_broker == BrokerKind::Tradovate
+    }
+
+    fn replay_affordance_visible(&self) -> bool {
+        self.broker_supports_replay()
+    }
+
+    fn session_stats_affordance_visible(&self) -> bool {
+        self.session_stats.enabled
+    }
+
+    fn manual_order_affordance_visible(&self) -> bool {
+        cfg!(feature = "manual-orders") && self.capabilities.manual_orders
+    }
+
+    fn automated_strategy_affordance_visible(&self) -> bool {
+        self.capabilities.automated_orders
+    }
+
+    fn engine_create_affordance_visible(&self) -> bool {
+        self.engine_creation_enabled
+    }
+
+    fn engine_close_and_kill_affordance_visible(&self) -> bool {
+        cfg!(feature = "manual-orders")
+    }
+
+    fn engine_select_item_count(&self) -> usize {
+        self.engine_summaries.len() + usize::from(self.engine_create_affordance_visible())
+    }
+
+    fn clamp_selected_engine(&mut self) {
+        let item_count = self.engine_select_item_count();
+        if item_count == 0 {
+            self.selected_engine = 0;
+        } else if self.selected_engine >= item_count {
+            self.selected_engine = item_count - 1;
+        }
+    }
+
+    fn bar_type_controls_visible(&self) -> bool {
+        self.broker_supports_bar_type_selection()
+    }
+
+    fn candle_mode_controls_visible(&self) -> bool {
+        self.broker_supports_heikin_ashi() && self.bar_type.supports_candle_mode()
+    }
+
+    fn visible_strategy_kinds(&self) -> &'static [StrategyKind] {
+        &[StrategyKind::Native]
+    }
+
+    fn next_visible_strategy_kind(&self) -> StrategyKind {
+        let kinds = self.visible_strategy_kinds();
+        let index = kinds
+            .iter()
+            .position(|kind| *kind == self.strategy.kind)
+            .unwrap_or(0);
+        kinds[(index + 1) % kinds.len()]
+    }
+
+    fn prev_visible_strategy_kind(&self) -> StrategyKind {
+        let kinds = self.visible_strategy_kinds();
+        let index = kinds
+            .iter()
+            .position(|kind| *kind == self.strategy.kind)
+            .unwrap_or(0);
+        kinds[(index + kinds.len() - 1) % kinds.len()]
     }
 
     fn normalize_market_controls_for_broker(&mut self) {
@@ -101,8 +293,10 @@ impl App {
             Focus::Username,
             Focus::Password,
             Focus::Connect,
-            Focus::ReplayMode,
         ];
+        if self.replay_affordance_visible() {
+            order.push(Focus::ReplayMode);
+        }
         match self.selected_broker {
             BrokerKind::Ironbeam => {
                 order.insert(7, Focus::ApiKey);
@@ -148,9 +342,13 @@ impl App {
                             Focus::HmaTakeProfitTicks,
                             Focus::HmaStopLossTicks,
                             Focus::HmaTrailingStop,
-                            Focus::HmaTrailTriggerTicks,
-                            Focus::HmaTrailOffsetTicks,
                         ]);
+                        if self.strategy.native_hma.use_trailing_stop {
+                            order.extend([
+                                Focus::HmaTrailTriggerTicks,
+                                Focus::HmaTrailOffsetTicks,
+                            ]);
+                        }
                     }
                 }
                 NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
@@ -164,9 +362,19 @@ impl App {
                             Focus::EmaTakeProfitTicks,
                             Focus::EmaStopLossTicks,
                             Focus::EmaTrailingStop,
-                            Focus::EmaTrailTriggerTicks,
-                            Focus::EmaTrailOffsetTicks,
                         ]);
+                        let use_trailing_stop = match self.strategy.native_strategy {
+                            NativeStrategyKind::HmaCross => {
+                                self.strategy.native_hma_cross.use_trailing_stop
+                            }
+                            _ => self.strategy.native_ema.use_trailing_stop,
+                        };
+                        if use_trailing_stop {
+                            order.extend([
+                                Focus::EmaTrailTriggerTicks,
+                                Focus::EmaTrailOffsetTicks,
+                            ]);
+                        }
                     }
                 }
             }
@@ -182,18 +390,27 @@ impl App {
     }
 
     fn selection_focus_order(&self) -> Vec<Focus> {
-        let mut order = vec![
-            Focus::AccountList,
-            Focus::BarTypeToggle,
-            Focus::BarValue,
-        ];
-        if self.bar_type.supports_candle_mode() {
+        let mut order = vec![Focus::AccountList];
+        if self.bar_type_controls_visible() {
+            order.push(Focus::BarTypeToggle);
+            order.push(Focus::BarValue);
+        }
+        if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
         }
         order.extend([
             Focus::InstrumentQuery,
             Focus::ContractList,
         ]);
+        order
+    }
+
+    fn replay_focus_order(&self) -> Vec<Focus> {
+        let mut order = vec![Focus::BarTypeToggle, Focus::BarValue];
+        if self.candle_mode_controls_visible() {
+            order.push(Focus::CandleModeToggle);
+        }
+        order.push(Focus::ReplayMode);
         order
     }
 
@@ -244,6 +461,24 @@ impl App {
 
     fn prev_selection_focus(&self) -> Focus {
         let order = self.selection_focus_order();
+        let index = order
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        order[(index + order.len() - 1) % order.len()]
+    }
+
+    fn next_replay_focus(&self) -> Focus {
+        let order = self.replay_focus_order();
+        let index = order
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        order[(index + 1) % order.len()]
+    }
+
+    fn prev_replay_focus(&self) -> Focus {
+        let order = self.replay_focus_order();
         let index = order
             .iter()
             .position(|focus| *focus == self.focus)
@@ -327,6 +562,7 @@ impl App {
         match self.persist_logs_to_file() {
             Ok(path) => {
                 let message = format!("Saved logs to {}", path.display());
+                self.last_saved_log_path = Some(path.clone());
                 self.status = message.clone();
                 self.push_log(message);
             }
@@ -351,8 +587,10 @@ impl App {
 
     fn build_persisted_log_body(&self, timestamp: &str) -> String {
         let screen = match self.screen {
+            Screen::EngineSelect => "Engine",
             Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
+            Screen::Replay => "Replay",
             Screen::Selection => "Selection",
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",
@@ -361,41 +599,386 @@ impl App {
         let selected_account = self
             .accounts
             .get(self.selected_account)
-            .map(|account| account.name.as_str())
+            .map(|account| (account.id, account.name.as_str()));
+        let selected_account_name = selected_account
+            .map(|(_, name)| name)
             .unwrap_or("none");
-        let selected_contract = self
-            .contract_results
-            .get(self.selected_contract)
+        let selected_account_id = selected_account
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let selected_contract = self.contract_results.get(self.selected_contract);
+        let selected_contract_name = selected_contract
             .map(|contract| contract.name.as_str())
             .or(self.market.contract_name.as_deref())
             .unwrap_or("none");
+        let selected_contract_id = selected_contract
+            .map(|contract| contract.id.to_string())
+            .or_else(|| self.market.contract_id.map(|id| id.to_string()))
+            .unwrap_or_else(|| "none".to_string());
 
         let mut body = String::new();
         body.push_str(&format!("saved_at_utc: {timestamp}\n"));
         body.push_str(&format!("screen: {screen}\n"));
-        body.push_str(&format!("status: {}\n", self.status));
+        body.push_str(&format!(
+            "status: {}\n",
+            sanitize_persisted_log_message(&self.status)
+        ));
+        body.push_str(&format!(
+            "engine_socket: {}\n",
+            self.active_engine_socket_label()
+        ));
+        body.push_str(&format!("engine_id: {}\n", self.active_engine_id_label()));
+        body.push_str(&format!(
+            "engine_connection_state: {}\n",
+            self.active_engine_connection_state_label()
+        ));
+        body.push_str(&format!(
+            "active_engine_key_display: {}\n",
+            self.active_engine_key_display_label()
+        ));
+        body.push_str(&format!(
+            "active_engine_key: {}\n",
+            self.active_engine_key_display_label()
+        ));
+        body.push_str(&format!(
+            "other_live_engine_count: {}\n",
+            self.other_live_engine_count()
+        ));
+        body.push_str(&format!(
+            "other_live_engines: {}\n",
+            self.other_live_engine_count()
+        ));
         body.push_str(&format!("broker: {}\n", self.selected_broker.label()));
         body.push_str(&format!("env: {}\n", self.form.env.label()));
         body.push_str(&format!("auth_mode: {}\n", self.form.auth_mode.label()));
         body.push_str(&format!("log_mode: {}\n", self.form.log_mode.label()));
+        body.push_str(&format!("session_kind: {}\n", self.session_kind.label()));
+        body.push_str(&format!("replay_speed: {}\n", self.replay_speed.label()));
+        body.push_str(&format!(
+            "capability_replay: {}\n",
+            self.capabilities.replay
+        ));
+        body.push_str(&format!(
+            "capability_manual_orders: {}\n",
+            self.capabilities.manual_orders
+        ));
+        body.push_str(&format!(
+            "capability_automated_orders: {}\n",
+            self.capabilities.automated_orders
+        ));
+        body.push_str(&format!(
+            "capability_native_protection: {}\n",
+            self.capabilities.native_protection
+        ));
         body.push_str(&format!("strategy: {}\n", self.strategy.summary_label()));
-        body.push_str(&format!("selected_account: {selected_account}\n"));
-        body.push_str(&format!("selected_contract: {selected_contract}\n"));
+        body.push_str(&format!("strategy_order_qty: {}\n", self.strategy.order_qty));
+        body.push_str(&format!(
+            "order_time_in_force: {}\n",
+            self.base_config.time_in_force
+        ));
+        body.push_str(&format!(
+            "strategy_armed: {}\n",
+            self.strategy_runtime.armed
+        ));
+        body.push_str(&format!(
+            "pending_target: {}\n",
+            self.pending_target_label()
+        ));
+        body.push_str(&format!(
+            "last_strategy_summary: {}\n",
+            sanitize_persisted_log_message(&self.last_strategy_summary_label())
+        ));
+        body.push_str(&format!("latency_summary: {}\n", self.latency_summary()));
+        body.push_str(&format!(
+            "latency_rest_rtt_ms: {}\n",
+            self.optional_u64_label(self.latency.rest_rtt_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_order_seen_ms: {}\n",
+            self.optional_u64_label(self.latency.last_order_seen_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_order_ack_ms: {}\n",
+            self.optional_u64_label(self.latency.last_order_ack_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_exec_report_ms: {}\n",
+            self.optional_u64_label(self.latency.last_exec_report_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_fill_ms: {}\n",
+            self.optional_u64_label(self.latency.last_fill_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_signal_submit_ms: {}\n",
+            self.optional_u64_label(self.latency.last_signal_submit_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_signal_seen_ms: {}\n",
+            self.optional_u64_label(self.latency.last_signal_seen_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_signal_ack_ms: {}\n",
+            self.optional_u64_label(self.latency.last_signal_ack_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_signal_fill_ms: {}\n",
+            self.optional_u64_label(self.latency.last_signal_fill_ms)
+        ));
+        body.push_str(&format!(
+            "market_update_age: {}\n",
+            format_age_ms(self.market_update_age_ms())
+        ));
+        body.push_str(&format!(
+            "market_update_age_ms: {}\n",
+            self.optional_u64_label(self.market_update_age_ms())
+        ));
+        body.push_str(&format!("selected_account: {selected_account_name}\n"));
+        body.push_str(&format!("selected_account_id: {selected_account_id}\n"));
+        body.push_str(&format!("selected_account_name: {selected_account_name}\n"));
+        body.push_str(&format!("selected_contract: {selected_contract_name}\n"));
+        body.push_str(&format!("selected_contract_id: {selected_contract_id}\n"));
+        body.push_str(&format!("selected_contract_name: {selected_contract_name}\n"));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
         if self.bar_type.supports_candle_mode() {
             body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
         }
         body.push_str("log_format: [HH:MM:SS.mmm local | +elapsed_since_previous] message\n");
         body.push('\n');
+        body.push_str(&self.review_summary_log_section());
+        body.push('\n');
+        body.push_str(&self.recent_session_events_log_section(12));
+        body.push('\n');
         body.push_str(&self.session_stats_log_section());
         body.push('\n');
         body.push_str("[logs]\n");
 
         for entry in &self.persisted_logs {
-            body.push_str(&entry.render_line());
+            body.push_str(&entry.render_persisted_line());
             body.push('\n');
         }
 
+        body
+    }
+
+    fn active_engine_summary(&self) -> Option<&EngineSummary> {
+        let active_key = self.active_engine_key.as_ref()?;
+        self.engine_summaries
+            .iter()
+            .find(|summary| &summary.key == active_key)
+    }
+
+    fn active_engine_socket_label(&self) -> String {
+        self.engine_socket_path
+            .as_ref()
+            .or_else(|| self.active_engine_summary().map(|summary| &summary.socket_path))
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn active_engine_socket_short_label(&self) -> String {
+        self.active_engine_summary()
+            .map(EngineSummary::socket_short_label)
+            .or_else(|| {
+                self.engine_socket_path.as_ref().map(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| path.display().to_string())
+                })
+            })
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn active_engine_id_label(&self) -> String {
+        self.active_engine_summary()
+            .and_then(|summary| summary.id)
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn active_engine_connection_state_label(&self) -> String {
+        self.active_engine_summary()
+            .map(|summary| summary.connection_state.label().to_string())
+            .unwrap_or_else(|| {
+                if self.engine_socket_path.is_some() {
+                    "unknown".to_string()
+                } else {
+                    "none".to_string()
+                }
+            })
+    }
+
+    pub(in crate::app) fn active_engine_header_label(&self) -> String {
+        if self.engine_socket_path.is_none() && self.active_engine_key.is_none() {
+            return "none".to_string();
+        }
+
+        let id = self.active_engine_id_label();
+        let socket = self.active_engine_socket_short_label();
+        let identity = if id == "none" {
+            socket
+        } else {
+            format!("#{id} {socket}")
+        };
+        let mut label = format!(
+            "{} {} {}",
+            identity,
+            self.active_engine_connection_state_label(),
+            self.session_kind.label()
+        );
+        let other_count = self.other_live_engine_count();
+        if other_count > 0 {
+            label.push_str(&format!(" +{other_count} other"));
+        }
+        label
+    }
+
+    fn engine_receiver_closed_message(&self, engine_key: &EngineKey) -> String {
+        let Some(summary) = self
+            .engine_summaries
+            .iter()
+            .find(|summary| &summary.key == engine_key)
+        else {
+            return format!(
+                "Engine {} connection closed.",
+                engine_key.display_label()
+            );
+        };
+
+        format!(
+            "Engine {} connection closed; last state was {}.",
+            summary.identity_label(),
+            summary.connection_state.label()
+        )
+    }
+
+    fn active_engine_key_display_label(&self) -> String {
+        self.active_engine_key
+            .as_ref()
+            .map(EngineKey::display_label)
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn active_engine_stats_identity_key(&self) -> String {
+        self.active_engine_key
+            .as_ref()
+            .map(|key| format!("engine:{}", key.display_label()))
+            .unwrap_or_else(|| "embedded".to_string())
+    }
+
+    fn other_live_engine_count(&self) -> usize {
+        self.engine_summaries
+            .iter()
+            .filter(|summary| {
+                self.active_engine_key
+                    .as_ref()
+                    .is_none_or(|active_key| &summary.key != active_key)
+                    && matches!(
+                        summary.connection_state,
+                        EngineConnectionState::Observing | EngineConnectionState::Connected
+                    )
+            })
+            .count()
+    }
+
+    fn optional_u64_label(&self, value: Option<u64>) -> String {
+        value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    }
+
+    fn pending_target_label(&self) -> String {
+        self.strategy_runtime
+            .pending_target_qty
+            .map(|qty| qty.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn last_strategy_summary_label(&self) -> String {
+        if self.strategy_runtime.last_summary.is_empty() {
+            "none".to_string()
+        } else {
+            self.strategy_runtime.last_summary.clone()
+        }
+    }
+
+    fn persisted_log_counts(&self) -> (usize, usize) {
+        self.persisted_logs
+            .iter()
+            .fold((0, 0), |(errors, debug), entry| {
+                (
+                    errors + usize::from(entry.message.starts_with("ERROR:")),
+                    debug + usize::from(entry.message.starts_with("DEBUG:")),
+                )
+            })
+    }
+
+    fn review_summary_log_section(&self) -> String {
+        let (error_count, debug_count) = self.persisted_log_counts();
+        let mut body = String::new();
+        body.push_str("[review_summary]\n");
+        body.push_str(&format!(
+            "final_status: {}\n",
+            sanitize_persisted_log_message(&self.status)
+        ));
+        body.push_str(&format!(
+            "strategy_runtime_summary: {}\n",
+            sanitize_persisted_log_message(&self.strategy_runtime_summary())
+        ));
+        body.push_str(&format!("pending_target: {}\n", self.pending_target_label()));
+        body.push_str(&format!("latency_summary: {}\n", self.latency_summary()));
+        if let Some(stats) = self.selected_session_stats() {
+            body.push_str(&format!(
+                "selected_account_session_pnl: {}\n",
+                format_signed_money(Some(stats.session_pnl()))
+            ));
+            body.push_str(&format!(
+                "selected_account_trade_pnl_ex_fees: {}\n",
+                format_signed_money(Some(stats.trade_pnl_ex_fees()))
+            ));
+            body.push_str(&format!(
+                "selected_account_total_fees: {}\n",
+                format_signed_money(Some(stats.total_fees))
+            ));
+        } else {
+            body.push_str("selected_account_session_pnl: n/a\n");
+            body.push_str("selected_account_trade_pnl_ex_fees: n/a\n");
+            body.push_str("selected_account_total_fees: n/a\n");
+        }
+        if let Some(snapshot) = self.selected_snapshot() {
+            body.push_str(&format!(
+                "selected_account_realized_pnl: {}\n",
+                format_signed_money(snapshot.realized_pnl)
+            ));
+            body.push_str(&format!(
+                "selected_account_unrealized_pnl: {}\n",
+                format_signed_money(snapshot.unrealized_pnl)
+            ));
+        } else {
+            body.push_str("selected_account_realized_pnl: n/a\n");
+            body.push_str("selected_account_unrealized_pnl: n/a\n");
+        }
+        body.push_str(&format!("persisted_error_count: {error_count}\n"));
+        body.push_str(&format!("persisted_debug_count: {debug_count}\n"));
+        body
+    }
+
+    fn recent_session_events_log_section(&self, limit: usize) -> String {
+        let mut body = String::new();
+        body.push_str("[recent_session_events]\n");
+        body.push_str(&format!(
+            "fees_visible: {}\n",
+            if self.session_stats_show_fees {
+                "shown"
+            } else {
+                "hidden"
+            }
+        ));
+        for line in self.session_stats_event_lines(limit) {
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
         body
     }
 
@@ -440,6 +1023,142 @@ impl App {
         )
     }
 
+    fn strategy_readiness(&self) -> StrategyReadiness {
+        let mut blockers = Vec::new();
+        let mut warnings = Vec::new();
+        let mut adjustments = Vec::new();
+
+        if self.strategy.kind != StrategyKind::Native {
+            return StrategyReadiness {
+                status: StrategyReadinessStatus::PreviewOnly,
+                blockers: vec![format!(
+                    "{} is not executable from the TUI yet.",
+                    self.strategy.kind.label()
+                )],
+                warnings,
+                adjustments,
+            };
+        }
+
+        if self.strategy.order_qty <= 0 {
+            blockers.push("Order Qty must be at least 1.".to_string());
+        }
+
+        match self.strategy.native_strategy {
+            NativeStrategyKind::HmaAngle => {
+                if self.strategy.native_hma.hma_length < 2 {
+                    blockers.push("HMA Length must be at least 2.".to_string());
+                }
+                if self.strategy.native_hma.angle_lookback == 0 {
+                    blockers.push("Angle Lookback must be at least 1.".to_string());
+                }
+                if self.strategy.native_hma.bars_required_to_trade == 0 {
+                    blockers.push("Bars Required must be at least 1.".to_string());
+                }
+            }
+            NativeStrategyKind::EmaCross => {
+                let fast = self.strategy.native_ema.fast_length;
+                let slow = self.strategy.native_ema.slow_length;
+                if fast >= slow {
+                    blockers.push(format!(
+                        "Fast EMA Length ({fast}) must be less than Slow EMA Length ({slow})."
+                    ));
+                }
+            }
+            NativeStrategyKind::HmaCross => {
+                let fast = self.strategy.native_hma_cross.fast_length;
+                let slow = self.strategy.native_hma_cross.slow_length;
+                if fast >= slow {
+                    blockers.push(format!(
+                        "Fast HMA Length ({fast}) must be less than Slow HMA Length ({slow})."
+                    ));
+                }
+            }
+        }
+
+        if self.strategy.native_signal_timing == NativeSignalTiming::ClosedBar
+            && self.market.bars.is_empty()
+        {
+            warnings.push("Closed-bar timing will wait for completed bars.".to_string());
+        }
+        if self.native_protection_controls_visible() && !self.active_native_uses_broker_owned_protection() {
+            warnings.push("No TP/SL/trailing protection is configured.".to_string());
+        }
+
+        if self.active_native_uses_broker_owned_protection()
+            && !self.capabilities.native_protection
+        {
+            blockers.push("Native protection is unavailable for this engine.".to_string());
+        } else {
+            if self.active_native_uses_broker_owned_protection()
+                && self.strategy.native_reversal_mode == NativeReversalMode::Direct
+            {
+                adjustments.push(
+                    "Direct reversal will switch to CloseAll > Enter for broker-owned protection."
+                        .to_string(),
+                );
+            }
+            if self.active_native_requires_guarded_path()
+                && self.strategy.native_execution_path != NativeExecutionPath::Guarded
+            {
+                adjustments.push(
+                    "Execution Path will switch to Guarded for this reversal/protection setup."
+                        .to_string(),
+                );
+            }
+        }
+
+        if !blockers.is_empty() {
+            return StrategyReadiness {
+                status: StrategyReadinessStatus::NeedsAttention,
+                blockers,
+                warnings,
+                adjustments,
+            };
+        }
+
+        if !self.automated_strategy_affordance_visible() {
+            blockers.push(format!(
+                "{} automation is unavailable.",
+                self.selected_broker.label()
+            ));
+        }
+        if self.accounts.get(self.selected_account).is_none() {
+            blockers.push("Select an account before arming.".to_string());
+        }
+        if !self.selected_contract_ready() {
+            blockers.push("Select a contract before arming.".to_string());
+        }
+
+        StrategyReadiness {
+            status: if blockers.is_empty() {
+                StrategyReadinessStatus::ReadyToArm
+            } else {
+                StrategyReadinessStatus::MonitorOnly
+            },
+            blockers,
+            warnings,
+            adjustments,
+        }
+    }
+
+    fn selected_contract_ready(&self) -> bool {
+        self.contract_results.get(self.selected_contract).is_some()
+            || self.market.contract_id.is_some()
+            || self.market.contract_name.is_some()
+    }
+
+    fn strategy_continue_label(&self) -> String {
+        match self.strategy_readiness().status {
+            StrategyReadinessStatus::ReadyToArm => {
+                "[Enter] Continue / Arm Native Strategy".to_string()
+            }
+            StrategyReadinessStatus::MonitorOnly => "[Enter] Continue / Monitor Only".to_string(),
+            StrategyReadinessStatus::PreviewOnly => "[Enter] Continue / Preview Only".to_string(),
+            StrategyReadinessStatus::NeedsAttention => "[Enter] Review Strategy Setup".to_string(),
+        }
+    }
+
     fn sync_execution_strategy_config(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.capabilities.automated_orders {
             return;
@@ -451,6 +1170,9 @@ impl App {
 
     fn native_protection_controls_visible(&self) -> bool {
         if self.strategy.kind != StrategyKind::Native {
+            return false;
+        }
+        if !self.capabilities.native_protection {
             return false;
         }
         if self.selected_broker != BrokerKind::Tradovate {

@@ -1,6 +1,8 @@
 export type DatasetMode = "train" | "val" | "custom";
 export type BacktestView = "script" | "analyzer";
 export type DatasetPickerTarget = "script" | "analyzer";
+export type BarKind = "price-action" | "volume";
+export type PriceSource = "ohlc" | "heikin-ashi";
 
 export type FileEntry = {
 	name: string;
@@ -67,12 +69,21 @@ export type AnalyzerResult = {
 export type NumericInput = number | string;
 
 export type MarginMode = "per-contract" | "price";
+export type FillModelMode = "fixed" | "random-adverse";
+
+export type FillModel = {
+	mode: FillModelMode;
+	seed: NumericInput;
+	maxAdverseTicks: NumericInput;
+	tickValueUsd: NumericInput;
+};
 
 export type BacktestEnv = {
 	initialBalance: NumericInput;
 	maxPosition: NumericInput;
 	commission: NumericInput;
 	slippage: NumericInput;
+	fillModel: FillModel;
 	marginPerContract: NumericInput;
 	marginMode: MarginMode;
 	contractMultiplier: NumericInput;
@@ -105,6 +116,9 @@ export type AnalyzerIndicatorConfig = {
 };
 
 export type AnalyzerConfig = {
+	barKind: BarKind;
+	volumeBarSize: NumericInput;
+	priceSource: PriceSource;
 	indicatorA: AnalyzerIndicatorConfig;
 	indicatorB: AnalyzerIndicatorConfig;
 	buyAction: CrossAction;
@@ -118,6 +132,7 @@ export type AnalyzerEnv = {
 	maxPosition: NumericInput;
 	commission: NumericInput;
 	slippage: NumericInput;
+	fillModel: FillModel;
 	marginPerContract: NumericInput;
 	marginMode: MarginMode;
 	contractMultiplier: NumericInput;

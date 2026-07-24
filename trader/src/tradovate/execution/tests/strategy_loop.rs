@@ -206,6 +206,7 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
     session.user_store.positions.insert(
@@ -250,6 +251,12 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
         ServiceEvent::DebugLog(message)
             if message.contains("simple strategy dispatch")
                 && message.contains("submit_in_flight ignored")
+                && message.starts_with("strategy decision |")
+                && message.contains("strategy=ema_cross")
+                && message.contains("broker=tradovate")
+                && message.contains("path=simple diagnostic")
+                && message.contains("decision=dispatching")
+                && message.contains("signal=Buy")
     )));
 }
 
@@ -271,6 +278,7 @@ fn simple_strategy_does_not_recheck_revised_closed_bar_with_same_timestamp() {
         high: 12.5,
         low: 11.5,
         close: 12.0,
+        volume: None,
     };
     session.execution_runtime.last_closed_bar_fingerprint = Some(bar_fingerprint(&old_last_bar));
     session.market.history_loaded = 6;
@@ -283,6 +291,7 @@ fn simple_strategy_does_not_recheck_revised_closed_bar_with_same_timestamp() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
     seed_long_position(&mut session);
@@ -318,6 +327,7 @@ fn closed_bar_timing_uses_t_minus_one_for_live_time_bars() {
                 high: 10.5,
                 low: 9.5,
                 close: 10.0,
+                volume: None,
             },
             Bar {
                 ts_ns: live_ts,
@@ -325,6 +335,7 @@ fn closed_bar_timing_uses_t_minus_one_for_live_time_bars() {
                 high: 12.5,
                 low: 9.75,
                 close: 12.0,
+                volume: None,
             },
         ];
 
@@ -362,6 +373,7 @@ fn live_bar_timing_includes_latest_live_minute_bar() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 2_000,
@@ -369,6 +381,7 @@ fn live_bar_timing_includes_latest_live_minute_bar() {
             high: 12.5,
             low: 9.75,
             close: 12.0,
+            volume: None,
         },
     ];
 
@@ -392,6 +405,7 @@ fn closed_bar_timing_uses_reported_t_minus_one_when_forming_bar_is_present() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 2_000,
@@ -399,6 +413,7 @@ fn closed_bar_timing_uses_reported_t_minus_one_when_forming_bar_is_present() {
             high: 11.5,
             low: 9.75,
             close: 11.0,
+            volume: None,
         },
         Bar {
             ts_ns: 3_000,
@@ -406,6 +421,7 @@ fn closed_bar_timing_uses_reported_t_minus_one_when_forming_bar_is_present() {
             high: 12.5,
             low: 10.75,
             close: 12.0,
+            volume: None,
         },
     ];
 
@@ -443,6 +459,7 @@ fn guarded_closed_bar_delay_waits_extra_completed_bar_before_entry() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
 
@@ -458,6 +475,7 @@ fn guarded_closed_bar_delay_waits_extra_completed_bar_before_entry() {
         high: 13.5,
         low: 12.5,
         close: 13.0,
+        volume: None,
     });
     session.market.history_loaded = 8;
 
@@ -499,6 +517,7 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
 
@@ -536,6 +555,11 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
             if message.contains("strategy eval | ema_cross | closed-bar already dispatched")
                 && message.contains("signal Buy")
                 && message.contains("bar_ts 7")
+                && message.starts_with("strategy decision |")
+                && message.contains("path=guarded")
+                && message.contains("decision=closed-bar already dispatched")
+                && message.contains("strategy_detail=Signal: Buy")
+                && message.contains("delta:")
     )));
 }
 
@@ -561,6 +585,7 @@ fn guarded_closed_bar_blocks_repeat_flat_entry_side_until_opposite_dispatch() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
 
@@ -590,6 +615,7 @@ fn guarded_closed_bar_blocks_repeat_flat_entry_side_until_opposite_dispatch() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
 
@@ -644,6 +670,7 @@ fn hma_direct_path_executes_current_closed_bar_cross() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
     seed_short_position(&mut session);
@@ -688,6 +715,10 @@ fn hma_direct_path_executes_current_closed_bar_cross() {
             if message.contains("hma direct dispatch")
                 && message.contains("Prior HMA Side: fast<slow")
                 && message.contains("HMA Side: fast>slow")
+                && message.starts_with("strategy decision |")
+                && message.contains("path=hma direct")
+                && message.contains("decision=dispatching")
+                && message.contains("prior_hma_side: fast<slow")
     )));
 }
 
@@ -721,6 +752,7 @@ fn hma_direct_path_does_not_enter_from_stale_cross_state() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
     seed_short_position(&mut session);
@@ -745,6 +777,9 @@ fn hma_direct_path_does_not_enter_from_stale_cross_state() {
             if message.contains("hma direct eval")
                 && message.contains("signal Hold")
                 && message.contains("Prior HMA Side: unset")
+                && message.starts_with("strategy decision |")
+                && message.contains("strategy_detail=Signal: Hold")
+                && message.contains("current_bar_side_edge: false")
     )));
 }
 
@@ -786,6 +821,7 @@ fn guarded_hma_cross_blocks_same_bar_revised_side_change_after_dispatch() {
             high: close + 0.5,
             low: close - 0.5,
             close,
+            volume: None,
         })
         .collect();
     seed_short_position(&mut session);
@@ -935,6 +971,7 @@ fn strategy_blockout_flattens_inside_configured_preclose_window() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.0,
+        volume: None,
     }];
     seed_long_position(&mut session);
 
@@ -983,6 +1020,7 @@ fn disabled_strategy_blockout_does_not_flatten_preclose_position() {
         high: 5001.0,
         low: 4999.0,
         close: 5000.0,
+        volume: None,
     }];
     seed_long_position(&mut session);
 
@@ -1025,6 +1063,7 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 2,
@@ -1032,6 +1071,7 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 3,
@@ -1039,6 +1079,7 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 4,
@@ -1046,6 +1087,7 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 5,
@@ -1053,6 +1095,7 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
             high: 8.5,
             low: 7.5,
             close: 8.0,
+            volume: None,
         },
         Bar {
             ts_ns: 6,
@@ -1060,6 +1103,7 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
             high: 12.5,
             low: 11.5,
             close: 12.0,
+            volume: None,
         },
     ];
     session.execution_runtime.armed = true;
@@ -1103,6 +1147,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 2,
@@ -1110,6 +1155,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 3,
@@ -1117,6 +1163,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 4,
@@ -1124,6 +1171,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 5,
@@ -1131,6 +1179,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
             high: 8.5,
             low: 7.5,
             close: 8.0,
+            volume: None,
         },
         Bar {
             ts_ns: 6,
@@ -1138,6 +1187,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
             high: 12.5,
             low: 11.5,
             close: 12.0,
+            volume: None,
         },
     ];
     session.execution_runtime.armed = true;
@@ -1224,6 +1274,7 @@ fn strategy_loop_waits_when_flat_qty_conflicts_with_live_broker_path() {
             high: 6411.0,
             low: 6409.0,
             close: if idx < 30 { 6410.0 } else { 6420.0 },
+            volume: None,
         })
         .collect();
     session.execution_runtime.armed = true;
@@ -1315,6 +1366,7 @@ fn strategy_loop_clears_stale_flat_broker_path_after_sync_grace() {
             high: 6411.0,
             low: 6409.0,
             close: if idx < 30 { 6410.0 } else { 6420.0 },
+            volume: None,
         })
         .collect();
     session.execution_runtime.armed = true;
@@ -1414,6 +1466,7 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 2,
@@ -1421,6 +1474,7 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 3,
@@ -1428,6 +1482,7 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 4,
@@ -1435,6 +1490,7 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             high: 10.5,
             low: 9.5,
             close: 10.0,
+            volume: None,
         },
         Bar {
             ts_ns: 5,
@@ -1442,6 +1498,7 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             high: 8.5,
             low: 7.5,
             close: 8.0,
+            volume: None,
         },
         Bar {
             ts_ns: 6,
@@ -1449,6 +1506,7 @@ fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
             high: 12.5,
             low: 11.5,
             close: 12.0,
+            volume: None,
         },
     ];
     session.execution_runtime.armed = true;

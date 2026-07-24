@@ -46,21 +46,11 @@ impl App {
             }
             Focus::ReplayMode => {
                 if key.code == KeyCode::Enter {
-                    if !self.broker_supports_replay() {
-                        self.push_log(format!(
-                            "Replay mode is unavailable for {}.",
-                            self.selected_broker.label()
-                        ));
+                    if !self.replay_affordance_visible() {
                         return;
                     }
-                    self.bar_type = BarType::range(1);
-                    let cfg = self.current_config();
-                    let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
-                        config: cfg,
-                        bar_type: self.bar_type,
-                        candle_mode: self.effective_candle_mode(),
-                    });
-                    self.push_log("Replay mode requested".to_string());
+                    self.screen = Screen::Replay;
+                    self.focus = Focus::BarTypeToggle;
                 }
             }
             Focus::TokenOverride => edit_string(&mut self.form.token_override, key),
@@ -72,7 +62,8 @@ impl App {
             Focus::Cid => edit_string(&mut self.form.cid, key),
             Focus::Secret => edit_string(&mut self.form.secret, key),
             Focus::TokenPath => edit_string(&mut self.form.token_path, key),
-            Focus::BrokerList
+            Focus::EngineList
+            | Focus::BrokerList
             | Focus::StrategyKind
             | Focus::OrderQty
             | Focus::NativeStrategy

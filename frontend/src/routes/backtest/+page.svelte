@@ -174,6 +174,9 @@
 		maxPosition: toNumber(env.maxPosition),
 		commission: toNumber(env.commission),
 		slippage: toNumber(env.slippage),
+		fillSeed: toInteger(env.fillModel.seed),
+		fillMaxAdverseTicks: toInteger(env.fillModel.maxAdverseTicks),
+		fillTickValueUsd: toNumber(env.fillModel.tickValueUsd),
 		marginPerContract: toNumber(env.marginPerContract),
 		contractMultiplier: toNumber(env.contractMultiplier)
 	}));
@@ -204,6 +207,19 @@
 	let invalidSlippage = $derived.by(
 		() => numericEnv.slippage === null || numericEnv.slippage < 0
 	);
+	let invalidFillSeed = $derived.by(
+		() => env.fillModel.mode === "random-adverse" && (numericEnv.fillSeed === null || numericEnv.fillSeed < 0)
+	);
+	let invalidFillMaxAdverseTicks = $derived.by(
+		() =>
+			env.fillModel.mode === "random-adverse" &&
+			(numericEnv.fillMaxAdverseTicks === null || numericEnv.fillMaxAdverseTicks < 0)
+	);
+	let invalidFillTickValueUsd = $derived.by(
+		() =>
+			env.fillModel.mode === "random-adverse" &&
+			(numericEnv.fillTickValueUsd === null || numericEnv.fillTickValueUsd < 0)
+	);
 	let invalidMargin = $derived.by(
 		() => numericEnv.marginPerContract === null || numericEnv.marginPerContract < 0
 	);
@@ -228,6 +244,9 @@
 		if (invalidMaxPosition) errors.push("Max position must be 0 or higher.");
 		if (invalidCommission) errors.push("Commission must be 0 or higher.");
 		if (invalidSlippage) errors.push("Slippage must be 0 or higher.");
+		if (invalidFillSeed) errors.push("Fill seed must be a non-negative integer.");
+		if (invalidFillMaxAdverseTicks) errors.push("Max adverse ticks must be a non-negative integer.");
+		if (invalidFillTickValueUsd) errors.push("Tick value USD must be 0 or higher.");
 		if (invalidMargin) errors.push("Margin per contract must be 0 or higher.");
 		if (invalidContractMultiplier) errors.push("Contract multiplier must be greater than 0.");
 		if (invalidMemory) errors.push("Memory limit must be 0 or higher.");
@@ -243,6 +262,9 @@
 		maxPosition: toNumber(analyzerEnv.maxPosition),
 		commission: toNumber(analyzerEnv.commission),
 		slippage: toNumber(analyzerEnv.slippage),
+		fillSeed: toInteger(analyzerEnv.fillModel.seed),
+		fillMaxAdverseTicks: toInteger(analyzerEnv.fillModel.maxAdverseTicks),
+		fillTickValueUsd: toNumber(analyzerEnv.fillModel.tickValueUsd),
 		marginPerContract: toNumber(analyzerEnv.marginPerContract),
 		contractMultiplier: toNumber(analyzerEnv.contractMultiplier)
 	}));
@@ -280,6 +302,8 @@
 		end: toNumber(analyzer.stopLoss.end),
 		step: toNumber(analyzer.stopLoss.step)
 	}));
+
+	let analyzerVolumeBarSize = $derived.by(() => toNumber(analyzer.volumeBarSize));
 
 	let analyzerDatasetPathInvalid = $derived.by(() => {
 		if (analyzerDatasetMode !== "custom") return false;
@@ -334,11 +358,32 @@
 	let invalidAnalyzerSlippage = $derived.by(
 		() => numericAnalyzerEnv.slippage === null || numericAnalyzerEnv.slippage < 0
 	);
+	let invalidAnalyzerFillSeed = $derived.by(
+		() =>
+			analyzerEnv.fillModel.mode === "random-adverse" &&
+			(numericAnalyzerEnv.fillSeed === null || numericAnalyzerEnv.fillSeed < 0)
+	);
+	let invalidAnalyzerFillMaxAdverseTicks = $derived.by(
+		() =>
+			analyzerEnv.fillModel.mode === "random-adverse" &&
+			(numericAnalyzerEnv.fillMaxAdverseTicks === null ||
+				numericAnalyzerEnv.fillMaxAdverseTicks < 0)
+	);
+	let invalidAnalyzerFillTickValueUsd = $derived.by(
+		() =>
+			analyzerEnv.fillModel.mode === "random-adverse" &&
+			(numericAnalyzerEnv.fillTickValueUsd === null || numericAnalyzerEnv.fillTickValueUsd < 0)
+	);
 	let invalidAnalyzerMargin = $derived.by(
 		() => numericAnalyzerEnv.marginPerContract === null || numericAnalyzerEnv.marginPerContract < 0
 	);
 	let invalidAnalyzerContractMultiplier = $derived.by(
 		() => numericAnalyzerEnv.contractMultiplier === null || numericAnalyzerEnv.contractMultiplier <= 0
+	);
+	let invalidAnalyzerVolumeBarSize = $derived.by(
+		() =>
+			analyzer.barKind === "volume" &&
+			(analyzerVolumeBarSize === null || analyzerVolumeBarSize <= 0)
 	);
 
 	let analyzerCombos = $derived.by(() => {
@@ -363,9 +408,17 @@
 		if (invalidAnalyzerMaxPosition) errors.push("Max position must be 0 or higher.");
 		if (invalidAnalyzerCommission) errors.push("Commission must be 0 or higher.");
 		if (invalidAnalyzerSlippage) errors.push("Slippage must be 0 or higher.");
+		if (invalidAnalyzerFillSeed) errors.push("Fill seed must be a non-negative integer.");
+		if (invalidAnalyzerFillMaxAdverseTicks) {
+			errors.push("Max adverse ticks must be a non-negative integer.");
+		}
+		if (invalidAnalyzerFillTickValueUsd) errors.push("Tick value USD must be 0 or higher.");
 		if (invalidAnalyzerMargin) errors.push("Margin per contract must be 0 or higher.");
 		if (invalidAnalyzerContractMultiplier) {
 			errors.push("Contract multiplier must be greater than 0.");
+		}
+		if (invalidAnalyzerVolumeBarSize) {
+			errors.push("Volume bar size must be greater than 0 when volume bars are selected.");
 		}
 		if (analyzerCombos > ANALYZER_MAX_COMBOS) {
 			errors.push(`Combination count exceeds ${ANALYZER_MAX_COMBOS.toLocaleString()}.`);
@@ -514,6 +567,12 @@
 					maxPosition: numericEnv.maxPosition,
 					commission: numericEnv.commission,
 					slippage: numericEnv.slippage,
+					fillModel: {
+						mode: env.fillModel.mode,
+						seed: numericEnv.fillSeed,
+						maxAdverseTicks: numericEnv.fillMaxAdverseTicks,
+						tickValueUsd: numericEnv.fillTickValueUsd
+					},
 					marginPerContract: numericEnv.marginPerContract,
 					marginMode: env.marginMode,
 					contractMultiplier: numericEnv.contractMultiplier,
@@ -554,6 +613,9 @@
 			const payload = {
 				dataset: analyzerDatasetMode === "custom" ? null : analyzerDatasetMode,
 				path: analyzerDatasetMode === "custom" ? analyzerDatasetPath : null,
+				barKind: analyzer.barKind,
+				volumeBarSize: analyzer.barKind === "volume" ? analyzerVolumeBarSize : null,
+				priceSource: analyzer.priceSource,
 				signal: {
 					indicatorA: {
 						kind: analyzer.indicatorA.kind,
@@ -609,6 +671,12 @@
 					maxPosition: numericAnalyzerEnv.maxPosition,
 					commission: numericAnalyzerEnv.commission,
 					slippage: numericAnalyzerEnv.slippage,
+					fillModel: {
+						mode: analyzerEnv.fillModel.mode,
+						seed: numericAnalyzerEnv.fillSeed,
+						maxAdverseTicks: numericAnalyzerEnv.fillMaxAdverseTicks,
+						tickValueUsd: numericAnalyzerEnv.fillTickValueUsd
+					},
 					marginPerContract: numericAnalyzerEnv.marginPerContract,
 					marginMode: analyzerEnv.marginMode,
 					contractMultiplier: numericAnalyzerEnv.contractMultiplier,
@@ -683,6 +751,9 @@
 					invalidMaxPosition,
 					invalidCommission,
 					invalidSlippage,
+					invalidFillSeed,
+					invalidFillMaxAdverseTicks,
+					invalidFillTickValueUsd,
 					invalidMargin,
 					invalidContractMultiplier,
 					invalidMemory,
@@ -713,8 +784,12 @@
 					invalidAnalyzerMaxPosition,
 					invalidAnalyzerCommission,
 					invalidAnalyzerSlippage,
+					invalidAnalyzerFillSeed,
+					invalidAnalyzerFillMaxAdverseTicks,
+					invalidAnalyzerFillTickValueUsd,
 					invalidAnalyzerMargin,
-					invalidAnalyzerContractMultiplier
+					invalidAnalyzerContractMultiplier,
+					invalidAnalyzerVolumeBarSize
 				}}
 				bind:heatmapMetric
 				{heatmapMetricOptions}

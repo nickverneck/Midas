@@ -17,24 +17,26 @@ impl App {
             return;
         }
 
+        if self.screen == Screen::EngineSelect {
+            if key.code == KeyCode::F(7) && self.replay_affordance_visible() {
+                self.status =
+                    "Attach or create an engine first, then press F7 for Replay.".to_string();
+                self.push_log(self.status.clone());
+                return;
+            }
+            self.handle_engine_select_key(key);
+            return;
+        }
+
         if self.screen == Screen::Login
             && !self.is_text_focus()
             && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
         {
-            if !self.broker_supports_replay() {
-                self.push_log(format!(
-                    "{} does not support replay mode in this build.",
-                    self.selected_broker.label()
-                ));
+            if !self.replay_affordance_visible() {
                 return;
             }
-            self.bar_type = BarType::range(1);
-            let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
-                config: self.current_config(),
-                bar_type: self.bar_type,
-                candle_mode: self.effective_candle_mode(),
-            });
-            self.push_log("Replay mode requested".to_string());
+            self.screen = Screen::Replay;
+            self.focus = Focus::BarTypeToggle;
             return;
         }
 
@@ -60,12 +62,26 @@ impl App {
                 return;
             }
             KeyCode::F(6) => {
+                if !self.session_stats_affordance_visible() {
+                    return;
+                }
                 self.screen = Screen::Stats;
                 self.focus = Focus::AccountList;
                 return;
             }
+            KeyCode::F(7) => {
+                if !self.replay_affordance_visible() {
+                    return;
+                }
+                self.screen = Screen::Replay;
+                self.focus = Focus::BarTypeToggle;
+                return;
+            }
             KeyCode::Esc => {
-                if self.screen == Screen::Login && self.available_brokers.len() > 1 {
+                if self.screen == Screen::Replay {
+                    self.screen = Screen::Login;
+                    self.focus = Focus::Env;
+                } else if self.screen == Screen::Login && self.available_brokers.len() > 1 {
                     self.screen = Screen::BrokerSelect;
                     self.focus = Focus::BrokerList;
                 } else {
@@ -85,13 +101,18 @@ impl App {
         if !self.is_free_text_focus()
             && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
         {
+            if !self.automated_strategy_affordance_visible() {
+                return;
+            }
             self.manual_disarm_native_strategy(cmd_tx);
             return;
         }
 
         match self.screen {
+            Screen::EngineSelect => self.handle_engine_select_key(key),
             Screen::BrokerSelect => self.handle_broker_select_key(key),
             Screen::Login => self.handle_login_key(key, cmd_tx),
+            Screen::Replay => self.handle_replay_key(key, cmd_tx),
             Screen::Strategy => self.handle_strategy_key(key, cmd_tx),
             Screen::Selection => self.handle_selection_key(key, cmd_tx),
             Screen::Dashboard => self.handle_dashboard_key(key, cmd_tx),

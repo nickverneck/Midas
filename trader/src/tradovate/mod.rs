@@ -1,3 +1,5 @@
+#[cfg(feature = "replay")]
+use crate::broker::BarKind;
 use crate::broker::{
     AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, ExecutionProbeManagedProtection, ExecutionProbeOrder,
@@ -17,7 +19,7 @@ use crate::strategy::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
-#[cfg(any(feature = "replay", test))]
+#[cfg(test)]
 use chrono::TimeZone;
 use chrono::{DateTime, Utc};
 #[cfg(any(feature = "replay", test))]
@@ -40,6 +42,8 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+#[cfg(feature = "replay")]
+mod download;
 mod execution;
 mod gateway;
 mod orders;
@@ -50,11 +54,18 @@ mod service;
 
 use self::protocol::*;
 pub use self::service::service_loop;
+#[cfg(feature = "replay")]
+pub use download::{
+    TradovateRawTickDownloadRequest, TradovateServerBarDownloadRequest, download_replay_raw_ticks,
+    download_replay_server_bars,
+};
 use execution::*;
 use gateway::*;
+#[cfg(feature = "manual-orders")]
+use orders::dispatch_manual_order;
 use orders::{
     MarketOrderDispatchOutcome, build_market_order_request, cancel_order_by_id,
-    cancel_orders_by_id, collect_live_protection_orders, dispatch_manual_order,
+    cancel_orders_by_id, collect_live_protection_orders,
     dispatch_profile_legacy_order_strategy_target, dispatch_target_position_order,
     enqueue_market_order, interrupt_order_strategy_by_id, native_order_strategy_enabled,
     recover_live_protection_order, refresh_managed_protection_order_ids, request_order_json,
@@ -72,7 +83,7 @@ include!("store.rs");
 fn tradovate_capabilities() -> BrokerCapabilities {
     BrokerCapabilities {
         replay: cfg!(feature = "replay"),
-        manual_orders: true,
+        manual_orders: cfg!(feature = "manual-orders"),
         automated_orders: true,
         native_protection: true,
     }

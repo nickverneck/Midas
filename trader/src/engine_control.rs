@@ -1,6 +1,15 @@
 use anyhow::Result;
+#[cfg(not(feature = "manual-orders"))]
+use anyhow::bail;
 
 pub async fn close_and_kill_engine(id: u32) -> Result<()> {
+    #[cfg(not(feature = "manual-orders"))]
+    {
+        let _ = id;
+        bail!("close-and-kill requires rebuilding with --features manual-orders");
+    }
+
+    #[cfg(feature = "manual-orders")]
     imp::close_and_kill_engine(id).await
 }
 
@@ -10,23 +19,34 @@ pub async fn kill_engine_process(id: u32) -> Result<()> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
+    #[cfg(feature = "manual-orders")]
     use crate::broker::{ManualOrderAction, ServiceCommand, ServiceEvent};
     use crate::engine_registry::resolve_engine;
+    #[cfg(feature = "manual-orders")]
     use crate::ipc::connect_client;
-    use anyhow::{Context, Result, anyhow, bail};
+    #[cfg(feature = "manual-orders")]
+    use anyhow::anyhow;
+    use anyhow::{Context, Result, bail};
     use std::fs;
     use std::os::unix::fs::FileTypeExt;
     use std::path::Path;
     use std::time::Duration;
+    #[cfg(feature = "manual-orders")]
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-    use tokio::time::{Instant, sleep, timeout};
+    #[cfg(feature = "manual-orders")]
+    use tokio::time::timeout;
+    use tokio::time::{Instant, sleep};
 
+    #[cfg(feature = "manual-orders")]
     const REPLAY_TIMEOUT: Duration = Duration::from_secs(2);
+    #[cfg(feature = "manual-orders")]
     const FLATTEN_TIMEOUT: Duration = Duration::from_secs(20);
     const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+    #[cfg(feature = "manual-orders")]
     const REPLAY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
     #[derive(Debug, Default)]
+    #[cfg(feature = "manual-orders")]
     struct ObservedEngineState {
         disconnected: bool,
         saw_execution_state: bool,
@@ -34,6 +54,7 @@ mod imp {
         market_position_qty: i32,
     }
 
+    #[cfg(feature = "manual-orders")]
     pub async fn close_and_kill_engine(id: u32) -> Result<()> {
         let engine = resolve_engine(id)?;
         flatten_engine(&engine.socket_path).await?;
@@ -45,6 +66,7 @@ mod imp {
         terminate_process(id, &engine.socket_path).await
     }
 
+    #[cfg(feature = "manual-orders")]
     async fn flatten_engine(socket_path: &Path) -> Result<()> {
         let (cmd_tx, mut event_rx) = connect_client(socket_path)
             .await
@@ -82,6 +104,7 @@ mod imp {
         bail!("timed out waiting for engine position to flatten on {label}; engine left running")
     }
 
+    #[cfg(feature = "manual-orders")]
     async fn replay_engine_state(
         cmd_tx: &UnboundedSender<ServiceCommand>,
         event_rx: &mut UnboundedReceiver<ServiceEvent>,
@@ -113,6 +136,7 @@ mod imp {
         }
     }
 
+    #[cfg(feature = "manual-orders")]
     fn observe_event(observed: &mut ObservedEngineState, event: ServiceEvent) -> Result<()> {
         match event {
             ServiceEvent::Disconnected => {

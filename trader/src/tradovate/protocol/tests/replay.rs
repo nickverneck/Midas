@@ -82,6 +82,7 @@ fn replay_bar_fills_take_profit_and_clears_sibling_strategy_orders() {
         high: 6604.5,
         low: 6599.5,
         close: 6604.0,
+        volume: None,
     });
 
     assert_eq!(events.len(), 1);
