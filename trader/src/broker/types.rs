@@ -143,17 +143,25 @@ pub struct AccountInfo {
 pub enum BarKind {
     Minute,
     Second,
+    Tick,
     Volume,
     Range,
 }
 
 impl BarKind {
-    const ALL: [Self; 4] = [Self::Minute, Self::Second, Self::Volume, Self::Range];
+    const ALL: [Self; 5] = [
+        Self::Minute,
+        Self::Second,
+        Self::Tick,
+        Self::Volume,
+        Self::Range,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Minute => "Minute",
             Self::Second => "Seconds",
+            Self::Tick => "Tick Count",
             Self::Volume => "Volume",
             Self::Range => "Range",
         }
@@ -163,6 +171,7 @@ impl BarKind {
         match self {
             Self::Minute => "Min",
             Self::Second => "Sec",
+            Self::Tick => "Tick",
             Self::Volume => "Vol",
             Self::Range => "Range",
         }
@@ -199,6 +208,10 @@ impl BarType {
 
     pub fn second(value: u32) -> Self {
         Self::new(BarKind::Second, value)
+    }
+
+    pub fn tick(value: u32) -> Self {
+        Self::new(BarKind::Tick, value)
     }
 
     pub fn volume(value: u32) -> Self {
@@ -249,6 +262,7 @@ impl BarType {
         match self.kind.next() {
             BarKind::Minute => Self::minute(self.value),
             BarKind::Second => Self::second(self.value),
+            BarKind::Tick => Self::tick(self.value),
             BarKind::Volume => Self::volume(self.value),
             BarKind::Range => Self::range(self.value),
         }
@@ -258,6 +272,7 @@ impl BarType {
         match self.kind.previous() {
             BarKind::Minute => Self::minute(self.value),
             BarKind::Second => Self::second(self.value),
+            BarKind::Tick => Self::tick(self.value),
             BarKind::Volume => Self::volume(self.value),
             BarKind::Range => Self::range(self.value),
         }
@@ -287,6 +302,12 @@ impl BarType {
                 "underlyingType": "Tick",
                 "elementSize": self.value,
                 "elementSizeUnit": "Seconds",
+                "withHistogram": false
+            }),
+            BarKind::Tick => json!({
+                "underlyingType": "Tick",
+                "elementSize": self.value,
+                "elementSizeUnit": "UnderlyingUnits",
                 "withHistogram": false
             }),
             BarKind::Volume => json!({
@@ -461,6 +482,15 @@ mod tests {
                 "underlyingType": "Tick",
                 "elementSize": 15,
                 "elementSizeUnit": "Seconds",
+                "withHistogram": false
+            })
+        );
+        assert_eq!(
+            BarType::tick(100).chart_description(),
+            json!({
+                "underlyingType": "Tick",
+                "elementSize": 100,
+                "elementSizeUnit": "UnderlyingUnits",
                 "withHistogram": false
             })
         );

@@ -1,10 +1,12 @@
 use super::*;
 
+#[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
 pub(crate) enum MarketOrderDispatchOutcome {
     NoOp { message: String },
     Queued { target_qty: Option<i32> },
 }
 
+#[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
 pub(crate) fn dispatch_manual_order(
     session: &mut SessionState,
     broker_tx: &UnboundedSender<BrokerCommand>,

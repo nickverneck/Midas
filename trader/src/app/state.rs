@@ -186,7 +186,7 @@ impl App {
     }
 
     fn manual_order_affordance_visible(&self) -> bool {
-        self.capabilities.manual_orders
+        cfg!(feature = "manual-orders") && self.capabilities.manual_orders
     }
 
     fn automated_strategy_affordance_visible(&self) -> bool {
@@ -195,6 +195,10 @@ impl App {
 
     fn engine_create_affordance_visible(&self) -> bool {
         self.engine_creation_enabled
+    }
+
+    fn engine_close_and_kill_affordance_visible(&self) -> bool {
+        cfg!(feature = "manual-orders")
     }
 
     fn engine_select_item_count(&self) -> usize {
@@ -401,6 +405,15 @@ impl App {
         order
     }
 
+    fn replay_focus_order(&self) -> Vec<Focus> {
+        let mut order = vec![Focus::BarTypeToggle, Focus::BarValue];
+        if self.candle_mode_controls_visible() {
+            order.push(Focus::CandleModeToggle);
+        }
+        order.push(Focus::ReplayMode);
+        order
+    }
+
     fn next_login_focus(&self) -> Focus {
         let order = self.login_focus_order();
         let index = order
@@ -448,6 +461,24 @@ impl App {
 
     fn prev_selection_focus(&self) -> Focus {
         let order = self.selection_focus_order();
+        let index = order
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        order[(index + order.len() - 1) % order.len()]
+    }
+
+    fn next_replay_focus(&self) -> Focus {
+        let order = self.replay_focus_order();
+        let index = order
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        order[(index + 1) % order.len()]
+    }
+
+    fn prev_replay_focus(&self) -> Focus {
+        let order = self.replay_focus_order();
         let index = order
             .iter()
             .position(|focus| *focus == self.focus)
@@ -559,6 +590,7 @@ impl App {
             Screen::EngineSelect => "Engine",
             Screen::BrokerSelect => "Broker",
             Screen::Login => "Login",
+            Screen::Replay => "Replay",
             Screen::Selection => "Selection",
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",

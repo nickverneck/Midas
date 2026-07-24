@@ -80,7 +80,7 @@ impl App {
         ));
         if self.replay_affordance_visible() {
             lines.push(styled_line(
-                "[Enter] Replay Mode (local file, skips login)".to_string(),
+                "[Enter] Open Replay Mode (local file, skips login)".to_string(),
                 self.focus == Focus::ReplayMode,
             ));
         }
@@ -108,7 +108,7 @@ impl App {
 
         if self.replay_affordance_visible() {
             lines.push(Line::from(
-                "Replay Mode loads the local tick file and starts on 1 Range bars by default.",
+                "Replay Mode uses its own screen for local-file bar and candle selection.",
             ));
         }
 

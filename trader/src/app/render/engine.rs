@@ -17,7 +17,14 @@ impl App {
             KeyCode::Char('x') | KeyCode::Char('X')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.open_engine_lifecycle_confirmation(EngineLifecycleAction::CloseAndKill);
+                if self.engine_close_and_kill_affordance_visible() {
+                    self.open_engine_lifecycle_confirmation(EngineLifecycleAction::CloseAndKill);
+                } else {
+                    self.status =
+                        "Close-and-kill is disabled; rebuild with --features manual-orders."
+                            .to_string();
+                    self.push_log(format!("ERROR: {}", self.status));
+                }
             }
             KeyCode::Char('r') | KeyCode::Char('R')
                 if !key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -109,6 +116,15 @@ impl App {
     }
 
     fn open_engine_lifecycle_confirmation(&mut self, action: EngineLifecycleAction) {
+        if action == EngineLifecycleAction::CloseAndKill
+            && !self.engine_close_and_kill_affordance_visible()
+        {
+            self.status =
+                "Close-and-kill is disabled; rebuild with --features manual-orders.".to_string();
+            self.push_log(format!("ERROR: {}", self.status));
+            return;
+        }
+
         let Some(engine) = self.engine_summaries.get(self.selected_engine) else {
             self.status = "Select a running engine first.".to_string();
             return;
@@ -156,6 +172,12 @@ impl App {
         };
 
         if confirmation.action == EngineLifecycleAction::CloseAndKill {
+            if !self.engine_close_and_kill_affordance_visible() {
+                self.status = "Close-and-kill is disabled; rebuild with --features manual-orders."
+                    .to_string();
+                self.push_log(format!("ERROR: {}", self.status));
+                return;
+            }
             if let Some(engine) = self
                 .engine_summaries
                 .iter()
@@ -362,6 +384,7 @@ impl App {
             Line::from(
                 "Live/connected rows attach. Stale/closed rows remain for observation context.",
             ),
+            Line::from("Replay uses an engine session too; attach or create an engine before F7."),
             self.engine_lifecycle_help_line(),
             Line::from("Destructive actions always open a confirmation prompt before running."),
         ];
@@ -390,11 +413,15 @@ impl App {
             return Line::from("Lifecycle actions require a known engine process ID.");
         }
         if engine.connection_state.attachable() {
-            Line::from("Ctrl+K kill selected engine. Ctrl+X close selected market and kill engine.")
+            if self.engine_close_and_kill_affordance_visible() {
+                Line::from(
+                    "Ctrl+K kill selected engine. Ctrl+X close selected market and kill engine.",
+                )
+            } else {
+                Line::from("Ctrl+K kill selected engine.")
+            }
         } else {
-            Line::from(
-                "Ctrl+K kill selected stale/closed engine. Close+kill requires a live engine.",
-            )
+            Line::from("Ctrl+K kill selected stale/closed engine.")
         }
     }
 

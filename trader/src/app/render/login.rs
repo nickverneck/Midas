@@ -49,14 +49,8 @@ impl App {
                     if !self.replay_affordance_visible() {
                         return;
                     }
-                    self.bar_type = BarType::range(1);
-                    let cfg = self.current_config();
-                    let _ = cmd_tx.send(ServiceCommand::EnterReplayMode {
-                        config: cfg,
-                        bar_type: self.bar_type,
-                        candle_mode: self.effective_candle_mode(),
-                    });
-                    self.push_log("Replay mode requested".to_string());
+                    self.screen = Screen::Replay;
+                    self.focus = Focus::BarTypeToggle;
                 }
             }
             Focus::TokenOverride => edit_string(&mut self.form.token_override, key),

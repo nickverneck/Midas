@@ -5,6 +5,7 @@ mod chrome;
 mod dashboard;
 mod engine;
 mod login;
+mod replay;
 mod selection;
 mod session_stats;
 mod strategy;
@@ -28,6 +29,7 @@ impl App {
             Screen::EngineSelect => self.render_engine_select_screen(frame, layout[1]),
             Screen::BrokerSelect => self.render_broker_select_screen(frame, layout[1]),
             Screen::Login => self.render_login_screen(frame, layout[1]),
+            Screen::Replay => self.render_replay_screen(frame, layout[1]),
             Screen::Strategy => self.render_strategy_screen(frame, layout[1]),
             Screen::Selection => self.render_selection_screen(frame, layout[1]),
             Screen::Dashboard => self.render_dashboard(frame, layout[1]),

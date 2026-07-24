@@ -451,24 +451,38 @@ fn manual_order(
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
 ) -> Result<()> {
-    let broker_tx = state.broker_tx.clone();
-    let Some(session) = state.session.as_mut() else {
-        bail!("connect first");
-    };
-    match dispatch_manual_order(session, &broker_tx, action)? {
-        MarketOrderDispatchOutcome::NoOp { message } => {
-            let _ = event_tx.send(ServiceEvent::Status(message));
-        }
-        MarketOrderDispatchOutcome::Queued { target_qty } => {
-            if let Some(target_qty) = target_qty {
-                session.execution_runtime.pending_target_qty = Some(target_qty);
-                session.execution_runtime.last_summary =
-                    "Manual close requested; waiting for flat position.".to_string();
-                emit_execution_state(event_tx, session);
+    #[cfg(not(feature = "manual-orders"))]
+    {
+        let _ = action;
+        let _ = state;
+        let _ = event_tx.send(ServiceEvent::Error(
+            "Manual order commands are disabled; rebuild with --features manual-orders."
+                .to_string(),
+        ));
+        return Ok(());
+    }
+
+    #[cfg(feature = "manual-orders")]
+    {
+        let broker_tx = state.broker_tx.clone();
+        let Some(session) = state.session.as_mut() else {
+            bail!("connect first");
+        };
+        match dispatch_manual_order(session, &broker_tx, action)? {
+            MarketOrderDispatchOutcome::NoOp { message } => {
+                let _ = event_tx.send(ServiceEvent::Status(message));
+            }
+            MarketOrderDispatchOutcome::Queued { target_qty } => {
+                if let Some(target_qty) = target_qty {
+                    session.execution_runtime.pending_target_qty = Some(target_qty);
+                    session.execution_runtime.last_summary =
+                        "Manual close requested; waiting for flat position.".to_string();
+                    emit_execution_state(event_tx, session);
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn set_target_position(

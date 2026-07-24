@@ -33,8 +33,11 @@ impl App {
                         self.set_replay_speed(cmd_tx, ReplaySpeed::Realtime);
                         return;
                     }
+                    #[cfg(feature = "manual-orders")]
                     'b' => Some(ManualOrderAction::Buy),
+                    #[cfg(feature = "manual-orders")]
                     's' => Some(ManualOrderAction::Sell),
+                    #[cfg(feature = "manual-orders")]
                     'c' => Some(ManualOrderAction::Close),
                     _ => None,
                 }

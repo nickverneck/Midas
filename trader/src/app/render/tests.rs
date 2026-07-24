@@ -1,7 +1,9 @@
 use super::*;
+#[cfg(feature = "manual-orders")]
+use crate::broker::ManualOrderAction;
 use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, LatencySnapshot, ManualOrderAction, MarketSnapshot, ServiceEvent,
+    ContractSuggestion, LatencySnapshot, MarketSnapshot, ServiceEvent,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::engine_registry::RunningEngine;
@@ -181,6 +183,20 @@ fn app_starts_on_engine_select() {
     assert_eq!(app.selected_engine, 0);
     assert!(!app.awaiting_broker_selection());
     assert!(app.take_engine_selection_action().is_none());
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn engine_screen_f7_explains_replay_requires_engine_session() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+
+    app.handle_key(key(KeyCode::F(7)), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::EngineSelect);
+    assert!(app.status.contains("Attach or create an engine first"));
+    assert!(app.header_help_text().contains("Replay after attach"));
+    assert!(cmd_rx.try_recv().is_err());
 }
 
 #[test]
@@ -389,6 +405,7 @@ fn engine_picker_kill_confirm_emits_kill_action() {
 }
 
 #[test]
+#[cfg(feature = "manual-orders")]
 fn engine_picker_ctrl_x_opens_close_and_kill_confirmation_for_live_engine() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -433,6 +450,20 @@ fn engine_picker_ctrl_x_opens_close_and_kill_confirmation_for_live_engine() {
 }
 
 #[test]
+#[cfg(not(feature = "manual-orders"))]
+fn engine_picker_ctrl_x_disabled_without_manual_orders() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_select_key(ctrl_key('x'));
+
+    assert!(app.pending_engine_lifecycle_confirmation.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("Close-and-kill is disabled"));
+}
+
+#[test]
+#[cfg(feature = "manual-orders")]
 fn engine_picker_close_and_kill_cancel_emits_no_action() {
     let mut app = App::new(AppConfig::default());
     app.set_running_engines(vec![running_engine(10, true)]);
@@ -446,6 +477,7 @@ fn engine_picker_close_and_kill_cancel_emits_no_action() {
 }
 
 #[test]
+#[cfg(feature = "manual-orders")]
 fn engine_picker_close_and_kill_confirm_emits_action() {
     let mut app = App::new(AppConfig::default());
     app.set_running_engines(vec![running_engine(10, true)]);
@@ -461,6 +493,7 @@ fn engine_picker_close_and_kill_confirm_emits_action() {
 }
 
 #[test]
+#[cfg(feature = "manual-orders")]
 fn engine_picker_close_and_kill_refuses_stale_engine() {
     let mut app = App::new(AppConfig::default());
     app.set_running_engines(vec![running_engine(10, false)]);
@@ -886,6 +919,7 @@ fn bar_type_cycles_through_supported_kinds() {
 
     for expected in [
         BarKind::Second,
+        BarKind::Tick,
         BarKind::Volume,
         BarKind::Range,
         BarKind::Minute,
@@ -962,11 +996,308 @@ fn unavailable_replay_is_hidden_from_login() {
             .iter()
             .all(|line| !line.contains("Replay Mode"))
     );
-    assert!(!app.header_help_text().contains("connect/replay"));
+    assert!(!app.header_help_text().contains("open replay"));
 
     app.handle_key(key(KeyCode::Char('r')), &cmd_tx);
 
     assert!(cmd_rx.try_recv().is_err());
+}
+
+#[cfg(feature = "replay")]
+fn replay_test_file(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "trader-replay-{name}-{}-{}.Last.txt",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::write(&path, "20260324 040000 1800000;6603;6603;6603.25;1\n")
+        .expect("write replay test file");
+    path
+}
+
+#[cfg(feature = "replay")]
+fn replay_cache_test_root(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "trader-replay-cache-{name}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    path
+}
+
+#[cfg(feature = "replay")]
+fn write_replay_cache_manifest(root: &std::path::Path) -> PathBuf {
+    let dataset_dir = root.join("tradovate/sim/MES/MESU6/2026-07-23");
+    std::fs::create_dir_all(dataset_dir.join("server-bars")).expect("create cache dirs");
+    let manifest = json!({
+        "manifest_version": 1,
+        "provider": "tradovate",
+        "env": "sim",
+        "instrument": {
+            "symbol": "MES",
+            "name": "Micro E-mini S&P 500",
+            "exchange": "CME"
+        },
+        "contract": {
+            "symbol": "MESU6",
+            "id": 25866054,
+            "expiration": "2026-09-18"
+        },
+        "display_name": "MESU6 RTH 1m Heikin",
+        "coverage": {
+            "start": "2026-07-23T13:30:00Z",
+            "end": "2026-07-23T20:00:00Z",
+            "trading_date": "2026-07-23"
+        },
+        "source_kind": "server_bars",
+        "download_request": {
+            "md": "getChart",
+            "chartDescription": {
+                "underlyingType": "MinuteBar",
+                "elementSize": 1,
+                "elementSizeUnit": "UnderlyingUnits",
+                "withHistogram": false
+            }
+        },
+        "tick_specs": {
+            "tick_size": 0.25,
+            "value_per_point": 5.0
+        },
+        "files": [{
+            "relative_path": "server-bars/1m-heikin.parquet",
+            "source_kind": "server_bars",
+            "format": "parquet",
+            "schema_version": 1,
+            "compression": "zstd",
+            "market_shape": {
+                "bar_type": {
+                    "kind": "minute",
+                    "value": 1
+                },
+                "chart_mode": "heikin_ashi",
+                "session_template": "Globex"
+            },
+            "row_count": 390,
+            "first_timestamp": "2026-07-23T13:30:00Z",
+            "last_timestamp": "2026-07-23T20:00:00Z",
+            "data_hash": {
+                "algorithm": "sha256",
+                "value": "abc123"
+            }
+        }],
+        "tags": ["fixture"],
+        "notes": "test manifest"
+    });
+    let manifest_path = dataset_dir.join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+    )
+    .expect("write manifest");
+    manifest_path
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn login_replay_shortcut_opens_replay_screen_without_starting() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Login;
+    app.focus = Focus::Env;
+    app.bar_type = BarType::tick(25);
+
+    app.handle_key(key(KeyCode::Char('r')), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.focus, Focus::BarTypeToggle);
+    assert_eq!(app.bar_type, BarType::tick(25));
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(app.header_tab_titles().contains(&"Replay"));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn login_replay_focus_opens_replay_screen_without_starting() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Login;
+    app.focus = Focus::ReplayMode;
+    app.bar_type = BarType::second(5);
+
+    app.handle_login_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.focus, Focus::BarTypeToggle);
+    assert_eq!(app.bar_type, BarType::second(5));
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_screen_start_uses_selected_market_controls() {
+    let path = replay_test_file("start-selected");
+    let mut config = AppConfig::default();
+    config.replay_file_path = path.clone();
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayMode;
+    app.bar_type = BarType::tick(100);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected replay start command") {
+        ServiceCommand::EnterReplayMode {
+            bar_type,
+            candle_mode,
+            config,
+        } => {
+            assert_eq!(bar_type, BarType::tick(100));
+            assert_eq!(candle_mode, CandleMode::HeikinAshi);
+            assert_eq!(config.replay_file_path, path);
+        }
+        _ => panic!("expected enter-replay command"),
+    }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_dataset_lines_expose_ready_and_missing_metadata() {
+    let path = replay_test_file("metadata");
+    let mut config = AppConfig::default();
+    config.replay_file_path = path;
+    let app = App::new(config);
+
+    let ready = rendered_text(app.replay_dataset_library_lines());
+    assert!(
+        ready
+            .iter()
+            .any(|line| line == "Configured Local Replay File")
+    );
+    assert!(
+        ready
+            .iter()
+            .any(|line| line.starts_with("Configured file: trader-replay-metadata"))
+    );
+    assert!(ready.iter().any(|line| line == "Status: ready"));
+    assert!(
+        ready
+            .iter()
+            .any(|line| line.starts_with("Inferred contract: trader-replay-metadata"))
+    );
+    assert!(
+        ready
+            .iter()
+            .any(|line| line == "Available bars: seconds, minutes, tick-count, range")
+    );
+
+    let mut missing_config = AppConfig::default();
+    missing_config.replay_file_path =
+        std::env::temp_dir().join("trader-replay-missing-file.Last.txt");
+    let missing_app = App::new(missing_config);
+    let missing = rendered_text(missing_app.replay_dataset_library_lines());
+    assert!(
+        missing
+            .iter()
+            .any(|line| line == "Status: missing local file")
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_dataset_lines_show_owned_cache_manifests_first() {
+    let cache_root = replay_cache_test_root("ui");
+    let manifest_path = write_replay_cache_manifest(&cache_root);
+    let path = replay_test_file("cache-lines");
+    let mut config = AppConfig::default();
+    config.replay_file_path = path;
+    config.replay_cache_dir = cache_root;
+    let mut app = App::new(config);
+    app.bar_type = BarType::minute(1);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    let lines = rendered_text(app.replay_dataset_library_lines());
+
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Owned Cached Datasets")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line
+                == "Status: 1 manifest(s), selected request manifest match (browse-only)")
+    );
+    assert!(lines.iter().any(
+        |line| line == "Cache readers are not wired yet; Enter still uses the local text file."
+    ));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Dataset: MESU6 RTH 1m Heikin")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Shapes: 1 Min | Modes: Heikin Ashi"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == &format!("  Manifest: {}", manifest_path.display()))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Configured Local Replay File")
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_run_lines_label_disabled_start_states() {
+    let mut missing_config = AppConfig::default();
+    missing_config.replay_file_path =
+        std::env::temp_dir().join("trader-replay-disabled-missing.Last.txt");
+    let missing_app = App::new(missing_config);
+
+    let missing_lines = rendered_text(missing_app.replay_run_control_lines());
+    assert!(
+        missing_lines
+            .iter()
+            .any(|line| line == "[Enter] Start Local Replay (missing file)")
+    );
+
+    let path = replay_test_file("disabled-volume");
+    let mut config = AppConfig::default();
+    config.replay_file_path = path;
+    let mut volume_app = App::new(config);
+    volume_app.bar_type = BarType::volume(6500);
+
+    let volume_lines = rendered_text(volume_app.replay_run_control_lines());
+    assert!(
+        volume_lines
+            .iter()
+            .any(|line| line == "[Enter] Start Local Replay (volume unavailable)")
+    );
+    let market_lines = rendered_text(volume_app.replay_market_control_lines());
+    assert!(
+        market_lines
+            .iter()
+            .any(|line| line == "Volume needs per-trade size; this Last file only has price.")
+    );
+}
+
+#[test]
+fn live_selection_defaults_remain_one_minute_ohlc() {
+    let app = App::new(AppConfig::default());
+
+    assert_eq!(app.bar_type, BarType::minute(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
 }
 
 #[test]
@@ -2573,6 +2904,7 @@ fn log_panel_lines_include_last_saved_path_stably() {
     assert!(text.iter().any(|line| line.contains("status update 9")));
 }
 
+#[cfg(feature = "manual-orders")]
 #[test]
 fn dashboard_manual_orders_sync_selected_account_first() {
     let mut app = App::new(AppConfig::default());
@@ -2590,6 +2922,30 @@ fn dashboard_manual_orders_sync_selected_account_first() {
         } => {}
         _ => panic!("expected buy manual-order command"),
     }
+}
+
+#[cfg(not(feature = "manual-orders"))]
+#[test]
+fn dashboard_manual_order_hotkeys_disabled_without_feature() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Dashboard;
+    app.accounts = vec![account(1, "DEMO4769136"), account(2, "CHMMMLE422")];
+    app.selected_account = 1;
+
+    assert!(!app.header_help_text().contains("b/s/c manual"));
+    assert!(
+        rendered_text(app.stats_lines())
+            .iter()
+            .all(|line| !line.contains("b/s/c"))
+    );
+
+    for ch in ['b', 'c', 's'] {
+        app.handle_dashboard_key(key(KeyCode::Char(ch)), &cmd_tx);
+    }
+
+    assert!(cmd_rx.try_recv().is_err());
 }
 
 #[test]

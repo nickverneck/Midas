@@ -8,6 +8,7 @@ default = ["tradovate", "ironbeam"]
 tradovate = []
 ironbeam = []
 replay = []
+manual-orders = []
 
 [profile.release]
 opt-level = 3

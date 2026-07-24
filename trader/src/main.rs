@@ -7,12 +7,16 @@ mod engine_runtime;
 mod ipc;
 #[cfg(feature = "ironbeam")]
 mod ironbeam;
+#[cfg(feature = "replay")]
+mod replay_cache;
 mod strategies;
 mod strategy;
 mod strategy_debug;
 #[cfg(feature = "tradovate")]
 mod tradovate;
 
+#[cfg(feature = "replay")]
+use anyhow::Context;
 use anyhow::{Result, bail};
 use app::{App, EngineKey};
 use broker::{ServiceCommand, ServiceEvent};
@@ -87,6 +91,45 @@ struct SwipeProfileArgs {
     output_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Args)]
+struct ReplayDownloadArgs {
+    /// Instrument root symbol, for example MES or ES.
+    #[arg(long)]
+    instrument: String,
+
+    /// Exact contract symbol, for example MESU6.
+    #[arg(long)]
+    contract: String,
+
+    /// Inclusive start date in YYYY-MM-DD.
+    #[arg(long)]
+    start: String,
+
+    /// Inclusive end date in YYYY-MM-DD.
+    #[arg(long)]
+    end: String,
+
+    /// Data source kind: server-bars or raw-ticks.
+    #[arg(long, default_value = "server-bars")]
+    source_kind: String,
+
+    /// Server-bar kind: minute, second, tick, volume, or range.
+    #[arg(long, default_value = "minute")]
+    bar_kind: String,
+
+    /// Server-bar value, such as 1 for 1 minute or 6500 for volume.
+    #[arg(long, default_value_t = 1)]
+    bar_value: u32,
+
+    /// Chart mode: ohlc or heikin-ashi.
+    #[arg(long, default_value = "ohlc")]
+    chart_mode: String,
+
+    /// Optional cache root. Defaults to replay_cache_dir / TRADER_DATA_CACHE_DIR.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 enum Mode {
     /// Run the background engine server.
@@ -102,20 +145,23 @@ enum Mode {
     Kill {
         /// Engine ID from `trader list` (PID).
         id: u32,
-        /// Disarm the strategy, close the selected market, then kill the engine.
+        /// Disarm, manually close the selected market, then kill the engine. Requires --features manual-orders.
         #[arg(short = 'c', long = "close")]
         close: bool,
     },
     /// Kill all running engines.
     #[command(name = "killall")]
     KillAll {
-        /// Disarm each strategy, close the selected market, then kill the engine.
+        /// Disarm, manually close each selected market, then kill engines. Requires --features manual-orders.
         #[arg(short = 'c', long = "close")]
         close: bool,
     },
     /// Run a non-TUI Tradovate sim swipe profiler for reversal paths.
     #[command(name = "swipe-profile")]
     SwipeProfile(SwipeProfileArgs),
+    /// Download replay data into the local replay cache.
+    #[command(name = "download-replay-data")]
+    DownloadReplayData(ReplayDownloadArgs),
 }
 
 #[tokio::main]
@@ -146,6 +192,11 @@ async fn main() -> Result<()> {
         bail!("tradovate support is not enabled in this build");
     }
 
+    if let Some(Mode::DownloadReplayData(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return download_replay_data(&config, args).await;
+    }
+
     if matches!(cli.mode, Some(Mode::Engine)) {
         return run_engine_server(&cli.engine_socket).await;
     }
@@ -172,6 +223,194 @@ async fn main() -> Result<()> {
     }
 
     run_tui(&cli, config, attach_mode).await
+}
+
+async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay downloader requires `--features replay`");
+    }
+
+    #[cfg(feature = "replay")]
+    {
+        let plan = build_replay_download_plan(config, args)?;
+        if plan.source_kind == replay_cache::ReplayCacheSourceKind::RawTicks {
+            bail!(
+                "raw-ticks replay downloads are not implemented yet; use --source-kind server-bars"
+            );
+        }
+        if config.broker != broker::BrokerKind::Tradovate {
+            bail!("server-bar replay downloads currently support Tradovate only");
+        }
+
+        #[cfg(not(feature = "tradovate"))]
+        {
+            let _ = plan;
+            bail!("Tradovate server-bar replay downloads require `--features tradovate,replay`");
+        }
+
+        #[cfg(feature = "tradovate")]
+        {
+            let download = tradovate::download_replay_server_bars(
+                config,
+                tradovate::TradovateServerBarDownloadRequest {
+                    contract: plan.contract.clone(),
+                    start: plan.start,
+                    end: plan.end,
+                    bar_type: plan.bar_type,
+                },
+            )
+            .await?;
+            let outcome = replay_cache::write_server_bars_jsonl_cache(
+                replay_cache::ReplayCacheServerBarsWrite {
+                    cache_root: plan.cache_root.clone(),
+                    provider: config.broker,
+                    env: config.env,
+                    instrument: replay_cache::ReplayCacheInstrument {
+                        symbol: plan.instrument.clone(),
+                        name: None,
+                        exchange: None,
+                    },
+                    contract: replay_cache::ReplayCacheContract {
+                        symbol: download.contract.name.clone(),
+                        id: Some(download.contract.id),
+                        expiration: None,
+                    },
+                    request_start: plan.start,
+                    request_end: plan.end,
+                    source_kind: replay_cache::ReplayCacheSourceKind::ServerBars,
+                    download_request: download.request_body,
+                    bar_type: plan.bar_type,
+                    tick_specs: download.tick_specs,
+                    session_template: download.session_template,
+                    bars: download.bars,
+                    warnings: download.warnings,
+                    notes: Some(
+                        "Downloaded through Tradovate md/getChart only; no user sync or order path was started."
+                            .to_string(),
+                    ),
+                },
+            )?;
+
+            println!("Replay server-bar download complete.");
+            println!("No user sync, account stream, or order path was started.");
+            println!("Provider: {}", config.broker.label());
+            println!("Environment: {}", config.env.label());
+            println!("Instrument: {}", plan.instrument);
+            println!("Contract: {}", plan.contract);
+            println!("Date range: {} to {}", plan.start_date, plan.end_date);
+            println!("Source kind: {}", plan.source_kind.label());
+            println!(
+                "Requested shape: {}",
+                plan.bar_type.mode_label(plan.chart_mode)
+            );
+            println!("Rows: {}", outcome.row_count);
+            println!("Data: {}", outcome.data_path.display());
+            println!("Manifest: {}", outcome.manifest_path.display());
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+struct ReplayDownloadPlan {
+    instrument: String,
+    contract: String,
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    source_kind: replay_cache::ReplayCacheSourceKind,
+    bar_type: broker::BarType,
+    chart_mode: broker::CandleMode,
+    cache_root: PathBuf,
+}
+
+#[cfg(feature = "replay")]
+fn build_replay_download_plan(
+    config: &AppConfig,
+    args: ReplayDownloadArgs,
+) -> Result<ReplayDownloadPlan> {
+    let instrument = args.instrument.trim();
+    let contract = args.contract.trim();
+    if instrument.is_empty() {
+        bail!("--instrument cannot be empty");
+    }
+    if contract.is_empty() {
+        bail!("--contract cannot be empty");
+    }
+    if args.bar_value == 0 {
+        bail!("--bar-value must be > 0");
+    }
+
+    let start_date = chrono::NaiveDate::parse_from_str(&args.start, "%Y-%m-%d")
+        .with_context(|| format!("parse --start {}", args.start))?;
+    let end_date = chrono::NaiveDate::parse_from_str(&args.end, "%Y-%m-%d")
+        .with_context(|| format!("parse --end {}", args.end))?;
+    if end_date < start_date {
+        bail!("--end must be on or after --start");
+    }
+
+    let source_kind = parse_replay_download_source_kind(&args.source_kind)?;
+    let bar_type = parse_replay_download_bar_type(&args.bar_kind, args.bar_value)?;
+    let chart_mode = parse_replay_download_chart_mode(&args.chart_mode)?;
+    let cache_root = args
+        .cache_dir
+        .unwrap_or_else(|| config.replay_cache_dir.clone());
+    let start = start_date
+        .and_hms_opt(0, 0, 0)
+        .context("build replay download start timestamp")?
+        .and_utc();
+    let end = end_date
+        .succ_opt()
+        .context("build replay download exclusive end date")?
+        .and_hms_opt(0, 0, 0)
+        .context("build replay download end timestamp")?
+        .and_utc();
+    Ok(ReplayDownloadPlan {
+        instrument: instrument.to_string(),
+        contract: contract.to_string(),
+        start_date,
+        end_date,
+        start,
+        end,
+        source_kind,
+        bar_type,
+        chart_mode,
+        cache_root,
+    })
+}
+
+#[cfg(feature = "replay")]
+fn parse_replay_download_source_kind(raw: &str) -> Result<replay_cache::ReplayCacheSourceKind> {
+    match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "server-bars" | "bars" => Ok(replay_cache::ReplayCacheSourceKind::ServerBars),
+        "raw-ticks" | "ticks" | "tick" => Ok(replay_cache::ReplayCacheSourceKind::RawTicks),
+        other => bail!("invalid --source-kind `{other}`; use server-bars or raw-ticks"),
+    }
+}
+
+#[cfg(feature = "replay")]
+fn parse_replay_download_bar_type(raw: &str, value: u32) -> Result<broker::BarType> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "minute" | "min" | "m" => Ok(broker::BarType::minute(value)),
+        "second" | "sec" | "s" => Ok(broker::BarType::second(value)),
+        "tick" | "tick-count" | "ticks" => Ok(broker::BarType::tick(value)),
+        "volume" | "vol" => Ok(broker::BarType::volume(value)),
+        "range" => Ok(broker::BarType::range(value)),
+        other => bail!("invalid --bar-kind `{other}`"),
+    }
+}
+
+#[cfg(feature = "replay")]
+fn parse_replay_download_chart_mode(raw: &str) -> Result<broker::CandleMode> {
+    match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "ohlc" | "standard" | "regular" => Ok(broker::CandleMode::Standard),
+        "heikin-ashi" | "heikin" | "heiken-ashi" | "heiken" => Ok(broker::CandleMode::HeikinAshi),
+        other => bail!("invalid --chart-mode `{other}`; use ohlc or heikin-ashi"),
+    }
 }
 
 fn list_engines() -> Result<()> {
@@ -863,5 +1102,102 @@ mod tests {
                 panic!("expected relay close after sender drop")
             }
         }
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn replay_download_planner_parses_safe_request_parts() {
+        assert!(matches!(
+            parse_replay_download_source_kind("raw-ticks").expect("source kind"),
+            replay_cache::ReplayCacheSourceKind::RawTicks
+        ));
+        assert_eq!(
+            parse_replay_download_bar_type("volume", 6500).expect("bar type"),
+            broker::BarType::volume(6500)
+        );
+        assert_eq!(
+            parse_replay_download_chart_mode("heikin-ashi").expect("chart mode"),
+            broker::CandleMode::HeikinAshi
+        );
+        assert!(parse_replay_download_source_kind("dom").is_err());
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn replay_download_planner_rejects_empty_or_zero_request_parts() {
+        let config = AppConfig::default();
+        let valid = ReplayDownloadArgs {
+            instrument: "MES".to_string(),
+            contract: "MESU6".to_string(),
+            start: "2026-07-23".to_string(),
+            end: "2026-07-24".to_string(),
+            source_kind: "server-bars".to_string(),
+            bar_kind: "minute".to_string(),
+            bar_value: 1,
+            chart_mode: "ohlc".to_string(),
+            cache_dir: None,
+        };
+
+        let mut blank_contract = valid.clone();
+        blank_contract.contract = " ".to_string();
+        assert!(build_replay_download_plan(&config, blank_contract).is_err());
+
+        let mut zero_bar_value = valid;
+        zero_bar_value.bar_value = 0;
+        assert!(build_replay_download_plan(&config, zero_bar_value).is_err());
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn replay_download_plan_uses_inclusive_end_date_and_cache_root() {
+        let mut config = AppConfig::default();
+        config.replay_cache_dir = PathBuf::from("/tmp/trader-cache-test");
+        let plan = build_replay_download_plan(
+            &config,
+            ReplayDownloadArgs {
+                instrument: "MES".to_string(),
+                contract: "MESU6".to_string(),
+                start: "2026-07-23".to_string(),
+                end: "2026-07-24".to_string(),
+                source_kind: "server-bars".to_string(),
+                bar_kind: "minute".to_string(),
+                bar_value: 5,
+                chart_mode: "heikin-ashi".to_string(),
+                cache_dir: None,
+            },
+        )
+        .expect("download plan");
+
+        assert_eq!(plan.start.to_rfc3339(), "2026-07-23T00:00:00+00:00");
+        assert_eq!(plan.end.to_rfc3339(), "2026-07-25T00:00:00+00:00");
+        assert_eq!(plan.cache_root, PathBuf::from("/tmp/trader-cache-test"));
+        assert_eq!(plan.bar_type, broker::BarType::minute(5));
+        assert_eq!(plan.chart_mode, broker::CandleMode::HeikinAshi);
+    }
+
+    #[cfg(feature = "replay")]
+    #[tokio::test]
+    async fn replay_download_raw_ticks_returns_not_implemented_before_network() {
+        let result = download_replay_data(
+            &AppConfig::default(),
+            ReplayDownloadArgs {
+                instrument: "MES".to_string(),
+                contract: "MESU6".to_string(),
+                start: "2026-07-23".to_string(),
+                end: "2026-07-24".to_string(),
+                source_kind: "raw-ticks".to_string(),
+                bar_kind: "minute".to_string(),
+                bar_value: 1,
+                chart_mode: "ohlc".to_string(),
+                cache_dir: None,
+            },
+        )
+        .await;
+
+        let err = result.expect_err("raw ticks should be rejected");
+        assert!(
+            err.to_string()
+                .contains("raw-ticks replay downloads are not implemented")
+        );
     }
 }

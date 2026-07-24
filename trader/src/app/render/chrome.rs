@@ -19,6 +19,11 @@ impl App {
                     "Enter attach".to_string()
                 },
                 "r refresh".to_string(),
+                if self.replay_affordance_visible() {
+                    "Replay after attach".to_string()
+                } else {
+                    String::new()
+                },
                 "F5/Ctrl+S save logs".to_string(),
                 "q quit".to_string(),
             ],
@@ -39,11 +44,14 @@ impl App {
                     "Up/Down focus".to_string(),
                     "Left/Right toggle env/auth/logs".to_string(),
                     if self.replay_affordance_visible() {
-                        "Enter connect/replay".to_string()
+                        "Enter connect/open replay".to_string()
                     } else {
                         "Enter connect".to_string()
                     },
                 ];
+                if self.replay_affordance_visible() {
+                    items.push("F7 replay".to_string());
+                }
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -60,6 +68,9 @@ impl App {
                     "F3 strategy".to_string(),
                     "F4 dashboard".to_string(),
                 ];
+                if self.replay_affordance_visible() {
+                    items.push("F7 replay".to_string());
+                }
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -73,12 +84,33 @@ impl App {
                 ]);
                 items
             }
+            Screen::Replay => {
+                let mut items = vec![
+                    "F1 login".to_string(),
+                    "F2 selection".to_string(),
+                    "Tab focus".to_string(),
+                    "Left/Right bar type/candles".to_string(),
+                    "Enter start replay".to_string(),
+                ];
+                if let Some(hint) = stats_hint {
+                    items.push(hint.to_string());
+                }
+                items.extend([
+                    "Esc login".to_string(),
+                    "F5/Ctrl+S save logs".to_string(),
+                    "q quit".to_string(),
+                ]);
+                items
+            }
             Screen::Strategy => {
                 let mut items = vec![
                     "F1 login".to_string(),
                     "F2 selection".to_string(),
                     "F4 dashboard".to_string(),
                 ];
+                if self.replay_affordance_visible() {
+                    items.push("F7 replay".to_string());
+                }
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -95,6 +127,9 @@ impl App {
                     "F2 selection".to_string(),
                     "F3 strategy".to_string(),
                 ];
+                if self.replay_affordance_visible() {
+                    items.push("F7 replay".to_string());
+                }
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -119,6 +154,11 @@ impl App {
                 "F2 selection".to_string(),
                 "F3 strategy".to_string(),
                 "F4 dashboard".to_string(),
+                if self.replay_affordance_visible() {
+                    "F7 replay".to_string()
+                } else {
+                    String::new()
+                },
                 "Up/Down account".to_string(),
                 "Enter re-sync".to_string(),
                 "f fees".to_string(),
@@ -131,14 +171,11 @@ impl App {
     }
 
     pub(in crate::app) fn header_tab_titles(&self) -> Vec<&'static str> {
-        let mut titles = vec![
-            "Engine",
-            "Broker",
-            "Login",
-            "Selection",
-            "Strategy",
-            "Dashboard",
-        ];
+        let mut titles = vec!["Engine", "Broker", "Login"];
+        if self.replay_affordance_visible() {
+            titles.push("Replay");
+        }
+        titles.extend(["Selection", "Strategy", "Dashboard"]);
         if self.session_stats_affordance_visible() {
             titles.push("Stats");
         }
@@ -146,15 +183,28 @@ impl App {
     }
 
     fn header_selected_tab(&self) -> usize {
+        let label = self.screen_header_label();
+        self.header_tab_titles()
+            .iter()
+            .position(|title| *title == label)
+            .unwrap_or_else(|| {
+                self.header_tab_titles()
+                    .iter()
+                    .position(|title| *title == "Dashboard")
+                    .unwrap_or(0)
+            })
+    }
+
+    fn screen_header_label(&self) -> &'static str {
         match self.screen {
-            Screen::EngineSelect => 0,
-            Screen::BrokerSelect => 1,
-            Screen::Login => 2,
-            Screen::Selection => 3,
-            Screen::Strategy => 4,
-            Screen::Dashboard => 5,
-            Screen::Stats if self.session_stats_affordance_visible() => 6,
-            Screen::Stats => 5,
+            Screen::EngineSelect => "Engine",
+            Screen::BrokerSelect => "Broker",
+            Screen::Login => "Login",
+            Screen::Replay => "Replay",
+            Screen::Selection => "Selection",
+            Screen::Strategy => "Strategy",
+            Screen::Dashboard => "Dashboard",
+            Screen::Stats => "Stats",
         }
     }
 
@@ -164,15 +214,7 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(3)])
             .split(area);
 
-        let screen_label = match self.screen {
-            Screen::EngineSelect => "Engine",
-            Screen::BrokerSelect => "Broker",
-            Screen::Login => "Login",
-            Screen::Selection => "Selection",
-            Screen::Strategy => "Strategy",
-            Screen::Dashboard => "Dashboard",
-            Screen::Stats => "Stats",
-        };
+        let screen_label = self.screen_header_label();
         let help = self.header_help_text();
         let titles = self
             .header_tab_titles()

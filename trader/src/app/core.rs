@@ -9,8 +9,12 @@ impl App {
             default_broker()
         };
         let form = FormState::from_config(&config);
+        #[cfg(feature = "replay")]
+        let replay_cache_library = ReplayCacheLibrary::scan(&config.replay_cache_dir);
         let mut app = Self {
             base_config: config,
+            #[cfg(feature = "replay")]
+            replay_cache_library,
             available_brokers,
             selected_broker,
             capabilities: BrokerCapabilities::default(),
@@ -70,7 +74,7 @@ impl App {
         );
         app.push_log(
             if app.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay") {
-                "Replay mode available from Login: local ES tick data can stream 1 Range or 1 Min bars."
+                "Replay mode available on F7: local price ticks can derive seconds, minutes, tick-count, and range bars."
             } else {
                 "Replay mode is only available on Tradovate builds with `--features replay`."
             }

@@ -1,11 +1,15 @@
+#[cfg(feature = "manual-orders")]
+use crate::broker::ManualOrderAction;
 use crate::broker::{
-    AccountInfo, AccountSnapshot, BarType, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
-    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
-    TradeMarkerSide, compiled_brokers, default_broker,
+    AccountInfo, AccountSnapshot, BarKind, BarType, BrokerCapabilities, BrokerKind, CandleMode,
+    ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, MarketSnapshot, ReplaySpeed,
+    ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers,
+    default_broker,
 };
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::engine_registry::RunningEngine;
+#[cfg(feature = "replay")]
+use crate::replay_cache::ReplayCacheLibrary;
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategies::hma_cross::hma_series;
@@ -34,6 +38,8 @@ const PERSISTED_LOG_ENTRY_LIMIT: usize = 10_000;
 
 pub struct App {
     base_config: AppConfig,
+    #[cfg(feature = "replay")]
+    replay_cache_library: ReplayCacheLibrary,
     available_brokers: Vec<BrokerKind>,
     selected_broker: BrokerKind,
     capabilities: BrokerCapabilities,
@@ -154,6 +160,7 @@ enum Screen {
     EngineSelect,
     BrokerSelect,
     Login,
+    Replay,
     Strategy,
     Selection,
     Dashboard,

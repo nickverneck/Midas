@@ -50,6 +50,7 @@ pub(crate) enum BrokerCommand {
         request_tx: UnboundedSender<UserSocketCommand>,
         order: PendingMarketOrder,
     },
+    #[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
     LiquidatePosition {
         request_tx: UnboundedSender<UserSocketCommand>,
         liquidation: PendingLiquidation,
