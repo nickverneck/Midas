@@ -69,12 +69,21 @@ export type AnalyzerResult = {
 export type NumericInput = number | string;
 
 export type MarginMode = "per-contract" | "price";
+export type FillModelMode = "fixed" | "random-adverse";
+
+export type FillModel = {
+	mode: FillModelMode;
+	seed: NumericInput;
+	maxAdverseTicks: NumericInput;
+	tickValueUsd: NumericInput;
+};
 
 export type BacktestEnv = {
 	initialBalance: NumericInput;
 	maxPosition: NumericInput;
 	commission: NumericInput;
 	slippage: NumericInput;
+	fillModel: FillModel;
 	marginPerContract: NumericInput;
 	marginMode: MarginMode;
 	contractMultiplier: NumericInput;
@@ -123,6 +132,7 @@ export type AnalyzerEnv = {
 	maxPosition: NumericInput;
 	commission: NumericInput;
 	slippage: NumericInput;
+	fillModel: FillModel;
 	marginPerContract: NumericInput;
 	marginMode: MarginMode;
 	contractMultiplier: NumericInput;

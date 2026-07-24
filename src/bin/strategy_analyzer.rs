@@ -12,6 +12,7 @@ use midas_env::backtesting::{compute_metrics, equity_returns};
 use midas_env::bars::{BarInput, BarKind, BarSelection, PriceSource, prepare_bars};
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
 use midas_env::features::{alma, ema, hma, kama, sma, wma};
+use midas_env::fill::{FillModelConfig, derive_seed};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,6 +34,8 @@ struct AnalyzerConfig {
     max_position: i32,
     commission_round_turn: f64,
     slippage_per_contract: f64,
+    #[serde(default)]
+    fill_model: FillModelConfig,
     margin_per_contract: f64,
     contract_multiplier: f64,
     margin_mode: String,
@@ -230,6 +233,11 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
         bail!("not enough bars to run analyzer");
     }
 
+    cfg.fill_model
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .with_context(|| "validate fill model")?;
+
     let sweep_values_a = build_indicator_sweep_values(&cfg.signal.indicator_a, "indicatorA")?;
     let sweep_values_b = build_indicator_sweep_values(&cfg.signal.indicator_b, "indicatorB")?;
 
@@ -267,6 +275,7 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
     let base_env = EnvConfig {
         commission_round_turn: cfg.commission_round_turn,
         slippage_per_contract: cfg.slippage_per_contract,
+        fill_model: cfg.fill_model,
         max_position: cfg.max_position,
         margin_per_contract: cfg.margin_per_contract,
         margin_mode: match cfg.margin_mode.as_str() {
@@ -292,6 +301,7 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
     let results: Vec<AnalyzerCell> = combos
         .par_iter()
         .map(|combo| {
+            let env_cfg = env_config_for_combo(&base_env, combo);
             let series_a = series_a
                 .get(&sweep_value_key(combo.a_value))
                 .expect("missing indicator A series");
@@ -302,7 +312,7 @@ fn run(cfg: AnalyzerConfig) -> Result<()> {
                 &execution_prices,
                 series_a,
                 series_b,
-                &base_env,
+                &env_cfg,
                 cfg.initial_balance,
                 cfg.signal.buy_action,
                 cfg.signal.sell_action,
@@ -581,6 +591,32 @@ fn build_combos(
         }
     }
     combos
+}
+
+fn env_config_for_combo(base_env: &EnvConfig, combo: &Combo) -> EnvConfig {
+    let mut env_cfg = base_env.clone();
+    if env_cfg.fill_model.is_random_adverse() {
+        env_cfg.fill_model = env_cfg
+            .fill_model
+            .with_seed(fill_seed_for_combo(env_cfg.fill_model.seed, combo));
+    }
+    env_cfg
+}
+
+fn fill_seed_for_combo(base_seed: u64, combo: &Combo) -> u64 {
+    derive_seed(
+        base_seed,
+        &[
+            combo.a_value.to_bits(),
+            combo.b_value.to_bits(),
+            optional_f64_seed_component(combo.take_profit, 0xa77a_cafe_0000_0000),
+            optional_f64_seed_component(combo.stop_loss, 0x5709_1055_0000_0000),
+        ],
+    )
+}
+
+fn optional_f64_seed_component(value: Option<f64>, none_marker: u64) -> u64 {
+    value.map(f64::to_bits).unwrap_or(none_marker)
 }
 
 fn run_strategy(

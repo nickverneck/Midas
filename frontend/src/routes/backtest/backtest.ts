@@ -49,6 +49,12 @@ export const createDefaultBacktestEnv = (): BacktestEnv => ({
 	maxPosition: 1,
 	commission: 1.6,
 	slippage: 0.25,
+	fillModel: {
+		mode: "fixed",
+		seed: 0,
+		maxAdverseTicks: 2,
+		tickValueUsd: 1.25
+	},
 	marginPerContract: 50,
 	marginMode: "per-contract",
 	contractMultiplier: 1.0,
@@ -100,6 +106,12 @@ export const createDefaultAnalyzerEnv = (): AnalyzerEnv => ({
 	maxPosition: 1,
 	commission: 1.6,
 	slippage: 0.25,
+	fillModel: {
+		mode: "fixed",
+		seed: 0,
+		maxAdverseTicks: 2,
+		tickValueUsd: 1.25
+	},
 	marginPerContract: 50,
 	marginMode: "per-contract",
 	contractMultiplier: 1.0,

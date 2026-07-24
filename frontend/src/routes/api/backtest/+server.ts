@@ -47,7 +47,79 @@ const resolveBacktestBin = (root: string) => {
 	return { command: 'cargo', argsPrefix: ['run', '--quiet', '--bin', 'backtest_script', '--'] };
 };
 
-const buildArgs = (payload: Record<string, any>, filePath: string, scriptPath: string) => {
+type FillModelPayload = {
+	mode: 'fixed' | 'random-adverse';
+	seed: number;
+	maxAdverseTicks: number;
+	tickValueUsd: number;
+};
+
+const normalizeNonNegativeInteger = (value: unknown, fallback: string, label: string) => {
+	const text = value === undefined || value === null || value === '' ? fallback : String(value).trim();
+	const numeric = Number(text);
+	if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric < 0) {
+		return { value: null, error: `${label} must be a non-negative integer` };
+	}
+	return { value: numeric, error: null };
+};
+
+const normalizeNonNegativeNumber = (value: unknown, fallback: string, label: string) => {
+	const text = value === undefined || value === null || value === '' ? fallback : String(value).trim();
+	const numeric = Number(text);
+	if (!Number.isFinite(numeric) || numeric < 0) {
+		return { value: null, error: `${label} must be 0 or higher` };
+	}
+	return { value: numeric, error: null };
+};
+
+const normalizeFillModel = (
+	fillModel: Record<string, any> | null | undefined
+): { fillModel: FillModelPayload | null; error: string | null } => {
+	const modeValue = fillModel?.mode === undefined ? 'fixed' : String(fillModel.mode);
+	const mode = modeValue === 'random-adverse' ? 'random-adverse' : modeValue === 'fixed' ? 'fixed' : null;
+	if (!mode) {
+		return { fillModel: null, error: 'Fill model must be fixed or random-adverse' };
+	}
+	if (mode === 'fixed') {
+		return {
+			fillModel: {
+				mode,
+				seed: 0,
+				maxAdverseTicks: 2,
+				tickValueUsd: 1.25
+			},
+			error: null
+		};
+	}
+
+	const seed = normalizeNonNegativeInteger(fillModel?.seed, '0', 'Fill seed');
+	if (seed.error) return { fillModel: null, error: seed.error };
+	const maxAdverseTicks = normalizeNonNegativeInteger(
+		fillModel?.maxAdverseTicks,
+		'2',
+		'Max adverse ticks'
+	);
+	if (maxAdverseTicks.error) return { fillModel: null, error: maxAdverseTicks.error };
+	const tickValueUsd = normalizeNonNegativeNumber(fillModel?.tickValueUsd, '1.25', 'Tick value USD');
+	if (tickValueUsd.error) return { fillModel: null, error: tickValueUsd.error };
+
+	return {
+		fillModel: {
+			mode,
+			seed: seed.value ?? 0,
+			maxAdverseTicks: maxAdverseTicks.value ?? 2,
+			tickValueUsd: tickValueUsd.value ?? 1.25
+		},
+		error: null
+	};
+};
+
+const buildArgs = (
+	payload: Record<string, any>,
+	filePath: string,
+	scriptPath: string,
+	fillModel: FillModelPayload
+) => {
 	const args: string[] = ['--file', filePath, '--script', scriptPath];
 
 	const add = (key: string, value: unknown) => {
@@ -67,6 +139,10 @@ const buildArgs = (payload: Record<string, any>, filePath: string, scriptPath: s
 	add('max-position', payload.env?.maxPosition);
 	add('commission-round-turn', payload.env?.commission);
 	add('slippage-per-contract', payload.env?.slippage);
+	add('fill-model', fillModel.mode);
+	add('fill-seed', fillModel.seed);
+	add('fill-max-adverse-ticks', fillModel.maxAdverseTicks);
+	add('fill-tick-value-usd', fillModel.tickValueUsd);
 	add('margin-per-contract', payload.env?.marginPerContract);
 	add('contract-multiplier', payload.env?.contractMultiplier);
 	add('margin-mode', payload.env?.marginMode);
@@ -100,6 +176,11 @@ export const POST = async ({ request }: RequestEvent) => {
 		return json({ error: 'Script is required' }, { status: 400, headers });
 	}
 
+	const fillModelResult = normalizeFillModel(payload.env?.fillModel);
+	if (fillModelResult.error || !fillModelResult.fillModel) {
+		return json({ error: fillModelResult.error || 'Invalid fill model' }, { status: 400, headers });
+	}
+
 	const filePath = resolveParquetPath(dataset, pathParam);
 	if (!filePath) {
 		return json({ error: 'Invalid parquet path' }, { status: 400, headers });
@@ -116,7 +197,7 @@ export const POST = async ({ request }: RequestEvent) => {
 	fs.writeFileSync(scriptPath, script, 'utf-8');
 
 	try {
-		const cliArgs = buildArgs(payload, filePath, scriptPath);
+		const cliArgs = buildArgs(payload, filePath, scriptPath, fillModelResult.fillModel);
 		const output = execFileSync(command, [...argsPrefix, ...cliArgs], {
 			cwd: root,
 			maxBuffer: 1024 * 1024 * 200

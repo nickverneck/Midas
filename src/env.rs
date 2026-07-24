@@ -1,7 +1,9 @@
 //! Trading environment with discrete actions and observation builder.
 
 use crate::features::{ATR_PERIODS, compute_features_ohlcv, periods};
+use crate::fill::FillModelConfig;
 use chrono::{DateTime, Timelike, Utc};
+use rand::rngs::StdRng;
 
 pub const VIOLATION_PENALTY: f64 = 1000.0;
 
@@ -33,6 +35,8 @@ pub struct EnvConfig {
     pub commission_round_turn: f64,
     /// Slippage per contract (USD).
     pub slippage_per_contract: f64,
+    /// Optional execution fill stress model. Defaults to fixed/off.
+    pub fill_model: FillModelConfig,
     /// Maximum absolute position (contracts). Set <= 0 to disable hard cap.
     pub max_position: i32,
     /// Margin required per contract (USD).
@@ -93,6 +97,7 @@ impl Default for EnvConfig {
         Self {
             commission_round_turn: 1.60,
             slippage_per_contract: 0.25,
+            fill_model: FillModelConfig::default(),
             max_position: 1,
             margin_per_contract: 50.0,
             margin_mode: MarginMode::PerContract,
@@ -181,12 +186,15 @@ pub struct StepInfo {
 pub struct TradingEnv {
     cfg: EnvConfig,
     state: EnvState,
+    fill_rng: Option<StdRng>,
 }
 
 impl TradingEnv {
     pub fn new(initial_price: f64, initial_balance: f64, cfg: EnvConfig) -> Self {
+        let fill_rng = cfg.fill_model.rng();
         Self {
             cfg,
+            fill_rng,
             state: EnvState {
                 step: 0,
                 position: 0,
@@ -205,6 +213,7 @@ impl TradingEnv {
     }
 
     pub fn reset(&mut self, initial_price: f64, initial_balance: f64) {
+        self.fill_rng = self.cfg.fill_model.rng();
         self.state = EnvState {
             step: 0,
             position: 0,
@@ -401,9 +410,20 @@ impl TradingEnv {
         }
 
         let delta_pos = target_position - self.state.position;
+        let traded_contracts = delta_pos.unsigned_abs();
         let commission_per_side = self.cfg.commission_round_turn / 2.0;
         let commission_paid = commission_per_side * (delta_pos.abs() as f64);
-        let slippage_paid = self.cfg.slippage_per_contract * (delta_pos.abs() as f64);
+        let fixed_slippage_paid = self.cfg.slippage_per_contract * (delta_pos.abs() as f64);
+        let adverse_slippage_paid = self
+            .fill_rng
+            .as_mut()
+            .map(|rng| {
+                self.cfg
+                    .fill_model
+                    .sample_adverse_slippage(rng, traded_contracts)
+            })
+            .unwrap_or(0.0);
+        let slippage_paid = fixed_slippage_paid + adverse_slippage_paid;
 
         let price_change = next_price - self.state.last_price;
         let pnl_change = price_change * multiplier * (self.state.position as f64);
@@ -734,7 +754,33 @@ mod tests {
         let mut env = TradingEnv::new(100.0, 1000.0, EnvConfig::default());
         let (_r, info) = env.step(Action::Hold, 101.0, StepContext::default());
         assert_eq!(info.commission_paid, 0.0);
+        assert_eq!(info.slippage_paid, 0.0);
         assert_eq!(env.state.position, 0);
+    }
+
+    #[test]
+    fn random_adverse_fill_is_seeded_and_added_to_slippage() {
+        let cfg = EnvConfig {
+            max_position: 1,
+            enforce_margin: false,
+            slippage_per_contract: 0.25,
+            fill_model: FillModelConfig {
+                mode: crate::fill::FillModelMode::RandomAdverse,
+                seed: 42,
+                max_adverse_ticks: 2,
+                tick_value_usd: 1.25,
+            },
+            ..Default::default()
+        };
+        let mut env_a = TradingEnv::new(100.0, 1000.0, cfg.clone());
+        let mut env_b = TradingEnv::new(100.0, 1000.0, cfg);
+
+        let (_ra, info_a) = env_a.step(Action::Buy, 100.0, StepContext::default());
+        let (_rb, info_b) = env_b.step(Action::Buy, 100.0, StepContext::default());
+
+        assert_eq!(info_a.slippage_paid, info_b.slippage_paid);
+        assert!(info_a.slippage_paid >= 0.25);
+        assert!(info_a.slippage_paid <= 0.25 + 2.0 * 1.25);
     }
 
     #[test]

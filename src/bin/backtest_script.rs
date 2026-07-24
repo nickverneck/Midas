@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use midas_env::backtesting::compute_metrics;
 use midas_env::env::{Action, EnvConfig, MarginMode, StepContext, TradingEnv};
 use midas_env::features::{ATR_PERIODS, compute_features_ohlcv, periods};
+use midas_env::fill::{FillModelConfig, FillModelMode};
 use midas_env::script::{ScriptLimits, ScriptRunner};
 
 #[derive(Parser, Debug)]
@@ -42,6 +43,18 @@ struct Args {
 
     #[arg(long, default_value_t = 0.25)]
     slippage_per_contract: f64,
+
+    #[arg(long = "fill-model", default_value = "fixed")]
+    fill_model: FillModelMode,
+
+    #[arg(long = "fill-seed", default_value_t = 0)]
+    fill_seed: u64,
+
+    #[arg(long = "fill-max-adverse-ticks", default_value_t = 2)]
+    fill_max_adverse_ticks: u32,
+
+    #[arg(long = "fill-tick-value-usd", default_value_t = 1.25)]
+    fill_tick_value_usd: f64,
 
     #[arg(long, default_value_t = 50.0)]
     margin_per_contract: f64,
@@ -119,6 +132,17 @@ fn run(args: Args) -> Result<()> {
         bail!("Not enough bars to run backtest");
     }
 
+    let fill_model = FillModelConfig {
+        mode: args.fill_model,
+        seed: args.fill_seed,
+        max_adverse_ticks: args.fill_max_adverse_ticks,
+        tick_value_usd: args.fill_tick_value_usd,
+    };
+    fill_model
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .with_context(|| "validate fill model")?;
+
     let limits = ScriptLimits {
         memory_bytes: if args.memory_limit_mb == 0 {
             None
@@ -138,6 +162,7 @@ fn run(args: Args) -> Result<()> {
     let env_cfg = EnvConfig {
         commission_round_turn: args.commission_round_turn,
         slippage_per_contract: args.slippage_per_contract,
+        fill_model,
         max_position: args.max_position,
         margin_per_contract: args.margin_per_contract,
         margin_mode: match args.margin_mode.as_str() {
@@ -151,7 +176,7 @@ fn run(args: Args) -> Result<()> {
     };
 
     let lua = runner.lua();
-    let mut init_ctx = lua.create_table()?;
+    let init_ctx = lua.create_table()?;
     init_ctx.set("symbol", data.symbol.as_str())?;
     init_ctx.set("bars", data.close.len())?;
     init_ctx.set("start_ts", data.datetime_ns.first().copied().unwrap_or(0))?;

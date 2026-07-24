@@ -22,6 +22,9 @@
 		invalidMaxPosition: boolean;
 		invalidCommission: boolean;
 		invalidSlippage: boolean;
+		invalidFillSeed: boolean;
+		invalidFillMaxAdverseTicks: boolean;
+		invalidFillTickValueUsd: boolean;
 		invalidMargin: boolean;
 		invalidContractMultiplier: boolean;
 		invalidMemory: boolean;
@@ -108,6 +111,9 @@
 			invalidMaxPosition={validation.invalidMaxPosition}
 			invalidCommission={validation.invalidCommission}
 			invalidSlippage={validation.invalidSlippage}
+			invalidFillSeed={validation.invalidFillSeed}
+			invalidFillMaxAdverseTicks={validation.invalidFillMaxAdverseTicks}
+			invalidFillTickValueUsd={validation.invalidFillTickValueUsd}
 			invalidMargin={validation.invalidMargin}
 			invalidContractMultiplier={validation.invalidContractMultiplier}
 			invalidMemory={validation.invalidMemory}

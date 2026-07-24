@@ -3,6 +3,7 @@
 	import * as Select from "$lib/components/ui/select";
 	import { Input } from "$lib/components/ui/input";
 	import { Label } from "$lib/components/ui/label";
+	import { Separator } from "$lib/components/ui/separator";
 	import { Gauge } from "lucide-svelte";
 	import type { AnalyzerEnv } from "../types";
 
@@ -12,6 +13,9 @@
 		invalidAnalyzerMaxPosition: boolean;
 		invalidAnalyzerCommission: boolean;
 		invalidAnalyzerSlippage: boolean;
+		invalidAnalyzerFillSeed: boolean;
+		invalidAnalyzerFillMaxAdverseTicks: boolean;
+		invalidAnalyzerFillTickValueUsd: boolean;
 		invalidAnalyzerMargin: boolean;
 		invalidAnalyzerContractMultiplier: boolean;
 	};
@@ -22,6 +26,9 @@
 		invalidAnalyzerMaxPosition,
 		invalidAnalyzerCommission,
 		invalidAnalyzerSlippage,
+		invalidAnalyzerFillSeed,
+		invalidAnalyzerFillMaxAdverseTicks,
+		invalidAnalyzerFillTickValueUsd,
 		invalidAnalyzerMargin,
 		invalidAnalyzerContractMultiplier
 	}: Props = $props();
@@ -103,6 +110,49 @@
 				/>
 				<Label>Enforce Margin</Label>
 			</div>
+		</div>
+		<Separator />
+		<div class="space-y-3">
+			<div class="grid gap-4 sm:grid-cols-2">
+				<div class="space-y-2">
+					<Label>Fill Model</Label>
+					<Select.Root bind:value={analyzerEnv.fillModel.mode}>
+						<Select.Trigger class="w-full">{analyzerEnv.fillModel.mode}</Select.Trigger>
+						<Select.Content>
+							<Select.Item value="fixed">fixed</Select.Item>
+							<Select.Item value="random-adverse">random-adverse</Select.Item>
+						</Select.Content>
+					</Select.Root>
+				</div>
+			</div>
+			{#if analyzerEnv.fillModel.mode === "random-adverse"}
+				<div class="grid gap-3 sm:grid-cols-3">
+					<div class="space-y-2">
+						<Label>Seed</Label>
+						<Input
+							type="number"
+							bind:value={analyzerEnv.fillModel.seed}
+							aria-invalid={invalidAnalyzerFillSeed}
+						/>
+					</div>
+					<div class="space-y-2">
+						<Label>Max Adverse Ticks</Label>
+						<Input
+							type="number"
+							bind:value={analyzerEnv.fillModel.maxAdverseTicks}
+							aria-invalid={invalidAnalyzerFillMaxAdverseTicks}
+						/>
+					</div>
+					<div class="space-y-2">
+						<Label>Tick Value USD</Label>
+						<Input
+							type="number"
+							bind:value={analyzerEnv.fillModel.tickValueUsd}
+							aria-invalid={invalidAnalyzerFillTickValueUsd}
+						/>
+					</div>
+				</div>
+			{/if}
 		</div>
 	</Card.Content>
 </Card.Root>

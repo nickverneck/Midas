@@ -398,6 +398,44 @@ fn apply_market_update_keeps_bars_incremental() {
 }
 
 #[test]
+fn live_series_keeps_out_of_order_historical_packets_sorted() {
+    let bar = |ts_ns| Bar {
+        ts_ns,
+        open: 5000.0 + ts_ns as f64,
+        high: 5001.0 + ts_ns as f64,
+        low: 4999.0 + ts_ns as f64,
+        close: 5000.5 + ts_ns as f64,
+        volume: None,
+    };
+
+    let mut series = LiveSeries::new();
+    for value in [10, 11, 12, 4, 5, 6, 7, 8, 9] {
+        series.push_closed_bar(&bar(value));
+    }
+    series.push_closed_bar(&Bar {
+        close: 5011.25,
+        ..bar(11)
+    });
+
+    assert_eq!(
+        series
+            .closed_bars
+            .iter()
+            .map(|bar| bar.ts_ns)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12]
+    );
+    assert_eq!(
+        series
+            .closed_bars
+            .iter()
+            .find(|bar| bar.ts_ns == 11)
+            .map(|bar| bar.close),
+        Some(5011.25)
+    );
+}
+
+#[test]
 fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
     let bar = |ts_ns| Bar {
         ts_ns,

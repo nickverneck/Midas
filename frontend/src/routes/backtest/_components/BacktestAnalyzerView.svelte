@@ -23,6 +23,9 @@
 		invalidAnalyzerMaxPosition: boolean;
 		invalidAnalyzerCommission: boolean;
 		invalidAnalyzerSlippage: boolean;
+		invalidAnalyzerFillSeed: boolean;
+		invalidAnalyzerFillMaxAdverseTicks: boolean;
+		invalidAnalyzerFillTickValueUsd: boolean;
 		invalidAnalyzerMargin: boolean;
 		invalidAnalyzerContractMultiplier: boolean;
 		invalidAnalyzerVolumeBarSize: boolean;
@@ -138,6 +141,9 @@
 			invalidAnalyzerMaxPosition={validation.invalidAnalyzerMaxPosition}
 			invalidAnalyzerCommission={validation.invalidAnalyzerCommission}
 			invalidAnalyzerSlippage={validation.invalidAnalyzerSlippage}
+			invalidAnalyzerFillSeed={validation.invalidAnalyzerFillSeed}
+			invalidAnalyzerFillMaxAdverseTicks={validation.invalidAnalyzerFillMaxAdverseTicks}
+			invalidAnalyzerFillTickValueUsd={validation.invalidAnalyzerFillTickValueUsd}
 			invalidAnalyzerMargin={validation.invalidAnalyzerMargin}
 			invalidAnalyzerContractMultiplier={validation.invalidAnalyzerContractMultiplier}
 		/>

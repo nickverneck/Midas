@@ -497,8 +497,9 @@ async fn market_data_worker_inner(
                             let is_historical = chart_id.is_some()
                                 && historical_id.is_some()
                                 && chart_id == historical_id;
-                            let is_realtime =
-                                chart_id.is_some() && realtime_id.is_some() && chart_id == realtime_id;
+                            let is_realtime = chart_id.is_some()
+                                && realtime_id.is_some()
+                                && chart_id == realtime_id;
 
                             if is_historical || (historical_id.is_none() && realtime_id.is_none()) {
                                 series.push_closed_bar_capped(&bar, ENGINE_MARKET_BAR_LIMIT);

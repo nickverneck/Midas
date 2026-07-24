@@ -45,16 +45,13 @@ impl LiveSeries {
     }
 
     pub(crate) fn push_closed_bar(&mut self, bar: &Bar) {
-        if let Some(last) = self.closed_bars.last_mut() {
-            if bar.ts_ns == last.ts_ns {
-                *last = bar.clone();
-                return;
-            }
-            if bar.ts_ns < last.ts_ns {
-                return;
-            }
+        match self
+            .closed_bars
+            .binary_search_by_key(&bar.ts_ns, |current| current.ts_ns)
+        {
+            Ok(index) => self.closed_bars[index] = bar.clone(),
+            Err(index) => self.closed_bars.insert(index, bar.clone()),
         }
-        self.closed_bars.push(bar.clone());
     }
 
     pub(crate) fn push_closed_bar_capped(&mut self, bar: &Bar, max_closed_bars: usize) {

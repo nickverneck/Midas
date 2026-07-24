@@ -14,6 +14,9 @@
 		invalidMaxPosition: boolean;
 		invalidCommission: boolean;
 		invalidSlippage: boolean;
+		invalidFillSeed: boolean;
+		invalidFillMaxAdverseTicks: boolean;
+		invalidFillTickValueUsd: boolean;
 		invalidMargin: boolean;
 		invalidContractMultiplier: boolean;
 		invalidMemory: boolean;
@@ -28,6 +31,9 @@
 		invalidMaxPosition,
 		invalidCommission,
 		invalidSlippage,
+		invalidFillSeed,
+		invalidFillMaxAdverseTicks,
+		invalidFillTickValueUsd,
 		invalidMargin,
 		invalidContractMultiplier,
 		invalidMemory,
@@ -84,6 +90,45 @@
 					</Select.Content>
 				</Select.Root>
 			</div>
+		</div>
+		<Separator />
+		<div class="space-y-3">
+			<div class="grid gap-4 sm:grid-cols-2">
+				<div class="space-y-2">
+					<Label>Fill Model</Label>
+					<Select.Root bind:value={env.fillModel.mode}>
+						<Select.Trigger class="w-full">{env.fillModel.mode}</Select.Trigger>
+						<Select.Content>
+							<Select.Item value="fixed">fixed</Select.Item>
+							<Select.Item value="random-adverse">random-adverse</Select.Item>
+						</Select.Content>
+					</Select.Root>
+				</div>
+			</div>
+			{#if env.fillModel.mode === "random-adverse"}
+				<div class="grid gap-3 sm:grid-cols-3">
+					<div class="space-y-2">
+						<Label>Seed</Label>
+						<Input type="number" bind:value={env.fillModel.seed} aria-invalid={invalidFillSeed} />
+					</div>
+					<div class="space-y-2">
+						<Label>Max Adverse Ticks</Label>
+						<Input
+							type="number"
+							bind:value={env.fillModel.maxAdverseTicks}
+							aria-invalid={invalidFillMaxAdverseTicks}
+						/>
+					</div>
+					<div class="space-y-2">
+						<Label>Tick Value USD</Label>
+						<Input
+							type="number"
+							bind:value={env.fillModel.tickValueUsd}
+							aria-invalid={invalidFillTickValueUsd}
+						/>
+					</div>
+				</div>
+			{/if}
 		</div>
 		<Separator />
 		<div class="space-y-2">

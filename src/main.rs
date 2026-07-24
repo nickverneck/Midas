@@ -1,6 +1,7 @@
 mod backtesting;
 mod env;
 mod features;
+mod fill;
 mod parquet_loader;
 mod sampler;
 
