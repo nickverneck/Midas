@@ -158,7 +158,7 @@ impl App {
     fn start_replay_mode(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
         if !self.replay_dataset_available() {
             self.status = format!(
-                "Replay file missing: {}",
+                "Replay dataset missing: no matching cache and no local file at {}",
                 self.base_config.replay_file_path.display()
             );
             self.push_log(self.status.clone());
@@ -166,8 +166,8 @@ impl App {
         }
 
         if !self.replay_selected_bar_supported() {
-            self.status =
-                "Replay volume bars require trade size; this local file is price-only.".to_string();
+            self.status = "Replay volume bars require a matching server-bar cache; this local file is price-only."
+                .to_string();
             self.push_log(self.status.clone());
             return;
         }
@@ -178,8 +178,13 @@ impl App {
             candle_mode: self.effective_candle_mode(),
         });
         self.push_log(format!(
-            "Replay mode requested: {}",
-            self.bar_type.mode_label(self.effective_candle_mode())
+            "Replay mode requested: {} ({})",
+            self.bar_type.mode_label(self.effective_candle_mode()),
+            if self.replay_cache_can_serve_selected_bar() {
+                "cache"
+            } else {
+                "local file"
+            }
         ));
     }
 

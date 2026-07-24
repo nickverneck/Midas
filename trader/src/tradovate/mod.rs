@@ -55,7 +55,10 @@ mod service;
 use self::protocol::*;
 pub use self::service::service_loop;
 #[cfg(feature = "replay")]
-pub use download::{TradovateServerBarDownloadRequest, download_replay_server_bars};
+pub use download::{
+    TradovateRawTickDownloadRequest, TradovateServerBarDownloadRequest, download_replay_raw_ticks,
+    download_replay_server_bars,
+};
 use execution::*;
 use gateway::*;
 #[cfg(feature = "manual-orders")]

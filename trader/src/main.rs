@@ -235,13 +235,8 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
     #[cfg(feature = "replay")]
     {
         let plan = build_replay_download_plan(config, args)?;
-        if plan.source_kind == replay_cache::ReplayCacheSourceKind::RawTicks {
-            bail!(
-                "raw-ticks replay downloads are not implemented yet; use --source-kind server-bars"
-            );
-        }
         if config.broker != broker::BrokerKind::Tradovate {
-            bail!("server-bar replay downloads currently support Tradovate only");
+            bail!("replay data downloads currently support Tradovate only");
         }
 
         #[cfg(not(feature = "tradovate"))]
@@ -252,63 +247,121 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
 
         #[cfg(feature = "tradovate")]
         {
-            let download = tradovate::download_replay_server_bars(
-                config,
-                tradovate::TradovateServerBarDownloadRequest {
-                    contract: plan.contract.clone(),
-                    start: plan.start,
-                    end: plan.end,
-                    bar_type: plan.bar_type,
-                },
-            )
-            .await?;
-            let outcome = replay_cache::write_server_bars_jsonl_cache(
-                replay_cache::ReplayCacheServerBarsWrite {
-                    cache_root: plan.cache_root.clone(),
-                    provider: config.broker,
-                    env: config.env,
-                    instrument: replay_cache::ReplayCacheInstrument {
-                        symbol: plan.instrument.clone(),
-                        name: None,
-                        exchange: None,
-                    },
-                    contract: replay_cache::ReplayCacheContract {
-                        symbol: download.contract.name.clone(),
-                        id: Some(download.contract.id),
-                        expiration: None,
-                    },
-                    request_start: plan.start,
-                    request_end: plan.end,
-                    source_kind: replay_cache::ReplayCacheSourceKind::ServerBars,
-                    download_request: download.request_body,
-                    bar_type: plan.bar_type,
-                    tick_specs: download.tick_specs,
-                    session_template: download.session_template,
-                    bars: download.bars,
-                    warnings: download.warnings,
-                    notes: Some(
-                        "Downloaded through Tradovate md/getChart only; no user sync or order path was started."
-                            .to_string(),
-                    ),
-                },
-            )?;
+            match plan.source_kind {
+                replay_cache::ReplayCacheSourceKind::ServerBars => {
+                    let download = tradovate::download_replay_server_bars(
+                        config,
+                        tradovate::TradovateServerBarDownloadRequest {
+                            contract: plan.contract.clone(),
+                            start: plan.start,
+                            end: plan.end,
+                            bar_type: plan.bar_type,
+                        },
+                    )
+                    .await?;
+                    let outcome = replay_cache::write_server_bars_jsonl_cache(
+                        replay_cache::ReplayCacheServerBarsWrite {
+                            cache_root: plan.cache_root.clone(),
+                            provider: config.broker,
+                            env: config.env,
+                            instrument: replay_cache::ReplayCacheInstrument {
+                                symbol: plan.instrument.clone(),
+                                name: None,
+                                exchange: None,
+                            },
+                            contract: replay_cache::ReplayCacheContract {
+                                symbol: download.contract.name.clone(),
+                                id: Some(download.contract.id),
+                                expiration: None,
+                            },
+                            request_start: plan.start,
+                            request_end: plan.end,
+                            source_kind: replay_cache::ReplayCacheSourceKind::ServerBars,
+                            download_request: download.request_body,
+                            bar_type: plan.bar_type,
+                            tick_specs: download.tick_specs,
+                            session_template: download.session_template,
+                            bars: download.bars,
+                            warnings: download.warnings,
+                            notes: Some(
+                                "Downloaded through Tradovate md/getChart only; no user sync or order path was started."
+                                    .to_string(),
+                            ),
+                        },
+                    )?;
 
-            println!("Replay server-bar download complete.");
-            println!("No user sync, account stream, or order path was started.");
-            println!("Provider: {}", config.broker.label());
-            println!("Environment: {}", config.env.label());
-            println!("Instrument: {}", plan.instrument);
-            println!("Contract: {}", plan.contract);
-            println!("Date range: {} to {}", plan.start_date, plan.end_date);
-            println!("Source kind: {}", plan.source_kind.label());
-            println!(
-                "Requested shape: {}",
-                plan.bar_type.mode_label(plan.chart_mode)
-            );
-            println!("Rows: {}", outcome.row_count);
-            println!("Data: {}", outcome.data_path.display());
-            println!("Manifest: {}", outcome.manifest_path.display());
-            Ok(())
+                    println!("Replay server-bar download complete.");
+                    println!("No user sync, account stream, or order path was started.");
+                    println!("Provider: {}", config.broker.label());
+                    println!("Environment: {}", config.env.label());
+                    println!("Instrument: {}", plan.instrument);
+                    println!("Contract: {}", plan.contract);
+                    println!("Date range: {} to {}", plan.start_date, plan.end_date);
+                    println!("Source kind: {}", plan.source_kind.label());
+                    println!(
+                        "Requested shape: {}",
+                        plan.bar_type.mode_label(plan.chart_mode)
+                    );
+                    println!("Rows: {}", outcome.row_count);
+                    println!("Data: {}", outcome.data_path.display());
+                    println!("Manifest: {}", outcome.manifest_path.display());
+                    Ok(())
+                }
+                replay_cache::ReplayCacheSourceKind::RawTicks => {
+                    let download = tradovate::download_replay_raw_ticks(
+                        config,
+                        tradovate::TradovateRawTickDownloadRequest {
+                            contract: plan.contract.clone(),
+                            start: plan.start,
+                            end: plan.end,
+                        },
+                    )
+                    .await?;
+                    let outcome = replay_cache::write_raw_ticks_parquet_cache(
+                        replay_cache::ReplayCacheRawTicksWrite {
+                            cache_root: plan.cache_root.clone(),
+                            provider: config.broker,
+                            env: config.env,
+                            instrument: replay_cache::ReplayCacheInstrument {
+                                symbol: plan.instrument.clone(),
+                                name: None,
+                                exchange: None,
+                            },
+                            contract: replay_cache::ReplayCacheContract {
+                                symbol: download.contract.name.clone(),
+                                id: Some(download.contract.id),
+                                expiration: None,
+                            },
+                            request_start: plan.start,
+                            request_end: plan.end,
+                            download_request: download.request_body,
+                            tick_specs: download.tick_specs,
+                            session_template: download.session_template,
+                            ticks: download.ticks,
+                            warnings: download.warnings,
+                            notes: Some(
+                                "Downloaded raw ticks through Tradovate md/getChart only; no user sync or order path was started."
+                                    .to_string(),
+                            ),
+                        },
+                    )?;
+
+                    println!("Replay raw tick download complete.");
+                    println!("No user sync, account stream, or order path was started.");
+                    println!("Provider: {}", config.broker.label());
+                    println!("Environment: {}", config.env.label());
+                    println!("Instrument: {}", plan.instrument);
+                    println!("Contract: {}", plan.contract);
+                    println!("Date range: {} to {}", plan.start_date, plan.end_date);
+                    println!("Source kind: {}", plan.source_kind.label());
+                    println!("Storage: parquet ({})", "snappy");
+                    println!("Rows: {}", outcome.row_count);
+                    println!("Data: {}", outcome.data_path.display());
+                    println!("Manifest: {}", outcome.manifest_path.display());
+                    Ok(())
+                }
+                other => bail!("unsupported replay download source kind: {}", other.label()),
+            }
         }
     }
 }
@@ -1176,10 +1229,11 @@ mod tests {
     }
 
     #[cfg(feature = "replay")]
-    #[tokio::test]
-    async fn replay_download_raw_ticks_returns_not_implemented_before_network() {
-        let result = download_replay_data(
-            &AppConfig::default(),
+    #[test]
+    fn replay_download_plan_accepts_raw_tick_source_kind() {
+        let config = AppConfig::default();
+        let plan = build_replay_download_plan(
+            &config,
             ReplayDownloadArgs {
                 instrument: "MES".to_string(),
                 contract: "MESU6".to_string(),
@@ -1192,12 +1246,13 @@ mod tests {
                 cache_dir: None,
             },
         )
-        .await;
+        .expect("raw tick download plan");
 
-        let err = result.expect_err("raw ticks should be rejected");
-        assert!(
-            err.to_string()
-                .contains("raw-ticks replay downloads are not implemented")
+        assert_eq!(
+            plan.source_kind,
+            replay_cache::ReplayCacheSourceKind::RawTicks
         );
+        assert_eq!(plan.start.to_rfc3339(), "2026-07-23T00:00:00+00:00");
+        assert_eq!(plan.end.to_rfc3339(), "2026-07-25T00:00:00+00:00");
     }
 }

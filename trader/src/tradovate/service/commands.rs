@@ -197,11 +197,12 @@ async fn enter_replay_mode(
     let candle_mode = bar_type.effective_candle_mode(candle_mode);
     reset_state_for_new_session(state, market_tx);
     let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Loading replay dataset from {}...",
+        "Loading replay dataset for {} from cache or {}...",
+        bar_type.mode_label(candle_mode),
         cfg.replay_file_path.display()
     )));
 
-    let replay = replay::load_replay_state(&cfg).await?;
+    let replay = replay::load_replay_state(&cfg, bar_type, candle_mode).await?;
     let accounts = replay::replay_accounts(&replay);
     let contract = replay::replay_contract(&replay);
     let selected_account_id = accounts.first().map(|account| account.id);

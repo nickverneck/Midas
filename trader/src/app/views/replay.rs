@@ -71,6 +71,10 @@ impl App {
             lines.push(Line::from(
                 "Volume needs per-trade size; this Last file only has price.",
             ));
+        } else if self.replay_cache_can_serve_selected_bar() {
+            lines.push(Line::from(
+                "Cached server bars provide this exact bar selection.",
+            ));
         }
         if self.bar_type.kind() == BarKind::Tick {
             lines.push(Line::from(
@@ -99,8 +103,10 @@ impl App {
             self.focus == Focus::ReplayMode,
         ));
         lines.push(Line::from(format!(
-            "Local replay file: {}",
-            if self.replay_dataset_available() {
+            "Replay source: {}",
+            if self.replay_cache_can_serve_selected_bar() {
+                "matching cached server bars"
+            } else if self.local_replay_dataset_available() {
                 "ready"
             } else {
                 "missing"
@@ -109,29 +115,47 @@ impl App {
         lines.push(Line::from(format!(
             "Bar selection: {}",
             if self.replay_selected_bar_supported() {
-                "supported for local file"
+                "supported"
             } else {
                 "unsupported for local file"
             }
         )));
         lines.push(Line::from(
-            "Cached manifests are browse-only until cache readers are wired.",
+            "Enter uses the newest matching cached server-bar JSONL dataset, otherwise the local text file.",
         ));
         lines.push(Line::from(
-            "Enter starts the configured local text replay and skips broker login.",
+            "Replay skips broker login and does not start live streams.",
         ));
         lines.push(Line::from(
-            "Downloader: use `trader download-replay-data` to plan cache writes; live sync is not started.",
+            "Downloader: use `trader download-replay-data` to add server-bar caches.",
         ));
         lines
     }
 
     pub(in crate::app) fn replay_dataset_available(&self) -> bool {
-        replay_dataset_file_metadata(&self.base_config.replay_file_path).is_some()
+        self.replay_cache_can_serve_selected_bar() || self.local_replay_dataset_available()
     }
 
     pub(in crate::app) fn replay_selected_bar_supported(&self) -> bool {
-        self.bar_type.kind() != BarKind::Volume
+        self.replay_cache_can_serve_selected_bar() || self.bar_type.kind() != BarKind::Volume
+    }
+
+    fn local_replay_dataset_available(&self) -> bool {
+        replay_dataset_file_metadata(&self.base_config.replay_file_path).is_some()
+    }
+
+    pub(in crate::app) fn replay_cache_can_serve_selected_bar(&self) -> bool {
+        #[cfg(feature = "replay")]
+        {
+            self.replay_cache_library
+                .first_server_bars_jsonl(self.bar_type, self.effective_candle_mode(), None)
+                .is_some()
+        }
+
+        #[cfg(not(feature = "replay"))]
+        {
+            false
+        }
     }
 
     fn replay_value_label(&self) -> &'static str {
@@ -146,9 +170,11 @@ impl App {
 
     fn replay_start_action_label(&self) -> String {
         if !self.replay_dataset_available() {
-            "[Enter] Start Local Replay (missing file)".to_string()
+            "[Enter] Start Replay (missing dataset)".to_string()
         } else if !self.replay_selected_bar_supported() {
-            "[Enter] Start Local Replay (volume unavailable)".to_string()
+            "[Enter] Start Replay (volume unavailable)".to_string()
+        } else if self.replay_cache_can_serve_selected_bar() {
+            "[Enter] Start Cached Replay".to_string()
         } else {
             "[Enter] Start Local Replay".to_string()
         }
@@ -173,7 +199,7 @@ impl App {
                     "Download planner: trader download-replay-data --instrument MES --contract MESU6 --start YYYY-MM-DD --end YYYY-MM-DD",
                 ),
                 Line::from(
-                    "Network downloader is not active yet; planner does not log in or start live streams.",
+                    "Downloader uses market-data history only; it does not start user sync or order streams.",
                 ),
             ]);
             if !self.replay_cache_library.warnings.is_empty() {
@@ -185,7 +211,7 @@ impl App {
             return lines;
         }
 
-        let selected_hit = self.replay_cache_library.first_serving(
+        let selected_hit = self.replay_cache_library.first_server_bars_jsonl(
             self.bar_type,
             self.effective_candle_mode(),
             None,
@@ -194,13 +220,13 @@ impl App {
             "Status: {} manifest(s), selected request {}",
             self.replay_cache_library.datasets.len(),
             if selected_hit.is_some() {
-                "manifest match (browse-only)"
+                "JSONL server-bar match"
             } else {
-                "no manifest match"
+                "no JSONL server-bar match"
             }
         )));
         lines.push(Line::from(
-            "Cache readers are not wired yet; Enter still uses the local text file.",
+            "Enter can start the newest matching JSONL server-bar cache; full dataset selection comes later.",
         ));
 
         for dataset in self.replay_cache_library.datasets.iter().take(5) {

@@ -1029,6 +1029,24 @@ fn replay_cache_test_root(name: &str) -> PathBuf {
 fn write_replay_cache_manifest(root: &std::path::Path) -> PathBuf {
     let dataset_dir = root.join("tradovate/sim/MES/MESU6/2026-07-23");
     std::fs::create_dir_all(dataset_dir.join("server-bars")).expect("create cache dirs");
+    let ts_ns = chrono::DateTime::parse_from_rfc3339("2026-07-23T13:30:00Z")
+        .expect("timestamp")
+        .timestamp_nanos_opt()
+        .expect("timestamp ns");
+    std::fs::write(
+        dataset_dir.join("server-bars/2026-07-23_to_2026-07-24_1minute.jsonl"),
+        json!({
+            "timestamp": "2026-07-23T13:30:00Z",
+            "ts_ns": ts_ns,
+            "open": 7430.0,
+            "high": 7431.0,
+            "low": 7429.0,
+            "close": 7430.5,
+            "volume": 100.0
+        })
+        .to_string(),
+    )
+    .expect("write cache data");
     let manifest = json!({
         "manifest_version": 1,
         "provider": "tradovate",
@@ -1064,27 +1082,30 @@ fn write_replay_cache_manifest(root: &std::path::Path) -> PathBuf {
             "value_per_point": 5.0
         },
         "files": [{
-            "relative_path": "server-bars/1m-heikin.parquet",
+            "relative_path": "server-bars/2026-07-23_to_2026-07-24_1minute.jsonl",
             "source_kind": "server_bars",
-            "format": "parquet",
+            "format": "jsonl",
             "schema_version": 1,
-            "compression": "zstd",
             "market_shape": {
                 "bar_type": {
                     "kind": "minute",
                     "value": 1
                 },
-                "chart_mode": "heikin_ashi",
                 "session_template": "Globex"
             },
-            "row_count": 390,
+            "row_count": 1,
             "first_timestamp": "2026-07-23T13:30:00Z",
-            "last_timestamp": "2026-07-23T20:00:00Z",
+            "last_timestamp": "2026-07-23T13:30:00Z",
             "data_hash": {
                 "algorithm": "sha256",
                 "value": "abc123"
             }
         }],
+        "available_bar_shapes": [{
+            "kind": "minute",
+            "value": 1
+        }],
+        "available_chart_modes": ["standard", "heikin_ashi"],
         "tags": ["fixture"],
         "notes": "test manifest"
     });
@@ -1229,11 +1250,11 @@ fn replay_dataset_lines_show_owned_cache_manifests_first() {
     assert!(
         lines
             .iter()
-            .any(|line| line
-                == "Status: 1 manifest(s), selected request manifest match (browse-only)")
+            .any(|line| line == "Status: 1 manifest(s), selected request JSONL server-bar match")
     );
     assert!(lines.iter().any(
-        |line| line == "Cache readers are not wired yet; Enter still uses the local text file."
+        |line| line
+            == "Enter can start the newest matching JSONL server-bar cache; full dataset selection comes later."
     ));
     assert!(
         lines
@@ -1243,7 +1264,7 @@ fn replay_dataset_lines_show_owned_cache_manifests_first() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Shapes: 1 Min | Modes: Heikin Ashi"))
+            .any(|line| line.contains("Shapes: 1 Min | Modes: OHLC, Heikin Ashi"))
     );
     assert!(
         lines
@@ -1259,6 +1280,45 @@ fn replay_dataset_lines_show_owned_cache_manifests_first() {
 
 #[cfg(feature = "replay")]
 #[test]
+fn replay_screen_start_accepts_matching_cached_jsonl_without_local_file() {
+    let cache_root = replay_cache_test_root("start-cache");
+    write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    config.replay_file_path =
+        std::env::temp_dir().join("trader-replay-cache-only-missing.Last.txt");
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayMode;
+    app.bar_type = BarType::minute(1);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    match cmd_rx
+        .try_recv()
+        .expect("expected replay start command from cache")
+    {
+        ServiceCommand::EnterReplayMode {
+            bar_type,
+            candle_mode,
+            ..
+        } => {
+            assert_eq!(bar_type, BarType::minute(1));
+            assert_eq!(candle_mode, CandleMode::HeikinAshi);
+        }
+        _ => panic!("expected enter-replay command"),
+    }
+    assert!(app.logs.iter().any(|line| {
+        line.message
+            .contains("Replay mode requested: Heikin Ashi 1 Min (cache)")
+    }));
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn replay_run_lines_label_disabled_start_states() {
     let mut missing_config = AppConfig::default();
     missing_config.replay_file_path =
@@ -1269,7 +1329,7 @@ fn replay_run_lines_label_disabled_start_states() {
     assert!(
         missing_lines
             .iter()
-            .any(|line| line == "[Enter] Start Local Replay (missing file)")
+            .any(|line| line == "[Enter] Start Replay (missing dataset)")
     );
 
     let path = replay_test_file("disabled-volume");
@@ -1282,7 +1342,7 @@ fn replay_run_lines_label_disabled_start_states() {
     assert!(
         volume_lines
             .iter()
-            .any(|line| line == "[Enter] Start Local Replay (volume unavailable)")
+            .any(|line| line == "[Enter] Start Replay (volume unavailable)")
     );
     let market_lines = rendered_text(volume_app.replay_market_control_lines());
     assert!(
