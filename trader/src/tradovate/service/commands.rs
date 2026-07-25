@@ -1,5 +1,14 @@
 use super::*;
 
+#[cfg(feature = "replay")]
+use crate::replay_cache::{
+    ReplayCacheContract, ReplayCacheInstrument, ReplayCacheRawTicksWrite,
+    ReplayCacheServerBarsWrite, ReplayCacheSourceKind, write_raw_ticks_parquet_cache,
+    write_server_bars_parquet_cache,
+};
+#[cfg(feature = "replay")]
+use chrono::{Datelike, TimeZone, Utc};
+
 pub(super) async fn handle_command(
     cmd: ServiceCommand,
     state: &mut ServiceState,
@@ -15,15 +24,39 @@ pub(super) async fn handle_command(
             config: cfg,
             bar_type,
             candle_mode,
+            replay_dataset_manifest,
         } => {
             enter_replay_mode(
                 cfg,
                 bar_type,
                 candle_mode,
+                replay_dataset_manifest,
                 state,
                 event_tx,
                 market_tx,
                 internal_tx,
+            )
+            .await
+        }
+        ServiceCommand::DownloadReplayData {
+            config,
+            instrument,
+            contract,
+            start_date,
+            end_date,
+            source_kind,
+            bar_type,
+        } => {
+            download_replay_data(
+                config,
+                instrument,
+                contract,
+                start_date,
+                end_date,
+                source_kind,
+                bar_type,
+                state,
+                event_tx,
             )
             .await
         }
@@ -81,6 +114,170 @@ pub(super) async fn handle_command(
             disarm_execution_strategy_command(reason, state, event_tx)
         }
         ServiceCommand::ProbeExecution { tag } => probe_execution(tag, state, event_tx),
+    }
+}
+
+async fn download_replay_data(
+    cfg: AppConfig,
+    instrument: String,
+    contract: String,
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
+    source_kind: String,
+    bar_type: BarType,
+    _state: &mut ServiceState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (
+            cfg,
+            instrument,
+            contract,
+            start_date,
+            end_date,
+            source_kind,
+            bar_type,
+            event_tx,
+        );
+        bail!("replay downloader requires `--features replay`");
+    }
+
+    #[cfg(feature = "replay")]
+    {
+        if end_date < start_date {
+            bail!("download end date cannot be before start date");
+        }
+        let start = Utc
+            .with_ymd_and_hms(
+                start_date.year(),
+                start_date.month(),
+                start_date.day(),
+                0,
+                0,
+                0,
+            )
+            .single()
+            .context("compose download start date")?;
+        let end_exclusive_date = end_date
+            .succ_opt()
+            .context("download end date overflowed")?;
+        let end = Utc
+            .with_ymd_and_hms(
+                end_exclusive_date.year(),
+                end_exclusive_date.month(),
+                end_exclusive_date.day(),
+                0,
+                0,
+                0,
+            )
+            .single()
+            .context("compose download end date")?;
+        let source_kind = match source_kind.as_str() {
+            "server-bars" => ReplayCacheSourceKind::ServerBars,
+            "raw-ticks" => ReplayCacheSourceKind::RawTicks,
+            other => bail!("unsupported replay download source kind: {other}"),
+        };
+
+        let _ = event_tx.send(ServiceEvent::Status(format!(
+            "Replay download starting: {} {} {} to {}",
+            instrument, contract, start_date, end_date
+        )));
+        let _ = event_tx.send(ServiceEvent::Status(format!(
+            "Replay download authenticating for {}...",
+            cfg.env.label()
+        )));
+
+        if source_kind == ReplayCacheSourceKind::ServerBars {
+            let _ = event_tx.send(ServiceEvent::Status(format!(
+                "Downloading server bars: {}",
+                bar_type.label()
+            )));
+            let download = crate::tradovate::download_replay_server_bars(
+                &cfg,
+                crate::tradovate::TradovateServerBarDownloadRequest {
+                    contract: contract.clone(),
+                    start,
+                    end,
+                    bar_type,
+                },
+            )
+            .await?;
+            let outcome = write_server_bars_parquet_cache(ReplayCacheServerBarsWrite {
+                cache_root: cfg.replay_cache_dir.clone(),
+                provider: cfg.broker,
+                env: cfg.env,
+                instrument: ReplayCacheInstrument {
+                    symbol: instrument,
+                    name: None,
+                    exchange: None,
+                },
+                contract: ReplayCacheContract {
+                    symbol: download.contract.name,
+                    id: Some(download.contract.id),
+                    expiration: None,
+                },
+                request_start: start,
+                request_end: end,
+                source_kind,
+                download_request: download.request_body,
+                bar_type,
+                tick_specs: download.tick_specs,
+                session_template: download.session_template,
+                bars: download.bars,
+                warnings: download.warnings,
+                notes: Some(
+                    "Downloaded from the TUI through Tradovate market data only.".to_string(),
+                ),
+            })?;
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadCompleted {
+                manifest_path: outcome.manifest_path,
+                data_path: outcome.data_path,
+                rows: outcome.row_count,
+            });
+        } else {
+            let _ = event_tx.send(ServiceEvent::Status("Downloading raw ticks...".to_string()));
+            let download = crate::tradovate::download_replay_raw_ticks(
+                &cfg,
+                crate::tradovate::TradovateRawTickDownloadRequest {
+                    contract,
+                    start,
+                    end,
+                },
+            )
+            .await?;
+            let outcome = write_raw_ticks_parquet_cache(ReplayCacheRawTicksWrite {
+                cache_root: cfg.replay_cache_dir.clone(),
+                provider: cfg.broker,
+                env: cfg.env,
+                instrument: ReplayCacheInstrument {
+                    symbol: instrument,
+                    name: None,
+                    exchange: None,
+                },
+                contract: ReplayCacheContract {
+                    symbol: download.contract.name,
+                    id: Some(download.contract.id),
+                    expiration: None,
+                },
+                request_start: start,
+                request_end: end,
+                download_request: download.request_body,
+                tick_specs: download.tick_specs,
+                session_template: download.session_template,
+                ticks: download.ticks,
+                warnings: download.warnings,
+                notes: Some(
+                    "Downloaded from the TUI through Tradovate market data only.".to_string(),
+                ),
+            })?;
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadCompleted {
+                manifest_path: outcome.manifest_path,
+                data_path: outcome.data_path,
+                rows: outcome.row_count,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -189,6 +386,7 @@ async fn enter_replay_mode(
     cfg: AppConfig,
     bar_type: BarType,
     candle_mode: CandleMode,
+    replay_dataset_manifest: Option<std::path::PathBuf>,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
@@ -202,7 +400,13 @@ async fn enter_replay_mode(
         cfg.replay_file_path.display()
     )));
 
-    let replay = replay::load_replay_state(&cfg, bar_type, candle_mode).await?;
+    let replay = replay::load_replay_state(
+        &cfg,
+        bar_type,
+        candle_mode,
+        replay_dataset_manifest.as_deref(),
+    )
+    .await?;
     let accounts = replay::replay_accounts(&replay);
     let contract = replay::replay_contract(&replay);
     let selected_account_id = accounts.first().map(|account| account.id);

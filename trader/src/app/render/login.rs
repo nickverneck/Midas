@@ -102,6 +102,8 @@ impl App {
             | Focus::BarValue
             | Focus::CandleModeToggle
             | Focus::ContractList => {}
+            #[cfg(feature = "replay")]
+            Focus::ReplayDataset => {}
         }
     }
 

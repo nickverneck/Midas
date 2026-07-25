@@ -469,6 +469,26 @@ pub struct ReplayCacheLoadedServerBars {
     pub bars: Vec<Bar>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayCacheResolvedRawTicksFile {
+    pub manifest_path: PathBuf,
+    pub dataset_dir: PathBuf,
+    pub data_path: PathBuf,
+    pub manifest: ReplayCacheManifest,
+    pub file: ReplayCacheDataFile,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayCacheLoadedRawTicks {
+    pub manifest_path: PathBuf,
+    pub dataset_dir: PathBuf,
+    pub data_path: PathBuf,
+    pub manifest: ReplayCacheManifest,
+    pub file: ReplayCacheDataFile,
+    pub ticks: Vec<ReplayCacheRawTickRow>,
+}
+
+#[allow(dead_code)]
 pub fn write_server_bars_jsonl_cache(
     write: ReplayCacheServerBarsWrite,
 ) -> Result<ReplayCacheWriteOutcome> {
@@ -476,7 +496,7 @@ pub fn write_server_bars_jsonl_cache(
         bail!("JSONL server-bar cache writer only accepts server-bars source data");
     }
 
-    let rows = normalize_server_bar_rows(write.bars);
+    let rows = normalize_server_bar_rows(write.bars.clone());
     if rows.is_empty() {
         bail!("server-bar download returned no usable bars");
     }
@@ -625,6 +645,168 @@ pub fn write_server_bars_jsonl_cache(
         data_path,
         row_count,
     })
+}
+
+pub fn write_server_bars_parquet_cache(
+    write: ReplayCacheServerBarsWrite,
+) -> Result<ReplayCacheWriteOutcome> {
+    if write.source_kind != ReplayCacheSourceKind::ServerBars {
+        bail!("Parquet server-bar cache writer only accepts server-bars source data");
+    }
+
+    let rows = normalize_server_bar_rows(write.bars.clone());
+    if rows.is_empty() {
+        bail!("server-bar download returned no usable bars");
+    }
+    let dataset_dir = replay_cache_dataset_dir(
+        &write.cache_root,
+        write.provider,
+        write.env,
+        &write.instrument.symbol,
+        &write.contract.symbol,
+        write.request_start.date_naive(),
+    );
+    let relative_path =
+        server_bars_parquet_relative_path(write.request_start, write.request_end, write.bar_type);
+    let data_path = dataset_dir.join(&relative_path);
+    if let Some(parent) = data_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    write_server_bars_parquet_file(&data_path, &rows)?;
+    let bytes = fs::read(&data_path).with_context(|| format!("read {}", data_path.display()))?;
+    let first_timestamp = rows.first().expect("rows are non-empty").timestamp;
+    let last_timestamp = rows.last().expect("rows are non-empty").timestamp;
+    let data_file = ReplayCacheDataFile {
+        relative_path: relative_path.clone(),
+        source_kind: ReplayCacheSourceKind::ServerBars,
+        format: ReplayCacheFileFormat::Parquet,
+        schema_version: Some(SERVER_BARS_SCHEMA_VERSION),
+        compression: Some(PARQUET_COMPRESSION_LABEL.to_string()),
+        market_shape: ReplayCacheMarketShape {
+            bar_type: Some(write.bar_type),
+            chart_mode: None,
+            session_template: write.session_template.clone(),
+        },
+        row_count: rows.len() as u64,
+        first_timestamp,
+        last_timestamp,
+        data_hash: Some(ReplayCacheDataHash {
+            algorithm: "fnv1a64".to_string(),
+            value: fnv1a64_hex(&bytes),
+        }),
+        warnings: write.warnings.clone(),
+        errors: Vec::new(),
+    };
+    let outcome = upsert_server_bars_manifest(&write, data_file, first_timestamp, last_timestamp)?;
+    Ok(ReplayCacheWriteOutcome {
+        dataset_dir,
+        manifest_path: outcome.0,
+        data_path,
+        row_count: rows.len() as u64,
+    })
+}
+
+fn upsert_server_bars_manifest(
+    write: &ReplayCacheServerBarsWrite,
+    data_file: ReplayCacheDataFile,
+    first_timestamp: DateTime<Utc>,
+    last_timestamp: DateTime<Utc>,
+) -> Result<(PathBuf, ReplayCacheManifest)> {
+    let dataset_dir = replay_cache_dataset_dir(
+        &write.cache_root,
+        write.provider,
+        write.env,
+        &write.instrument.symbol,
+        &write.contract.symbol,
+        write.request_start.date_naive(),
+    );
+    let manifest_path = dataset_dir.join(MANIFEST_FILE_NAME);
+    let mut manifest = if manifest_path.exists() {
+        ReplayCacheManifest::from_path(&manifest_path)
+            .with_context(|| format!("load existing {}", manifest_path.display()))?
+    } else {
+        ReplayCacheManifest {
+            manifest_version: MANIFEST_VERSION,
+            provider: write.provider,
+            env: write.env,
+            instrument: write.instrument.clone(),
+            contract: write.contract.clone(),
+            display_name: replay_cache_display_name(
+                &write.contract.symbol,
+                write.request_start,
+                write.request_end,
+                write.bar_type,
+            ),
+            coverage: ReplayCacheCoverage {
+                start: first_timestamp,
+                end: last_timestamp,
+                trading_date: Some(write.request_start.date_naive()),
+            },
+            source_kind: ReplayCacheSourceKind::ServerBars,
+            download_request: Value::Null,
+            tick_specs: write.tick_specs.clone(),
+            files: Vec::new(),
+            app: None,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+            badges: Vec::new(),
+            available_bar_shapes: Vec::new(),
+            available_chart_modes: Vec::new(),
+            tags: Vec::new(),
+            notes: write.notes.clone(),
+        }
+    };
+    manifest.provider = write.provider;
+    manifest.env = write.env;
+    manifest.instrument = write.instrument.clone();
+    manifest.contract = write.contract.clone();
+    manifest.source_kind = ReplayCacheSourceKind::ServerBars;
+    manifest.download_request = write.download_request.clone();
+    manifest.tick_specs = write.tick_specs.clone();
+    manifest.app = Some(ReplayCacheAppMetadata {
+        app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        git_commit: option_env!("VERGEN_GIT_SHA").map(ToString::to_string),
+        generated_at: Some(Utc::now()),
+    });
+    manifest.warnings = write.warnings.clone();
+    manifest.errors.clear();
+    manifest.notes = write.notes.clone();
+    let shape = data_file.market_shape.bar_type;
+    manifest.files.retain(|file| {
+        !(file.source_kind == ReplayCacheSourceKind::ServerBars
+            && file.market_shape.bar_type == shape
+            && file.format == data_file.format)
+    });
+    manifest.files.push(data_file);
+    manifest.files.sort_by(|left, right| {
+        left.relative_path
+            .to_string_lossy()
+            .cmp(&right.relative_path.to_string_lossy())
+    });
+    manifest.coverage = manifest_coverage_from_files(&manifest.files, write.request_start);
+    manifest.available_bar_shapes = manifest
+        .files
+        .iter()
+        .filter_map(|file| file.market_shape.bar_type)
+        .collect();
+    manifest
+        .available_bar_shapes
+        .sort_by_key(|bar_type| bar_type.value());
+    manifest.available_bar_shapes.dedup();
+    manifest.available_chart_modes = if write.bar_type.supports_candle_mode() {
+        vec![CandleMode::Standard, CandleMode::HeikinAshi]
+    } else {
+        vec![CandleMode::Standard]
+    };
+    manifest.badges = manifest.derived_badges();
+    fs::create_dir_all(&dataset_dir)
+        .with_context(|| format!("create {}", dataset_dir.display()))?;
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).context("serialize replay cache manifest")?,
+    )
+    .with_context(|| format!("write {}", manifest_path.display()))?;
+    Ok((manifest_path, manifest))
 }
 
 pub fn write_raw_ticks_parquet_cache(
@@ -819,6 +1001,7 @@ pub fn replay_cache_dataset_dir(
         .join(start_date.to_string())
 }
 
+#[allow(dead_code)]
 pub fn server_bars_relative_path(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
@@ -826,6 +1009,19 @@ pub fn server_bars_relative_path(
 ) -> PathBuf {
     PathBuf::from("server-bars").join(format!(
         "{}_to_{}_{}.jsonl",
+        start.format("%Y-%m-%d"),
+        end.format("%Y-%m-%d"),
+        bar_type_file_label(bar_type)
+    ))
+}
+
+pub fn server_bars_parquet_relative_path(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    bar_type: BarType,
+) -> PathBuf {
+    PathBuf::from("server-bars").join(format!(
+        "{}_to_{}_{}.parquet",
         start.format("%Y-%m-%d"),
         end.format("%Y-%m-%d"),
         bar_type_file_label(bar_type)
@@ -917,6 +1113,100 @@ pub fn read_server_bars_jsonl_file(path: &Path) -> Result<Vec<Bar>> {
 
     if bars.is_empty() {
         bail!("server-bar cache file {} contained no bars", path.display());
+    }
+    normalize_read_server_bars(bars)
+}
+
+fn server_bars_parquet_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("timestamp", DataType::Utf8, false),
+        Field::new("ts_ns", DataType::Int64, false),
+        Field::new("open", DataType::Float64, false),
+        Field::new("high", DataType::Float64, false),
+        Field::new("low", DataType::Float64, false),
+        Field::new("close", DataType::Float64, false),
+        Field::new("volume", DataType::Float64, true),
+    ]))
+}
+
+pub fn write_server_bars_parquet_file(path: &Path, rows: &[ReplayCacheServerBarRow]) -> Result<()> {
+    if rows.is_empty() {
+        bail!("server-bar parquet writer requires at least one row");
+    }
+    let schema = server_bars_parquet_schema();
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.timestamp.to_rfc3339())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Int64Array::from(
+            rows.iter().map(|row| row.ts_ns).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter().map(|row| row.open).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter().map(|row| row.high).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter().map(|row| row.low).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter().map(|row| row.close).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter().map(|row| row.volume).collect::<Vec<_>>(),
+        )),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+pub fn read_server_bars_parquet_file(path: &Path) -> Result<Vec<Bar>> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("open parquet reader {}", path.display()))?;
+    let reader = builder
+        .build()
+        .with_context(|| format!("build parquet reader {}", path.display()))?;
+    let mut bars = Vec::new();
+    for batch in reader {
+        let batch = batch.with_context(|| format!("read parquet batch {}", path.display()))?;
+        let timestamps = parquet_column::<StringArray>(&batch, 0, "timestamp")?;
+        let ts_ns = parquet_column::<Int64Array>(&batch, 1, "ts_ns")?;
+        let opens = parquet_column::<Float64Array>(&batch, 2, "open")?;
+        let highs = parquet_column::<Float64Array>(&batch, 3, "high")?;
+        let lows = parquet_column::<Float64Array>(&batch, 4, "low")?;
+        let closes = parquet_column::<Float64Array>(&batch, 5, "close")?;
+        let volumes = parquet_column::<Float64Array>(&batch, 6, "volume")?;
+        for index in 0..batch.num_rows() {
+            let timestamp = DateTime::parse_from_rfc3339(timestamps.value(index))
+                .with_context(|| format!("parse server bar timestamp row {index}"))?
+                .with_timezone(&Utc);
+            bars.push(server_bar_row_to_bar(ReplayCacheServerBarRow {
+                timestamp,
+                ts_ns: ts_ns.value(index),
+                open: opens.value(index),
+                high: highs.value(index),
+                low: lows.value(index),
+                close: closes.value(index),
+                volume: optional_f64(volumes, index),
+            })?);
+        }
+    }
+    if bars.is_empty() {
+        bail!(
+            "server-bar parquet file {} contained no bars",
+            path.display()
+        );
     }
     normalize_read_server_bars(bars)
 }
@@ -1051,6 +1341,7 @@ pub fn read_raw_ticks_parquet_file(path: &Path) -> Result<Vec<ReplayCacheRawTick
     Ok(normalized.rows)
 }
 
+#[allow(dead_code)]
 pub fn load_server_bars_jsonl_cache_file(
     dataset: &ReplayCacheDataset,
     bar_type: BarType,
@@ -1062,6 +1353,29 @@ pub fn load_server_bars_jsonl_cache_file(
     let bars = read_server_bars_jsonl_file(&resolved.data_path)?;
     validate_loaded_server_bars_metadata(&resolved, &bars)?;
 
+    Ok(ReplayCacheLoadedServerBars {
+        manifest_path: resolved.manifest_path,
+        dataset_dir: resolved.dataset_dir,
+        data_path: resolved.data_path,
+        manifest: resolved.manifest,
+        file: resolved.file,
+        bars,
+    })
+}
+
+pub fn load_server_bars_cache_file(
+    dataset: &ReplayCacheDataset,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    requested_coverage: Option<&ReplayCacheCoverage>,
+) -> Result<ReplayCacheLoadedServerBars> {
+    let resolved = dataset.resolve_server_bars_file(bar_type, candle_mode, requested_coverage)?;
+    let bars = match resolved.file.format {
+        ReplayCacheFileFormat::Parquet => read_server_bars_parquet_file(&resolved.data_path)?,
+        ReplayCacheFileFormat::Jsonl => read_server_bars_jsonl_file(&resolved.data_path)?,
+        format => bail!("unsupported server-bar cache format: {format:?}"),
+    };
+    validate_loaded_server_bars_metadata(&resolved, &bars)?;
     Ok(ReplayCacheLoadedServerBars {
         manifest_path: resolved.manifest_path,
         dataset_dir: resolved.dataset_dir,
@@ -1408,6 +1722,41 @@ impl ReplayCacheDataset {
         })
     }
 
+    pub fn server_bars_parquet_file_for(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Option<&ReplayCacheDataFile> {
+        if !self.manifest.errors.is_empty()
+            || requested_coverage
+                .is_some_and(|requested| !self.manifest.coverage.contains(requested))
+        {
+            return None;
+        }
+        self.manifest.files.iter().find(|file| {
+            file.errors.is_empty()
+                && file.source_kind == ReplayCacheSourceKind::ServerBars
+                && file.format == ReplayCacheFileFormat::Parquet
+                && file.market_shape.chart_mode != Some(CandleMode::HeikinAshi)
+                && file
+                    .schema_version
+                    .is_none_or(|version| version == SERVER_BARS_SCHEMA_VERSION)
+                && file.market_shape.supports(bar_type, candle_mode)
+        })
+    }
+
+    pub fn server_bars_file_for(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Option<&ReplayCacheDataFile> {
+        self.server_bars_parquet_file_for(bar_type, candle_mode, requested_coverage)
+            .or_else(|| self.server_bars_jsonl_file_for(bar_type, candle_mode, requested_coverage))
+    }
+
+    #[allow(dead_code)]
     pub fn resolve_server_bars_jsonl_file(
         &self,
         bar_type: BarType,
@@ -1424,6 +1773,119 @@ impl ReplayCacheDataset {
                 )
             })?
             .clone();
+        let data_path = resolve_cache_data_path(&self.dataset_dir, &file.relative_path)?;
+        Ok(ReplayCacheResolvedServerBarsFile {
+            manifest_path: self.manifest_path.clone(),
+            dataset_dir: self.dataset_dir.clone(),
+            data_path,
+            manifest: self.manifest.clone(),
+            file,
+        })
+    }
+
+    pub fn raw_ticks_parquet_file_for(
+        &self,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Option<&ReplayCacheDataFile> {
+        if !self.manifest.errors.is_empty()
+            || requested_coverage
+                .is_some_and(|requested| !self.manifest.coverage.contains(requested))
+        {
+            return None;
+        }
+        self.manifest.files.iter().find(|file| {
+            file.errors.is_empty()
+                && file.source_kind == ReplayCacheSourceKind::RawTicks
+                && file.format == ReplayCacheFileFormat::Parquet
+                && file
+                    .schema_version
+                    .is_none_or(|version| version == RAW_TICKS_SCHEMA_VERSION)
+        })
+    }
+
+    pub fn resolve_raw_ticks_parquet_file(
+        &self,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Result<ReplayCacheResolvedRawTicksFile> {
+        let file = self
+            .raw_ticks_parquet_file_for(requested_coverage)
+            .with_context(|| {
+                format!(
+                    "no cached Parquet raw ticks in {}",
+                    self.manifest_path.display()
+                )
+            })?
+            .clone();
+        let data_path = resolve_cache_data_path(&self.dataset_dir, &file.relative_path)?;
+        Ok(ReplayCacheResolvedRawTicksFile {
+            manifest_path: self.manifest_path.clone(),
+            dataset_dir: self.dataset_dir.clone(),
+            data_path,
+            manifest: self.manifest.clone(),
+            file,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn resolve_server_bars_parquet_file(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Result<ReplayCacheResolvedServerBarsFile> {
+        self.resolve_server_bars_file_with_format(
+            bar_type,
+            candle_mode,
+            requested_coverage,
+            ReplayCacheFileFormat::Parquet,
+        )
+    }
+
+    pub fn resolve_server_bars_file(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Result<ReplayCacheResolvedServerBarsFile> {
+        let file = self
+            .server_bars_file_for(bar_type, candle_mode, requested_coverage)
+            .with_context(|| {
+                format!(
+                    "no cached server bars for {} in {}",
+                    bar_type.mode_label(candle_mode),
+                    self.manifest_path.display()
+                )
+            })?
+            .clone();
+        let data_path = resolve_cache_data_path(&self.dataset_dir, &file.relative_path)?;
+        Ok(ReplayCacheResolvedServerBarsFile {
+            manifest_path: self.manifest_path.clone(),
+            dataset_dir: self.dataset_dir.clone(),
+            data_path,
+            manifest: self.manifest.clone(),
+            file,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn resolve_server_bars_file_with_format(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+        format: ReplayCacheFileFormat,
+    ) -> Result<ReplayCacheResolvedServerBarsFile> {
+        let file = match format {
+            ReplayCacheFileFormat::Parquet => {
+                self.server_bars_parquet_file_for(bar_type, candle_mode, requested_coverage)
+            }
+            ReplayCacheFileFormat::Jsonl => {
+                self.server_bars_jsonl_file_for(bar_type, candle_mode, requested_coverage)
+            }
+            _ => None,
+        }
+        .with_context(|| format!("no cached server bars in {}", self.manifest_path.display()))?
+        .clone();
         let data_path = resolve_cache_data_path(&self.dataset_dir, &file.relative_path)?;
         Ok(ReplayCacheResolvedServerBarsFile {
             manifest_path: self.manifest_path.clone(),
@@ -1500,6 +1962,21 @@ impl ReplayCacheLibrary {
         })
     }
 
+    pub fn first_server_bars(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Option<&ReplayCacheDataset> {
+        self.datasets.iter().find(|dataset| {
+            dataset.can_serve(bar_type, candle_mode, requested_coverage)
+                && dataset
+                    .server_bars_file_for(bar_type, candle_mode, requested_coverage)
+                    .is_some()
+        })
+    }
+
+    #[allow(dead_code)]
     pub fn load_first_server_bars_jsonl(
         &self,
         bar_type: BarType,
@@ -1512,6 +1989,80 @@ impl ReplayCacheLibrary {
         };
         load_server_bars_jsonl_cache_file(dataset, bar_type, candle_mode, requested_coverage)
             .map(Some)
+    }
+
+    pub fn load_first_server_bars(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Result<Option<ReplayCacheLoadedServerBars>> {
+        let Some(dataset) = self.first_server_bars(bar_type, candle_mode, requested_coverage)
+        else {
+            return Ok(None);
+        };
+        load_server_bars_cache_file(dataset, bar_type, candle_mode, requested_coverage).map(Some)
+    }
+
+    pub fn raw_ticks_parquet_datasets(
+        &self,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Vec<&ReplayCacheDataset> {
+        self.datasets
+            .iter()
+            .filter(|dataset| {
+                dataset
+                    .raw_ticks_parquet_file_for(requested_coverage)
+                    .is_some()
+            })
+            .collect()
+    }
+
+    pub fn load_unique_raw_ticks_parquet(
+        &self,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Result<Option<ReplayCacheLoadedRawTicks>> {
+        let datasets = self.raw_ticks_parquet_datasets(requested_coverage);
+        if datasets.len() > 1 {
+            let names = datasets
+                .iter()
+                .map(|dataset| dataset.manifest.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "multiple cached raw-tick datasets match replay: {names}; select one dataset before starting replay"
+            );
+        }
+        let Some(dataset) = datasets.first().copied() else {
+            return Ok(None);
+        };
+        let resolved = dataset.resolve_raw_ticks_parquet_file(requested_coverage)?;
+        let ticks = read_raw_ticks_parquet_file(&resolved.data_path)?;
+        Ok(Some(ReplayCacheLoadedRawTicks {
+            manifest_path: resolved.manifest_path,
+            dataset_dir: resolved.dataset_dir,
+            data_path: resolved.data_path,
+            manifest: resolved.manifest,
+            file: resolved.file,
+            ticks,
+        }))
+    }
+
+    pub fn load_raw_ticks_parquet_dataset(
+        &self,
+        dataset: &ReplayCacheDataset,
+        requested_coverage: Option<&ReplayCacheCoverage>,
+    ) -> Result<ReplayCacheLoadedRawTicks> {
+        let resolved = dataset.resolve_raw_ticks_parquet_file(requested_coverage)?;
+        let ticks = read_raw_ticks_parquet_file(&resolved.data_path)?;
+        Ok(ReplayCacheLoadedRawTicks {
+            manifest_path: resolved.manifest_path,
+            dataset_dir: resolved.dataset_dir,
+            data_path: resolved.data_path,
+            manifest: resolved.manifest,
+            file: resolved.file,
+            ticks,
+        })
     }
 }
 
@@ -1806,6 +2357,53 @@ mod tests {
     }
 
     #[test]
+    fn raw_tick_loader_fails_closed_when_multiple_datasets_match() {
+        let root = temp_cache_dir("ambiguous-raw-ticks");
+        let mut first_manifest = sample_manifest();
+        first_manifest.display_name = "MESU6 raw ticks".to_string();
+        first_manifest.source_kind = ReplayCacheSourceKind::RawTicks;
+        first_manifest.files[0].source_kind = ReplayCacheSourceKind::RawTicks;
+        first_manifest.files[0].format = ReplayCacheFileFormat::Parquet;
+        first_manifest.files[0].market_shape = ReplayCacheMarketShape {
+            bar_type: None,
+            chart_mode: None,
+            session_template: Some("Globex".to_string()),
+        };
+
+        let mut second_manifest = first_manifest.clone();
+        second_manifest.display_name = "ESU6 raw ticks".to_string();
+        second_manifest.instrument.symbol = "ES".to_string();
+        second_manifest.contract.symbol = "ESU6".to_string();
+
+        let library = ReplayCacheLibrary {
+            root: root.clone(),
+            datasets: vec![
+                ReplayCacheDataset {
+                    manifest_path: root.join("first/manifest.json"),
+                    dataset_dir: root.join("first"),
+                    manifest: first_manifest,
+                },
+                ReplayCacheDataset {
+                    manifest_path: root.join("second/manifest.json"),
+                    dataset_dir: root.join("second"),
+                    manifest: second_manifest,
+                },
+            ],
+            warnings: Vec::new(),
+        };
+
+        let err = library
+            .load_unique_raw_ticks_parquet(None)
+            .expect_err("ambiguous raw tick datasets must not be selected implicitly");
+        assert!(
+            err.to_string()
+                .contains("multiple cached raw-tick datasets")
+        );
+        assert!(err.to_string().contains("MESU6 raw ticks"));
+        assert!(err.to_string().contains("ESU6 raw ticks"));
+    }
+
+    #[test]
     fn write_server_bars_jsonl_cache_writes_manifest_and_data_file() {
         let root = temp_cache_dir("write");
         let outcome = write_server_bars_jsonl_cache(ReplayCacheServerBarsWrite {
@@ -1898,6 +2496,69 @@ mod tests {
         assert_eq!(loaded[0].price, 100.0);
         assert_eq!(loaded[0].bid_price, Some(99.75));
         assert_eq!(loaded[1].packet_source.as_deref(), Some("db"));
+    }
+
+    #[test]
+    fn server_bar_parquet_file_round_trips_and_is_preferred_over_jsonl() {
+        let root = temp_cache_dir("server-parquet");
+        let write = ReplayCacheServerBarsWrite {
+            cache_root: root.clone(),
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "MES".to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "MESU6".to_string(),
+                id: Some(123),
+                expiration: None,
+            },
+            request_start: dt("2026-07-23T00:00:00Z"),
+            request_end: dt("2026-07-24T00:00:00Z"),
+            source_kind: ReplayCacheSourceKind::ServerBars,
+            download_request: json!({"md": "getChart"}),
+            bar_type: BarType::minute(1),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 5.0,
+            },
+            session_template: Some("Globex".to_string()),
+            bars: vec![bar("2026-07-23T00:00:00Z", 100.0)],
+            warnings: Vec::new(),
+            notes: None,
+        };
+        let parquet = write_server_bars_parquet_cache(write.clone()).expect("write parquet");
+        let jsonl = write_server_bars_jsonl_cache(write).expect("write jsonl compatibility file");
+        assert_eq!(parquet.row_count, 1);
+        assert_eq!(jsonl.row_count, 1);
+        assert_eq!(
+            parquet.data_path.extension().and_then(|ext| ext.to_str()),
+            Some("parquet")
+        );
+
+        let library = ReplayCacheLibrary::scan(root);
+        let loaded = library
+            .load_first_server_bars(BarType::minute(1), CandleMode::Standard, None)
+            .expect("load parquet-preferred server bars")
+            .expect("server bars exist");
+        assert_eq!(loaded.file.format, ReplayCacheFileFormat::Parquet);
+        assert_eq!(loaded.bars[0].close, 100.5);
+
+        let manifest = ReplayCacheManifest::from_path(&loaded.manifest_path).expect("manifest");
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|file| file.format == ReplayCacheFileFormat::Jsonl)
+        );
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|file| file.format == ReplayCacheFileFormat::Parquet)
+        );
     }
 
     #[test]

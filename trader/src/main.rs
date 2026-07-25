@@ -259,7 +259,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                         },
                     )
                     .await?;
-                    let outcome = replay_cache::write_server_bars_jsonl_cache(
+                    let outcome = replay_cache::write_server_bars_parquet_cache(
                         replay_cache::ReplayCacheServerBarsWrite {
                             cache_root: plan.cache_root.clone(),
                             provider: config.broker,
@@ -298,6 +298,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                     println!("Contract: {}", plan.contract);
                     println!("Date range: {} to {}", plan.start_date, plan.end_date);
                     println!("Source kind: {}", plan.source_kind.label());
+                    println!("Storage: parquet ({})", "snappy");
                     println!(
                         "Requested shape: {}",
                         plan.bar_type.mode_label(plan.chart_mode)

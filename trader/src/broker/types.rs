@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategy::{ExecutionStateSnapshot, ExecutionStrategyConfig};
+use chrono::NaiveDate;
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,16 @@ pub enum ServiceCommand {
         config: AppConfig,
         bar_type: BarType,
         candle_mode: CandleMode,
+        replay_dataset_manifest: Option<std::path::PathBuf>,
+    },
+    DownloadReplayData {
+        config: crate::config::AppConfig,
+        instrument: String,
+        contract: String,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        source_kind: String,
+        bar_type: BarType,
     },
     ReplayState,
     SelectAccount {
@@ -114,6 +125,11 @@ pub enum ServiceEvent {
     ExecutionState(ExecutionStateSnapshot),
     ExecutionProbe(ExecutionProbeSnapshot),
     ReplaySpeedUpdated(ReplaySpeed),
+    ReplayDownloadCompleted {
+        manifest_path: std::path::PathBuf,
+        data_path: std::path::PathBuf,
+        rows: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

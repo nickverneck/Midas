@@ -1,6 +1,9 @@
 use super::*;
 #[cfg(feature = "replay")]
-use crate::replay_cache::{ReplayCacheLibrary, ReplayCacheLoadedServerBars};
+use crate::replay_cache::{
+    ReplayCacheLibrary, ReplayCacheLoadedRawTicks, ReplayCacheLoadedServerBars,
+    ReplayCacheRawTickRow,
+};
 #[cfg(feature = "replay")]
 use anyhow::{Context, Result, bail};
 #[cfg(not(feature = "replay"))]
@@ -36,19 +39,28 @@ pub(crate) async fn load_replay_state(
     cfg: &AppConfig,
     bar_type: BarType,
     candle_mode: CandleMode,
+    selected_manifest_path: Option<&Path>,
 ) -> Result<ReplayState> {
     #[cfg(not(feature = "replay"))]
     {
-        let _ = (cfg, bar_type, candle_mode);
+        let _ = (cfg, bar_type, candle_mode, selected_manifest_path);
         bail!("replay mode is not enabled in this build; rebuild with `--features replay`");
     }
 
     #[cfg(feature = "replay")]
     {
         let cfg = cfg.clone();
-        tokio::task::spawn_blocking(move || load_replay_state_blocking(&cfg, bar_type, candle_mode))
-            .await
-            .context("join replay parser task")?
+        let selected_manifest_path = selected_manifest_path.map(Path::to_path_buf);
+        tokio::task::spawn_blocking(move || {
+            load_replay_state_blocking(
+                &cfg,
+                bar_type,
+                candle_mode,
+                selected_manifest_path.as_deref(),
+            )
+        })
+        .await
+        .context("join replay parser task")?
     }
 }
 
@@ -161,10 +173,51 @@ fn load_replay_state_blocking(
     cfg: &AppConfig,
     bar_type: BarType,
     candle_mode: CandleMode,
+    selected_manifest_path: Option<&Path>,
 ) -> Result<ReplayState> {
     let library = ReplayCacheLibrary::scan(&cfg.replay_cache_dir);
-    if let Some(cached) = library.load_first_server_bars_jsonl(bar_type, candle_mode, None)? {
+    if let Some(selected_path) = selected_manifest_path {
+        let dataset = library
+            .datasets
+            .iter()
+            .find(|dataset| dataset.manifest_path == selected_path)
+            .with_context(|| {
+                format!(
+                    "selected replay dataset not found: {}",
+                    selected_path.display()
+                )
+            })?;
+        if dataset
+            .server_bars_file_for(bar_type, candle_mode, None)
+            .is_some()
+        {
+            return replay_state_from_cached_server_bars(
+                crate::replay_cache::load_server_bars_cache_file(
+                    dataset,
+                    bar_type,
+                    candle_mode,
+                    None,
+                )?,
+                bar_type,
+                candle_mode,
+            );
+        }
+        if dataset.raw_ticks_parquet_file_for(None).is_some() {
+            let cached = library
+                .load_raw_ticks_parquet_dataset(dataset, None)
+                .context("load selected raw-tick replay dataset")?;
+            return replay_state_from_cached_raw_ticks(cached);
+        }
+        bail!(
+            "selected replay dataset does not support {}",
+            bar_type.mode_label(candle_mode)
+        );
+    }
+    if let Some(cached) = library.load_first_server_bars(bar_type, candle_mode, None)? {
         return replay_state_from_cached_server_bars(cached, bar_type, candle_mode);
+    }
+    if let Some(cached) = library.load_unique_raw_ticks_parquet(None)? {
+        return replay_state_from_cached_raw_ticks(cached);
     }
 
     load_local_tick_replay_state_blocking(&cfg.replay_file_path)
@@ -234,7 +287,62 @@ fn load_local_tick_replay_state_blocking(path: &Path) -> Result<ReplayState> {
             value_per_point: Some(value_per_point),
             tick_size: Some(tick_size),
         },
-        data: ReplayDataSource::LocalTicks(Arc::from(ticks.into_boxed_slice())),
+        data: ReplayDataSource::PriceTicks(Arc::from(ticks.into_boxed_slice())),
+    })
+}
+
+#[cfg(feature = "replay")]
+fn replay_state_from_cached_raw_ticks(cached: ReplayCacheLoadedRawTicks) -> Result<ReplayState> {
+    let ticks = cached
+        .ticks
+        .iter()
+        .map(replay_tick_from_cache_row)
+        .collect::<Vec<_>>();
+    if ticks.is_empty() {
+        bail!(
+            "cached raw tick dataset {} contained no ticks",
+            cached.data_path.display()
+        );
+    }
+    let contract_name = if cached.manifest.contract.symbol.trim().is_empty() {
+        "Replay Cache".to_string()
+    } else {
+        cached.manifest.contract.symbol.clone()
+    };
+    let contract_id = cached
+        .manifest
+        .contract
+        .id
+        .unwrap_or_else(|| replay_contract_id(&cached.data_path));
+    Ok(ReplayState {
+        contract: ContractSuggestion {
+            id: contract_id,
+            name: contract_name.clone(),
+            description: format!("Cached Raw Tick Dataset ({})", cached.manifest.display_name),
+            raw: json!({
+                "source": "replay-cache",
+                "sourceKind": "raw-ticks",
+                "manifestPath": cached.manifest_path.display().to_string(),
+                "dataPath": cached.data_path.display().to_string(),
+            }),
+        },
+        account: AccountInfo {
+            id: 1,
+            name: "REPLAY".to_string(),
+            raw: json!({
+                "id": 1,
+                "name": "REPLAY",
+                "source": "replay-cache",
+                "startingBalance": 100000.0,
+                "balance": 100000.0,
+            }),
+        },
+        market_specs: MarketSpecs {
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(cached.manifest.tick_specs.value_per_point),
+            tick_size: Some(cached.manifest.tick_specs.tick_size),
+        },
+        data: ReplayDataSource::RawTicks(Arc::from(ticks.into_boxed_slice())),
     })
 }
 
@@ -522,7 +630,7 @@ fn scale_duration(duration: Duration, factor: f64) -> Duration {
 impl ReplayState {
     fn bars_for_type(&self, bar_type: BarType) -> Result<Vec<Bar>> {
         match &self.data {
-            ReplayDataSource::LocalTicks(ticks) => {
+            ReplayDataSource::PriceTicks(ticks) | ReplayDataSource::RawTicks(ticks) => {
                 let ticks = ticks.as_ref();
                 match bar_type.kind() {
                     BarKind::Minute => {
@@ -548,9 +656,12 @@ impl ReplayState {
                         Ok(bars)
                     }
                     BarKind::Volume => {
-                        bail!(
-                            "volume bars require trade size; local replay file only has trusted last prices"
-                        )
+                        if matches!(&self.data, ReplayDataSource::PriceTicks(_)) {
+                            bail!(
+                                "volume bars require trade size; local replay file only has trusted last prices"
+                            )
+                        }
+                        Ok(build_volume_bars(ticks, bar_type.value()))
                     }
                 }
             }
@@ -575,7 +686,8 @@ impl ReplayState {
 #[cfg(feature = "replay")]
 #[derive(Debug, Clone)]
 enum ReplayDataSource {
-    LocalTicks(Arc<[ReplayTick]>),
+    PriceTicks(Arc<[ReplayTick]>),
+    RawTicks(Arc<[ReplayTick]>),
     CachedServerBars {
         bars: Arc<[Bar]>,
         bar_type: BarType,
@@ -588,6 +700,16 @@ enum ReplayDataSource {
 struct ReplayTick {
     ts_ns: i64,
     last: f64,
+    size: Option<f64>,
+}
+
+#[cfg(feature = "replay")]
+fn replay_tick_from_cache_row(row: &ReplayCacheRawTickRow) -> ReplayTick {
+    ReplayTick {
+        ts_ns: row.ts_ns,
+        last: row.price,
+        size: Some(row.size),
+    }
 }
 
 #[cfg(feature = "replay")]
@@ -632,7 +754,11 @@ fn parse_tick_line(line: &str) -> Result<ReplayTick> {
         .timestamp_nanos_opt()
         .context("convert replay timestamp to nanoseconds")?;
 
-    Ok(ReplayTick { ts_ns, last })
+    Ok(ReplayTick {
+        ts_ns,
+        last,
+        size: None,
+    })
 }
 
 #[cfg(feature = "replay")]
@@ -658,6 +784,15 @@ fn build_range_bars(ticks: &[ReplayTick], range_size: f64) -> Vec<Bar> {
     let mut builder = RangeBarBuilder::new(range_size);
     for tick in ticks {
         builder.push_tick(tick.ts_ns, tick.last);
+    }
+    builder.finish()
+}
+
+#[cfg(feature = "replay")]
+fn build_volume_bars(ticks: &[ReplayTick], volume_per_bar: u32) -> Vec<Bar> {
+    let mut builder = VolumeBarBuilder::new(volume_per_bar as f64);
+    for tick in ticks {
+        builder.push_tick(tick.ts_ns, tick.last, tick.size.unwrap_or(0.0).max(0.0));
     }
     builder.finish()
 }
@@ -744,6 +879,69 @@ struct TickCountBarBuilder {
     current_tick_count: usize,
     current_bar: Option<Bar>,
     bars: Vec<Bar>,
+}
+
+#[cfg(feature = "replay")]
+struct VolumeBarBuilder {
+    volume_per_bar: f64,
+    current_volume: f64,
+    current_bar: Option<Bar>,
+    bars: Vec<Bar>,
+}
+
+#[cfg(feature = "replay")]
+impl VolumeBarBuilder {
+    fn new(volume_per_bar: f64) -> Self {
+        Self {
+            volume_per_bar: volume_per_bar.max(1.0),
+            current_volume: 0.0,
+            current_bar: None,
+            bars: Vec::new(),
+        }
+    }
+
+    fn push_tick(&mut self, ts_ns: i64, price: f64, size: f64) {
+        let mut remaining = size;
+        if remaining <= 0.0 {
+            return;
+        }
+        while remaining > 0.0 {
+            if self.current_bar.is_none() {
+                self.current_bar = Some(Bar {
+                    ts_ns,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                    volume: Some(0.0),
+                });
+            }
+            let capacity = self.volume_per_bar - self.current_volume;
+            let consumed = remaining.min(capacity);
+            if let Some(current) = self.current_bar.as_mut() {
+                current.ts_ns = ts_ns;
+                current.high = current.high.max(price);
+                current.low = current.low.min(price);
+                current.close = price;
+                current.volume = Some(self.current_volume + consumed);
+            }
+            self.current_volume += consumed;
+            remaining -= consumed;
+            if self.current_volume >= self.volume_per_bar - f64::EPSILON {
+                if let Some(current) = self.current_bar.take() {
+                    self.bars.push(current);
+                }
+                self.current_volume = 0.0;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<Bar> {
+        if let Some(current) = self.current_bar.take() {
+            self.bars.push(current);
+        }
+        self.bars
+    }
 }
 
 #[cfg(feature = "replay")]
@@ -1036,19 +1234,22 @@ mod replay_tests {
                 value_per_point: Some(5.0),
                 tick_size: Some(0.25),
             },
-            data: ReplayDataSource::LocalTicks(Arc::from(
+            data: ReplayDataSource::PriceTicks(Arc::from(
                 vec![
                     ReplayTick {
                         ts_ns: base,
                         last: 100.0,
+                        size: None,
                     },
                     ReplayTick {
                         ts_ns: base + 1_000_000_000,
                         last: 100.25,
+                        size: None,
                     },
                     ReplayTick {
                         ts_ns: base + 60_000_000_000,
                         last: 100.5,
+                        size: None,
                     },
                 ]
                 .into_boxed_slice(),
@@ -1066,6 +1267,58 @@ mod replay_tests {
                 .to_string()
                 .contains("volume bars require trade size")
         );
+    }
+
+    #[test]
+    fn raw_tick_replay_derives_volume_bars_and_preserves_trade_volume() {
+        let state = ReplayState {
+            contract: ContractSuggestion {
+                id: 1,
+                name: "MESU6".to_string(),
+                description: "raw tick replay".to_string(),
+                raw: json!({}),
+            },
+            account: AccountInfo {
+                id: 1,
+                name: "REPLAY".to_string(),
+                raw: json!({}),
+            },
+            market_specs: MarketSpecs {
+                session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+                value_per_point: Some(5.0),
+                tick_size: Some(0.25),
+            },
+            data: ReplayDataSource::RawTicks(Arc::from(
+                vec![
+                    ReplayTick {
+                        ts_ns: 1,
+                        last: 100.0,
+                        size: Some(60.0),
+                    },
+                    ReplayTick {
+                        ts_ns: 2,
+                        last: 100.25,
+                        size: Some(60.0),
+                    },
+                    ReplayTick {
+                        ts_ns: 3,
+                        last: 100.5,
+                        size: Some(30.0),
+                    },
+                ]
+                .into_boxed_slice(),
+            )),
+        };
+
+        let bars = state.bars_for_type(BarType::volume(100)).unwrap();
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].open, 100.0);
+        assert_eq!(bars[0].high, 100.25);
+        assert_eq!(bars[0].close, 100.25);
+        assert_eq!(bars[0].volume, Some(100.0));
+        assert_eq!(bars[1].open, 100.25);
+        assert_eq!(bars[1].close, 100.5);
+        assert_eq!(bars[1].volume, Some(50.0));
     }
 
     #[test]
@@ -1088,19 +1341,22 @@ mod replay_tests {
                 value_per_point: Some(5.0),
                 tick_size: Some(0.25),
             },
-            data: ReplayDataSource::LocalTicks(Arc::from(
+            data: ReplayDataSource::PriceTicks(Arc::from(
                 vec![
                     ReplayTick {
                         ts_ns: base,
                         last: 100.0,
+                        size: None,
                     },
                     ReplayTick {
                         ts_ns: base,
                         last: 100.25,
+                        size: None,
                     },
                     ReplayTick {
                         ts_ns: base,
                         last: 101.0,
+                        size: None,
                     },
                 ]
                 .into_boxed_slice(),
@@ -1263,8 +1519,9 @@ mod replay_tests {
         let mut cfg = AppConfig::default();
         cfg.replay_cache_dir = cache_root;
         cfg.replay_file_path = PathBuf::from("/tmp/trader-replay-missing-local.Last.txt");
-        let state = load_replay_state_blocking(&cfg, BarType::minute(1), CandleMode::HeikinAshi)
-            .expect("load replay state from cache");
+        let state =
+            load_replay_state_blocking(&cfg, BarType::minute(1), CandleMode::HeikinAshi, None)
+                .expect("load replay state from cache");
 
         assert_eq!(replay_contract(&state).name, "MESU6");
         let bars = state

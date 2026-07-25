@@ -248,6 +248,8 @@ impl App {
             | Focus::StrategyContinue
             | Focus::ReplayMode
             | Focus::Connect => {}
+            #[cfg(feature = "replay")]
+            Focus::ReplayDataset => {}
         }
     }
 

@@ -52,6 +52,8 @@ impl App {
             latency: LatencySnapshot::default(),
             session_kind: SessionKind::Live,
             replay_speed: ReplaySpeed::default(),
+            #[cfg(feature = "replay")]
+            replay_dataset_index: None,
             last_log_at: None,
             last_market_update_at: None,
         };
@@ -326,6 +328,26 @@ impl App {
             ServiceEvent::ExecutionProbe(_) => {}
             ServiceEvent::ReplaySpeedUpdated(speed) => {
                 self.replay_speed = speed;
+            }
+            ServiceEvent::ReplayDownloadCompleted {
+                manifest_path,
+                data_path,
+                rows,
+            } => {
+                #[cfg(feature = "replay")]
+                {
+                    self.replay_cache_library =
+                        ReplayCacheLibrary::scan(&self.base_config.replay_cache_dir);
+                }
+                self.status = format!(
+                    "Replay download complete: {rows} rows ({})",
+                    manifest_path.display()
+                );
+                self.push_log(format!(
+                    "Replay cache updated: manifest={} data={}",
+                    manifest_path.display(),
+                    data_path.display()
+                ));
             }
         }
     }

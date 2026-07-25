@@ -121,7 +121,7 @@ impl App {
             }
         )));
         lines.push(Line::from(
-            "Enter uses the newest matching cached server-bar JSONL dataset, otherwise the local text file.",
+            "Enter uses cached server bars first, then cached raw-tick Parquet, otherwise the local text file.",
         ));
         lines.push(Line::from(
             "Replay skips broker login and does not start live streams.",
@@ -129,15 +129,26 @@ impl App {
         lines.push(Line::from(
             "Downloader: use `trader download-replay-data` to add server-bar caches.",
         ));
+        lines.push(Line::from(
+            "D downloads the selected dataset coverage again and refreshes the cache list.",
+        ));
         lines
     }
 
     pub(in crate::app) fn replay_dataset_available(&self) -> bool {
-        self.replay_cache_can_serve_selected_bar() || self.local_replay_dataset_available()
+        if self.replay_dataset_index_is_selected() {
+            self.replay_selected_cache_can_serve_bar()
+        } else {
+            self.replay_selected_cache_can_serve_bar() || self.local_replay_dataset_available()
+        }
     }
 
     pub(in crate::app) fn replay_selected_bar_supported(&self) -> bool {
-        self.replay_cache_can_serve_selected_bar() || self.bar_type.kind() != BarKind::Volume
+        if self.replay_dataset_index_is_selected() {
+            self.replay_cache_can_serve_selected_bar()
+        } else {
+            self.replay_cache_can_serve_selected_bar() || self.bar_type.kind() != BarKind::Volume
+        }
     }
 
     fn local_replay_dataset_available(&self) -> bool {
@@ -145,17 +156,52 @@ impl App {
     }
 
     pub(in crate::app) fn replay_cache_can_serve_selected_bar(&self) -> bool {
+        self.replay_selected_cache_can_serve_bar()
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_dataset_index_is_selected(&self) -> bool {
+        self.replay_dataset_index.is_some()
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_dataset_index_is_selected(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_selected_dataset(&self) -> Option<&crate::replay_cache::ReplayCacheDataset> {
+        self.replay_dataset_index
+            .and_then(|index| self.replay_cache_library.datasets.get(index))
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_selected_cache_can_serve_bar(&self) -> bool {
+        if let Some(dataset) = self.replay_selected_dataset() {
+            return dataset.can_serve(self.bar_type, self.effective_candle_mode(), None)
+                || dataset.raw_ticks_parquet_file_for(None).is_some();
+        }
         #[cfg(feature = "replay")]
         {
             self.replay_cache_library
                 .first_server_bars_jsonl(self.bar_type, self.effective_candle_mode(), None)
                 .is_some()
+                || self
+                    .replay_cache_library
+                    .raw_ticks_parquet_datasets(None)
+                    .len()
+                    == 1
         }
 
         #[cfg(not(feature = "replay"))]
         {
             false
         }
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_selected_cache_can_serve_bar(&self) -> bool {
+        false
     }
 
     fn replay_value_label(&self) -> &'static str {
@@ -211,39 +257,74 @@ impl App {
             return lines;
         }
 
-        let selected_hit = self.replay_cache_library.first_server_bars_jsonl(
-            self.bar_type,
-            self.effective_candle_mode(),
-            None,
-        );
+        let selected = self.replay_selected_dataset();
         lines.push(Line::from(format!(
-            "Status: {} manifest(s), selected request {}",
+            "Status: {} manifest(s), selected dataset {}",
             self.replay_cache_library.datasets.len(),
-            if selected_hit.is_some() {
-                "JSONL server-bar match"
-            } else {
-                "no JSONL server-bar match"
-            }
+            selected.map_or("none", |dataset| dataset.manifest.display_name.as_str())
         )));
         lines.push(Line::from(
-            "Enter can start the newest matching JSONL server-bar cache; full dataset selection comes later.",
+            "Focus Dataset and use Up/Down to browse; Enter uses the selected cache exactly; A clears to automatic.",
         ));
 
-        for dataset in self.replay_cache_library.datasets.iter().take(5) {
+        const VISIBLE_DATASETS: usize = 8;
+        let visible_start = self
+            .replay_dataset_index
+            .map(|index| index.saturating_sub(VISIBLE_DATASETS - 1))
+            .unwrap_or(0)
+            .min(
+                self.replay_cache_library
+                    .datasets
+                    .len()
+                    .saturating_sub(VISIBLE_DATASETS),
+            );
+        let visible_end =
+            (visible_start + VISIBLE_DATASETS).min(self.replay_cache_library.datasets.len());
+        lines.push(Line::from(format!(
+            "Showing datasets {}-{} of {}",
+            visible_start + 1,
+            visible_end,
+            self.replay_cache_library.datasets.len()
+        )));
+        for (index, dataset) in self
+            .replay_cache_library
+            .datasets
+            .iter()
+            .enumerate()
+            .skip(visible_start)
+            .take(VISIBLE_DATASETS)
+        {
             let manifest = &dataset.manifest;
+            let marker = if self.replay_dataset_index == Some(index) {
+                ">"
+            } else {
+                " "
+            };
             lines.extend([
-                Line::from(format!("Dataset: {}", manifest.display_name)),
                 Line::from(format!(
-                    "  {} {} {} | {}",
+                    "{} Dataset [{}]: {}",
+                    marker,
+                    index + 1,
+                    manifest.display_name
+                )),
+                Line::from(format!(
+                    "  {} {} {} | {} | {}",
                     manifest.provider.label(),
                     manifest.env.label(),
                     manifest.contract.symbol,
-                    manifest.coverage.label()
+                    manifest.coverage.label(),
+                    manifest.source_kind.label()
                 )),
                 Line::from(format!(
-                    "  Badges: {} | Rows: {}",
+                    "  Badges: {} | Rows: {} | Granular: {}",
                     manifest.badges_label(),
-                    manifest.row_count_total()
+                    manifest.row_count_total(),
+                    if manifest.source_kind == crate::replay_cache::ReplayCacheSourceKind::RawTicks
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    }
                 )),
                 Line::from(format!(
                     "  Shapes: {} | Modes: {}",
@@ -252,12 +333,6 @@ impl App {
                 )),
                 Line::from(format!("  Manifest: {}", dataset.manifest_path.display())),
             ]);
-        }
-        if self.replay_cache_library.datasets.len() > 5 {
-            lines.push(Line::from(format!(
-                "... {} more cached dataset(s)",
-                self.replay_cache_library.datasets.len() - 5
-            )));
         }
         for warning in self.replay_cache_library.warnings.iter().take(2) {
             lines.push(Line::from(format!("Warning: {warning}")));

@@ -98,7 +98,8 @@ impl App {
             return;
         }
 
-        if !self.is_free_text_focus()
+        if self.screen != Screen::Replay
+            && !self.is_free_text_focus()
             && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
         {
             if !self.automated_strategy_affordance_visible() {

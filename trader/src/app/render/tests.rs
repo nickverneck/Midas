@@ -1176,10 +1176,12 @@ fn replay_screen_start_uses_selected_market_controls() {
             bar_type,
             candle_mode,
             config,
+            replay_dataset_manifest,
         } => {
             assert_eq!(bar_type, BarType::tick(100));
             assert_eq!(candle_mode, CandleMode::HeikinAshi);
             assert_eq!(config.replay_file_path, path);
+            assert!(replay_dataset_manifest.is_none());
         }
         _ => panic!("expected enter-replay command"),
     }
@@ -1250,16 +1252,14 @@ fn replay_dataset_lines_show_owned_cache_manifests_first() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "Status: 1 manifest(s), selected request JSONL server-bar match")
+            .any(|line| line == "Status: 1 manifest(s), selected dataset none")
     );
-    assert!(lines.iter().any(
-        |line| line
-            == "Enter can start the newest matching JSONL server-bar cache; full dataset selection comes later."
-    ));
+    assert!(lines.iter().any(|line| line
+        == "Focus Dataset and use Up/Down to browse; Enter uses the selected cache exactly; A clears to automatic."));
     assert!(
         lines
             .iter()
-            .any(|line| line == "Dataset: MESU6 RTH 1m Heikin")
+            .any(|line| line == "  Dataset [1]: MESU6 RTH 1m Heikin")
     );
     assert!(
         lines
@@ -1304,10 +1304,12 @@ fn replay_screen_start_accepts_matching_cached_jsonl_without_local_file() {
         ServiceCommand::EnterReplayMode {
             bar_type,
             candle_mode,
+            replay_dataset_manifest,
             ..
         } => {
             assert_eq!(bar_type, BarType::minute(1));
             assert_eq!(candle_mode, CandleMode::HeikinAshi);
+            assert!(replay_dataset_manifest.is_none());
         }
         _ => panic!("expected enter-replay command"),
     }
@@ -1315,6 +1317,77 @@ fn replay_screen_start_accepts_matching_cached_jsonl_without_local_file() {
         line.message
             .contains("Replay mode requested: Heikin Ashi 1 Min (cache)")
     }));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_dataset_picker_selects_manifest_for_startup() {
+    let cache_root = replay_cache_test_root("picker");
+    let manifest_path = write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    config.replay_file_path = std::env::temp_dir().join("trader-replay-picker-missing.Last.txt");
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayDataset;
+    app.bar_type = BarType::minute(1);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.replay_dataset_index, Some(0));
+    app.handle_replay_key(key(KeyCode::Char('a')), &cmd_tx);
+    assert_eq!(app.replay_dataset_index, None);
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.replay_dataset_index, Some(0));
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplayMode);
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected replay start command") {
+        ServiceCommand::EnterReplayMode {
+            replay_dataset_manifest,
+            ..
+        } => assert_eq!(replay_dataset_manifest, Some(manifest_path)),
+        _ => panic!("expected enter-replay command"),
+    }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_dataset_downloader_uses_selected_manifest_coverage() {
+    let cache_root = replay_cache_test_root("download-command");
+    write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayDataset;
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    app.handle_key(key(KeyCode::Char('d')), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("expected download command") {
+        ServiceCommand::DownloadReplayData {
+            instrument,
+            contract,
+            start_date,
+            end_date,
+            source_kind,
+            ..
+        } => {
+            assert_eq!(instrument, "MES");
+            assert_eq!(contract, "MESU6");
+            assert_eq!(start_date.to_string(), "2026-07-23");
+            assert_eq!(end_date.to_string(), "2026-07-23");
+            assert_eq!(source_kind, "server-bars");
+        }
+        _ => panic!("expected replay download command"),
+    }
 }
 
 #[cfg(feature = "replay")]

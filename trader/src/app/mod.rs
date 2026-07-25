@@ -77,6 +77,8 @@ pub struct App {
     latency: LatencySnapshot,
     session_kind: SessionKind,
     replay_speed: ReplaySpeed,
+    #[cfg(feature = "replay")]
+    replay_dataset_index: Option<usize>,
     last_log_at: Option<Instant>,
     last_market_update_at: Option<Instant>,
 }
@@ -152,6 +154,8 @@ enum Focus {
     BarTypeToggle,
     BarValue,
     CandleModeToggle,
+    #[cfg(feature = "replay")]
+    ReplayDataset,
     ContractList,
 }
 

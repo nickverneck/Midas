@@ -85,7 +85,44 @@ impl App {
                 }
                 _ => {}
             },
+            #[cfg(feature = "replay")]
+            Focus::ReplayDataset => {
+                let count = self.replay_cache_library.datasets.len();
+                if count == 0 {
+                    if matches!(key.code, KeyCode::Up | KeyCode::Enter) {
+                        self.focus = self.prev_replay_focus();
+                    } else if key.code == KeyCode::Down {
+                        self.focus = self.next_replay_focus();
+                    }
+                    return;
+                }
+                match key.code {
+                    KeyCode::Up | KeyCode::Down => {
+                        let current = self.replay_dataset_index.unwrap_or(0);
+                        let next = if key.code == KeyCode::Up {
+                            current.checked_sub(1).unwrap_or(count - 1)
+                        } else {
+                            (current + 1) % count
+                        };
+                        self.replay_dataset_index = Some(next);
+                        return;
+                    }
+                    KeyCode::Char('a') => {
+                        self.replay_dataset_index = None;
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        self.focus = self.next_replay_focus();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             Focus::ReplayMode => {
+                if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
+                    self.start_replay_download(cmd_tx);
+                    return;
+                }
                 if matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')) {
                     self.start_replay_mode(cmd_tx);
                     return;
@@ -176,6 +213,7 @@ impl App {
             config: self.current_config(),
             bar_type: self.bar_type,
             candle_mode: self.effective_candle_mode(),
+            replay_dataset_manifest: self.replay_selected_dataset_manifest(),
         });
         self.push_log(format!(
             "Replay mode requested: {} ({})",
@@ -186,6 +224,60 @@ impl App {
                 "local file"
             }
         ));
+    }
+
+    #[cfg(feature = "replay")]
+    fn start_replay_download(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        let Some(index) = self.replay_dataset_index else {
+            self.status = "Select an owned dataset before downloading or extending it.".to_string();
+            self.push_log(self.status.clone());
+            return;
+        };
+        let Some(dataset) = self.replay_cache_library.datasets.get(index) else {
+            self.status = "Selected replay dataset is no longer available.".to_string();
+            self.push_log(self.status.clone());
+            return;
+        };
+        let source_kind = match dataset.manifest.source_kind.badge() {
+            "server-bars" | "raw-ticks" => dataset.manifest.source_kind.badge().to_string(),
+            other => {
+                self.status = format!("Cannot download source kind {other} from this screen.");
+                self.push_log(self.status.clone());
+                return;
+            }
+        };
+        let _ = cmd_tx.send(ServiceCommand::DownloadReplayData {
+            config: self.current_config(),
+            instrument: dataset.manifest.instrument.symbol.clone(),
+            contract: dataset.manifest.contract.symbol.clone(),
+            start_date: dataset.manifest.coverage.start.date_naive(),
+            end_date: dataset.manifest.coverage.end.date_naive(),
+            source_kind,
+            bar_type: self.bar_type,
+        });
+        self.status = format!(
+            "Replay download requested for {} {}.",
+            dataset.manifest.instrument.symbol, dataset.manifest.contract.symbol
+        );
+        self.push_log(self.status.clone());
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn start_replay_download(&mut self, _cmd_tx: &UnboundedSender<ServiceCommand>) {
+        self.status = "Replay downloader requires a replay-enabled build.".to_string();
+        self.push_log(self.status.clone());
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_selected_dataset_manifest(&self) -> Option<std::path::PathBuf> {
+        self.replay_dataset_index
+            .and_then(|index| self.replay_cache_library.datasets.get(index))
+            .map(|dataset| dataset.manifest_path.clone())
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_selected_dataset_manifest(&self) -> Option<std::path::PathBuf> {
+        None
     }
 
     pub(in crate::app) fn render_replay_screen(&self, frame: &mut Frame<'_>, area: Rect) {

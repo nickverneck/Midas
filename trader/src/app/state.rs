@@ -410,6 +410,8 @@ impl App {
         if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
         }
+        #[cfg(feature = "replay")]
+        order.push(Focus::ReplayDataset);
         order.push(Focus::ReplayMode);
         order
     }

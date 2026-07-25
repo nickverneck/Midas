@@ -220,6 +220,7 @@ impl EngineSummary {
             }
             ServiceEvent::ExecutionProbe(_) => {}
             ServiceEvent::ReplaySpeedUpdated(_) => {}
+            ServiceEvent::ReplayDownloadCompleted { .. } => {}
         }
     }
 
