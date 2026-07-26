@@ -23,6 +23,7 @@
   - [x] `train_ppo.py` using PyTorch (MLP policy) against batched env.
   - [x] `train_ga.py` GA-only neuroevolution over multiple windows.
   - [x] `train_hybrid.py` GA + PPO hybrid trainer.
+  - [x] All three examples deprecated and removed; functionality moved to Rust binaries.
 
 ## RL/GA logic
 - [ ] Implement PPO-style rollout/advantage calc with configurable reward weights (Sharpe/PnL/drawdown).
@@ -41,4 +42,5 @@
 
 ## Documentation
 - [x] Update README with build instructions (`uv` + `maturin develop --features python`).
+- [x] Update README to reflect Python deprecation and Rust as the main engine.
 - [ ] Quickstart for running EMA rule vs. feature-only RL training.

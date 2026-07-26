@@ -3,9 +3,11 @@
 Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures).
 
 ## Setup
-- Rust nightly/stable, Python 3.12+ (Built and tested on 3.13).
-- Install `uv` for Python management if not already installed.
-- Build and install Python bindings:  
+
+**Python is deprecated.** All training, backtesting, and tooling has been migrated to Rust. The Python dependency exists only for legacy bindings and build scaffolding; new work should be done in Rust.
+
+- Rust nightly/stable.
+- Python 3.12+ (Built and tested on 3.13) is only needed to build the PyO3 bindings:  
   `uv run maturin develop --features python`
 - Build Rust with torch from the local uv venv:  
   `python scripts/cargo-build.py`
@@ -24,7 +26,7 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - `burn` now runs the GA trainer in this branch. The current runtime split is Burn CPU via `burn-cpu`, native Burn CUDA via the optional `backend-burn-cuda` Cargo feature, and Apple GPU via `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
 - `mlx` is still a separate planned backend slot rather than the Burn Apple GPU path.
 - Successful runs write `training_stack.json` beside the log files so benchmark tooling can group results by backend/runtime/algorithm/host.
-- The training page diagnostics now run both the existing libtorch probe and `python/examples/mlx_probe.py`, so Apple MLX viability can be checked before a full MLX trainer exists.
+- `python/examples/mlx_probe.py` remains as a Python-side MLX runtime probe. It is the only remaining Python example in active use.
 - Candle frontend runs now compile with `backend-candle` automatically, add `backend-candle-accelerate` on macOS unless `MIDAS_CANDLE_ACCELERATE=0`, and can opt into CUDA on Linux with `MIDAS_CANDLE_CUDA=1`.
 - Burn frontend runs always compile with `backend-burn`, add `backend-burn-cuda` when `MIDAS_BURN_CUDA=1`, add `backend-burn-mlx` only when you explicitly target `mps` or opt into it with `MIDAS_BURN_MLX=1`, and add `backend-burn-ndarray` only when `MIDAS_BURN_NDARRAY=1` or `MIDAS_BURN_CPU_BACKEND=ndarray`.
 - `burn-mlx` currently needs both `cmake` and an active Xcode Metal Toolchain. On this machine the MLX source build progressed after installing `cmake`, but `xcrun metal` still reports the Metal toolchain as unavailable.
@@ -50,37 +52,21 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - Rust GA-only trainer on Burn MLX (macOS Apple GPU, toolchain required):  
   `cargo run --features backend-burn,backend-burn-mlx --bin train_ga -- --backend burn --device mps --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_mlx`
 
-## Python examples
+## Python examples (deprecated)
 
-### Genetic Algorithm + PPO Training
-Run the hybrid GA-PPO trainer with parallel evaluation:
-```bash
-uv run python/examples/train_hybrid.py \
-  --train-parquet data/train/SPY0.parquet \
-  --val-parquet data/val/SPY.parquet \
-  --test-parquet data/val/SPY.parquet \
-  --outdir runs_ga \
-  --workers 4 \
-  --pop-size 12
-```
+The following Python examples have been removed. Their functionality is fully replaced by Rust binaries:
 
-### GA-Only Neuroevolution
-Run GA-only training that evolves policy weights directly:
-```bash
-uv run python/examples/train_ga.py \
-  --train-parquet data/train/SPY0.parquet \
-  --val-parquet data/val/SPY.parquet \
-  --test-parquet data/val/SPY.parquet \
-  --outdir runs_ga \
-  --workers 4 \
-  --pop-size 12
-```
-Notes:
-- GA selection fitness uses `train-parquet`; validation metrics use `val-parquet`.
-- Add `--skip-val-eval` to skip validation during GA for faster iterations.
+- `python/examples/train_ga.py` — replaced by `train_ga` (Rust).
+- `python/examples/train_ppo.py` — replaced by `train_rl` (Rust).
+- `python/examples/train_hybrid.py` — replaced by `train_rl` / `train_ga` (Rust).
+- `python/examples/check_mps.py` — replaced by `tch_mps_check` (Rust).
 
-### PPO Only Training
-`uv run python/examples/train_ppo.py --parquet data/train/SPY0.parquet --epochs 3`
+The remaining Python files serve limited purposes:
+- `python/examples/mlx_probe.py` — MLX runtime probe (kept as-is).
+- `python/examples/benchmark_policy_inference.py` — cross-backend inference benchmark (kept as-is).
+- `python/examples/feature_dump.py` — feature computation (kept; no Rust CLI replacement yet).
+- `python/examples/train_stub.py` — minimal teaching stub (kept as documentation).
+- `scripts/cargo-build.py` — build utility (kept).
 
 ## Environment & Observations
 - **Initial Balance**: Configurable starting cash (default $10,000).
@@ -98,7 +84,7 @@ Notes:
 - **Parallel Workers**: Training can be parallelized across CPU/GPU cores using the `--workers` flag.
 
 ## Development
-To recompile the Rust environment for Python:
+To recompile the Rust environment for Python bindings (only needed when adding new PyO3 interfaces):
 `uv run maturin develop --features python`
 
 ## Artifacts

@@ -10,7 +10,7 @@ This branch establishes a single backend-selection surface for both GA and RL tr
 - `mlx` remains a separate first-class CLI/UI option, but it still intentionally fails fast until a dedicated runner exists.
 - GA orchestration now calls through a backend runner boundary in `src/bin/train_ga/backends/` instead of reaching directly into the `tch` policy code. RL now has a matching Candle runner in `src/bin/train_rl/candle.rs` for PPO and GRPO.
 - Every successful training run now writes `training_stack.json` into the run directory so benchmark scripts can compare backend/runtime/algorithm combinations later.
-- `python/examples/mlx_probe.py` is wired into the frontend diagnostics flow so Mac MLX viability can be checked before a full MLX trainer exists.
+- `python/examples/mlx_probe.py` is wired into the frontend diagnostics flow so Mac MLX viability can be checked before a full MLX trainer exists. (Only remaining Python example in active use.)
 
 ## Shared contract
 
