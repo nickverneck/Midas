@@ -53,8 +53,63 @@ struct ServiceState {
     user_task: Option<JoinHandle<()>>,
     market_task: Option<JoinHandle<()>>,
     rest_probe_task: Option<JoinHandle<()>>,
+    replay_lookup_job: Option<ReplayLookupJob>,
+    replay_download_job: Option<ReplayDownloadJob>,
     latency: LatencySnapshot,
     snapshot_revision: u64,
+}
+
+struct ReplayLookupJob {
+    operation_id: ReplayDownloadOperationId,
+    task: JoinHandle<()>,
+}
+
+struct ReplayDownloadJob {
+    operation_id: ReplayDownloadOperationId,
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+    stage: Arc<AtomicU8>,
+    task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum ReplayDownloadJobStage {
+    Network = 0,
+    CancelRequested = 1,
+    Committing = 2,
+    Finished = 3,
+}
+
+impl ReplayDownloadJob {
+    fn stage(&self) -> ReplayDownloadJobStage {
+        ReplayDownloadJobStage::from_raw(self.stage.load(Ordering::Acquire))
+    }
+
+    fn request_cancellation(&self) -> ReplayDownloadJobStage {
+        match self.stage.compare_exchange(
+            ReplayDownloadJobStage::Network as u8,
+            ReplayDownloadJobStage::CancelRequested as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                let _ = self.cancel_tx.send(true);
+                ReplayDownloadJobStage::CancelRequested
+            }
+            Err(stage) => ReplayDownloadJobStage::from_raw(stage),
+        }
+    }
+}
+
+impl ReplayDownloadJobStage {
+    fn from_raw(stage: u8) -> Self {
+        match stage {
+            0 => ReplayDownloadJobStage::Network,
+            1 => ReplayDownloadJobStage::CancelRequested,
+            2 => ReplayDownloadJobStage::Committing,
+            _ => ReplayDownloadJobStage::Finished,
+        }
+    }
 }
 
 struct SessionState {

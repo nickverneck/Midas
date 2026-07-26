@@ -1,8 +1,8 @@
 use super::*;
 #[cfg(feature = "replay")]
 use crate::replay_cache::{
-    ReplayCacheLibrary, ReplayCacheLoadedRawTicks, ReplayCacheLoadedServerBars,
-    ReplayCacheRawTickRow,
+    ReplayCacheLibrary, ReplayCacheLoadedServerBars, ReplayCacheRawTickRow,
+    ReplayCacheResolvedRawTicks, stream_resolved_raw_ticks,
 };
 #[cfg(feature = "replay")]
 use anyhow::{Context, Result, bail};
@@ -203,8 +203,8 @@ fn load_replay_state_blocking(
             );
         }
         if dataset.raw_ticks_parquet_file_for(None).is_some() {
-            let cached = library
-                .load_raw_ticks_parquet_dataset(dataset, None)
+            let cached = dataset
+                .resolve_raw_ticks_parquet_files(None)
                 .context("load selected raw-tick replay dataset")?;
             return replay_state_from_cached_raw_ticks(cached);
         }
@@ -216,7 +216,7 @@ fn load_replay_state_blocking(
     if let Some(cached) = library.load_first_server_bars(bar_type, candle_mode, None)? {
         return replay_state_from_cached_server_bars(cached, bar_type, candle_mode);
     }
-    if let Some(cached) = library.load_unique_raw_ticks_parquet(None)? {
+    if let Some(cached) = library.resolve_unique_raw_ticks_parquet_files(None)? {
         return replay_state_from_cached_raw_ticks(cached);
     }
 
@@ -292,18 +292,9 @@ fn load_local_tick_replay_state_blocking(path: &Path) -> Result<ReplayState> {
 }
 
 #[cfg(feature = "replay")]
-fn replay_state_from_cached_raw_ticks(cached: ReplayCacheLoadedRawTicks) -> Result<ReplayState> {
-    let ticks = cached
-        .ticks
-        .iter()
-        .map(replay_tick_from_cache_row)
-        .collect::<Vec<_>>();
-    if ticks.is_empty() {
-        bail!(
-            "cached raw tick dataset {} contained no ticks",
-            cached.data_path.display()
-        );
-    }
+fn replay_state_from_cached_raw_ticks(
+    cached: ReplayCacheResolvedRawTicks,
+) -> Result<ReplayState> {
     let contract_name = if cached.manifest.contract.symbol.trim().is_empty() {
         "Replay Cache".to_string()
     } else {
@@ -313,7 +304,7 @@ fn replay_state_from_cached_raw_ticks(cached: ReplayCacheLoadedRawTicks) -> Resu
         .manifest
         .contract
         .id
-        .unwrap_or_else(|| replay_contract_id(&cached.data_path));
+        .unwrap_or_else(|| replay_contract_id(&cached.manifest_path));
     Ok(ReplayState {
         contract: ContractSuggestion {
             id: contract_id,
@@ -323,7 +314,7 @@ fn replay_state_from_cached_raw_ticks(cached: ReplayCacheLoadedRawTicks) -> Resu
                 "source": "replay-cache",
                 "sourceKind": "raw-ticks",
                 "manifestPath": cached.manifest_path.display().to_string(),
-                "dataPath": cached.data_path.display().to_string(),
+                "dataPaths": cached.files.iter().map(|file| file.data_path.display().to_string()).collect::<Vec<_>>(),
             }),
         },
         account: AccountInfo {
@@ -342,7 +333,7 @@ fn replay_state_from_cached_raw_ticks(cached: ReplayCacheLoadedRawTicks) -> Resu
             value_per_point: Some(cached.manifest.tick_specs.value_per_point),
             tick_size: Some(cached.manifest.tick_specs.tick_size),
         },
-        data: ReplayDataSource::RawTicks(Arc::from(ticks.into_boxed_slice())),
+        data: ReplayDataSource::CachedRawTicks(cached),
     })
 }
 
@@ -665,6 +656,11 @@ impl ReplayState {
                     }
                 }
             }
+            ReplayDataSource::CachedRawTicks(resolved) => derive_cached_raw_tick_bars(
+                resolved,
+                bar_type,
+                self.market_specs.tick_size.unwrap_or(0.25).max(0.01),
+            ),
             ReplayDataSource::CachedServerBars {
                 bars,
                 bar_type: cached_bar_type,
@@ -688,6 +684,7 @@ impl ReplayState {
 enum ReplayDataSource {
     PriceTicks(Arc<[ReplayTick]>),
     RawTicks(Arc<[ReplayTick]>),
+    CachedRawTicks(ReplayCacheResolvedRawTicks),
     CachedServerBars {
         bars: Arc<[Bar]>,
         bar_type: BarType,
@@ -710,6 +707,62 @@ fn replay_tick_from_cache_row(row: &ReplayCacheRawTickRow) -> ReplayTick {
         last: row.price,
         size: Some(row.size),
     }
+}
+
+#[cfg(feature = "replay")]
+fn derive_cached_raw_tick_bars(
+    resolved: &ReplayCacheResolvedRawTicks,
+    bar_type: BarType,
+    tick_size: f64,
+) -> Result<Vec<Bar>> {
+    let mut bars = match bar_type.kind() {
+        BarKind::Minute => {
+            let interval_ns = i64::from(bar_type.value()) * 60 * 1_000_000_000;
+            let mut builder = TimeBarBuilder::new(interval_ns.max(1));
+            stream_resolved_raw_ticks(resolved, None, |row| {
+                builder.push_tick(row.ts_ns, row.price);
+                Ok(())
+            })?;
+            builder.finish()
+        }
+        BarKind::Second => {
+            let interval_ns = i64::from(bar_type.value()) * 1_000_000_000;
+            let mut builder = TimeBarBuilder::new(interval_ns.max(1));
+            stream_resolved_raw_ticks(resolved, None, |row| {
+                builder.push_tick(row.ts_ns, row.price);
+                Ok(())
+            })?;
+            builder.finish()
+        }
+        BarKind::Tick => {
+            let mut builder = TickCountBarBuilder::new(bar_type.value());
+            stream_resolved_raw_ticks(resolved, None, |row| {
+                builder.push_tick(row.ts_ns, row.price);
+                Ok(())
+            })?;
+            builder.finish()
+        }
+        BarKind::Volume => {
+            let mut builder = VolumeBarBuilder::new(f64::from(bar_type.value()));
+            stream_resolved_raw_ticks(resolved, None, |row| {
+                builder.push_tick(row.ts_ns, row.price, row.size);
+                Ok(())
+            })?;
+            builder.finish()
+        }
+        BarKind::Range => {
+            let mut builder = RangeBarBuilder::new(tick_size * f64::from(bar_type.value()));
+            stream_resolved_raw_ticks(resolved, None, |row| {
+                builder.push_tick(row.ts_ns, row.price);
+                Ok(())
+            })?;
+            builder.finish()
+        }
+    };
+    if matches!(bar_type.kind(), BarKind::Tick | BarKind::Range) {
+        make_bar_timestamps_strictly_increasing(&mut bars);
+    }
+    Ok(bars)
 }
 
 #[cfg(feature = "replay")]
@@ -1141,8 +1194,10 @@ fn infer_value_per_point(contract_name: &str) -> f64 {
 mod replay_tests {
     use super::*;
     use crate::replay_cache::{
-        ReplayCacheContract, ReplayCacheInstrument, ReplayCacheServerBarsWrite,
-        ReplayCacheSourceKind, ReplayCacheTickSpecs, write_server_bars_jsonl_cache,
+        ReplayCacheContract, ReplayCacheInstrument, ReplayCacheRawTickRow,
+        ReplayCacheRawTicksWrite, ReplayCacheServerBarsWrite, ReplayCacheSourceKind,
+        ReplayCacheTickSpecs, write_raw_ticks_parquet_cache,
+        write_raw_ticks_parquet_file_with_limits, write_server_bars_jsonl_cache,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1322,6 +1377,221 @@ mod replay_tests {
     }
 
     #[test]
+    fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
+        let cache_root = temp_cache_dir("streaming-parity");
+        let base = dt("2026-07-23T00:00:00Z");
+        let prices_and_sizes = [
+            (100.0, 60.0),
+            (100.25, 60.0),
+            (100.5, 30.0),
+            (100.0, 20.0),
+            (99.75, 40.0),
+        ];
+        let rows = prices_and_sizes
+            .iter()
+            .enumerate()
+            .map(|(index, (price, size))| {
+                let timestamp = base + chrono::Duration::seconds(index as i64 * 20);
+                ReplayCacheRawTickRow {
+                    timestamp,
+                    ts_ns: timestamp.timestamp_nanos_opt().expect("timestamp"),
+                    tick_id: Some(index as i64 + 1),
+                    price: *price,
+                    size: *size,
+                    bid_price: None,
+                    bid_size: None,
+                    ask_price: None,
+                    ask_size: None,
+                    chart_id: None,
+                    trade_date: None,
+                    packet_source: None,
+                    packet_base_ts_ms: None,
+                    packet_base_price_ticks: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let outcome = write_raw_ticks_parquet_cache(ReplayCacheRawTicksWrite {
+            cache_root: cache_root.clone(),
+            target: None,
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "MES".to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "MESU6".to_string(),
+                id: Some(123),
+                expiration: None,
+            },
+            request_start: base,
+            request_end: base + chrono::Duration::minutes(2),
+            download_request: json!({"md": "getChart"}),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 5.0,
+            },
+            contract_metadata: None,
+            session_template: Some("Globex".to_string()),
+            ticks: rows.clone(),
+            warnings: Vec::new(),
+            display_name: None,
+            tags: None,
+            notes: None,
+        })
+        .expect("write raw cache");
+        write_raw_ticks_parquet_file_with_limits(&outcome.data_path, &rows, 2, 1)
+            .expect("rewrite fixture with multiple row groups");
+        let bytes = std::fs::read(&outcome.data_path).expect("read rewritten fixture");
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut manifest =
+            crate::replay_cache::ReplayCacheManifest::from_path(&outcome.manifest_path)
+                .expect("load fixture manifest");
+        manifest.files[0]
+            .data_hash
+            .as_mut()
+            .expect("fixture data hash")
+            .value = format!("{hash:016x}");
+        std::fs::write(
+            &outcome.manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize fixture manifest"),
+        )
+        .expect("update fixture manifest hash");
+        let library = ReplayCacheLibrary::scan(&cache_root);
+        let resolved = library
+            .resolve_unique_raw_ticks_parquet_files(None)
+            .expect("resolve cache")
+            .expect("raw dataset");
+        let memory_ticks = rows
+            .iter()
+            .map(replay_tick_from_cache_row)
+            .collect::<Vec<_>>();
+        let memory_state = ReplayState {
+            contract: ContractSuggestion {
+                id: 1,
+                name: "MESU6".to_string(),
+                description: "memory parity".to_string(),
+                raw: json!({}),
+            },
+            account: AccountInfo {
+                id: 1,
+                name: "REPLAY".to_string(),
+                raw: json!({}),
+            },
+            market_specs: MarketSpecs {
+                session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+                value_per_point: Some(5.0),
+                tick_size: Some(0.25),
+            },
+            data: ReplayDataSource::RawTicks(Arc::from(memory_ticks.into_boxed_slice())),
+        };
+
+        for bar_type in [
+            BarType::second(30),
+            BarType::minute(1),
+            BarType::tick(2),
+            BarType::volume(100),
+            BarType::range(1),
+        ] {
+            assert_eq!(
+                derive_cached_raw_tick_bars(&resolved, bar_type, 0.25).expect("streaming bars"),
+                memory_state.bars_for_type(bar_type).expect("memory bars"),
+                "{} parity",
+                bar_type.label()
+            );
+        }
+    }
+
+    #[test]
+    fn cached_raw_tick_replay_lease_survives_cache_refresh() {
+        let cache_root = temp_cache_dir("refresh-lease");
+        let base = dt("2026-07-23T00:00:00Z");
+        let make_rows = |price_offset: f64| {
+            (0..3)
+                .map(|index| {
+                    let timestamp = base + chrono::Duration::seconds(index * 30);
+                    ReplayCacheRawTickRow {
+                        timestamp,
+                        ts_ns: timestamp.timestamp_nanos_opt().expect("timestamp"),
+                        tick_id: Some(index + 1),
+                        price: 100.0 + price_offset + index as f64 * 0.25,
+                        size: 1.0,
+                        bid_price: None,
+                        bid_size: None,
+                        ask_price: None,
+                        ask_size: None,
+                        chart_id: None,
+                        trade_date: None,
+                        packet_source: None,
+                        packet_base_ts_ms: None,
+                        packet_base_price_ticks: None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let write = |ticks| ReplayCacheRawTicksWrite {
+            cache_root: cache_root.clone(),
+            target: None,
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "MES".to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "MESU6".to_string(),
+                id: Some(123),
+                expiration: None,
+            },
+            request_start: base,
+            request_end: base + chrono::Duration::minutes(2),
+            download_request: json!({"md": "getChart"}),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 5.0,
+            },
+            contract_metadata: None,
+            session_template: Some("Globex".to_string()),
+            ticks,
+            warnings: Vec::new(),
+            display_name: None,
+            tags: None,
+            notes: None,
+        };
+
+        write_raw_ticks_parquet_cache(write(make_rows(0.0))).expect("write first cache");
+        let library = ReplayCacheLibrary::scan(&cache_root);
+        let resolved = library
+            .resolve_unique_raw_ticks_parquet_files(None)
+            .expect("resolve first cache")
+            .expect("first dataset");
+        let old_path = resolved.files[0].data_path.clone();
+        let state = replay_state_from_cached_raw_ticks(resolved).expect("build replay state");
+
+        let refreshed =
+            write_raw_ticks_parquet_cache(write(make_rows(10.0))).expect("refresh cache");
+        assert_ne!(refreshed.data_path, old_path);
+        assert!(
+            !old_path.exists(),
+            "superseded pathname should be cleaned up"
+        );
+
+        let bars = state
+            .bars_for_type(BarType::minute(1))
+            .expect("leased replay remains readable after unlink");
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].open, 100.0);
+        assert_eq!(bars[0].close, 100.25);
+        assert_eq!(bars[1].open, 100.5);
+    }
+
+    #[test]
     fn replay_state_keeps_duplicate_timestamp_derived_bars_distinct() {
         let base = 1_700_000_000_000_000_000i64;
         let state = ReplayState {
@@ -1479,6 +1749,7 @@ mod replay_tests {
         let cache_root = temp_cache_dir("cache-load");
         write_server_bars_jsonl_cache(ReplayCacheServerBarsWrite {
             cache_root: cache_root.clone(),
+            target: None,
             provider: BrokerKind::Tradovate,
             env: TradingEnvironment::Sim,
             instrument: ReplayCacheInstrument {
@@ -1500,6 +1771,7 @@ mod replay_tests {
                 tick_size: 0.25,
                 value_per_point: 5.0,
             },
+            contract_metadata: None,
             session_template: Some("Globex".to_string()),
             bars: vec![Bar {
                 ts_ns: dt("2026-07-23T00:00:00Z")
@@ -1512,6 +1784,8 @@ mod replay_tests {
                 volume: Some(1000.0),
             }],
             warnings: Vec::new(),
+            display_name: None,
+            tags: None,
             notes: None,
         })
         .expect("write cache");

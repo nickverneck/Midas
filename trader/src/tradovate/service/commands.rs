@@ -1,4 +1,5 @@
 use super::*;
+use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};
 
 #[cfg(feature = "replay")]
 use crate::replay_cache::{
@@ -39,26 +40,172 @@ pub(super) async fn handle_command(
             .await
         }
         ServiceCommand::DownloadReplayData {
+            operation_id,
             config,
             instrument,
             contract,
+            target,
             start_date,
             end_date,
             source_kind,
             bar_type,
+            candle_mode,
+            display_name,
+            tags,
         } => {
-            download_replay_data(
-                config,
-                instrument,
-                contract,
-                start_date,
-                end_date,
-                source_kind,
-                bar_type,
-                state,
-                event_tx,
-            )
-            .await
+            reap_finished_replay_download(state).await;
+            if let Some(active) = state.replay_download_job.as_ref() {
+                let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+                    operation_id,
+                    phase: ReplayDownloadPhase::Busy,
+                    message: format!(
+                        "Replay download {} is still {}; cancel it or wait for it to finish.",
+                        active.operation_id.0,
+                        match active.stage() {
+                            ReplayDownloadJobStage::Network => "collecting network data",
+                            ReplayDownloadJobStage::CancelRequested => "cancelling network data",
+                            ReplayDownloadJobStage::Committing => "committing cache data",
+                            ReplayDownloadJobStage::Finished => "finishing",
+                        }
+                    ),
+                });
+                return Ok(());
+            }
+            let event_tx = event_tx.clone();
+            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let stage = Arc::new(AtomicU8::new(ReplayDownloadJobStage::Network as u8));
+            let task_stage = stage.clone();
+            let task = tokio::spawn(async move {
+                let result = download_replay_data(
+                    operation_id,
+                    config,
+                    instrument,
+                    contract,
+                    target,
+                    start_date,
+                    end_date,
+                    source_kind,
+                    bar_type,
+                    candle_mode,
+                    display_name,
+                    tags,
+                    &event_tx,
+                    cancel_rx,
+                    task_stage.clone(),
+                )
+                .await;
+                if let Err((phase, err)) = result {
+                    let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+                        operation_id,
+                        phase,
+                        message: err.to_string(),
+                    });
+                }
+                task_stage.store(ReplayDownloadJobStage::Finished as u8, Ordering::Release);
+            });
+            state.replay_download_job = Some(ReplayDownloadJob {
+                operation_id,
+                cancel_tx,
+                stage,
+                task,
+            });
+            Ok(())
+        }
+        ServiceCommand::SearchReplayDownloadContracts {
+            operation_id,
+            config,
+            query,
+            limit,
+        } => {
+            #[cfg(feature = "replay")]
+            {
+                replace_replay_lookup(state).await;
+                let event_tx = event_tx.clone();
+                let task = tokio::spawn(async move {
+                    let result =
+                        crate::tradovate::search_replay_download_contracts(&config, &query, limit)
+                            .await;
+                    match result {
+                        Ok(results) => {
+                            let _ =
+                                event_tx.send(ServiceEvent::ReplayDownloadContractSearchResults {
+                                    operation_id,
+                                    query,
+                                    results,
+                                });
+                        }
+                        Err(err) => {
+                            let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+                                operation_id,
+                                phase: ReplayDownloadPhase::Searching,
+                                message: err.to_string(),
+                            });
+                        }
+                    }
+                });
+                state.replay_lookup_job = Some(ReplayLookupJob { operation_id, task });
+            }
+            #[cfg(not(feature = "replay"))]
+            {
+                let _ = (config, query, limit);
+                let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+                    operation_id,
+                    phase: ReplayDownloadPhase::Searching,
+                    message: "replay downloader requires a replay-enabled build".to_string(),
+                });
+            }
+            Ok(())
+        }
+        ServiceCommand::InspectReplayDownloadContract {
+            operation_id,
+            config,
+            contract,
+        } => {
+            #[cfg(feature = "replay")]
+            {
+                replace_replay_lookup(state).await;
+                let event_tx = event_tx.clone();
+                let task = tokio::spawn(async move {
+                    let result =
+                        crate::tradovate::inspect_replay_download_contract(&config, contract).await;
+                    match result {
+                        Ok(inspection) => {
+                            let coverage = inspection.suggested_coverage;
+                            let _ = event_tx.send(ServiceEvent::ReplayDownloadContractInspected {
+                                operation_id,
+                                contract: inspection.contract,
+                                suggested_start_date: coverage
+                                    .as_ref()
+                                    .map(|value| value.start_date),
+                                suggested_end_date: coverage.as_ref().map(|value| value.end_date),
+                                suggestion_basis: coverage.map(|value| value.basis),
+                            });
+                        }
+                        Err(err) => {
+                            let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+                                operation_id,
+                                phase: ReplayDownloadPhase::InspectingContract,
+                                message: err.to_string(),
+                            });
+                        }
+                    }
+                });
+                state.replay_lookup_job = Some(ReplayLookupJob { operation_id, task });
+            }
+            #[cfg(not(feature = "replay"))]
+            {
+                let _ = (config, contract);
+                let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+                    operation_id,
+                    phase: ReplayDownloadPhase::InspectingContract,
+                    message: "replay downloader requires a replay-enabled build".to_string(),
+                });
+            }
+            Ok(())
+        }
+        ServiceCommand::CancelReplayDownloadOperation { operation_id } => {
+            cancel_replay_operation(operation_id, state, event_tx).await;
+            Ok(())
         }
         ServiceCommand::ReplayState => replay_state(state, event_tx),
         ServiceCommand::SelectAccount { account_id } => {
@@ -117,36 +264,167 @@ pub(super) async fn handle_command(
     }
 }
 
+#[cfg(feature = "replay")]
+pub(super) async fn replace_replay_lookup(state: &mut ServiceState) {
+    if let Some(previous) = state.replay_lookup_job.take() {
+        previous.task.abort();
+        let _ = previous.task.await;
+    }
+}
+
+pub(super) async fn reap_finished_replay_download(state: &mut ServiceState) {
+    let finished = state
+        .replay_download_job
+        .as_ref()
+        .is_some_and(|job| job.task.is_finished());
+    if finished && let Some(job) = state.replay_download_job.take() {
+        let _ = job.task.await;
+    }
+}
+
+pub(super) async fn cancel_replay_operation(
+    operation_id: ReplayDownloadOperationId,
+    state: &mut ServiceState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) {
+    if state
+        .replay_lookup_job
+        .as_ref()
+        .is_some_and(|job| job.operation_id == operation_id)
+        && let Some(job) = state.replay_lookup_job.take()
+    {
+        job.task.abort();
+        let _ = job.task.await;
+        let _ = event_tx.send(ServiceEvent::ReplayDownloadFailed {
+            operation_id,
+            phase: ReplayDownloadPhase::Cancelled,
+            message: "Replay contract lookup cancelled.".to_string(),
+        });
+        return;
+    }
+
+    reap_finished_replay_download(state).await;
+    let Some(job) = state.replay_download_job.as_ref() else {
+        return;
+    };
+    if job.operation_id != operation_id {
+        return;
+    }
+    match job.request_cancellation() {
+        ReplayDownloadJobStage::CancelRequested => {
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadProgress {
+                operation_id,
+                phase: ReplayDownloadPhase::Cancelling,
+                message: "Cancelling replay download before cache commit...".to_string(),
+                estimated_rows: None,
+                estimated_bytes: None,
+            });
+        }
+        ReplayDownloadJobStage::Network => unreachable!("cancellation claim returned network"),
+        ReplayDownloadJobStage::Committing => {
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadProgress {
+                operation_id,
+                phase: ReplayDownloadPhase::WritingCache,
+                message: "Cancellation cannot interrupt an atomic cache commit that has already begun; the commit will finish.".to_string(),
+                estimated_rows: None,
+                estimated_bytes: None,
+            });
+        }
+        ReplayDownloadJobStage::Finished => {
+            reap_finished_replay_download(state).await;
+        }
+    }
+}
+
+#[cfg(feature = "replay")]
+pub(super) fn begin_replay_cache_commit(
+    stage: &AtomicU8,
+) -> std::result::Result<(), (ReplayDownloadPhase, anyhow::Error)> {
+    let result = stage
+        .compare_exchange(
+            ReplayDownloadJobStage::Network as u8,
+            ReplayDownloadJobStage::Committing as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map(|_| ())
+        .map_err(ReplayDownloadJobStage::from_raw);
+    result.map_err(|current| match current {
+        ReplayDownloadJobStage::CancelRequested => (
+            ReplayDownloadPhase::Cancelled,
+            anyhow::anyhow!("replay download cancelled before cache commit"),
+        ),
+        other => (
+            ReplayDownloadPhase::WritingCache,
+            anyhow::anyhow!("replay download could not begin cache commit from {other:?} state"),
+        ),
+    })
+}
+
+#[cfg(feature = "replay")]
+pub(super) async fn wait_for_replay_download_cancellation(
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
+) {
+    if *cancel_rx.borrow() {
+        return;
+    }
+    while cancel_rx.changed().await.is_ok() {
+        if *cancel_rx.borrow() {
+            return;
+        }
+    }
+}
+
 async fn download_replay_data(
+    operation_id: ReplayDownloadOperationId,
     cfg: AppConfig,
     instrument: String,
-    contract: String,
+    contract: ContractSuggestion,
+    target: Option<ReplayDownloadCacheTarget>,
     start_date: chrono::NaiveDate,
     end_date: chrono::NaiveDate,
     source_kind: String,
     bar_type: BarType,
-    _state: &mut ServiceState,
+    candle_mode: CandleMode,
+    display_name: Option<String>,
+    tags: Vec<String>,
     event_tx: &UnboundedSender<ServiceEvent>,
-) -> Result<()> {
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    stage: Arc<AtomicU8>,
+) -> std::result::Result<(), (ReplayDownloadPhase, anyhow::Error)> {
     #[cfg(not(feature = "replay"))]
     {
         let _ = (
+            operation_id,
             cfg,
             instrument,
             contract,
+            target,
             start_date,
             end_date,
             source_kind,
             bar_type,
+            candle_mode,
+            display_name,
+            tags,
             event_tx,
+            cancel_rx,
+            stage,
         );
-        bail!("replay downloader requires `--features replay`");
+        return Err((
+            ReplayDownloadPhase::Authenticating,
+            anyhow::anyhow!("replay downloader requires `--features replay`"),
+        ));
     }
 
     #[cfg(feature = "replay")]
     {
+        let mut cancel_rx = cancel_rx;
         if end_date < start_date {
-            bail!("download end date cannot be before start date");
+            return Err((
+                ReplayDownloadPhase::Ready,
+                anyhow::anyhow!("download end date cannot be before start date"),
+            ));
         }
         let start = Utc
             .with_ymd_and_hms(
@@ -158,10 +436,12 @@ async fn download_replay_data(
                 0,
             )
             .single()
-            .context("compose download start date")?;
+            .context("compose download start date")
+            .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
         let end_exclusive_date = end_date
             .succ_opt()
-            .context("download end date overflowed")?;
+            .context("download end date overflowed")
+            .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
         let end = Utc
             .with_ymd_and_hms(
                 end_exclusive_date.year(),
@@ -172,39 +452,84 @@ async fn download_replay_data(
                 0,
             )
             .single()
-            .context("compose download end date")?;
+            .context("compose download end date")
+            .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
         let source_kind = match source_kind.as_str() {
             "server-bars" => ReplayCacheSourceKind::ServerBars,
             "raw-ticks" => ReplayCacheSourceKind::RawTicks,
-            other => bail!("unsupported replay download source kind: {other}"),
+            other => {
+                return Err((
+                    ReplayDownloadPhase::Ready,
+                    anyhow::anyhow!("unsupported replay download source kind: {other}"),
+                ));
+            }
         };
 
-        let _ = event_tx.send(ServiceEvent::Status(format!(
-            "Replay download starting: {} {} {} to {}",
-            instrument, contract, start_date, end_date
-        )));
-        let _ = event_tx.send(ServiceEvent::Status(format!(
-            "Replay download authenticating for {}...",
-            cfg.env.label()
-        )));
+        let _ = event_tx.send(ServiceEvent::ReplayDownloadProgress {
+            operation_id,
+            phase: ReplayDownloadPhase::Authenticating,
+            message: format!(
+                "Authenticating for {} {} {} to {}.",
+                instrument, contract.name, start_date, end_date
+            ),
+            estimated_rows: None,
+            estimated_bytes: None,
+        });
 
         if source_kind == ReplayCacheSourceKind::ServerBars {
-            let _ = event_tx.send(ServiceEvent::Status(format!(
-                "Downloading server bars: {}",
-                bar_type.label()
-            )));
-            let download = crate::tradovate::download_replay_server_bars(
+            let authenticated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let authenticated_callback = authenticated.clone();
+            let progress_tx = event_tx.clone();
+            let download = crate::tradovate::download_replay_server_bars_after_auth(
                 &cfg,
                 crate::tradovate::TradovateServerBarDownloadRequest {
-                    contract: contract.clone(),
+                    contract: contract.name.clone(),
+                    exact_contract: Some(contract),
                     start,
                     end,
                     bar_type,
                 },
-            )
-            .await?;
-            let outcome = write_server_bars_parquet_cache(ReplayCacheServerBarsWrite {
+                move || {
+                    authenticated_callback.store(true, std::sync::atomic::Ordering::Release);
+                    let _ = progress_tx.send(ServiceEvent::ReplayDownloadProgress {
+                        operation_id,
+                        phase: ReplayDownloadPhase::Downloading,
+                        message: format!("Downloading server bars: {}.", bar_type.label()),
+                        estimated_rows: None,
+                        estimated_bytes: None,
+                    });
+                },
+            );
+            tokio::pin!(download);
+            let download = tokio::select! {
+                biased;
+                _ = wait_for_replay_download_cancellation(&mut cancel_rx) => {
+                    return Err((
+                        ReplayDownloadPhase::Cancelled,
+                        anyhow::anyhow!("replay download cancelled before cache commit"),
+                    ));
+                }
+                result = &mut download => result,
+            }
+            .map_err(|err| {
+                let phase = if authenticated.load(std::sync::atomic::Ordering::Acquire) {
+                    ReplayDownloadPhase::Downloading
+                } else {
+                    ReplayDownloadPhase::Authenticating
+                };
+                (phase, err)
+            })?;
+            begin_replay_cache_commit(&stage)?;
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadProgress {
+                operation_id,
+                phase: ReplayDownloadPhase::WritingCache,
+                message: "Writing server bars to the replay cache...".to_string(),
+                estimated_rows: None,
+                estimated_bytes: None,
+            });
+            let write = ReplayCacheServerBarsWrite {
                 cache_root: cfg.replay_cache_dir.clone(),
+                target,
                 provider: cfg.broker,
                 env: cfg.env,
                 instrument: ReplayCacheInstrument {
@@ -223,31 +548,89 @@ async fn download_replay_data(
                 download_request: download.request_body,
                 bar_type,
                 tick_specs: download.tick_specs,
+                contract_metadata: Some(download.contract_metadata),
                 session_template: download.session_template,
                 bars: download.bars,
                 warnings: download.warnings,
-                notes: Some(
-                    "Downloaded from the TUI through Tradovate market data only.".to_string(),
-                ),
-            })?;
+                display_name,
+                tags: Some(tags),
+                notes: Some(format!(
+                    "Downloaded from the TUI as {} through Tradovate read-only metadata/account REST endpoints and the md/getChart market-data WebSocket; no user sync, account stream, or order path was started.",
+                    bar_type.mode_label(candle_mode)
+                )),
+            };
+            let outcome =
+                tokio::task::spawn_blocking(move || write_server_bars_parquet_cache(write))
+                    .await
+                    .map_err(|err| (ReplayDownloadPhase::WritingCache, anyhow::Error::new(err)))?
+                    .map_err(|err| (ReplayDownloadPhase::WritingCache, err))?;
+            let bytes = std::fs::metadata(&outcome.data_path)
+                .map(|metadata| metadata.len())
+                .with_context(|| {
+                    format!("read cache file metadata {}", outcome.data_path.display())
+                })
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, err))?;
             let _ = event_tx.send(ServiceEvent::ReplayDownloadCompleted {
+                operation_id,
+                cache_root: cfg.replay_cache_dir.clone(),
                 manifest_path: outcome.manifest_path,
                 data_path: outcome.data_path,
                 rows: outcome.row_count,
+                bytes,
             });
         } else {
-            let _ = event_tx.send(ServiceEvent::Status("Downloading raw ticks...".to_string()));
-            let download = crate::tradovate::download_replay_raw_ticks(
+            let authenticated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let authenticated_callback = authenticated.clone();
+            let progress_tx = event_tx.clone();
+            let download = crate::tradovate::download_replay_raw_ticks_after_auth(
                 &cfg,
                 crate::tradovate::TradovateRawTickDownloadRequest {
-                    contract,
+                    contract: contract.name.clone(),
+                    exact_contract: Some(contract),
                     start,
                     end,
                 },
-            )
-            .await?;
-            let outcome = write_raw_ticks_parquet_cache(ReplayCacheRawTicksWrite {
+                move || {
+                    authenticated_callback.store(true, std::sync::atomic::Ordering::Release);
+                    let _ = progress_tx.send(ServiceEvent::ReplayDownloadProgress {
+                        operation_id,
+                        phase: ReplayDownloadPhase::Downloading,
+                        message: "Downloading raw ticks...".to_string(),
+                        estimated_rows: None,
+                        estimated_bytes: None,
+                    });
+                },
+            );
+            tokio::pin!(download);
+            let download = tokio::select! {
+                biased;
+                _ = wait_for_replay_download_cancellation(&mut cancel_rx) => {
+                    return Err((
+                        ReplayDownloadPhase::Cancelled,
+                        anyhow::anyhow!("replay download cancelled before cache commit"),
+                    ));
+                }
+                result = &mut download => result,
+            }
+            .map_err(|err| {
+                let phase = if authenticated.load(std::sync::atomic::Ordering::Acquire) {
+                    ReplayDownloadPhase::Downloading
+                } else {
+                    ReplayDownloadPhase::Authenticating
+                };
+                (phase, err)
+            })?;
+            begin_replay_cache_commit(&stage)?;
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadProgress {
+                operation_id,
+                phase: ReplayDownloadPhase::WritingCache,
+                message: "Writing raw ticks to the replay cache...".to_string(),
+                estimated_rows: None,
+                estimated_bytes: None,
+            });
+            let write = ReplayCacheRawTicksWrite {
                 cache_root: cfg.replay_cache_dir.clone(),
+                target,
                 provider: cfg.broker,
                 env: cfg.env,
                 instrument: ReplayCacheInstrument {
@@ -264,17 +647,34 @@ async fn download_replay_data(
                 request_end: end,
                 download_request: download.request_body,
                 tick_specs: download.tick_specs,
+                contract_metadata: Some(download.contract_metadata),
                 session_template: download.session_template,
                 ticks: download.ticks,
                 warnings: download.warnings,
+                display_name,
+                tags: Some(tags),
                 notes: Some(
-                    "Downloaded from the TUI through Tradovate market data only.".to_string(),
+                    "Downloaded from the TUI through Tradovate read-only metadata/account REST endpoints and the md/getChart market-data WebSocket; no user sync, account stream, or order path was started."
+                        .to_string(),
                 ),
-            })?;
+            };
+            let outcome = tokio::task::spawn_blocking(move || write_raw_ticks_parquet_cache(write))
+                .await
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, anyhow::Error::new(err)))?
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, err))?;
+            let bytes = std::fs::metadata(&outcome.data_path)
+                .map(|metadata| metadata.len())
+                .with_context(|| {
+                    format!("read cache file metadata {}", outcome.data_path.display())
+                })
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, err))?;
             let _ = event_tx.send(ServiceEvent::ReplayDownloadCompleted {
+                operation_id,
+                cache_root: cfg.replay_cache_dir.clone(),
                 manifest_path: outcome.manifest_path,
                 data_path: outcome.data_path,
                 rows: outcome.row_count,
+                bytes,
             });
         }
         Ok(())
@@ -288,7 +688,7 @@ async fn connect_live_session(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    reset_state_for_new_session(state, market_tx);
+    reset_state_for_new_session(state, market_tx).await;
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Authenticating against {}...",
         cfg.env.label()
@@ -393,7 +793,7 @@ async fn enter_replay_mode(
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
     let candle_mode = bar_type.effective_candle_mode(candle_mode);
-    reset_state_for_new_session(state, market_tx);
+    reset_state_for_new_session(state, market_tx).await;
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Loading replay dataset for {} from cache or {}...",
         bar_type.mode_label(candle_mode),
@@ -834,11 +1234,11 @@ fn probe_execution(
     Ok(())
 }
 
-fn reset_state_for_new_session(
+async fn reset_state_for_new_session(
     state: &mut ServiceState,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
 ) {
-    shutdown_tasks(state);
+    shutdown_tasks(state).await;
     state.latency = LatencySnapshot::default();
     state.replay_speed = ReplaySpeed::default();
     let _ = state.replay_speed_tx.send(state.replay_speed);

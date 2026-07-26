@@ -274,13 +274,13 @@ async fn ensure_background_tasks(
     })
 }
 
-fn shutdown_state(state: &mut ServiceState, event_tx: &UnboundedSender<ServiceEvent>) {
-    shutdown_tasks(state);
+async fn shutdown_state(state: &mut ServiceState, event_tx: &UnboundedSender<ServiceEvent>) {
+    shutdown_tasks(state).await;
     state.session = None;
     let _ = event_tx.send(ServiceEvent::Disconnected);
 }
 
-fn shutdown_tasks(state: &mut ServiceState) {
+async fn shutdown_tasks(state: &mut ServiceState) {
     if let Some(task) = state.user_task.take() {
         task.abort();
     }
@@ -289,6 +289,22 @@ fn shutdown_tasks(state: &mut ServiceState) {
     }
     if let Some(task) = state.rest_probe_task.take() {
         task.abort();
+    }
+    if let Some(job) = state.replay_lookup_job.take() {
+        job.task.abort();
+        let _ = job.task.await;
+    }
+    if let Some(job) = state.replay_download_job.take() {
+        match job.request_cancellation() {
+            ReplayDownloadJobStage::Network => {
+                unreachable!("cancellation claim returned network")
+            }
+            ReplayDownloadJobStage::CancelRequested => {
+                job.task.abort();
+            }
+            ReplayDownloadJobStage::Committing | ReplayDownloadJobStage::Finished => {}
+        }
+        let _ = job.task.await;
     }
     state.replay = None;
 }

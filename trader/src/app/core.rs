@@ -11,6 +11,8 @@ impl App {
         let form = FormState::from_config(&config);
         #[cfg(feature = "replay")]
         let replay_cache_library = ReplayCacheLibrary::scan(&config.replay_cache_dir);
+        #[cfg(feature = "replay")]
+        let replay_downloader = ReplayDownloaderState::new(&config);
         let mut app = Self {
             base_config: config,
             #[cfg(feature = "replay")]
@@ -54,6 +56,10 @@ impl App {
             replay_speed: ReplaySpeed::default(),
             #[cfg(feature = "replay")]
             replay_dataset_index: None,
+            #[cfg(feature = "replay")]
+            replay_view: ReplayView::Library,
+            #[cfg(feature = "replay")]
+            replay_downloader,
             last_log_at: None,
             last_market_update_at: None,
         };
@@ -329,18 +335,132 @@ impl App {
             ServiceEvent::ReplaySpeedUpdated(speed) => {
                 self.replay_speed = speed;
             }
-            ServiceEvent::ReplayDownloadCompleted {
-                manifest_path,
-                data_path,
-                rows,
+            ServiceEvent::ReplayDownloadProgress {
+                operation_id,
+                phase,
+                message,
+                estimated_rows,
+                estimated_bytes,
             } => {
                 #[cfg(feature = "replay")]
                 {
+                    if !self.replay_downloader.accepts(operation_id) {
+                        return;
+                    }
+                    self.replay_downloader.phase = phase;
+                    self.replay_downloader.phase_message = message.clone();
+                    self.replay_downloader.estimated_rows = estimated_rows;
+                    self.replay_downloader.estimated_bytes = estimated_bytes;
+                }
+                #[cfg(not(feature = "replay"))]
+                let _ = (operation_id, phase, estimated_rows, estimated_bytes);
+                self.status = message.clone();
+                self.push_log(message);
+            }
+            ServiceEvent::ReplayDownloadContractSearchResults {
+                operation_id,
+                query,
+                results,
+            } => {
+                #[cfg(feature = "replay")]
+                {
+                    if !self.replay_downloader.accepts(operation_id) {
+                        return;
+                    }
+                    self.replay_downloader.invalidate_operation();
+                    self.replay_downloader.contract_results = results;
+                    self.replay_downloader.selected_contract = 0;
+                    self.replay_downloader.exact_contract = None;
+                    self.replay_downloader.phase = ReplayDownloadPhase::Idle;
+                    self.replay_downloader.phase_message = format!(
+                        "Search `{query}` returned {} contract(s). Select one exactly.",
+                        self.replay_downloader.contract_results.len()
+                    );
+                }
+                #[cfg(not(feature = "replay"))]
+                let _ = (operation_id, results);
+                self.push_log(format!("Replay contract search completed for `{query}`."));
+            }
+            ServiceEvent::ReplayDownloadContractInspected {
+                operation_id,
+                contract,
+                suggested_start_date,
+                suggested_end_date,
+                suggestion_basis,
+            } => {
+                #[cfg(feature = "replay")]
+                {
+                    if !self.replay_downloader.accepts(operation_id) {
+                        return;
+                    }
+                    self.replay_downloader.invalidate_operation();
+                    self.replay_downloader.exact_contract = Some(contract.clone());
+                    if self.replay_downloader.workflow == ReplayDownloadWorkflow::New {
+                        if let Some(start) = suggested_start_date {
+                            self.replay_downloader.start_date =
+                                start.format("%Y-%m-%d").to_string();
+                        }
+                        if let Some(end) = suggested_end_date {
+                            self.replay_downloader.end_date = end.format("%Y-%m-%d").to_string();
+                        }
+                    }
+                    self.replay_downloader.suggestion_basis = suggestion_basis;
+                    self.replay_downloader.phase = ReplayDownloadPhase::Ready;
+                    self.replay_downloader.phase_message = if suggested_start_date.is_some()
+                        && suggested_end_date.is_some()
+                    {
+                        "Exact contract selected; broad estimated coverage was applied and remains editable."
+                            .to_string()
+                    } else {
+                        "Exact contract selected; coverage estimate unavailable, so dates remain user supplied."
+                            .to_string()
+                    };
+                    self.focus = Focus::ReplayDownloadStart;
+                }
+                #[cfg(not(feature = "replay"))]
+                let _ = (
+                    operation_id,
+                    suggested_start_date,
+                    suggested_end_date,
+                    suggestion_basis,
+                );
+                self.push_log(format!(
+                    "Replay downloader selected exact contract {} (#{}).",
+                    contract.name, contract.id
+                ));
+            }
+            ServiceEvent::ReplayDownloadCompleted {
+                operation_id,
+                cache_root,
+                manifest_path,
+                data_path,
+                rows,
+                bytes,
+            } => {
+                #[cfg(not(feature = "replay"))]
+                let _ = (&operation_id, &cache_root);
+                #[cfg(feature = "replay")]
+                {
+                    if !self.replay_downloader.accepts(operation_id) {
+                        return;
+                    }
+                    self.replay_downloader.invalidate_operation();
+                    self.base_config.replay_cache_dir = cache_root.clone();
                     self.replay_cache_library =
-                        ReplayCacheLibrary::scan(&self.base_config.replay_cache_dir);
+                        ReplayCacheLibrary::scan(&cache_root);
+                    self.replay_dataset_index = self
+                        .replay_cache_library
+                        .datasets
+                        .iter()
+                        .position(|dataset| dataset.manifest_path == manifest_path);
+                    self.replay_downloader.phase = ReplayDownloadPhase::Complete;
+                    self.replay_downloader.phase_message =
+                        "Cache committed and dataset library refreshed.".to_string();
+                    self.replay_downloader.actual_rows = Some(rows);
+                    self.replay_downloader.actual_bytes = Some(bytes);
                 }
                 self.status = format!(
-                    "Replay download complete: {rows} rows ({})",
+                    "Replay download complete: {rows} rows, {bytes} bytes ({})",
                     manifest_path.display()
                 );
                 self.push_log(format!(
@@ -348,6 +468,29 @@ impl App {
                     manifest_path.display(),
                     data_path.display()
                 ));
+            }
+            ServiceEvent::ReplayDownloadFailed {
+                operation_id,
+                phase,
+                message,
+            } => {
+                #[cfg(not(feature = "replay"))]
+                let _ = operation_id;
+                #[cfg(feature = "replay")]
+                {
+                    if !self.replay_downloader.accepts(operation_id) {
+                        return;
+                    }
+                    self.replay_downloader.invalidate_operation();
+                    self.replay_downloader.phase = match phase {
+                        ReplayDownloadPhase::Busy | ReplayDownloadPhase::Cancelled => phase,
+                        _ => ReplayDownloadPhase::Failed,
+                    };
+                    self.replay_downloader.phase_message =
+                        format!("{} failed: {message}", phase.label());
+                }
+                self.status = format!("Replay download error: {message}");
+                self.push_log(format!("ERROR: replay {}: {message}", phase.label()));
             }
         }
     }

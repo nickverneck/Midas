@@ -401,7 +401,10 @@ async fn handle_command(
                 "Execution probe is only available on Tradovate.".to_string(),
             ));
         }
-        ServiceCommand::DownloadReplayData { .. } => {
+        ServiceCommand::DownloadReplayData { .. }
+        | ServiceCommand::SearchReplayDownloadContracts { .. }
+        | ServiceCommand::InspectReplayDownloadContract { .. }
+        | ServiceCommand::CancelReplayDownloadOperation { .. } => {
             let _ = event_tx.send(ServiceEvent::Error(
                 "Replay downloads are only available on Tradovate.".to_string(),
             ));

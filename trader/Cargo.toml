@@ -7,7 +7,7 @@ edition = "2024"
 default = ["tradovate", "ironbeam"]
 tradovate = []
 ironbeam = []
-replay = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
+replay = ["dep:arrow-array", "dep:arrow-schema", "dep:bytes", "dep:parquet"]
 manual-orders = []
 
 [profile.release]
@@ -20,6 +20,7 @@ anyhow = "1.0"
 arrow-array = { version = "55", optional = true }
 arrow-schema = { version = "55", optional = true }
 base64 = "0.22"
+bytes = { version = "1", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 clap = { version = "4.5", features = ["derive"] }

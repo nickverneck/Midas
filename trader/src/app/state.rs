@@ -406,6 +406,33 @@ impl App {
     }
 
     fn replay_focus_order(&self) -> Vec<Focus> {
+        #[cfg(feature = "replay")]
+        if self.replay_view == ReplayView::Downloader {
+            let mut order = vec![
+                Focus::ReplayDownloadProvider,
+                Focus::ReplayDownloadEnv,
+                Focus::ReplayDownloadInstrument,
+                Focus::ReplayDownloadContract,
+                Focus::ReplayDownloadStart,
+                Focus::ReplayDownloadEnd,
+                Focus::ReplayDownloadSource,
+            ];
+            if self.replay_downloader.source_kind == Some(ReplayCacheSourceKind::ServerBars) {
+                order.extend([
+                    Focus::ReplayDownloadBarType,
+                    Focus::ReplayDownloadBarValue,
+                    Focus::ReplayDownloadCandleMode,
+                ]);
+            }
+            order.extend([
+                Focus::ReplayDownloadName,
+                Focus::ReplayDownloadTags,
+                Focus::ReplayDownloadCacheRoot,
+                Focus::ReplayDownloadSubmit,
+            ]);
+            return order;
+        }
+
         let mut order = vec![Focus::BarTypeToggle, Focus::BarValue];
         if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
@@ -489,7 +516,7 @@ impl App {
     }
 
     fn is_text_focus(&self) -> bool {
-        matches!(
+        let standard_focus = matches!(
             self.focus,
             Focus::TokenOverride
                 | Focus::Username
@@ -521,11 +548,24 @@ impl App {
                 | Focus::LuaEditor
                 | Focus::BarValue
                 | Focus::InstrumentQuery
-        )
+        );
+        #[cfg(feature = "replay")]
+        let replay_download_focus = matches!(
+            self.focus,
+            Focus::ReplayDownloadInstrument
+                | Focus::ReplayDownloadStart
+                | Focus::ReplayDownloadEnd
+                | Focus::ReplayDownloadName
+                | Focus::ReplayDownloadTags
+                | Focus::ReplayDownloadCacheRoot
+        );
+        #[cfg(not(feature = "replay"))]
+        let replay_download_focus = false;
+        standard_focus || replay_download_focus
     }
 
     fn is_free_text_focus(&self) -> bool {
-        matches!(
+        let standard_focus = matches!(
             self.focus,
             Focus::TokenOverride
                 | Focus::Username
@@ -539,7 +579,20 @@ impl App {
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
                 | Focus::InstrumentQuery
-        )
+        );
+        #[cfg(feature = "replay")]
+        let replay_download_focus = matches!(
+            self.focus,
+            Focus::ReplayDownloadInstrument
+                | Focus::ReplayDownloadStart
+                | Focus::ReplayDownloadEnd
+                | Focus::ReplayDownloadName
+                | Focus::ReplayDownloadTags
+                | Focus::ReplayDownloadCacheRoot
+        );
+        #[cfg(not(feature = "replay"))]
+        let replay_download_focus = false;
+        standard_focus || replay_download_focus
     }
 
     fn push_log(&mut self, message: String) {

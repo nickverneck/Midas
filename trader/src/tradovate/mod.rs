@@ -4,8 +4,8 @@ use crate::broker::{
     AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, ExecutionProbeManagedProtection, ExecutionProbeOrder,
     ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot,
-    ManualOrderAction, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
-    TradeMarker, TradeMarkerSide, infer_session_profile,
+    ManualOrderAction, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed, ServiceCommand,
+    ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;
@@ -34,6 +34,10 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -56,8 +60,14 @@ use self::protocol::*;
 pub use self::service::service_loop;
 #[cfg(feature = "replay")]
 pub use download::{
-    TradovateRawTickDownloadRequest, TradovateServerBarDownloadRequest, download_replay_raw_ticks,
-    download_replay_server_bars,
+    TradovateChunkedRawTickCacheRequest, TradovateChunkedRawTickPhase,
+    TradovateChunkedRawTickProgress, TradovateRawTickDownloadRequest,
+    TradovateReplayDownloadSession, TradovateServerBarDownloadRequest,
+    download_replay_raw_ticks, download_replay_raw_ticks_after_auth,
+    download_replay_raw_ticks_chunked_to_cache, download_replay_server_bars,
+    download_replay_server_bars_after_auth, inspect_replay_download_contract,
+    prepare_replay_download_session, prepare_replay_download_session_after_auth,
+    search_replay_download_contracts,
 };
 use execution::*;
 use gateway::*;

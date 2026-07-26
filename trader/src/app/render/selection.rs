@@ -249,7 +249,21 @@ impl App {
             | Focus::ReplayMode
             | Focus::Connect => {}
             #[cfg(feature = "replay")]
-            Focus::ReplayDataset => {}
+            Focus::ReplayDataset
+            | Focus::ReplayDownloadProvider
+            | Focus::ReplayDownloadEnv
+            | Focus::ReplayDownloadInstrument
+            | Focus::ReplayDownloadContract
+            | Focus::ReplayDownloadStart
+            | Focus::ReplayDownloadEnd
+            | Focus::ReplayDownloadSource
+            | Focus::ReplayDownloadBarType
+            | Focus::ReplayDownloadBarValue
+            | Focus::ReplayDownloadCandleMode
+            | Focus::ReplayDownloadName
+            | Focus::ReplayDownloadTags
+            | Focus::ReplayDownloadCacheRoot
+            | Focus::ReplayDownloadSubmit => {}
         }
     }
 

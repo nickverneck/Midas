@@ -9,6 +9,8 @@ mod ipc;
 mod ironbeam;
 #[cfg(feature = "replay")]
 mod replay_cache;
+#[cfg(feature = "replay")]
+mod replay_download;
 mod strategies;
 mod strategy;
 mod strategy_debug;
@@ -128,6 +130,22 @@ struct ReplayDownloadArgs {
     /// Optional cache root. Defaults to replay_cache_dir / TRADER_DATA_CACHE_DIR.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
+
+    /// Optional user-facing dataset name stored in the cache manifest.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Optional dataset tag. Repeat --tag to store more than one.
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+
+    /// Maximum initial raw-tick request chunk size in minutes.
+    #[arg(long, default_value_t = 60)]
+    raw_chunk_minutes: u32,
+
+    /// Smallest raw-tick chunk produced after an incomplete request.
+    #[arg(long, default_value_t = 5)]
+    raw_minimum_split_minutes: u32,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -253,6 +271,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                         config,
                         tradovate::TradovateServerBarDownloadRequest {
                             contract: plan.contract.clone(),
+                            exact_contract: None,
                             start: plan.start,
                             end: plan.end,
                             bar_type: plan.bar_type,
@@ -262,6 +281,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                     let outcome = replay_cache::write_server_bars_parquet_cache(
                         replay_cache::ReplayCacheServerBarsWrite {
                             cache_root: plan.cache_root.clone(),
+                            target: None,
                             provider: config.broker,
                             env: config.env,
                             instrument: replay_cache::ReplayCacheInstrument {
@@ -280,11 +300,14 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                             download_request: download.request_body,
                             bar_type: plan.bar_type,
                             tick_specs: download.tick_specs,
+                            contract_metadata: Some(download.contract_metadata.clone()),
                             session_template: download.session_template,
                             bars: download.bars,
                             warnings: download.warnings,
+                            display_name: plan.display_name.clone(),
+                            tags: (!plan.tags.is_empty()).then_some(plan.tags.clone()),
                             notes: Some(
-                                "Downloaded through Tradovate md/getChart only; no user sync or order path was started."
+                                "Downloaded through Tradovate read-only metadata/account REST endpoints and the md/getChart market-data WebSocket; no user sync, account stream, or order path was started."
                                     .to_string(),
                             ),
                         },
@@ -304,6 +327,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                         plan.bar_type.mode_label(plan.chart_mode)
                     );
                     println!("Rows: {}", outcome.row_count);
+                    print_suggested_contract_coverage(&download.contract_metadata);
                     println!("Data: {}", outcome.data_path.display());
                     println!("Manifest: {}", outcome.manifest_path.display());
                     Ok(())
@@ -313,6 +337,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                         config,
                         tradovate::TradovateRawTickDownloadRequest {
                             contract: plan.contract.clone(),
+                            exact_contract: None,
                             start: plan.start,
                             end: plan.end,
                         },
@@ -321,6 +346,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                     let outcome = replay_cache::write_raw_ticks_parquet_cache(
                         replay_cache::ReplayCacheRawTicksWrite {
                             cache_root: plan.cache_root.clone(),
+                            target: None,
                             provider: config.broker,
                             env: config.env,
                             instrument: replay_cache::ReplayCacheInstrument {
@@ -337,11 +363,14 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                             request_end: plan.end,
                             download_request: download.request_body,
                             tick_specs: download.tick_specs,
+                            contract_metadata: Some(download.contract_metadata.clone()),
                             session_template: download.session_template,
                             ticks: download.ticks,
                             warnings: download.warnings,
+                            display_name: plan.display_name.clone(),
+                            tags: (!plan.tags.is_empty()).then_some(plan.tags.clone()),
                             notes: Some(
-                                "Downloaded raw ticks through Tradovate md/getChart only; no user sync or order path was started."
+                                "Downloaded raw ticks through Tradovate read-only metadata/account REST endpoints and the md/getChart market-data WebSocket; no user sync, account stream, or order path was started."
                                     .to_string(),
                             ),
                         },
@@ -357,6 +386,7 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
                     println!("Source kind: {}", plan.source_kind.label());
                     println!("Storage: parquet ({})", "snappy");
                     println!("Rows: {}", outcome.row_count);
+                    print_suggested_contract_coverage(&download.contract_metadata);
                     println!("Data: {}", outcome.data_path.display());
                     println!("Manifest: {}", outcome.manifest_path.display());
                     Ok(())
@@ -365,6 +395,42 @@ async fn download_replay_data(config: &AppConfig, args: ReplayDownloadArgs) -> R
             }
         }
     }
+}
+
+#[cfg(feature = "replay")]
+fn print_suggested_contract_coverage(metadata: &replay_cache::ReplayCacheContractMetadata) {
+    if let Some(coverage) = &metadata.suggested_coverage {
+        println!(
+            "Suggested broad contract coverage: {} to {} (estimate; requested dates were not changed)",
+            coverage.start_date, coverage.end_date
+        );
+        println!("Coverage basis: {}", coverage.basis);
+    } else {
+        println!("Suggested broad contract coverage: unavailable from maturity metadata");
+    }
+    println!(
+        "Contract metadata: {} endpoint snapshot(s), {} account context(s)",
+        replay_contract_metadata_snapshot_count(metadata),
+        metadata.context.accounts.len()
+    );
+}
+
+#[cfg(feature = "replay")]
+fn replay_contract_metadata_snapshot_count(
+    metadata: &replay_cache::ReplayCacheContractMetadata,
+) -> usize {
+    1 + [
+        metadata.maturity.as_ref(),
+        metadata.maturity_chain.as_ref(),
+        metadata.product.as_ref(),
+        metadata.product_sessions.as_ref(),
+        metadata.product_margins.as_ref(),
+        metadata.contract_margins.as_ref(),
+        metadata.fee_params.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .count()
 }
 
 #[cfg(feature = "replay")]
@@ -380,6 +446,10 @@ struct ReplayDownloadPlan {
     bar_type: broker::BarType,
     chart_mode: broker::CandleMode,
     cache_root: PathBuf,
+    display_name: Option<String>,
+    tags: Vec<String>,
+    raw_chunk_minutes: u32,
+    raw_minimum_split_minutes: u32,
 }
 
 #[cfg(feature = "replay")]
@@ -398,6 +468,9 @@ fn build_replay_download_plan(
     if args.bar_value == 0 {
         bail!("--bar-value must be > 0");
     }
+    if args.raw_chunk_minutes == 0 || args.raw_minimum_split_minutes == 0 {
+        bail!("raw-tick chunk and minimum split minutes must be > 0");
+    }
 
     let start_date = chrono::NaiveDate::parse_from_str(&args.start, "%Y-%m-%d")
         .with_context(|| format!("parse --start {}", args.start))?;
@@ -413,6 +486,16 @@ fn build_replay_download_plan(
     let cache_root = args
         .cache_dir
         .unwrap_or_else(|| config.replay_cache_dir.clone());
+    let display_name = args
+        .name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    let tags = args
+        .tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
     let start = start_date
         .and_hms_opt(0, 0, 0)
         .context("build replay download start timestamp")?
@@ -434,6 +517,10 @@ fn build_replay_download_plan(
         bar_type,
         chart_mode,
         cache_root,
+        display_name,
+        tags,
+        raw_chunk_minutes: args.raw_chunk_minutes,
+        raw_minimum_split_minutes: args.raw_minimum_split_minutes,
     })
 }
 
@@ -1190,6 +1277,8 @@ mod tests {
             bar_value: 1,
             chart_mode: "ohlc".to_string(),
             cache_dir: None,
+            name: None,
+            tags: Vec::new(),
         };
 
         let mut blank_contract = valid.clone();
@@ -1218,6 +1307,8 @@ mod tests {
                 bar_value: 5,
                 chart_mode: "heikin-ashi".to_string(),
                 cache_dir: None,
+                name: Some("MES research".to_string()),
+                tags: vec!["baseline".to_string()],
             },
         )
         .expect("download plan");
@@ -1227,6 +1318,8 @@ mod tests {
         assert_eq!(plan.cache_root, PathBuf::from("/tmp/trader-cache-test"));
         assert_eq!(plan.bar_type, broker::BarType::minute(5));
         assert_eq!(plan.chart_mode, broker::CandleMode::HeikinAshi);
+        assert_eq!(plan.display_name.as_deref(), Some("MES research"));
+        assert_eq!(plan.tags, vec!["baseline"]);
     }
 
     #[cfg(feature = "replay")]
@@ -1245,6 +1338,8 @@ mod tests {
                 bar_value: 1,
                 chart_mode: "ohlc".to_string(),
                 cache_dir: None,
+                name: None,
+                tags: Vec::new(),
             },
         )
         .expect("raw tick download plan");

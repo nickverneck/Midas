@@ -32,6 +32,8 @@ pub async fn service_loop(
         user_task: None,
         market_task: None,
         rest_probe_task: None,
+        replay_lookup_job: None,
+        replay_download_job: None,
         latency: LatencySnapshot::default(),
         snapshot_revision: 0,
     };
@@ -76,7 +78,7 @@ pub async fn service_loop(
         }
     }
 
-    shutdown_state(&mut state, &event_tx);
+    shutdown_state(&mut state, &event_tx).await;
 }
 
 const PENDING_TARGET_WATCHDOG_DELAY_SECS: u64 = 2;

@@ -2,6 +2,177 @@ use super::super::*;
 use std::path::{Path, PathBuf};
 
 impl App {
+    pub(in crate::app) fn replay_dataset_library_compact_lines(&self) -> Vec<Line<'static>> {
+        #[cfg(feature = "replay")]
+        {
+            let mut lines = vec![Line::from("Owned Cached Datasets")];
+            if self.replay_cache_library.datasets.is_empty() {
+                lines.extend([
+                    Line::from("Count: 0"),
+                    Line::from("No cached datasets found."),
+                    Line::from("Press N or Enter to add a dataset."),
+                    Line::from(format!(
+                        "Local fallback: {}",
+                        if self.local_replay_dataset_available() {
+                            "ready"
+                        } else {
+                            "missing"
+                        }
+                    )),
+                ]);
+                return lines;
+            }
+
+            lines.push(Line::from(format!(
+                "Count: {} | Selected: {}",
+                self.replay_cache_library.datasets.len(),
+                self.replay_dataset_index
+                    .map(|index| (index + 1).to_string())
+                    .unwrap_or_else(|| "auto".to_string())
+            )));
+            lines.push(Line::from("Up/Down browse | N new | D extend | A auto"));
+
+            const VISIBLE_DATASETS: usize = 4;
+            let visible_start = self
+                .replay_dataset_index
+                .unwrap_or(0)
+                .saturating_sub(VISIBLE_DATASETS - 1)
+                .min(
+                    self.replay_cache_library
+                        .datasets
+                        .len()
+                        .saturating_sub(VISIBLE_DATASETS),
+                );
+            for (index, dataset) in self
+                .replay_cache_library
+                .datasets
+                .iter()
+                .enumerate()
+                .skip(visible_start)
+                .take(VISIBLE_DATASETS)
+            {
+                let manifest = &dataset.manifest;
+                let marker = if self.replay_dataset_index == Some(index) {
+                    ">"
+                } else {
+                    " "
+                };
+                let first_shape = manifest
+                    .available_bar_shapes
+                    .first()
+                    .map(|bar_type| bar_type.label())
+                    .unwrap_or_else(|| "derived".to_string());
+                let extra_shapes = manifest.available_bar_shapes.len().saturating_sub(1);
+                let shape_label = if extra_shapes == 0 {
+                    first_shape
+                } else {
+                    format!("{first_shape} +{extra_shapes}")
+                };
+                let has_standard = manifest
+                    .available_chart_modes
+                    .contains(&CandleMode::Standard);
+                let has_heikin = manifest
+                    .available_chart_modes
+                    .contains(&CandleMode::HeikinAshi);
+                let mode_label = match (has_standard, has_heikin) {
+                    (true, true) => "OHLC/HA",
+                    (false, true) => "HA",
+                    _ => "OHLC",
+                };
+                lines.extend([
+                    Line::from(format!(
+                        "{marker} [{}] {} | {}",
+                        index + 1,
+                        manifest.contract.symbol,
+                        manifest.source_kind.label()
+                    )),
+                    Line::from(format!(
+                        "  {} {}-{} UTC",
+                        manifest.coverage.start.format("%Y-%m-%d"),
+                        manifest.coverage.start.format("%H:%M"),
+                        manifest.coverage.end.format("%H:%M")
+                    )),
+                    Line::from(format!(
+                        "  {shape_label} | {mode_label} | {} rows | raw {}",
+                        manifest.preferred_row_count_total(),
+                        if manifest
+                            .has_source_kind(crate::replay_cache::ReplayCacheSourceKind::RawTicks,)
+                        {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                    )),
+                ]);
+            }
+            lines.push(Line::from(format!(
+                "Local fallback: {}",
+                if self.local_replay_dataset_available() {
+                    "ready"
+                } else {
+                    "missing"
+                }
+            )));
+            lines
+        }
+
+        #[cfg(not(feature = "replay"))]
+        {
+            vec![Line::from("Replay cache support is disabled.")]
+        }
+    }
+
+    pub(in crate::app) fn replay_market_control_compact_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            styled_line(
+                format!("Bar Type: {}", self.bar_type.kind().label()),
+                self.focus == Focus::BarTypeToggle,
+            ),
+            styled_line(
+                format!("{}: {}", self.replay_value_label(), self.bar_value_text()),
+                self.focus == Focus::BarValue,
+            ),
+        ];
+        if self.candle_mode_controls_visible() {
+            lines.push(styled_line(
+                format!("Candles: {}", self.candle_mode.label()),
+                self.focus == Focus::CandleModeToggle,
+            ));
+        }
+        lines.push(Line::from(format!(
+            "Selection: {}",
+            self.bar_type.mode_label(self.effective_candle_mode())
+        )));
+        lines.push(Line::from(format!(
+            "Data: {}",
+            if self.replay_dataset_available() {
+                "ready"
+            } else {
+                "missing"
+            }
+        )));
+        lines
+    }
+
+    pub(in crate::app) fn replay_run_control_compact_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            styled_line(
+                self.replay_start_action_label(),
+                self.focus == Focus::ReplayMode,
+            ),
+            Line::from(format!(
+                "Bar: {}",
+                if self.replay_selected_bar_supported() {
+                    "supported"
+                } else {
+                    "unsupported"
+                }
+            )),
+            Line::from("N new | D extend selected"),
+            Line::from("No live streams in Replay."),
+        ]
+    }
+
     pub(in crate::app) fn replay_dataset_library_lines(&self) -> Vec<Line<'static>> {
         let configured_path = &self.base_config.replay_file_path;
         let resolved = replay_dataset_file_metadata(configured_path);
@@ -127,10 +298,10 @@ impl App {
             "Replay skips broker login and does not start live streams.",
         ));
         lines.push(Line::from(
-            "Downloader: use `trader download-replay-data` to add server-bar caches.",
+            "N opens a new dataset download; D opens the selected dataset prefilled for extension.",
         ));
         lines.push(Line::from(
-            "D downloads the selected dataset coverage again and refreshes the cache list.",
+            "Headless automation remains available through `trader download-replay-data`.",
         ));
         lines
     }
@@ -242,10 +413,10 @@ impl App {
             lines.extend([
                 Line::from("Status: no manifest.json datasets found"),
                 Line::from(
-                    "Download planner: trader download-replay-data --instrument MES --contract MESU6 --start YYYY-MM-DD --end YYYY-MM-DD",
+                    "Press N or Enter to search contracts and download the first owned dataset.",
                 ),
                 Line::from(
-                    "Downloader uses market-data history only; it does not start user sync or order streams.",
+                    "The Replay downloader uses read-only REST and market-data history without user or order streams.",
                 ),
             ]);
             if !self.replay_cache_library.warnings.is_empty() {
@@ -264,7 +435,7 @@ impl App {
             selected.map_or("none", |dataset| dataset.manifest.display_name.as_str())
         )));
         lines.push(Line::from(
-            "Focus Dataset and use Up/Down to browse; Enter uses the selected cache exactly; A clears to automatic.",
+            "Up/Down browses; Enter uses the selected cache; N adds data; D extends selected coverage; A uses automatic resolution.",
         ));
 
         const VISIBLE_DATASETS: usize = 8;
@@ -316,10 +487,11 @@ impl App {
                     manifest.source_kind.label()
                 )),
                 Line::from(format!(
-                    "  Badges: {} | Rows: {} | Granular: {}",
+                    "  Badges: {} | Replay Rows: {} | Granular: {}",
                     manifest.badges_label(),
-                    manifest.row_count_total(),
-                    if manifest.source_kind == crate::replay_cache::ReplayCacheSourceKind::RawTicks
+                    manifest.preferred_row_count_total(),
+                    if manifest
+                        .has_source_kind(crate::replay_cache::ReplayCacheSourceKind::RawTicks,)
                     {
                         "yes"
                     } else {

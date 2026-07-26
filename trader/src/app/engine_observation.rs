@@ -220,7 +220,11 @@ impl EngineSummary {
             }
             ServiceEvent::ExecutionProbe(_) => {}
             ServiceEvent::ReplaySpeedUpdated(_) => {}
-            ServiceEvent::ReplayDownloadCompleted { .. } => {}
+            ServiceEvent::ReplayDownloadProgress { .. }
+            | ServiceEvent::ReplayDownloadContractSearchResults { .. }
+            | ServiceEvent::ReplayDownloadContractInspected { .. }
+            | ServiceEvent::ReplayDownloadFailed { .. }
+            | ServiceEvent::ReplayDownloadCompleted { .. } => {}
         }
     }
 

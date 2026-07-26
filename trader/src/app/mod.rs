@@ -6,10 +6,12 @@ use crate::broker::{
     ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers,
     default_broker,
 };
+#[cfg(feature = "replay")]
+use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::engine_registry::RunningEngine;
 #[cfg(feature = "replay")]
-use crate::replay_cache::ReplayCacheLibrary;
+use crate::replay_cache::{ReplayCacheLibrary, ReplayCacheSourceKind};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategies::hma_cross::hma_series;
@@ -79,6 +81,10 @@ pub struct App {
     replay_speed: ReplaySpeed,
     #[cfg(feature = "replay")]
     replay_dataset_index: Option<usize>,
+    #[cfg(feature = "replay")]
+    replay_view: ReplayView,
+    #[cfg(feature = "replay")]
+    replay_downloader: ReplayDownloaderState,
     last_log_at: Option<Instant>,
     last_market_update_at: Option<Instant>,
 }
@@ -156,7 +162,134 @@ enum Focus {
     CandleModeToggle,
     #[cfg(feature = "replay")]
     ReplayDataset,
+    #[cfg(feature = "replay")]
+    ReplayDownloadProvider,
+    #[cfg(feature = "replay")]
+    ReplayDownloadEnv,
+    #[cfg(feature = "replay")]
+    ReplayDownloadInstrument,
+    #[cfg(feature = "replay")]
+    ReplayDownloadContract,
+    #[cfg(feature = "replay")]
+    ReplayDownloadStart,
+    #[cfg(feature = "replay")]
+    ReplayDownloadEnd,
+    #[cfg(feature = "replay")]
+    ReplayDownloadSource,
+    #[cfg(feature = "replay")]
+    ReplayDownloadBarType,
+    #[cfg(feature = "replay")]
+    ReplayDownloadBarValue,
+    #[cfg(feature = "replay")]
+    ReplayDownloadCandleMode,
+    #[cfg(feature = "replay")]
+    ReplayDownloadName,
+    #[cfg(feature = "replay")]
+    ReplayDownloadTags,
+    #[cfg(feature = "replay")]
+    ReplayDownloadCacheRoot,
+    #[cfg(feature = "replay")]
+    ReplayDownloadSubmit,
     ContractList,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayView {
+    Library,
+    Downloader,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayDownloadWorkflow {
+    New,
+    Extend,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+struct ReplayDownloaderState {
+    workflow: ReplayDownloadWorkflow,
+    active_operation_id: Option<ReplayDownloadOperationId>,
+    target: Option<ReplayDownloadCacheTarget>,
+    provider: BrokerKind,
+    env: TradingEnvironment,
+    instrument_query: String,
+    contract_results: Vec<ContractSuggestion>,
+    selected_contract: usize,
+    exact_contract: Option<ContractSuggestion>,
+    start_date: String,
+    end_date: String,
+    source_kind: Option<ReplayCacheSourceKind>,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    display_name: String,
+    tags: String,
+    cache_root: String,
+    phase: ReplayDownloadPhase,
+    phase_message: String,
+    estimated_rows: Option<u64>,
+    estimated_bytes: Option<u64>,
+    actual_rows: Option<u64>,
+    actual_bytes: Option<u64>,
+    suggestion_basis: Option<String>,
+}
+
+#[cfg(feature = "replay")]
+impl ReplayDownloaderState {
+    fn new(config: &AppConfig) -> Self {
+        let today = chrono::Utc::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        Self {
+            workflow: ReplayDownloadWorkflow::New,
+            active_operation_id: None,
+            target: None,
+            provider: BrokerKind::Tradovate,
+            env: config.env,
+            instrument_query: String::new(),
+            contract_results: Vec::new(),
+            selected_contract: 0,
+            exact_contract: None,
+            start_date: today.clone(),
+            end_date: today,
+            source_kind: Some(ReplayCacheSourceKind::ServerBars),
+            bar_type: BarType::default(),
+            candle_mode: config.candle_mode,
+            display_name: String::new(),
+            tags: String::new(),
+            cache_root: config.replay_cache_dir.display().to_string(),
+            phase: ReplayDownloadPhase::Idle,
+            phase_message: "Search for an exact contract to continue.".to_string(),
+            estimated_rows: None,
+            estimated_bytes: None,
+            actual_rows: None,
+            actual_bytes: None,
+            suggestion_basis: None,
+        }
+    }
+
+    fn begin_operation(&mut self) -> ReplayDownloadOperationId {
+        let operation_id = ReplayDownloadOperationId::next();
+        self.active_operation_id = Some(operation_id);
+        operation_id
+    }
+
+    fn invalidate_operation(&mut self) {
+        self.active_operation_id = None;
+    }
+
+    fn cancel_active_operation(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+        if let Some(operation_id) = self.active_operation_id.take() {
+            let _ = cmd_tx.send(ServiceCommand::CancelReplayDownloadOperation { operation_id });
+        }
+    }
+
+    fn accepts(&self, operation_id: ReplayDownloadOperationId) -> bool {
+        self.active_operation_id == Some(operation_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

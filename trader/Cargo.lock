@@ -2669,6 +2669,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "base64",
+ "bytes",
  "chrono",
  "chrono-tz",
  "clap",

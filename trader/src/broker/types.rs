@@ -5,6 +5,39 @@ use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::PathBuf;
+#[cfg(feature = "replay")]
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
+
+#[cfg(feature = "replay")]
+static NEXT_REPLAY_DOWNLOAD_OPERATION_ID: OnceLock<AtomicU64> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplayDownloadOperationId(pub u64);
+
+impl ReplayDownloadOperationId {
+    #[cfg(feature = "replay")]
+    pub fn next() -> Self {
+        let counter = NEXT_REPLAY_DOWNLOAD_OPERATION_ID.get_or_init(|| {
+            let epoch_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1);
+            let process_seed = u64::from(std::process::id()).rotate_left(32);
+            AtomicU64::new((epoch_nanos ^ process_seed).max(1))
+        });
+        Self(counter.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayDownloadCacheTarget {
+    pub dataset_dir: PathBuf,
+    pub manifest_path: PathBuf,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,13 +73,32 @@ pub enum ServiceCommand {
         replay_dataset_manifest: Option<std::path::PathBuf>,
     },
     DownloadReplayData {
+        operation_id: ReplayDownloadOperationId,
         config: crate::config::AppConfig,
         instrument: String,
-        contract: String,
+        contract: ContractSuggestion,
+        target: Option<ReplayDownloadCacheTarget>,
         start_date: NaiveDate,
         end_date: NaiveDate,
         source_kind: String,
         bar_type: BarType,
+        candle_mode: CandleMode,
+        display_name: Option<String>,
+        tags: Vec<String>,
+    },
+    SearchReplayDownloadContracts {
+        operation_id: ReplayDownloadOperationId,
+        config: crate::config::AppConfig,
+        query: String,
+        limit: usize,
+    },
+    InspectReplayDownloadContract {
+        operation_id: ReplayDownloadOperationId,
+        config: crate::config::AppConfig,
+        contract: ContractSuggestion,
+    },
+    CancelReplayDownloadOperation {
+        operation_id: ReplayDownloadOperationId,
     },
     ReplayState,
     SelectAccount {
@@ -125,11 +177,87 @@ pub enum ServiceEvent {
     ExecutionState(ExecutionStateSnapshot),
     ExecutionProbe(ExecutionProbeSnapshot),
     ReplaySpeedUpdated(ReplaySpeed),
-    ReplayDownloadCompleted {
-        manifest_path: std::path::PathBuf,
-        data_path: std::path::PathBuf,
-        rows: u64,
+    ReplayDownloadProgress {
+        operation_id: ReplayDownloadOperationId,
+        phase: ReplayDownloadPhase,
+        message: String,
+        estimated_rows: Option<u64>,
+        estimated_bytes: Option<u64>,
     },
+    ReplayDownloadContractSearchResults {
+        operation_id: ReplayDownloadOperationId,
+        query: String,
+        results: Vec<ContractSuggestion>,
+    },
+    ReplayDownloadContractInspected {
+        operation_id: ReplayDownloadOperationId,
+        contract: ContractSuggestion,
+        suggested_start_date: Option<NaiveDate>,
+        suggested_end_date: Option<NaiveDate>,
+        suggestion_basis: Option<String>,
+    },
+    ReplayDownloadCompleted {
+        operation_id: ReplayDownloadOperationId,
+        cache_root: PathBuf,
+        manifest_path: PathBuf,
+        data_path: PathBuf,
+        rows: u64,
+        bytes: u64,
+    },
+    ReplayDownloadFailed {
+        operation_id: ReplayDownloadOperationId,
+        phase: ReplayDownloadPhase,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayDownloadPhase {
+    Idle,
+    Searching,
+    InspectingContract,
+    Ready,
+    Authenticating,
+    Downloading,
+    WritingCache,
+    Busy,
+    Cancelling,
+    Cancelled,
+    Complete,
+    Failed,
+}
+
+impl ReplayDownloadPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Searching => "Searching",
+            Self::InspectingContract => "Inspecting contract",
+            Self::Ready => "Ready",
+            Self::Authenticating => "Authenticating",
+            Self::Downloading => "Downloading",
+            Self::WritingCache => "Writing cache",
+            Self::Busy => "Busy",
+            Self::Cancelling => "Cancelling",
+            Self::Cancelled => "Cancelled",
+            Self::Complete => "Complete",
+            Self::Failed => "Failed",
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    pub fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::Searching
+                | Self::InspectingContract
+                | Self::Authenticating
+                | Self::Downloading
+                | Self::WritingCache
+                | Self::Cancelling
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
