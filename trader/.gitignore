@@ -1,3 +1,9 @@
 ninja-login.sh
-docs/
+docs/*
+!docs/large-file-refactoring.md
+!docs/todo/
+docs/todo/*
+!docs/todo/replay-backtesting-roadmap/
+docs/todo/replay-backtesting-roadmap/*
+!docs/todo/replay-backtesting-roadmap/03-session-range-selection.md
 .run/

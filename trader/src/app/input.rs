@@ -110,7 +110,7 @@ impl App {
                         }
                         if self.replay_downloader.phase == ReplayDownloadPhase::WritingCache {
                             self.replay_downloader.phase_message =
-                                "Cache commit already started and cannot be interrupted; waiting for completion."
+                                "The current atomic cache commit will finish; cancellation will stop any remaining resumable chunks."
                                     .to_string();
                         } else {
                             self.replay_downloader.phase = ReplayDownloadPhase::Cancelling;

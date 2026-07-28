@@ -5,7 +5,8 @@ use crate::broker::{
     ContractSuggestion, EngineHistoryFill, EngineHistorySnapshot, ExecutionProbeManagedProtection,
     ExecutionProbeOrder, ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow,
     LatencySnapshot, ManualOrderAction, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed,
-    ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
+    ReplayWindowSnapshot, ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide,
+    infer_session_profile,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;

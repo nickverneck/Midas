@@ -96,7 +96,15 @@ impl ReplayDownloadJob {
                 let _ = self.cancel_tx.send(true);
                 ReplayDownloadJobStage::CancelRequested
             }
-            Err(stage) => ReplayDownloadJobStage::from_raw(stage),
+            Err(stage) => {
+                let stage = ReplayDownloadJobStage::from_raw(stage);
+                if stage == ReplayDownloadJobStage::Committing {
+                    // An atomic chunk/final-manifest commit must finish, but a
+                    // resumable download should stop before its next chunk.
+                    let _ = self.cancel_tx.send(true);
+                }
+                stage
+            }
         }
     }
 }

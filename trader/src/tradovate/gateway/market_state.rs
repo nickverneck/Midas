@@ -17,6 +17,7 @@ pub(crate) struct MarketUpdate {
     pub(crate) tick_size: Option<f64>,
     pub(crate) history_loaded: usize,
     pub(crate) live_bars: usize,
+    pub(crate) replay_window: Option<ReplayWindowSnapshot>,
     pub(crate) status: String,
     pub(crate) bars: MarketBarsUpdate,
 }
@@ -109,6 +110,7 @@ pub(crate) fn display_market_snapshot(market: &MarketSnapshot) -> MarketSnapshot
         tick_size: market.tick_size,
         history_loaded: retained_closed,
         live_bars: market.live_bars,
+        replay_window: market.replay_window.clone(),
         status: market.status.clone(),
     }
 }
@@ -172,6 +174,7 @@ pub(crate) fn build_market_update(
         tick_size: market_specs.and_then(|specs| specs.tick_size),
         history_loaded,
         live_bars,
+        replay_window: None,
         status,
         bars,
     })
@@ -224,6 +227,7 @@ pub(crate) fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpd
     market.value_per_point = update.value_per_point;
     market.tick_size = update.tick_size;
     market.live_bars = update.live_bars;
+    market.replay_window = update.replay_window;
     market.status = update.status;
 
     let closed_bar_advanced = match update.bars {

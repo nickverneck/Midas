@@ -260,6 +260,7 @@ async fn handle_command(
                 tick_size: pick_number(&contract.raw, &["minTick", "pipSize", "tickSize"]),
                 history_loaded: 0,
                 live_bars: 0,
+                replay_window: None,
                 status: format!("Subscribing to {} 1-minute bars...", contract.name),
             };
             refresh_managed_protection(session);

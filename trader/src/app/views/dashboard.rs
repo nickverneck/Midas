@@ -13,6 +13,22 @@ impl App {
                 "Replay Speed: {}",
                 self.replay_speed.label()
             )));
+            if let Some(window) = self.market.replay_window.as_ref() {
+                lines.push(Line::from(format!(
+                    "Replay Window: {} | {}",
+                    window.preset, window.input_timezone
+                )));
+                lines.push(Line::from(format!(
+                    "Replay Range: {}",
+                    window.local_range_label()
+                )));
+                lines.push(Line::from(format!(
+                    "Replay Rows: warmup {} | evaluation {}/{}",
+                    window.warmup_rows,
+                    window.evaluation_rows_processed,
+                    window.evaluation_rows_total
+                )));
+            }
         }
         lines.extend([
             Line::from(format!(

@@ -125,6 +125,7 @@ fn fallback_unrealized_pnl_uses_latest_close_and_value_per_point() {
         tick_size: Some(0.25),
         history_loaded: 1,
         live_bars: 0,
+        replay_window: None,
         status: String::new(),
     };
 
@@ -365,6 +366,7 @@ fn apply_market_update_keeps_bars_incremental() {
         tick_size: Some(0.25),
         history_loaded: 1,
         live_bars: 0,
+        replay_window: None,
         status: "initial".to_string(),
         bars: MarketBarsUpdate::Snapshot {
             closed_bars: vec![closed_bar.clone()],
@@ -385,6 +387,7 @@ fn apply_market_update_keeps_bars_incremental() {
         tick_size: Some(0.25),
         history_loaded: 2,
         live_bars: 1,
+        replay_window: None,
         status: "realtime".to_string(),
         bars: MarketBarsUpdate::Closed {
             closed_bar: forming_bar.clone(),
@@ -460,6 +463,7 @@ fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
         tick_size: Some(0.25),
         history_loaded: 2,
         live_bars: 1,
+        replay_window: None,
         status: "realtime".to_string(),
         bars: MarketBarsUpdate::Closed {
             closed_bar: bar(3),
@@ -470,6 +474,52 @@ fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
     assert!(apply_market_update(&mut market, update));
     assert_eq!(market.history_loaded, 2);
     assert_eq!(market.bars, vec![bar(2), bar(3)]);
+}
+
+#[test]
+fn replay_window_progress_survives_market_update_and_display_trimming() {
+    let window = ReplayWindowSnapshot {
+        preset: "Custom UTC".to_string(),
+        input_timezone: "UTC".to_string(),
+        warmup_start: "2026-07-23T00:00:00Z".parse().unwrap(),
+        evaluation_start: "2026-07-23T01:00:00Z".parse().unwrap(),
+        evaluation_end: "2026-07-23T02:00:00Z".parse().unwrap(),
+        warmup_rows: 60,
+        evaluation_rows_total: 60,
+        evaluation_rows_processed: 1,
+    };
+    let bar = Bar {
+        ts_ns: window
+            .evaluation_start
+            .timestamp_nanos_opt()
+            .expect("timestamp"),
+        open: 5000.0,
+        high: 5001.0,
+        low: 4999.0,
+        close: 5000.5,
+        volume: Some(1.0),
+    };
+    let mut market = MarketSnapshot::default();
+    let update = MarketUpdate {
+        contract_id: 1,
+        contract_name: "MESU6".to_string(),
+        candle_mode: CandleMode::Standard,
+        session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+        value_per_point: Some(5.0),
+        tick_size: Some(0.25),
+        history_loaded: 1,
+        live_bars: 1,
+        replay_window: Some(window.clone()),
+        status: "evaluation 1/60".to_string(),
+        bars: MarketBarsUpdate::Snapshot {
+            closed_bars: vec![bar],
+            forming_bar: None,
+        },
+    };
+
+    assert!(apply_market_update(&mut market, update));
+    assert_eq!(market.replay_window, Some(window.clone()));
+    assert_eq!(display_market_snapshot(&market).replay_window, Some(window));
 }
 
 #[test]

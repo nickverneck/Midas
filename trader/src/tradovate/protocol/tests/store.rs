@@ -231,6 +231,7 @@ fn build_snapshots_include_realized_pnl_and_protection_prices() {
         tick_size: Some(0.25),
         history_loaded: 1,
         live_bars: 0,
+        replay_window: None,
         status: String::new(),
     };
     let managed_protection = BTreeMap::from([(
@@ -375,6 +376,7 @@ fn replay_snapshots_mark_to_market_open_positions() {
         tick_size: Some(0.25),
         history_loaded: 1,
         live_bars: 0,
+        replay_window: None,
         status: String::new(),
     };
 
@@ -448,6 +450,7 @@ fn replay_snapshots_roll_realized_pnl_into_balance() {
         tick_size: Some(0.25),
         history_loaded: 1,
         live_bars: 0,
+        replay_window: None,
         status: String::new(),
     };
 

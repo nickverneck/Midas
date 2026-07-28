@@ -33,7 +33,10 @@ impl DownloadWindow {
     }
 }
 
-pub fn plan_fixed_windows(window: DownloadWindow, max_duration: ChronoDuration) -> Result<Vec<DownloadWindow>> {
+pub fn plan_fixed_windows(
+    window: DownloadWindow,
+    max_duration: ChronoDuration,
+) -> Result<Vec<DownloadWindow>> {
     if max_duration <= ChronoDuration::zero() {
         bail!("download chunk duration must be positive");
     }
@@ -106,6 +109,12 @@ pub struct HistoricalDownloadTelemetry {
     pub normalized_rows: u64,
     pub duplicate_rows: u64,
     pub dropped_rows: u64,
+    #[serde(default)]
+    pub page_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_first_timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_last_timestamp: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_timestamp: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +144,9 @@ impl HistoricalDownloadTelemetry {
             normalized_rows: 0,
             duplicate_rows: 0,
             dropped_rows: 0,
+            page_count: 0,
+            provider_first_timestamp: None,
+            provider_last_timestamp: None,
             first_timestamp: None,
             last_timestamp: None,
             historical_id: None,
@@ -179,7 +191,10 @@ impl HistoricalDownloadFailureKind {
     }
 
     pub fn is_transient(self) -> bool {
-        matches!(self, Self::RateLimited | Self::Timeout | Self::Transport)
+        matches!(
+            self,
+            Self::RateLimited | Self::Timeout | Self::ClosedWithoutCompletion | Self::Transport
+        )
     }
 }
 
@@ -265,8 +280,12 @@ pub struct DownloadProbeResult {
     pub replay_read_rows: Option<u64>,
 }
 
-pub fn prepare_probe_directory(root: &Path, expected: &DownloadProbePlan) -> Result<DownloadProbePlan> {
-    fs::create_dir_all(root).with_context(|| format!("create probe directory {}", root.display()))?;
+pub fn prepare_probe_directory(
+    root: &Path,
+    expected: &DownloadProbePlan,
+) -> Result<DownloadProbePlan> {
+    fs::create_dir_all(root)
+        .with_context(|| format!("create probe directory {}", root.display()))?;
     fs::create_dir_all(root.join("results"))
         .with_context(|| format!("create probe results directory {}", root.display()))?;
     let path = root.join("plan.json");
@@ -297,8 +316,14 @@ pub fn prepare_probe_directory(root: &Path, expected: &DownloadProbePlan) -> Res
     Ok(expected.clone())
 }
 
-pub fn verified_probe_result(root: &Path, plan: &DownloadProbePlan, probe_id: &str) -> Result<Option<DownloadProbeResult>> {
-    let path = root.join("results").join(format!("{}.json", safe_id(probe_id)));
+pub fn verified_probe_result(
+    root: &Path,
+    plan: &DownloadProbePlan,
+    probe_id: &str,
+) -> Result<Option<DownloadProbeResult>> {
+    let path = root
+        .join("results")
+        .join(format!("{}.json", safe_id(probe_id)));
     if !path.exists() {
         return Ok(None);
     }
@@ -328,7 +353,10 @@ pub fn write_probe_report(root: &Path, plan: &DownloadProbePlan) -> Result<PathB
     report.push_str("This report is generated from sanitized, read-only market-data probe results. Missing rows are not interpreted as a provider cap without independent evidence.\n\n");
     report.push_str(&format!("- Plan identity: `{}`\n", plan.identity));
     report.push_str(&format!("- Environment: `{}`\n", plan.env.label()));
-    report.push_str(&format!("- Contract: `{}` (`{}`)\n\n", plan.contract_symbol, plan.contract_id));
+    report.push_str(&format!(
+        "- Contract: `{}` (`{}`)\n\n",
+        plan.contract_symbol, plan.contract_id
+    ));
     report.push_str("| Probe | Source | UTC window `[start,end)` | Result | Rows | EOH | Cap | Elapsed | Bytes |\n");
     report.push_str("|---|---|---|---|---:|---|---|---:|---:|\n");
     for probe in &plan.probes {
@@ -382,7 +410,9 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let temp = parent.join(format!(
         ".{}.tmp-{}-{}",
-        path.file_name().and_then(|value| value.to_str()).unwrap_or("output"),
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("output"),
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
@@ -416,20 +446,28 @@ mod tests {
         let parent = DownloadWindow::new(dt(0), dt(5)).expect("window");
         let windows = plan_fixed_windows(parent, ChronoDuration::hours(2)).expect("plan");
         assert_eq!(windows.len(), 3);
-        assert_eq!(windows[0], DownloadWindow { start: dt(0), end: dt(2) });
+        assert_eq!(
+            windows[0],
+            DownloadWindow {
+                start: dt(0),
+                end: dt(2)
+            }
+        );
         assert_eq!(windows[1].start, windows[0].end);
-        assert_eq!(windows[2], DownloadWindow { start: dt(4), end: dt(5) });
+        assert_eq!(
+            windows[2],
+            DownloadWindow {
+                start: dt(4),
+                end: dt(5)
+            }
+        );
     }
 
     #[test]
     fn split_prefers_nearest_valid_session_boundary() {
         let parent = DownloadWindow::new(dt(0), dt(4)).expect("window");
-        let split = split_download_window(
-            parent,
-            &[dt(1), dt(3)],
-            ChronoDuration::minutes(30),
-        )
-        .expect("split");
+        let split = split_download_window(parent, &[dt(1), dt(3)], ChronoDuration::minutes(30))
+            .expect("split");
         assert_eq!(split.0.end, dt(1));
         assert_eq!(split.0.end, split.1.start);
         assert_eq!(split.1.end, parent.end);
@@ -438,8 +476,6 @@ mod tests {
     #[test]
     fn split_refuses_children_below_minimum() {
         let parent = DownloadWindow::new(dt(0), dt(1)).expect("window");
-        assert!(
-            split_download_window(parent, &[], ChronoDuration::minutes(31)).is_none()
-        );
+        assert!(split_download_window(parent, &[], ChronoDuration::minutes(31)).is_none());
     }
 }
