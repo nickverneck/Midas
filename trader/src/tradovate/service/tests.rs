@@ -51,6 +51,7 @@ fn test_session() -> SessionState {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     }
 }
 
@@ -720,6 +721,488 @@ async fn order_strategy_submit_failure_debug_logs_request_and_target() {
         ServiceEvent::Error(message)
             if message == "broker rejected entry"
     )));
+}
+
+#[tokio::test]
+async fn asynchronous_command_rejection_reports_reason_and_clears_pending_strategy() {
+    let strategy_id = 592_891_516_837_i64;
+    let order_id = 592_891_516_838_i64;
+    let report_id = 592_891_516_839_i64;
+    let contract_id = 4_095_561_i64;
+    let mut session = test_session();
+    session.selected_contract = Some(ContractSuggestion {
+        id: contract_id,
+        name: "GCQ6".to_string(),
+        description: "Gold August 2026".to_string(),
+        raw: json!({}),
+    });
+    session.execution_runtime.armed = true;
+    session.execution_runtime.pending_target_qty = Some(1);
+    session.execution_runtime.last_summary = "Strategy submitted".to_string();
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key: StrategyProtectionKey {
+            account_id: 42,
+            contract_id,
+        },
+        order_strategy_id: strategy_id,
+        target_qty: 1,
+    });
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        started_at: time::Instant::now(),
+        signal_started_at: Some(time::Instant::now()),
+        signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
+        cl_ord_id: "midas-gcq6-strategy".to_string(),
+        order_id: None,
+        order_strategy_id: Some(strategy_id),
+        seen_recorded: false,
+        exec_report_recorded: false,
+        fill_recorded: false,
+    });
+
+    let entities = vec![
+        EntityEnvelope {
+            entity_type: "orderStrategy".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": strategy_id,
+                "accountId": 42,
+                "contractId": contract_id,
+                "status": "ExecutionFailed",
+                "uuid": "midas-gcq6-strategy"
+            }),
+        },
+        EntityEnvelope {
+            entity_type: "order".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": order_id,
+                "accountId": 42,
+                "contractId": contract_id,
+                "action": "Buy",
+                "ordStatus": "Rejected"
+            }),
+        },
+        EntityEnvelope {
+            entity_type: "command".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": order_id,
+                "orderId": order_id,
+                "commandType": "New",
+                "commandStatus": "RiskRejected"
+            }),
+        },
+        EntityEnvelope {
+            entity_type: "commandReport".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": report_id,
+                "commandId": order_id,
+                "commandStatus": "RiskRejected",
+                "rejectReason": "LiquidationOnlyBeforeExpiration",
+                "text": "Liquidation only, contract is about to be expired. Please contact the Trade Desk.",
+                "ordStatus": "Rejected"
+            }),
+        },
+    ];
+
+    let mut state = test_state(session);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    handle_internal(
+        InternalEvent::UserEntities(entities.clone()),
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx.clone(),
+    )
+    .await
+    .expect("command rejection should be handled");
+    handle_internal(
+        InternalEvent::UserEntities(entities),
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("duplicate command rejection should be ignored");
+
+    let session = state.session.expect("session should persist");
+    assert!(session.execution_runtime.armed);
+    assert_eq!(session.execution_runtime.pending_target_qty, None);
+    assert!(session.order_latency_tracker.is_none());
+    assert!(session.active_order_strategy.is_none());
+    assert_eq!(
+        session.execution_runtime.last_summary,
+        "Broker rejected Buy GCQ6 on SIM: LiquidationOnlyBeforeExpiration — Liquidation only, contract is about to be expired. Please contact the Trade Desk."
+    );
+    assert!(
+        session
+            .user_store
+            .reported_command_rejections
+            .contains(&report_id)
+    );
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    let rejection_notices = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ServiceEvent::BrokerRejection(message)
+                    if message.contains("Broker rejected Buy GCQ6 on SIM")
+                        && message.contains("LiquidationOnlyBeforeExpiration")
+                        && message.contains("contact the Trade Desk")
+            )
+        })
+        .count();
+    assert_eq!(rejection_notices, 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("broker rejection")
+                && message.contains("command report 592891516839")
+                && message.contains("order 592891516838")
+                && message.contains("account 42")
+                && message.contains("contract 4095561")
+                && message.contains("status RiskRejected")
+    )));
+}
+
+#[test]
+fn gc_rejection_does_not_affect_armed_es_strategy() {
+    let es_contract_id = 3_570_918_i64;
+    let gc_contract_id = 4_095_561_i64;
+    let es_strategy_id = 592_891_516_900_i64;
+    let es_order_id = 592_891_516_901_i64;
+    let gc_order_id = 592_891_516_902_i64;
+    let gc_command_id = 592_891_516_903_i64;
+    let gc_report_id = 592_891_516_904_i64;
+    let es_key = StrategyProtectionKey {
+        account_id: 42,
+        contract_id: es_contract_id,
+    };
+    let mut session = test_session();
+    session.execution_runtime.armed = true;
+    session.execution_runtime.pending_target_qty = Some(1);
+    session.execution_runtime.last_summary = "ES strategy active".to_string();
+    session.order_submit_in_flight = true;
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key: es_key,
+        order_strategy_id: es_strategy_id,
+        target_qty: 1,
+    });
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        started_at: time::Instant::now(),
+        signal_started_at: Some(time::Instant::now()),
+        signal_context: Some("ES buy".to_string()),
+        cl_ord_id: "midas-es-strategy".to_string(),
+        order_id: Some(es_order_id),
+        order_strategy_id: Some(es_strategy_id),
+        seen_recorded: true,
+        exec_report_recorded: false,
+        fill_recorded: false,
+    });
+    session.managed_protection.insert(
+        es_key,
+        ManagedProtectionOrders {
+            signed_qty: 1,
+            take_profit_price: Some(6_400.0),
+            stop_price: Some(6_350.0),
+            take_profit_cl_ord_id: Some("midas-es-tp".to_string()),
+            stop_cl_ord_id: Some("midas-es-sl".to_string()),
+            take_profit_order_id: Some(es_order_id + 1),
+            stop_order_id: Some(es_order_id + 2),
+        },
+    );
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            gc_order_id,
+            json!({
+                "id": gc_order_id,
+                "accountId": 42,
+                "contractId": gc_contract_id,
+                "symbol": "GCQ6",
+                "action": "Buy",
+                "ordStatus": "Rejected",
+                "clOrdId": "unrelated-gc-order"
+            }),
+        )]),
+    );
+    session.user_store.commands.insert(
+        gc_command_id,
+        json!({
+            "id": gc_command_id,
+            "orderId": gc_order_id,
+            "commandStatus": "RiskRejected"
+        }),
+    );
+    let report = json!({
+        "id": gc_report_id,
+        "commandId": gc_command_id,
+        "commandStatus": "RiskRejected",
+        "rejectReason": "LiquidationOnlyBeforeExpiration",
+        "text": "GC contract is liquidation only",
+        "ordStatus": "Rejected"
+    });
+    let rejection = super::internal::broker_rejection_notice(&session, gc_report_id, &report);
+    assert!(!rejection.affects_active_submission);
+    assert!(!rejection.affects_active_strategy);
+    assert!(!rejection.matches_selected_instrument);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    super::internal::apply_broker_rejection(&mut session, &event_tx, rejection);
+
+    assert!(session.execution_runtime.armed);
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+    assert_eq!(session.execution_runtime.last_summary, "ES strategy active");
+    assert!(session.order_submit_in_flight);
+    let tracker = session
+        .order_latency_tracker
+        .as_ref()
+        .expect("ES tracker should remain");
+    assert_eq!(tracker.cl_ord_id, "midas-es-strategy");
+    let active = session
+        .active_order_strategy
+        .as_ref()
+        .expect("ES strategy should remain tracked");
+    assert_eq!(active.key, es_key);
+    assert_eq!(active.order_strategy_id, es_strategy_id);
+    assert!(session.managed_protection.contains_key(&es_key));
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::DebugLog(message)
+            if message.contains("GCQ6") || message.contains("contract 4095561")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServiceEvent::BrokerRejection(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServiceEvent::ExecutionState(_)))
+    );
+}
+
+#[test]
+fn broker_history_filters_manual_other_engine_and_other_contract_fills() {
+    let mut session = test_session();
+    session.market.value_per_point = Some(50.0);
+    session.market.bars = vec![Bar {
+        ts_ns: Utc::now().timestamp_nanos_opt().expect("timestamp"),
+        open: 5_000.0,
+        high: 5_002.0,
+        low: 4_999.0,
+        close: 5_001.0,
+        volume: None,
+    }];
+    start_engine_run(&mut session).expect("engine run");
+    let prefix = session
+        .engine_run
+        .as_ref()
+        .expect("run")
+        .order_prefix
+        .clone();
+    let now = Utc::now().to_rfc3339();
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([
+            (100, json!({"id": 100, "accountId": 42, "contractId": 3570918, "symbol": "ESM6", "action": "Buy", "clOrdId": format!("{prefix}-1-entry")})),
+            (101, json!({"id": 101, "accountId": 42, "contractId": 3570918, "symbol": "ESM6", "action": "Sell", "clOrdId": format!("{prefix}-2-entry")})),
+            (102, json!({"id": 102, "accountId": 42, "contractId": 3570918, "symbol": "ESM6", "action": "Sell", "clOrdId": "manual-web-order"})),
+            (103, json!({"id": 103, "accountId": 42, "contractId": 4095561, "symbol": "GCQ6", "action": "Buy", "clOrdId": format!("{prefix}-gc-entry")})),
+            (104, json!({"id": 104, "accountId": 42, "contractId": 3570918, "symbol": "ESM6", "action": "Buy", "clOrdId": "midas-rother-engine-entry"})),
+        ]),
+    );
+    for (fill_id, order_id, contract_id, symbol, action, price) in [
+        (1, 100, 3_570_918, "ESM6", "Buy", 5_000.0),
+        (2, 101, 3_570_918, "ESM6", "Sell", 5_001.0),
+        (3, 102, 3_570_918, "ESM6", "Sell", 5_010.0),
+        (4, 103, 4_095_561, "GCQ6", "Buy", 4_000.0),
+        (5, 104, 3_570_918, "ESM6", "Buy", 4_999.0),
+    ] {
+        session.user_store.history_fills.insert(
+            fill_id,
+            json!({
+                "id": fill_id,
+                "orderId": order_id,
+                "contractId": contract_id,
+                "symbol": symbol,
+                "action": action,
+                "qty": 1,
+                "price": price,
+                "timestamp": now
+            }),
+        );
+    }
+    session
+        .user_store
+        .fill_fees
+        .insert(900, json!({"id": 900, "fillId": 2, "amount": 2.0}));
+
+    refresh_engine_history(&mut session);
+
+    let history = &session.engine_run.as_ref().expect("run").history;
+    assert_eq!(history.fills.len(), 2);
+    assert_eq!(history.position_qty, 0);
+    assert_eq!(history.fees, 2.0);
+    assert_eq!(history.realized_pnl, 48.0);
+    assert_eq!(history.wins, 1);
+    assert_eq!(history.losses, 0);
+    assert_eq!(
+        history
+            .fills
+            .iter()
+            .map(|fill| fill.fill_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn broker_history_attributes_broker_strategy_child_orders() {
+    let mut session = test_session();
+    session.market.value_per_point = Some(50.0);
+    start_engine_run(&mut session).expect("engine run");
+    let prefix = session
+        .engine_run
+        .as_ref()
+        .expect("run")
+        .order_prefix
+        .clone();
+    let now = Utc::now().to_rfc3339();
+    session.user_store.order_strategies.insert(
+        700,
+        json!({
+            "id": 700,
+            "accountId": 42,
+            "contractId": 3570918,
+            "symbol": "ESM6",
+            "uuid": format!("{prefix}-strategy")
+        }),
+    );
+    session.user_store.order_strategy_links.insert(
+        701,
+        json!({"id": 701, "orderStrategyId": 700, "orderId": 702}),
+    );
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            702,
+            json!({
+                "id": 702,
+                "accountId": 42,
+                "contractId": 3570918,
+                "symbol": "ESM6",
+                "action": "Buy"
+            }),
+        )]),
+    );
+    session.user_store.history_fills.insert(
+        703,
+        json!({
+            "id": 703,
+            "orderId": 702,
+            "contractId": 3570918,
+            "symbol": "ESM6",
+            "qty": 1,
+            "price": 5000.0,
+            "timestamp": now
+        }),
+    );
+
+    refresh_engine_history(&mut session);
+
+    let history = &session.engine_run.as_ref().expect("run").history;
+    assert_eq!(history.fills.len(), 1);
+    assert_eq!(history.position_qty, 1);
+    assert_eq!(history.average_entry_price, Some(5_000.0));
+}
+
+#[test]
+fn engine_history_run_rejects_preexisting_selected_contract_position() {
+    let mut session = test_session();
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "symbol": "ESM6",
+                "netPos": 1,
+                "netPrice": 5000.0
+            }),
+        )]),
+    );
+
+    let err = start_engine_run(&mut session).expect_err("position should block history start");
+
+    assert!(err.to_string().contains("pre-existing broker position 1"));
+    assert!(session.engine_run.is_none());
+}
+
+#[tokio::test]
+async fn replay_state_reemits_existing_engine_history_for_tui_reattach() {
+    let mut session = test_session();
+    session.replay_enabled = true;
+    start_engine_run(&mut session).expect("engine run");
+    let expected_run_id = session.engine_run.as_ref().expect("run").run_id.clone();
+    let mut state = test_state(session);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    super::commands::replay_state(&mut state, &event_tx)
+        .await
+        .expect("replay state");
+
+    let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::EngineHistoryUpdated(history) if history.run_id == expected_run_id
+    )));
+}
+
+#[tokio::test]
+async fn automated_liquidation_ack_registers_broker_order_with_engine_run() {
+    let mut session = test_session();
+    start_engine_run(&mut session).expect("engine run");
+    let request_id = format!(
+        "{}-liquidate",
+        session.engine_run.as_ref().expect("run").order_prefix
+    );
+    let mut state = test_state(session);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    super::internal::handle_broker_order_ack(
+        BrokerOrderAck {
+            endpoint: "order/liquidateposition",
+            cl_ord_id: request_id,
+            order_id: Some(808),
+            submit_rtt_ms: 1,
+            message: "close submitted".to_string(),
+        },
+        &mut state,
+        &event_tx,
+        internal_tx,
+    );
+
+    assert!(
+        state
+            .session
+            .as_ref()
+            .and_then(|session| session.engine_run.as_ref())
+            .is_some_and(|run| run.owned_order_ids.contains(&808))
+    );
 }
 
 #[tokio::test]

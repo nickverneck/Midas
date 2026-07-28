@@ -8,10 +8,12 @@ impl App {
     ) {
         match key.code {
             KeyCode::BackTab => {
+                self.pending_contract_override = None;
                 self.focus = self.prev_selection_focus();
                 return;
             }
             KeyCode::Tab => {
+                self.pending_contract_override = None;
                 self.focus = self.next_selection_focus();
                 return;
             }
@@ -50,18 +52,42 @@ impl App {
             match key.code {
                 KeyCode::Up => {
                     self.selected_contract = self.selected_contract.saturating_sub(1);
+                    self.pending_contract_override = None;
                     return;
                 }
                 KeyCode::Down => {
                     if self.selected_contract + 1 < self.contract_results.len() {
                         self.selected_contract += 1;
                     }
+                    self.pending_contract_override = None;
                     return;
                 }
                 KeyCode::Enter => {
                     if let Some(contract) =
                         self.contract_results.get(self.selected_contract).cloned()
                     {
+                        let trade_status = contract.trade_status();
+                        if trade_status.is_blocked()
+                            && self.pending_contract_override != Some(contract.id)
+                        {
+                            self.pending_contract_override = Some(contract.id);
+                            self.status = format!(
+                                "{}. Press Enter again to override and select {}.",
+                                trade_status.label(),
+                                contract.name
+                            );
+                            self.push_log(self.status.clone());
+                            return;
+                        }
+                        if trade_status.is_blocked() {
+                            self.push_log(format!(
+                                "Contract safety override accepted for {}: {}",
+                                contract.name,
+                                trade_status.label()
+                            ));
+                        }
+                        self.pending_contract_override = None;
+                        self.engine_history = None;
                         self.sync_selected_account(cmd_tx);
                         let _ = cmd_tx.send(ServiceCommand::SubscribeBars {
                             contract,
@@ -378,7 +404,12 @@ impl App {
                 .iter()
                 .enumerate()
                 .map(|(idx, contract)| {
-                    let text = format!("{}  |  {}", contract.name, contract.description);
+                    let text = format!(
+                        "{}  |  {}  |  {}",
+                        contract.name,
+                        contract.trade_status().label(),
+                        contract.description
+                    );
                     ListItem::new(styled_line(
                         text,
                         self.focus == Focus::ContractList && idx == self.selected_contract,

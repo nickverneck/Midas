@@ -42,11 +42,13 @@ impl App {
             candle_mode,
             contract_results: Vec::new(),
             selected_contract: 0,
+            pending_contract_override: None,
             market: MarketSnapshot::default(),
             logs: VecDeque::new(),
             persisted_logs: VecDeque::new(),
             last_saved_log_path: None,
             session_stats: SessionStatsState::new(session_stats_enabled),
+            engine_history: None,
             session_stats_show_fees: true,
             dashboard_visuals_enabled: false,
             strategy_runtime: StrategyRuntimeState::default(),
@@ -65,16 +67,14 @@ impl App {
         };
         app.normalize_market_controls_for_broker();
         app.status = "Select an engine to continue or create a new one.".to_string();
-        app.push_log(
-            format!(
-                "Broker support compiled in: {}.",
-                app.available_brokers
-                    .iter()
-                    .map(|broker| broker.label())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        );
+        app.push_log(format!(
+            "Broker support compiled in: {}.",
+            app.available_brokers
+                .iter()
+                .map(|broker| broker.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         app.push_log("Dashboard visual overlays can be toggled with v.".to_string());
         app.push_log(
             "Native HMA Angle and EMA Crossover strategies can auto-trade on closed bars or live forming bars once armed from Strategy."
@@ -138,7 +138,10 @@ impl App {
         self.active_engine_key = Some(engine_key);
         self.engine_socket_path = Some(socket_path.clone());
         self.move_to_initial_broker_screen();
-        self.push_log(format!("Attached to engine socket {}.", socket_path.display()));
+        self.push_log(format!(
+            "Attached to engine socket {}.",
+            socket_path.display()
+        ));
     }
 
     pub fn leave_active_engine_session(&mut self, message: impl Into<String>) {
@@ -163,10 +166,15 @@ impl App {
 
     pub fn observe_live_engine_socket(&mut self, socket_path: PathBuf) {
         let key = EngineKey::from_socket_path(&socket_path);
-        if self.engine_summaries.iter().any(|summary| summary.key == key) {
+        if self
+            .engine_summaries
+            .iter()
+            .any(|summary| summary.key == key)
+        {
             return;
         }
-        self.engine_summaries.push(EngineSummary::live_socket(socket_path));
+        self.engine_summaries
+            .push(EngineSummary::live_socket(socket_path));
     }
 
     fn move_to_initial_broker_screen(&mut self) {
@@ -222,6 +230,10 @@ impl App {
                     self.push_log(format!("DEBUG: {message}"));
                 }
             }
+            ServiceEvent::BrokerRejection(message) => {
+                self.status = format!("Rejected: {message}");
+                self.push_log(format!("REJECTED: {message}"));
+            }
             ServiceEvent::Error(message) => {
                 self.status = format!("Error: {message}");
                 self.push_log(format!("ERROR: {message}"));
@@ -274,6 +286,7 @@ impl App {
                 self.session_kind = SessionKind::Live;
                 self.accounts.clear();
                 self.account_snapshots.clear();
+                self.engine_history = None;
                 self.contract_results.clear();
                 self.market = MarketSnapshot::default();
                 self.strategy_runtime = StrategyRuntimeState::default();
@@ -297,6 +310,7 @@ impl App {
             ServiceEvent::ContractSearchResults { query, results } => {
                 self.contract_results = results;
                 self.selected_contract = 0;
+                self.pending_contract_override = None;
                 self.push_log(format!(
                     "Contract search `{query}` returned {} result(s)",
                     self.contract_results.len()
@@ -311,6 +325,9 @@ impl App {
             }
             ServiceEvent::TradeMarkersUpdated(markers) => {
                 self.market.trade_markers = markers;
+            }
+            ServiceEvent::EngineHistoryUpdated(history) => {
+                self.engine_history = Some(history);
             }
             ServiceEvent::Latency(snapshot) => {
                 self.latency = snapshot;
@@ -446,8 +463,7 @@ impl App {
                     }
                     self.replay_downloader.invalidate_operation();
                     self.base_config.replay_cache_dir = cache_root.clone();
-                    self.replay_cache_library =
-                        ReplayCacheLibrary::scan(&cache_root);
+                    self.replay_cache_library = ReplayCacheLibrary::scan(&cache_root);
                     self.replay_dataset_index = self
                         .replay_cache_library
                         .datasets

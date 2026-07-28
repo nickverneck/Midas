@@ -134,19 +134,24 @@ fn user_store_recovers_midas_strategy_from_linked_active_orders() {
 
 #[test]
 fn user_store_ignores_terminal_midas_order_strategy_status() {
-    let mut store = UserSyncStore::default();
-    store.order_strategies.insert(
-        77,
-        json!({
-            "id": 77,
-            "accountId": 42,
-            "contractId": 3570918,
-            "status": "InterruptedStrategy",
-            "uuid": "midas-1710546400000-1-strategy"
-        }),
-    );
+    for status in ["InterruptedStrategy", "ExecutionFailed"] {
+        let mut store = UserSyncStore::default();
+        store.order_strategies.insert(
+            77,
+            json!({
+                "id": 77,
+                "accountId": 42,
+                "contractId": 3570918,
+                "status": status,
+                "uuid": "midas-1710546400000-1-strategy"
+            }),
+        );
 
-    assert!(store.find_active_order_strategy(42, 3570918).is_none());
+        assert!(
+            store.find_active_order_strategy(42, 3570918).is_none(),
+            "{status} must be terminal"
+        );
+    }
 }
 
 #[test]
@@ -256,6 +261,59 @@ fn build_snapshots_include_realized_pnl_and_protection_prices() {
     assert_eq!(snapshot.market_entry_price, Some(5000.0));
     assert_eq!(snapshot.selected_contract_take_profit_price, Some(5004.0));
     assert_eq!(snapshot.selected_contract_stop_price, Some(4998.0));
+}
+
+#[test]
+fn build_snapshots_filters_open_qty_and_unrealized_pnl_to_selected_contract() {
+    let mut store = UserSyncStore::default();
+    store.positions.insert(
+        42,
+        BTreeMap::from([
+            (
+                1,
+                json!({
+                    "id": 1,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "symbol": "ESM6",
+                    "netPos": 1,
+                    "netPrice": 5000.0,
+                    "unrealizedPnL": 50.0
+                }),
+            ),
+            (
+                2,
+                json!({
+                    "id": 2,
+                    "accountId": 42,
+                    "contractId": 4095561,
+                    "symbol": "GCQ6",
+                    "netPos": -3,
+                    "netPrice": 4100.0,
+                    "unrealizedPnL": -750.0
+                }),
+            ),
+        ]),
+    );
+    let accounts = vec![AccountInfo {
+        id: 42,
+        name: "sim".to_string(),
+        raw: json!({}),
+    }];
+    let market = MarketSnapshot {
+        contract_id: Some(3_570_918),
+        contract_name: Some("ESM6".to_string()),
+        value_per_point: Some(50.0),
+        ..MarketSnapshot::default()
+    };
+
+    let snapshots = store.build_snapshots(&accounts, Some(&market), &BTreeMap::new());
+    let snapshot = snapshots.first().expect("snapshot");
+
+    assert_eq!(snapshot.open_position_qty, Some(1.0));
+    assert_eq!(snapshot.market_position_qty, Some(1.0));
+    assert_eq!(snapshot.market_entry_price, Some(5_000.0));
+    assert_eq!(snapshot.unrealized_pnl, Some(50.0));
 }
 
 #[test]

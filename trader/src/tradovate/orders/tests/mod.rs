@@ -51,5 +51,6 @@ fn test_session() -> SessionState {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     }
 }

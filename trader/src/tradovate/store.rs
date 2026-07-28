@@ -56,6 +56,21 @@ impl UserSyncStore {
                     bucket.insert(entity_id, envelope.entity);
                 }
             }
+            "command" => {
+                if envelope.deleted {
+                    self.commands.remove(&entity_id);
+                } else {
+                    self.commands.insert(entity_id, envelope.entity);
+                }
+            }
+            "commandreport" => {
+                if envelope.deleted {
+                    self.command_reports.remove(&entity_id);
+                    self.reported_command_rejections.remove(&entity_id);
+                } else {
+                    self.command_reports.insert(entity_id, envelope.entity);
+                }
+            }
             "orderstrategy" => {
                 if envelope.deleted {
                     self.order_strategies.remove(&entity_id);
@@ -71,6 +86,12 @@ impl UserSyncStore {
                 }
             }
             "fill" => {
+                if envelope.deleted {
+                    self.history_fills.remove(&entity_id);
+                } else {
+                    self.history_fills
+                        .insert(entity_id, envelope.entity.clone());
+                }
                 let Some(account_id) = extract_account_id("fill", &envelope.entity) else {
                     return;
                 };
@@ -89,6 +110,13 @@ impl UserSyncStore {
                         .entry(account_id)
                         .or_default()
                         .insert(entity_id, envelope.entity);
+                }
+            }
+            "fillfee" => {
+                if envelope.deleted {
+                    self.fill_fees.remove(&entity_id);
+                } else {
+                    self.fill_fees.insert(entity_id, envelope.entity);
                 }
             }
             _ => {}
@@ -262,7 +290,9 @@ impl UserSyncStore {
                             )
                         })
                     });
-                let mut unrealized_pnl = sum_position_metric(
+                let selected_position =
+                    market.and_then(|market| best_market_position(raw_positions.iter(), market));
+                let account_unrealized_pnl = sum_position_metric(
                     &raw_positions,
                     &[
                         "unrealizedPnL",
@@ -276,10 +306,31 @@ impl UserSyncStore {
                         "openPnl",
                     ],
                 );
+                let mut unrealized_pnl = selected_position.and_then(|position| {
+                    pick_number(
+                        position,
+                        &[
+                            "unrealizedPnL",
+                            "unrealizedPnl",
+                            "floatingPnL",
+                            "floatingPnl",
+                            "openProfitAndLoss",
+                            "netPnL",
+                            "netPnl",
+                            "openPnL",
+                            "openPnl",
+                        ],
+                    )
+                });
                 unrealized_pnl = unrealized_pnl.or_else(|| {
                     market.and_then(|market| fallback_unrealized_pnl(&raw_positions, market))
                 });
-                net_liq = net_liq.or_else(|| match (balance, unrealized_pnl) {
+                let net_liq_unrealized = account_unrealized_pnl.or_else(|| {
+                    (raw_positions.len() == 1)
+                        .then_some(unrealized_pnl)
+                        .flatten()
+                });
+                net_liq = net_liq.or(match (balance, net_liq_unrealized) {
                     (Some(balance), Some(unrealized)) => Some(balance + unrealized),
                     _ => None,
                 });
@@ -301,15 +352,9 @@ impl UserSyncStore {
                     net_liq =
                         Some(balance.unwrap_or_default() + unrealized_pnl.unwrap_or_default());
                 }
-                let open_position_qty = sum_position_metric(
-                    &raw_positions,
-                    &["netPos", "netPosition", "qty", "quantity", "netQty"],
-                );
-                let market_position_qty = market
-                    .and_then(|market| best_market_position(raw_positions.iter(), market))
-                    .and_then(position_qty);
-                let market_entry_price =
-                    market.and_then(|market| weighted_market_entry_price(&raw_positions, market));
+                let market_position_qty = selected_position.and_then(position_qty);
+                let open_position_qty = market_position_qty;
+                let market_entry_price = selected_position.and_then(position_entry_price);
                 let (selected_contract_take_profit_price, selected_contract_stop_price) = market
                     .and_then(|market| {
                         market.contract_id.map(|contract_id| StrategyProtectionKey {
@@ -346,6 +391,12 @@ impl UserSyncStore {
 
     fn find_order(&self, account_id: i64, order_id: i64) -> Option<&Value> {
         self.orders.get(&account_id)?.get(&order_id)
+    }
+
+    fn find_order_by_id(&self, order_id: i64) -> Option<&Value> {
+        self.orders
+            .values()
+            .find_map(|orders| orders.get(&order_id))
     }
 
     fn contract_position_qty(&self, account_id: i64, contract: &ContractSuggestion) -> Option<f64> {
@@ -463,6 +514,8 @@ fn order_strategy_is_active(strategy: &Value) -> bool {
             | "closedstrategy"
             | "completed"
             | "completedstrategy"
+            | "executionfailed"
+            | "executionfailedstrategy"
             | "finished"
             | "finishedstrategy"
             | "inactive"
@@ -493,7 +546,8 @@ fn sum_position_metric(positions: &[Value], keys: &[&str]) -> Option<f64> {
 }
 
 fn is_replay_entity(value: &Value) -> bool {
-    value.get("source")
+    value
+        .get("source")
         .and_then(Value::as_str)
         .is_some_and(|source| source.eq_ignore_ascii_case("replay"))
 }
@@ -607,10 +661,6 @@ fn fallback_unrealized_pnl(positions: &[Value], market: &MarketSnapshot) -> Opti
     Some((last_close - entry_price) * qty * value_per_point)
 }
 
-fn weighted_market_entry_price(positions: &[Value], market: &MarketSnapshot) -> Option<f64> {
-    best_market_position(positions.iter(), market).and_then(position_entry_price)
-}
-
 fn best_contract_position<'a>(
     positions: impl IntoIterator<Item = &'a Value>,
     contract: &ContractSuggestion,
@@ -690,13 +740,8 @@ fn position_qty(position: &Value) -> Option<f64> {
     }
 
     let raw_qty = pick_number(position, &["qty", "quantity"])?;
-    let sign = position_side_sign(position).unwrap_or_else(|| {
-        if raw_qty < 0.0 {
-            -1.0
-        } else {
-            1.0
-        }
-    });
+    let sign =
+        position_side_sign(position).unwrap_or_else(|| if raw_qty < 0.0 { -1.0 } else { 1.0 });
     Some(raw_qty.abs() * sign)
 }
 
@@ -750,11 +795,9 @@ fn position_side_sign(position: &Value) -> Option<f64> {
         };
     }
 
-    position.get("isShort").and_then(Value::as_bool).map(|is_short| {
-        if is_short {
-            -1.0
-        } else {
-            1.0
-        }
-    })
+    position.get("isShort").and_then(Value::as_bool).map(
+        |is_short| {
+            if is_short { -1.0 } else { 1.0 }
+        },
+    )
 }

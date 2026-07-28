@@ -262,7 +262,8 @@ impl AccountSessionStats {
         }
 
         let previous_value = self.current_value;
-        let side = session_trade_side_for_delta(source, previous_position_side, current_position_side);
+        let side =
+            session_trade_side_for_delta(source, previous_position_side, current_position_side);
         let classification = classify_session_balance_delta(delta, fee_context);
         self.current_value = value;
         self.last_delta = Some(delta);
@@ -306,11 +307,7 @@ impl AccountSessionStats {
             let loss = trade_delta.abs();
             self.losses += 1;
             self.gross_losses += loss;
-            self.max_loss = Some(
-                self.max_loss
-                    .map(|value| value.max(loss))
-                    .unwrap_or(loss),
-            );
+            self.max_loss = Some(self.max_loss.map(|value| value.max(loss)).unwrap_or(loss));
         }
     }
 
@@ -331,8 +328,7 @@ impl AccountSessionStats {
     }
 
     fn session_pnl_per_hour(&self) -> Option<f64> {
-        self.elapsed_hours()
-            .map(|hours| self.session_pnl() / hours)
+        self.elapsed_hours().map(|hours| self.session_pnl() / hours)
     }
 
     fn trade_pnl_per_hour(&self) -> Option<f64> {
@@ -455,7 +451,11 @@ fn tracked_balance_value(snapshot: &AccountSnapshot) -> Option<(SessionStatSourc
                 .cash_balance
                 .map(|value| (SessionStatSource::CashBalance, value))
         })
-        .or_else(|| snapshot.net_liq.map(|value| (SessionStatSource::NetLiq, value)))?;
+        .or_else(|| {
+            snapshot
+                .net_liq
+                .map(|value| (SessionStatSource::NetLiq, value))
+        })?;
     value.is_finite().then_some((source, value))
 }
 
@@ -656,7 +656,10 @@ impl App {
     }
 
     fn selected_session_stats(&self) -> Option<&AccountSessionStats> {
-        let account_id = self.accounts.get(self.selected_account).map(|account| account.id)?;
+        let account_id = self
+            .accounts
+            .get(self.selected_account)
+            .map(|account| account.id)?;
         self.session_stats
             .accounts
             .get(&self.session_stats_key_for_account_id(account_id))
@@ -672,6 +675,50 @@ impl App {
 
     fn session_stats_log_section(&self) -> String {
         let mut body = String::new();
+        if let Some(history) = self.engine_history.as_ref() {
+            body.push_str("[engine_history]\n");
+            body.push_str("source: broker_attributed_orders_and_fills\n");
+            body.push_str(&format!("run_id: {}\n", history.run_id));
+            body.push_str(&format!(
+                "started_at: {}\n",
+                history.started_at_utc.to_rfc3339()
+            ));
+            body.push_str(&format!("account_id: {}\n", history.account_id));
+            body.push_str(&format!("account_name: {}\n", history.account_name));
+            body.push_str(&format!("contract_id: {}\n", history.contract_id));
+            body.push_str(&format!("contract_name: {}\n", history.contract_name));
+            body.push_str(&format!("position_qty: {}\n", history.position_qty));
+            body.push_str(&format!(
+                "average_entry_price: {}\n",
+                format_money(history.average_entry_price)
+            ));
+            body.push_str(&format!(
+                "realized_pnl: {}\n",
+                format_signed_money(Some(history.realized_pnl))
+            ));
+            body.push_str(&format!(
+                "unrealized_pnl: {}\n",
+                format_signed_money(Some(history.unrealized_pnl))
+            ));
+            body.push_str(&format!("fees: -{:.2}\n", history.fees));
+            body.push_str(&format!("wins: {}\n", history.wins));
+            body.push_str(&format!("losses: {}\n", history.losses));
+            body.push_str(&format!("fills: {}\n\n", history.fills.len()));
+            for fill in &history.fills {
+                body.push_str("[engine_history.fill]\n");
+                body.push_str(&format!("fill_id: {}\n", fill.fill_id));
+                body.push_str(&format!("order_id: {}\n", fill.order_id));
+                body.push_str(&format!("ts_ns: {}\n", fill.ts_ns));
+                body.push_str(&format!("side: {:?}\n", fill.side));
+                body.push_str(&format!("qty: {}\n", fill.qty));
+                body.push_str(&format!("price: {:.8}\n", fill.price));
+                body.push_str(&format!(
+                    "realized_pnl: {}\n\n",
+                    format_signed_money(Some(fill.realized_pnl))
+                ));
+            }
+            return body;
+        }
         body.push_str("[session_stats]\n");
         body.push_str(&format!("enabled: {}\n", self.session_stats.enabled));
         body.push_str(&format!(
@@ -739,11 +786,7 @@ impl App {
                     format_signed_money(Some(side_stats.pnl))
                 ));
                 body.push_str(&format!("{}_wins: {}\n", side.label(), side_stats.wins));
-                body.push_str(&format!(
-                    "{}_losses: {}\n",
-                    side.label(),
-                    side_stats.losses
-                ));
+                body.push_str(&format!("{}_losses: {}\n", side.label(), side_stats.losses));
             }
             body.push_str(&format!("start_value: {:.2}\n", stats.start_value));
             body.push_str(&format!("current_value: {:.2}\n", stats.current_value));

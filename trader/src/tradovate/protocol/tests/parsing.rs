@@ -126,3 +126,33 @@ fn parse_socket_response_maps_status_and_payload() {
         "websocket request failed (400): bad request"
     );
 }
+
+#[test]
+fn extract_sync_response_includes_commands_and_command_reports() {
+    let item = json!({
+        "i": 2,
+        "s": 200,
+        "d": {
+            "commands": [{
+                "id": 101,
+                "orderId": 101,
+                "commandStatus": "RiskRejected"
+            }],
+            "commandReports": [{
+                "id": 102,
+                "commandId": 101,
+                "commandStatus": "RiskRejected",
+                "rejectReason": "LiquidationOnlyBeforeExpiration"
+            }]
+        }
+    });
+
+    let envelopes = extract_entity_envelopes(&item);
+
+    assert!(envelopes.iter().any(|envelope| {
+        envelope.entity_type == "command" && extract_entity_id(&envelope.entity) == Some(101)
+    }));
+    assert!(envelopes.iter().any(|envelope| {
+        envelope.entity_type == "commandReport" && extract_entity_id(&envelope.entity) == Some(102)
+    }));
+}

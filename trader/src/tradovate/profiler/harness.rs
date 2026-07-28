@@ -414,6 +414,7 @@ fn format_log_line(processed: &ProcessedEvent) -> Option<String> {
     let message = match &processed.event {
         ServiceEvent::Status(message) => format!("STATUS {message}"),
         ServiceEvent::DebugLog(message) => format!("DEBUG {message}"),
+        ServiceEvent::BrokerRejection(message) => format!("REJECTED {message}"),
         ServiceEvent::Error(message) => format!("ERROR {message}"),
         ServiceEvent::Connected {
             broker,

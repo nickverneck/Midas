@@ -76,10 +76,13 @@ fn extract_response_entities(payload: &Value) -> Vec<EntityEnvelope> {
         ("cashBalance", "cashBalances"),
         ("position", "positions"),
         ("order", "orders"),
+        ("command", "commands"),
+        ("commandReport", "commandReports"),
         ("orderStrategy", "orderStrategies"),
         ("orderStrategyLink", "orderStrategyLinks"),
         ("executionReport", "executionReports"),
         ("fill", "fills"),
+        ("fillFee", "fillFees"),
     ] {
         if let Some(entity) = obj.get(key) {
             if entity.is_object() {

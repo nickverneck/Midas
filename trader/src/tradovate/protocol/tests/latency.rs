@@ -67,6 +67,7 @@ fn update_latency_from_order_strategy_link_binds_order_id() {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     };
     let mut latency = LatencySnapshot::default();
     let link = EntityEnvelope {
@@ -137,6 +138,7 @@ fn update_latency_from_envelope_records_seen_ack_and_fill() {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     };
     let mut latency = LatencySnapshot::default();
 
@@ -230,6 +232,7 @@ fn trade_marker_from_fill_uses_order_action_for_side_and_contract() {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     };
     let fill = json!({
         "id": 501,
@@ -324,6 +327,7 @@ fn trade_marker_from_sparse_fill_uses_tracked_order_account_without_id_fallback(
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     };
     let fill = json!({
         "id": 501,
@@ -373,6 +377,7 @@ fn historical_fill_without_account_id_does_not_use_fill_id_as_account_id() {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     };
     let fill = json!({
         "id": 501,
@@ -420,6 +425,7 @@ fn record_trade_marker_deduplicates_fill_ids() {
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     };
     let marker = TradeMarker {
         fill_id: Some(501),

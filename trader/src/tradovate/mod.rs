@@ -2,10 +2,10 @@
 use crate::broker::BarKind;
 use crate::broker::{
     AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, ExecutionProbeManagedProtection, ExecutionProbeOrder,
-    ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot,
-    ManualOrderAction, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed, ServiceCommand,
-    ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
+    ContractSuggestion, EngineHistoryFill, EngineHistorySnapshot, ExecutionProbeManagedProtection,
+    ExecutionProbeOrder, ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow,
+    LatencySnapshot, ManualOrderAction, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed,
+    ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;
@@ -29,7 +29,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::ToSocketAddrs;
@@ -50,6 +50,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 mod download;
 mod execution;
 mod gateway;
+mod history;
 mod orders;
 mod profiler;
 mod protocol;
@@ -62,15 +63,15 @@ pub use self::service::service_loop;
 pub use download::{
     TradovateChunkedRawTickCacheRequest, TradovateChunkedRawTickPhase,
     TradovateChunkedRawTickProgress, TradovateRawTickDownloadRequest,
-    TradovateReplayDownloadSession, TradovateServerBarDownloadRequest,
-    download_replay_raw_ticks, download_replay_raw_ticks_after_auth,
-    download_replay_raw_ticks_chunked_to_cache, download_replay_server_bars,
-    download_replay_server_bars_after_auth, inspect_replay_download_contract,
-    prepare_replay_download_session, prepare_replay_download_session_after_auth,
-    search_replay_download_contracts,
+    TradovateReplayDownloadSession, TradovateServerBarDownloadRequest, download_replay_raw_ticks,
+    download_replay_raw_ticks_after_auth, download_replay_raw_ticks_chunked_to_cache,
+    download_replay_server_bars, download_replay_server_bars_after_auth,
+    inspect_replay_download_contract, prepare_replay_download_session,
+    prepare_replay_download_session_after_auth, search_replay_download_contracts,
 };
 use execution::*;
 use gateway::*;
+use history::*;
 #[cfg(feature = "manual-orders")]
 use orders::dispatch_manual_order;
 use orders::{

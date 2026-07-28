@@ -16,15 +16,6 @@
 - [ ] Batch stepping performance profiling; reduce allocations in env step.
 - [ ] Slippage/commission configs per instrument; load from config file.
 
-## PyO3 / Python tooling
-- [ ] Replace deprecated PyO3/numpy APIs with bound versions to remove warnings.
-- [ ] Provide wheels/build script for Python 3.12+ (avoid ABI3 workaround if possible).
-- [ ] Add `python/examples`:
-  - [x] `train_ppo.py` using PyTorch (MLP policy) against batched env.
-  - [x] `train_ga.py` GA-only neuroevolution over multiple windows.
-  - [x] `train_hybrid.py` GA + PPO hybrid trainer.
-  - [x] All three examples deprecated and removed; functionality moved to Rust binaries.
-
 ## RL/GA logic
 - [ ] Implement PPO-style rollout/advantage calc with configurable reward weights (Sharpe/PnL/drawdown).
 - [ ] Implement GA fitness over multiple regimes: mean return/Sharpe, penalties for drawdown/std returns.
@@ -37,10 +28,30 @@
 
 ## CI / tests
 - [ ] Add Rust benches for env step and indicator computation.
-- [ ] Python tests for feature parity and PyO3 bindings.
 - [ ] Basic property tests for PnL accounting and drawdown metrics.
 
 ## Documentation
 - [x] Update README with build instructions (`uv` + `maturin develop --features python`).
 - [x] Update README to reflect Python deprecation and Rust as the main engine.
 - [ ] Quickstart for running EMA rule vs. feature-only RL training.
+
+## Frontend QoL (SvelteKit)
+### High priority
+- [x] [001] Fix active top nav state — make nav highlight correct section based on current route
+- [ ] [003] Prevent accidental training submit — remove implicit form submits, only Step 3 button triggers run
+- [ ] [004] Show supported training backends — disable unavailable backends in train forms
+- [ ] [009] Link validation errors to fields — make errors actionable per field, not just a generic list
+
+### Medium priority
+- [ ] [002] Align train analytics back link — back link should depend on trainMode (GA vs RL)
+- [ ] [005] Improve collapsed sidebars — visible expand buttons, labels, and tooltips
+- [ ] [006] Add GA run folder picker — mirror the RL folder picker experience
+- [ ] [007] Make backtest demo state unmistakable — clearly separate demo from real run data
+- [ ] [008] Wire script load or remove disabled button — implement .lua loading or remove the button
+- [ ] [010] Simplify analyzer setup flow — guided flow with advanced settings secondary
+- [ ] [011] Highlight selected analyzer cell — persistent selected state on heatmap cells
+- [ ] [012] Add RL chart inspection controls — zoom/window/reset, increase height, show epoch range
+
+### Low priority
+- [ ] [013] Clarify RL fitness weight controls — readable labels, reset action, formula summary
+- [ ] [014] Stabilize training log timestamps — store timestamp at append time, not render time

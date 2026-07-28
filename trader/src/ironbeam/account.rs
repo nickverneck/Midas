@@ -105,18 +105,9 @@ pub(super) fn rebuild_account_snapshots(session: &mut IronbeamSession) {
                     .iter()
                     .find(|position| position_symbol(position) == Some(symbol))
             });
-            let open_position_qty = raw_positions
-                .iter()
-                .filter_map(signed_position_qty)
-                .map(f64::abs)
-                .sum::<f64>();
+            let selected_position_qty = selected_position.and_then(signed_position_qty);
             let unrealized_pnl = selected_position
-                .and_then(|position| pick_number(position, &["unrealizedPL", "unrealizedPnl"]))
-                .or_else(|| {
-                    balance
-                        .as_ref()
-                        .and_then(|item| pick_number(item, &["openTradeEquity"]))
-                });
+                .and_then(|position| pick_number(position, &["unrealizedPL", "unrealizedPnl"]));
 
             let protection = selected_contract_id.and_then(|contract_id| {
                 session.managed_protection.get(&ProtectionKey {
@@ -160,8 +151,8 @@ pub(super) fn rebuild_account_snapshots(session: &mut IronbeamSession) {
                     .and_then(|item| {
                         pick_number(item, &["initialTotalMargin", "maintenanceTotalMargin"])
                     }),
-                open_position_qty: (open_position_qty > 0.0).then_some(open_position_qty),
-                market_position_qty: selected_position.and_then(signed_position_qty),
+                open_position_qty: selected_position_qty,
+                market_position_qty: selected_position_qty,
                 market_entry_price: selected_position.and_then(position_entry_price),
                 selected_contract_take_profit_price: protection.and_then(|state| {
                     state

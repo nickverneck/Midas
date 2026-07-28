@@ -136,6 +136,20 @@ struct SessionState {
     managed_protection: BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     active_order_strategy: Option<TrackedOrderStrategy>,
     next_strategy_order_nonce: u64,
+    engine_run: Option<EngineRunState>,
+}
+
+#[derive(Debug, Clone)]
+struct EngineRunState {
+    run_id: String,
+    order_prefix: String,
+    started_at_utc: DateTime<Utc>,
+    account_id: i64,
+    account_name: String,
+    contract_id: i64,
+    contract_name: String,
+    owned_order_ids: BTreeSet<i64>,
+    history: EngineHistorySnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +208,12 @@ struct UserSyncStore {
     cash: BTreeMap<i64, Value>,
     positions: BTreeMap<i64, BTreeMap<i64, Value>>,
     orders: BTreeMap<i64, BTreeMap<i64, Value>>,
+    commands: BTreeMap<i64, Value>,
+    command_reports: BTreeMap<i64, Value>,
+    reported_command_rejections: BTreeSet<i64>,
     fills: BTreeMap<i64, BTreeMap<i64, Value>>,
+    history_fills: BTreeMap<i64, Value>,
+    fill_fees: BTreeMap<i64, Value>,
     order_strategies: BTreeMap<i64, Value>,
     order_strategy_links: BTreeMap<i64, Value>,
 }

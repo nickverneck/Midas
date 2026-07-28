@@ -2,6 +2,27 @@ use super::super::*;
 
 impl App {
     pub(in crate::app) fn session_stats_overview_lines(&self) -> Vec<Line<'static>> {
+        if let Some(history) = self.engine_history.as_ref() {
+            return vec![
+                Line::from("Tracking: broker-attributed engine orders and fills"),
+                Line::from(format!("Run: {}", history.run_id)),
+                Line::from(format!(
+                    "Started: {}",
+                    format_session_stats_timestamp(history.started_at_utc, true)
+                )),
+                Line::from(format!(
+                    "Account: {} ({})",
+                    history.account_name, history.account_id
+                )),
+                Line::from(format!(
+                    "Contract: {} ({})",
+                    history.contract_name, history.contract_id
+                )),
+                Line::from(format!("Broker fills: {}", history.fills.len())),
+                Line::from("Only this run's tagged strategy/direct orders are included."),
+                Line::from("Manual Web UI and other-engine orders are excluded."),
+            ];
+        }
         let selected_account = self
             .accounts
             .get(self.selected_account)
@@ -55,6 +76,44 @@ impl App {
     }
 
     pub(in crate::app) fn selected_session_stats_lines(&self) -> Vec<Line<'static>> {
+        if let Some(history) = self.engine_history.as_ref() {
+            let net_pnl = history.realized_pnl + history.unrealized_pnl;
+            return vec![
+                Line::from(format!(
+                    "Engine run: {} on {}",
+                    history.run_id, history.contract_name
+                )),
+                Line::from(format!(
+                    "Position: {}  Entry: {}",
+                    history.position_qty,
+                    format_money(history.average_entry_price)
+                )),
+                Line::from(vec![
+                    Span::raw("Realized: "),
+                    Span::styled(
+                        format_signed_money(Some(history.realized_pnl)),
+                        pnl_style(Some(history.realized_pnl)),
+                    ),
+                    Span::raw("  Unrealized: "),
+                    Span::styled(
+                        format_signed_money(Some(history.unrealized_pnl)),
+                        pnl_style(Some(history.unrealized_pnl)),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("Net: "),
+                    Span::styled(format_signed_money(Some(net_pnl)), pnl_style(Some(net_pnl))),
+                    Span::raw(format!("  Fees: -{:.2}", history.fees)),
+                ]),
+                Line::from(format!(
+                    "Fills: {}  Wins: {}  Losses: {}",
+                    history.fills.len(),
+                    history.wins,
+                    history.losses
+                )),
+                Line::from("Source: broker orders → strategy links → fills"),
+            ];
+        }
         if !self.session_stats.enabled {
             return vec![
                 Line::from("Session stats tracking is disabled."),
@@ -174,6 +233,33 @@ impl App {
     }
 
     pub(in crate::app) fn session_stats_event_lines(&self, limit: usize) -> Vec<Line<'static>> {
+        if let Some(history) = self.engine_history.as_ref() {
+            if history.fills.is_empty() {
+                return vec![Line::from(
+                    "No broker-attributed fills for this engine run yet.",
+                )];
+            }
+            return history
+                .fills
+                .iter()
+                .rev()
+                .take(limit)
+                .map(|fill| {
+                    let side = match fill.side {
+                        TradeMarkerSide::Buy => "BUY",
+                        TradeMarkerSide::Sell => "SELL",
+                    };
+                    Line::from(format!(
+                        "{side} {} @ {:.2} | pnl {} | fill {} order {}",
+                        fill.qty,
+                        fill.price,
+                        format_signed_money(Some(fill.realized_pnl)),
+                        fill.fill_id,
+                        fill.order_id
+                    ))
+                })
+                .collect();
+        }
         if !self.session_stats.enabled {
             return vec![Line::from(
                 "Tracking is disabled, so no balance-delta events were recorded.",

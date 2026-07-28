@@ -2,9 +2,9 @@
 use crate::broker::ManualOrderAction;
 use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BarType, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, InstrumentSessionWindow, LatencySnapshot, MarketSnapshot, ReplaySpeed,
-    ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers,
-    default_broker,
+    ContractSuggestion, EngineHistorySnapshot, InstrumentSessionWindow, LatencySnapshot,
+    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
+    TradeMarkerSide, compiled_brokers, default_broker,
 };
 #[cfg(feature = "replay")]
 use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};
@@ -67,11 +67,13 @@ pub struct App {
     candle_mode: CandleMode,
     contract_results: Vec<ContractSuggestion>,
     selected_contract: usize,
+    pending_contract_override: Option<i64>,
     market: MarketSnapshot,
     logs: VecDeque<LogEntry>,
     persisted_logs: VecDeque<LogEntry>,
     last_saved_log_path: Option<PathBuf>,
     session_stats: SessionStatsState,
+    engine_history: Option<EngineHistorySnapshot>,
     session_stats_show_fees: bool,
     dashboard_visuals_enabled: bool,
     strategy_runtime: StrategyRuntimeState,

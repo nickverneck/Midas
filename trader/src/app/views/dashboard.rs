@@ -79,6 +79,7 @@ impl App {
         };
 
         let trade_levels = self.displayed_trade_levels();
+        let selected_unrealized = self.selected_contract_unrealized_pnl(snapshot);
         let tp_label = if trade_levels.take_profit_projected {
             "TP*"
         } else {
@@ -117,7 +118,7 @@ impl App {
             )
         };
 
-        vec![
+        let mut lines = vec![
             Line::from(format!("Acct: {}", snapshot.account_name)),
             Line::from(format!(
                 "Bal: {}  Cash: {}",
@@ -130,20 +131,19 @@ impl App {
                 format_money(snapshot.intraday_margin),
             )),
             Line::from(vec![
-                Span::raw("Session: "),
+                Span::raw("Account realized: "),
                 Span::styled(
                     format_signed_money(snapshot.realized_pnl),
                     pnl_style(snapshot.realized_pnl),
                 ),
-                Span::raw("  Unreal: "),
+                Span::raw("  Selected unreal: "),
                 Span::styled(
-                    format_signed_money(snapshot.unrealized_pnl),
-                    pnl_style(snapshot.unrealized_pnl),
+                    format_signed_money(selected_unrealized),
+                    pnl_style(selected_unrealized),
                 ),
             ]),
             Line::from(format!(
-                "Open: {}  Sel: {}",
-                format_quantity(snapshot.open_position_qty),
+                "Selected position: {}",
                 format_quantity(snapshot.market_position_qty),
             )),
             Line::from(format!(
@@ -165,6 +165,18 @@ impl App {
                 None => "Contract: none".to_string(),
             }),
             Line::from(hotkeys),
-        ]
+        ];
+        if let Some(history) = self.engine_history.as_ref() {
+            let net = history.realized_pnl + history.unrealized_pnl;
+            lines.insert(
+                5,
+                Line::from(vec![
+                    Span::raw("Engine run: "),
+                    Span::styled(format_signed_money(Some(net)), pnl_style(Some(net))),
+                    Span::raw(format!("  fills {}", history.fills.len())),
+                ]),
+            );
+        }
+        lines
     }
 }

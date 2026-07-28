@@ -322,5 +322,61 @@ async fn search_contracts(
             });
         }
     }
+    enrich_contract_maturities(client, env, token, &mut out).await;
     Ok(out)
+}
+
+async fn enrich_contract_maturities(
+    client: &Client,
+    env: &TradingEnvironment,
+    token: &str,
+    contracts: &mut [ContractSuggestion],
+) {
+    let maturity_ids = contracts
+        .iter()
+        .filter_map(|contract| json_i64(&contract.raw, "contractMaturityId"))
+        .collect::<Vec<_>>();
+    if maturity_ids.is_empty() {
+        return;
+    }
+
+    let url = format!("{}/contractMaturity/items", env.rest_url());
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .query(&[(
+            "ids",
+            maturity_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        )])
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return;
+    };
+    if !response.status().is_success() {
+        return;
+    }
+    let Ok(maturities) = response.json::<Vec<Value>>().await else {
+        return;
+    };
+    let maturities = maturities
+        .into_iter()
+        .filter_map(|maturity| json_i64(&maturity, "id").map(|id| (id, maturity)))
+        .collect::<HashMap<_, _>>();
+
+    for contract in contracts {
+        let Some(maturity_id) = json_i64(&contract.raw, "contractMaturityId") else {
+            continue;
+        };
+        let Some(maturity) = maturities.get(&maturity_id) else {
+            continue;
+        };
+        if let Some(raw) = contract.raw.as_object_mut() {
+            raw.insert("_midasContractMaturity".to_string(), maturity.clone());
+        }
+    }
 }

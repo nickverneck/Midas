@@ -243,7 +243,11 @@ pub(crate) fn build_market_order_request(
     interrupt_order_strategy_id: Option<i64>,
     cancel_order_ids: Vec<i64>,
 ) -> PendingMarketOrder {
-    let cl_ord_id = next_strategy_cl_ord_id(session, "entry");
+    let cl_ord_id = if automated {
+        next_strategy_cl_ord_id(session, "entry")
+    } else {
+        next_unattributed_cl_ord_id(session, "entry")
+    };
     let current_qty = session
         .user_store
         .contract_position_qty(account.id, contract)
@@ -303,7 +307,11 @@ pub(super) fn build_liquidation_request(
 ) -> PendingLiquidation {
     PendingLiquidation {
         simulate: session.replay_enabled,
-        request_id: next_strategy_cl_ord_id(session, "liquidate"),
+        request_id: if automated {
+            next_strategy_cl_ord_id(session, "liquidate")
+        } else {
+            next_unattributed_cl_ord_id(session, "liquidate")
+        },
         payload: json!({
             "accountId": account.id,
             "contractId": contract.id,

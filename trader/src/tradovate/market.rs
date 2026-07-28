@@ -82,8 +82,11 @@ async fn seed_user_store(
         "cashBalance",
         "position",
         "order",
+        "command",
         "orderStrategy",
         "orderStrategyLink",
+        "fill",
+        "fillFee",
     ] {
         let Ok(items) = fetch_entity_list(client, env, token, entity).await else {
             continue;
@@ -293,10 +296,13 @@ async fn user_sync_worker_inner(
                                 "cashBalance",
                                 "position",
                                 "order",
+                                "command",
+                                "commandReport",
                                 "orderStrategy",
                                 "orderStrategyLink",
                                 "executionReport",
-                                "fill"
+                                "fill",
+                                "fillFee"
                             ]
                         });
                         write
@@ -312,7 +318,16 @@ async fn user_sync_worker_inner(
                     }
 
                     if status == Some(200) && response_id == sync_id {
-                        let envelopes = extract_entity_envelopes(&item);
+                        let mut envelopes = extract_entity_envelopes(&item);
+                        // Commands and command reports are subscribed above so future broker
+                        // rejections arrive as live props events. Do not replay historical
+                        // rejection reports from the initial account snapshot as new errors.
+                        envelopes.retain(|envelope| {
+                            !envelope.entity_type.eq_ignore_ascii_case("command")
+                                && !envelope
+                                    .entity_type
+                                    .eq_ignore_ascii_case("commandReport")
+                        });
                         if !envelopes.is_empty() {
                             let _ = internal_tx.send(InternalEvent::UserEntities(envelopes));
                         }

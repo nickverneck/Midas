@@ -154,6 +154,9 @@ impl EngineSummary {
                 self.latest_status = Some(message.clone());
             }
             ServiceEvent::DebugLog(_) => {}
+            ServiceEvent::BrokerRejection(message) => {
+                self.latest_status = Some(format!("Rejected: {message}"));
+            }
             ServiceEvent::Error(message) => {
                 self.connection_state = EngineConnectionState::Error;
                 self.latest_error = Some(message.clone());
@@ -201,6 +204,7 @@ impl EngineSummary {
                 }
             }
             ServiceEvent::TradeMarkersUpdated(_) => {}
+            ServiceEvent::EngineHistoryUpdated(_) => {}
             ServiceEvent::Latency(snapshot) => {
                 self.latency = *snapshot;
             }

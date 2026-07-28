@@ -628,6 +628,41 @@ fn engine_summary_tracks_disconnect_and_error_events() {
 }
 
 #[test]
+fn broker_rejection_is_prominent_without_marking_engine_connection_failed() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        true,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::BrokerRejection("GCQ6 liquidation only".to_string()),
+        true,
+        &cmd_tx,
+    );
+
+    let summary = app
+        .engine_summaries
+        .iter()
+        .find(|summary| summary.key == key)
+        .expect("expected engine summary");
+    assert_eq!(summary.connection_state, EngineConnectionState::Connected);
+    assert_eq!(summary.status_label(), "Rejected: GCQ6 liquidation only");
+    assert_eq!(app.status, "Rejected: GCQ6 liquidation only");
+    assert!(
+        app.persisted_logs
+            .iter()
+            .any(|entry| entry.message == "REJECTED: GCQ6 liquidation only")
+    );
+}
+
+#[test]
 fn inactive_engine_events_do_not_mutate_detail_state() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -3817,6 +3852,41 @@ fn session_stats_identity_keeps_same_account_separate_by_active_engine() {
 }
 
 #[test]
+fn account_snapshot_changes_do_not_mutate_broker_attributed_engine_history() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(7, "SIM")];
+    let history = EngineHistorySnapshot {
+        run_id: "gc-run".to_string(),
+        started_at_utc: chrono::Utc::now(),
+        account_id: 7,
+        account_name: "SIM".to_string(),
+        contract_id: 4_095_561,
+        contract_name: "GCQ6".to_string(),
+        position_qty: 0,
+        average_entry_price: None,
+        realized_pnl: 240.0,
+        unrealized_pnl: 0.0,
+        fees: 2.0,
+        wins: 1,
+        losses: 0,
+        fills: Vec::new(),
+    };
+    app.handle_service_event(ServiceEvent::EngineHistoryUpdated(history.clone()), &cmd_tx);
+
+    app.handle_service_event(
+        ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(7, "SIM", 101_000.0)]),
+        &cmd_tx,
+    );
+
+    assert_eq!(app.engine_history.as_ref(), Some(&history));
+    let lines = rendered_text(app.selected_session_stats_lines());
+    assert!(lines.iter().any(|line| line.contains("GCQ6")));
+    assert!(lines.iter().any(|line| line.contains("240.00")));
+    assert!(lines.iter().all(|line| !line.contains("101000")));
+}
+
+#[test]
 fn log_panel_lines_include_last_saved_path_stably() {
     let mut app = App::new(AppConfig::default());
     app.last_saved_log_path = Some(PathBuf::from(".run/trader-logs/session-test.txt"));
@@ -3903,6 +3973,37 @@ fn dashboard_hides_manual_order_affordances_without_capability() {
     app.handle_dashboard_key(key(KeyCode::Char('b')), &cmd_tx);
 
     assert!(cmd_rx.try_recv().is_err());
+}
+
+#[test]
+fn dashboard_selected_unrealized_pnl_reprices_from_live_market_without_account_refresh() {
+    let mut app = App::new(AppConfig::default());
+    app.accounts = vec![account(1, "SIM")];
+    app.account_snapshots = vec![account_snapshot(1, Some(1.0), Some(5_000.0), None, None)];
+    app.market.contract_id = Some(3_570_918);
+    app.market.contract_name = Some("ESM6".to_string());
+    app.market.value_per_point = Some(50.0);
+    app.market.bars = vec![crate::broker::Bar {
+        ts_ns: 1,
+        open: 5_000.0,
+        high: 5_001.0,
+        low: 4_999.0,
+        close: 5_001.0,
+        volume: None,
+    }];
+
+    let snapshot = app.selected_snapshot().expect("selected snapshot");
+    assert_eq!(app.selected_contract_unrealized_pnl(snapshot), Some(50.0));
+
+    app.market.bars.last_mut().expect("forming bar").close = 5_002.0;
+
+    let snapshot = app.selected_snapshot().expect("same account snapshot");
+    assert_eq!(app.selected_contract_unrealized_pnl(snapshot), Some(100.0));
+    assert!(
+        rendered_text(app.stats_lines())
+            .iter()
+            .any(|line| line.contains("Selected unreal") && line.contains("100.00"))
+    );
 }
 
 #[test]
@@ -4003,6 +4104,51 @@ fn contract_selection_syncs_selected_account_before_subscribe() {
         }
         _ => panic!("expected subscribe-bars command"),
     }
+}
+
+#[test]
+fn blocked_contract_requires_second_enter_to_override() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(1, "DEMO4769136")];
+    app.contract_results = vec![ContractSuggestion {
+        id: 4_095_561,
+        name: "GCQ6".to_string(),
+        description: "Gold August 2026".to_string(),
+        raw: json!({
+            "contractMaturityId": 59107,
+            "_midasContractMaturity": {
+                "id": 59107,
+                "expirationDate": "2026-08-27T17:30Z",
+                "firstIntentDate": "2026-07-31T00:00Z",
+                "archived": false
+            }
+        }),
+    }];
+    app.focus = Focus::ContractList;
+
+    app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(app.status.contains("BLOCKED"));
+    assert!(app.status.contains("Press Enter again to override"));
+    assert_ne!(app.screen, Screen::Strategy);
+
+    app.handle_selection_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected override subscription") {
+        ServiceCommand::SubscribeBars { contract, .. } => {
+            assert_eq!(contract.name, "GCQ6");
+        }
+        _ => panic!("expected subscribe-bars command"),
+    }
+    assert_eq!(app.screen, Screen::Strategy);
+    assert!(
+        app.persisted_logs
+            .iter()
+            .any(|entry| entry.message.contains("safety override accepted for GCQ6"))
+    );
 }
 
 #[test]

@@ -63,10 +63,31 @@ fn ensure_no_market_order_submit_in_flight(session: &SessionState) -> Result<()>
 }
 
 fn next_strategy_cl_ord_id(session: &mut SessionState, suffix: &str) -> String {
+    next_order_cl_ord_id(session, suffix, true)
+}
+
+fn next_unattributed_cl_ord_id(session: &mut SessionState, suffix: &str) -> String {
+    next_order_cl_ord_id(session, suffix, false)
+}
+
+fn next_order_cl_ord_id(
+    session: &mut SessionState,
+    suffix: &str,
+    attribute_to_engine_run: bool,
+) -> String {
     let nonce = session.next_strategy_order_nonce;
     session.next_strategy_order_nonce = session.next_strategy_order_nonce.saturating_add(1);
     let ts = Utc::now().timestamp_millis();
-    format!("midas-{ts}-{nonce}-{suffix}")
+    let prefix = if attribute_to_engine_run {
+        session
+            .engine_run
+            .as_ref()
+            .map(|run| run.order_prefix.as_str())
+            .unwrap_or("midas")
+    } else {
+        "midas-manual"
+    };
+    format!("{prefix}-{ts}-{nonce}-{suffix}")
 }
 
 #[cfg(test)]

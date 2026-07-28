@@ -224,6 +224,7 @@ fn event_message(event: &ServiceEvent) -> Option<&str> {
     match event {
         ServiceEvent::Status(message)
         | ServiceEvent::DebugLog(message)
+        | ServiceEvent::BrokerRejection(message)
         | ServiceEvent::Error(message) => Some(message),
         _ => None,
     }

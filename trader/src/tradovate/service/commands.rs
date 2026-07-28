@@ -207,7 +207,7 @@ pub(super) async fn handle_command(
             cancel_replay_operation(operation_id, state, event_tx).await;
             Ok(())
         }
-        ServiceCommand::ReplayState => replay_state(state, event_tx),
+        ServiceCommand::ReplayState => replay_state(state, event_tx).await,
         ServiceCommand::SelectAccount { account_id } => {
             select_account(account_id, state, event_tx, internal_tx)
         }
@@ -774,6 +774,7 @@ async fn connect_live_session(
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     });
     if let Some(session) = state.session.as_ref() {
         emit_execution_state(event_tx, session);
@@ -845,6 +846,7 @@ async fn enter_replay_mode(
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,
+        engine_run: None,
     });
 
     let _ = event_tx.send(ServiceEvent::Connected {
@@ -880,11 +882,15 @@ async fn enter_replay_mode(
     Ok(())
 }
 
-fn replay_state(state: &ServiceState, event_tx: &UnboundedSender<ServiceEvent>) -> Result<()> {
-    let Some(session) = state.session.as_ref() else {
+pub(super) async fn replay_state(
+    state: &mut ServiceState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) -> Result<()> {
+    let Some(session) = state.session.as_mut() else {
         let _ = event_tx.send(ServiceEvent::Disconnected);
         return Ok(());
     };
+    refresh_engine_history_from_broker(&state.client, session).await;
     let _ = event_tx.send(ServiceEvent::Connected {
         broker: BrokerKind::Tradovate,
         env: session.cfg.env,
@@ -906,6 +912,7 @@ fn replay_state(state: &ServiceState, event_tx: &UnboundedSender<ServiceEvent>) 
         let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
     }
     emit_execution_state(event_tx, session);
+    emit_engine_history(event_tx, session);
     Ok(())
 }
 
@@ -976,6 +983,7 @@ async fn subscribe_bars(
     session.market = MarketSnapshot::default();
     let _ = market_tx.send(MarketSnapshot::default());
     session.selected_contract = Some(contract.clone());
+    session.engine_run = None;
     session.active_order_strategy = None;
     session.bar_type = bar_type;
     session.candle_mode = candle_mode;
@@ -1200,8 +1208,20 @@ fn arm_execution_strategy_command(
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };
+    let was_armed = session.execution_runtime.armed;
     arm_execution_strategy(session);
+    if session.execution_runtime.armed
+        && !was_armed
+        && let Err(err) = start_engine_run(session)
+    {
+        session.execution_runtime.armed = false;
+        session.execution_runtime.last_summary =
+            format!("Strategy arm failed before history start: {err}");
+        emit_execution_state(event_tx, session);
+        return Err(err);
+    }
     emit_execution_state(event_tx, session);
+    emit_engine_history(event_tx, session);
     Ok(())
 }
 

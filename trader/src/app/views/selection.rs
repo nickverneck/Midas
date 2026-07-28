@@ -47,6 +47,12 @@ impl App {
                 None => "Selected contract: none".to_string(),
             }),
         ];
+        if let Some(contract) = self.contract_results.get(self.selected_contract) {
+            lines.push(Line::from(format!(
+                "Contract status: {}",
+                contract.trade_status().label()
+            )));
+        }
         if self.candle_mode_controls_visible() {
             lines.insert(
                 3,

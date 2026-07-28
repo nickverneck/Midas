@@ -253,11 +253,7 @@ impl App {
         }
     }
 
-    fn set_replay_speed(
-        &mut self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-        speed: ReplaySpeed,
-    ) {
+    fn set_replay_speed(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>, speed: ReplaySpeed) {
         if self.session_kind != SessionKind::Replay || self.replay_speed == speed {
             return;
         }
@@ -277,6 +273,26 @@ impl App {
         let account = self.accounts.get(self.selected_account)?;
         self.snapshot_for_account(account.id)
     }
+
+    fn selected_contract_unrealized_pnl(&self, snapshot: &AccountSnapshot) -> Option<f64> {
+        let marked = snapshot
+            .market_position_qty
+            .filter(|qty| qty.is_finite())
+            .zip(
+                snapshot
+                    .market_entry_price
+                    .filter(|price| price.is_finite()),
+            )
+            .zip(self.market.bars.last().map(|bar| bar.close))
+            .zip(
+                self.market
+                    .value_per_point
+                    .filter(|value| value.is_finite() && *value > 0.0),
+            )
+            .map(|(((qty, entry), mark), value_per_point)| (mark - entry) * qty * value_per_point);
+        marked.or(snapshot.unrealized_pnl)
+    }
+
     fn snapshot_for_account(&self, account_id: i64) -> Option<&AccountSnapshot> {
         self.account_snapshots
             .iter()
@@ -304,12 +320,7 @@ impl App {
             BrokerKind::Tradovate => {
                 order.splice(
                     7..7,
-                    [
-                        Focus::AppId,
-                        Focus::AppVersion,
-                        Focus::Cid,
-                        Focus::Secret,
-                    ],
+                    [Focus::AppId, Focus::AppVersion, Focus::Cid, Focus::Secret],
                 );
             }
         }
@@ -344,10 +355,7 @@ impl App {
                             Focus::HmaTrailingStop,
                         ]);
                         if self.strategy.native_hma.use_trailing_stop {
-                            order.extend([
-                                Focus::HmaTrailTriggerTicks,
-                                Focus::HmaTrailOffsetTicks,
-                            ]);
+                            order.extend([Focus::HmaTrailTriggerTicks, Focus::HmaTrailOffsetTicks]);
                         }
                     }
                 }
@@ -370,10 +378,7 @@ impl App {
                             _ => self.strategy.native_ema.use_trailing_stop,
                         };
                         if use_trailing_stop {
-                            order.extend([
-                                Focus::EmaTrailTriggerTicks,
-                                Focus::EmaTrailOffsetTicks,
-                            ]);
+                            order.extend([Focus::EmaTrailTriggerTicks, Focus::EmaTrailOffsetTicks]);
                         }
                     }
                 }
@@ -398,10 +403,7 @@ impl App {
         if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
         }
-        order.extend([
-            Focus::InstrumentQuery,
-            Focus::ContractList,
-        ]);
+        order.extend([Focus::InstrumentQuery, Focus::ContractList]);
         order
     }
 
@@ -655,9 +657,7 @@ impl App {
             .accounts
             .get(self.selected_account)
             .map(|account| (account.id, account.name.as_str()));
-        let selected_account_name = selected_account
-            .map(|(_, name)| name)
-            .unwrap_or("none");
+        let selected_account_name = selected_account.map(|(_, name)| name).unwrap_or("none");
         let selected_account_id = selected_account
             .map(|(id, _)| id.to_string())
             .unwrap_or_else(|| "none".to_string());
@@ -726,7 +726,10 @@ impl App {
             self.capabilities.native_protection
         ));
         body.push_str(&format!("strategy: {}\n", self.strategy.summary_label()));
-        body.push_str(&format!("strategy_order_qty: {}\n", self.strategy.order_qty));
+        body.push_str(&format!(
+            "strategy_order_qty: {}\n",
+            self.strategy.order_qty
+        ));
         body.push_str(&format!(
             "order_time_in_force: {}\n",
             self.base_config.time_in_force
@@ -793,7 +796,9 @@ impl App {
         body.push_str(&format!("selected_account_name: {selected_account_name}\n"));
         body.push_str(&format!("selected_contract: {selected_contract_name}\n"));
         body.push_str(&format!("selected_contract_id: {selected_contract_id}\n"));
-        body.push_str(&format!("selected_contract_name: {selected_contract_name}\n"));
+        body.push_str(&format!(
+            "selected_contract_name: {selected_contract_name}\n"
+        ));
         body.push_str(&format!("bar_type: {}\n", self.bar_type.label()));
         if self.bar_type.supports_candle_mode() {
             body.push_str(&format!("candle_mode: {}\n", self.candle_mode.label()));
@@ -826,7 +831,10 @@ impl App {
     fn active_engine_socket_label(&self) -> String {
         self.engine_socket_path
             .as_ref()
-            .or_else(|| self.active_engine_summary().map(|summary| &summary.socket_path))
+            .or_else(|| {
+                self.active_engine_summary()
+                    .map(|summary| &summary.socket_path)
+            })
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "none".to_string())
     }
@@ -895,10 +903,7 @@ impl App {
             .iter()
             .find(|summary| &summary.key == engine_key)
         else {
-            return format!(
-                "Engine {} connection closed.",
-                engine_key.display_label()
-            );
+            return format!("Engine {} connection closed.", engine_key.display_label());
         };
 
         format!(
@@ -981,7 +986,10 @@ impl App {
             "strategy_runtime_summary: {}\n",
             sanitize_persisted_log_message(&self.strategy_runtime_summary())
         ));
-        body.push_str(&format!("pending_target: {}\n", self.pending_target_label()));
+        body.push_str(&format!(
+            "pending_target: {}\n",
+            self.pending_target_label()
+        ));
         body.push_str(&format!("latency_summary: {}\n", self.latency_summary()));
         if let Some(stats) = self.selected_session_stats() {
             body.push_str(&format!(
@@ -1136,12 +1144,13 @@ impl App {
         {
             warnings.push("Closed-bar timing will wait for completed bars.".to_string());
         }
-        if self.native_protection_controls_visible() && !self.active_native_uses_broker_owned_protection() {
+        if self.native_protection_controls_visible()
+            && !self.active_native_uses_broker_owned_protection()
+        {
             warnings.push("No TP/SL/trailing protection is configured.".to_string());
         }
 
-        if self.active_native_uses_broker_owned_protection()
-            && !self.capabilities.native_protection
+        if self.active_native_uses_broker_owned_protection() && !self.capabilities.native_protection
         {
             blockers.push("Native protection is unavailable for this engine.".to_string());
         } else {
@@ -1252,9 +1261,7 @@ impl App {
         match self.strategy.native_strategy {
             NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
             NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
-            NativeStrategyKind::HmaCross => {
-                self.strategy.native_hma_cross.uses_native_protection()
-            }
+            NativeStrategyKind::HmaCross => self.strategy.native_hma_cross.uses_native_protection(),
         }
     }
 
@@ -1324,14 +1331,9 @@ impl App {
     }
 
     fn session_window_at(&self, ts_ns: i64) -> Option<InstrumentSessionWindow> {
-        self.market
-            .session_profile
-            .map(|profile| {
-                profile.evaluate_with_blockout(
-                    ts_ns,
-                    self.strategy.blockout_minutes_before_close,
-                )
-            })
+        self.market.session_profile.map(|profile| {
+            profile.evaluate_with_blockout(ts_ns, self.strategy.blockout_minutes_before_close)
+        })
     }
 
     fn latest_session_window(&self) -> Option<InstrumentSessionWindow> {
@@ -1421,7 +1423,8 @@ impl App {
         };
 
         if levels.take_profit_price.is_none() {
-            levels.take_profit_price = self.projected_native_take_profit_price(entry_price, signed_qty);
+            levels.take_profit_price =
+                self.projected_native_take_profit_price(entry_price, signed_qty);
             levels.take_profit_projected = levels.take_profit_price.is_some();
         }
         if levels.stop_price.is_none() {
@@ -1518,17 +1521,20 @@ impl App {
     }
 
     fn projected_native_take_profit_price(&self, entry_price: f64, signed_qty: i32) -> Option<f64> {
-        if self.strategy.kind != StrategyKind::Native || !entry_price.is_finite() || signed_qty == 0 {
+        if self.strategy.kind != StrategyKind::Native || !entry_price.is_finite() || signed_qty == 0
+        {
             return None;
         }
 
         let offset = match self.strategy.native_strategy {
-            NativeStrategyKind::HmaAngle => {
-                self.strategy.native_hma.take_profit_offset(self.market.tick_size)?
-            }
-            NativeStrategyKind::EmaCross => {
-                self.strategy.native_ema.take_profit_offset(self.market.tick_size)?
-            }
+            NativeStrategyKind::HmaAngle => self
+                .strategy
+                .native_hma
+                .take_profit_offset(self.market.tick_size)?,
+            NativeStrategyKind::EmaCross => self
+                .strategy
+                .native_ema
+                .take_profit_offset(self.market.tick_size)?,
             NativeStrategyKind::HmaCross => self
                 .strategy
                 .native_hma_cross
@@ -1543,7 +1549,8 @@ impl App {
     }
 
     fn projected_native_stop_price(&self, entry_price: f64, signed_qty: i32) -> Option<f64> {
-        if self.strategy.kind != StrategyKind::Native || !entry_price.is_finite() || signed_qty == 0 {
+        if self.strategy.kind != StrategyKind::Native || !entry_price.is_finite() || signed_qty == 0
+        {
             return None;
         }
 
@@ -1567,11 +1574,12 @@ impl App {
                     .current_effective_stop_price(&runtime, self.market.tick_size)
             }
             NativeStrategyKind::HmaCross => {
-                let mut runtime =
-                    crate::strategies::hma_cross::HmaCrossExecutionState::default();
-                self.strategy
-                    .native_hma_cross
-                    .sync_position(&mut runtime, signed_qty, Some(entry_price));
+                let mut runtime = crate::strategies::hma_cross::HmaCrossExecutionState::default();
+                self.strategy.native_hma_cross.sync_position(
+                    &mut runtime,
+                    signed_qty,
+                    Some(entry_price),
+                );
                 self.strategy
                     .native_hma_cross
                     .current_effective_stop_price(&runtime, self.market.tick_size)
@@ -1579,5 +1587,4 @@ impl App {
         }
         .filter(|price| price.is_finite())
     }
-
 }
