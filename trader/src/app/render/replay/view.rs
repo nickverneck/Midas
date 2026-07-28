@@ -7,6 +7,11 @@ impl App {
             self.render_replay_downloader_screen(frame, area);
             return;
         }
+        #[cfg(feature = "replay")]
+        if self.replay_view == ReplayView::DatasetViews {
+            self.render_replay_dataset_views_screen(frame, area);
+            return;
+        }
 
         let compact = area.width < 120 || area.height < 28;
         let columns = Layout::default()

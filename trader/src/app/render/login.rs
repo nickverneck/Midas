@@ -104,6 +104,15 @@ impl App {
             | Focus::ContractList => {}
             #[cfg(feature = "replay")]
             Focus::ReplayDataset
+            | Focus::ReplayViewList
+            | Focus::ReplayViewId
+            | Focus::ReplayViewPreset
+            | Focus::ReplayViewTradingDate
+            | Focus::ReplayViewStart
+            | Focus::ReplayViewEnd
+            | Focus::ReplayViewTimezone
+            | Focus::ReplayViewWarmupMinutes
+            | Focus::ReplayViewSave
             | Focus::ReplayDownloadProvider
             | Focus::ReplayDownloadEnv
             | Focus::ReplayDownloadInstrument

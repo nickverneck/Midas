@@ -35,6 +35,21 @@ fn replay_run_lines_label_disabled_start_states() {
     );
 }
 
+#[cfg(feature = "replay")]
+#[test]
+fn replay_run_lines_identify_the_selected_engine_mode() {
+    let mut config = AppConfig::default();
+    config.replay_engine_mode = crate::broker::ReplayEngineMode::Deterministic;
+    let app = App::new(config);
+
+    let lines = rendered_text(app.replay_run_control_lines());
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Replay engine: Deterministic virtual time")
+    );
+}
+
 #[test]
 fn dashboard_summary_hides_replay_speed_in_live_mode() {
     let mut app = App::new(AppConfig::default());

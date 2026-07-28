@@ -59,9 +59,13 @@ impl App {
             #[cfg(feature = "replay")]
             replay_dataset_index: None,
             #[cfg(feature = "replay")]
+            replay_dataset_view_path: None,
+            #[cfg(feature = "replay")]
             replay_view: ReplayView::Library,
             #[cfg(feature = "replay")]
             replay_downloader,
+            #[cfg(feature = "replay")]
+            replay_dataset_views: ReplayDatasetViewsState::default(),
             last_log_at: None,
             last_market_update_at: None,
         };
@@ -469,6 +473,7 @@ impl App {
                         .datasets
                         .iter()
                         .position(|dataset| dataset.manifest_path == manifest_path);
+                    self.replay_dataset_view_path = None;
                     self.replay_downloader.phase = ReplayDownloadPhase::Complete;
                     self.replay_downloader.phase_message =
                         "Cache committed and dataset library refreshed.".to_string();

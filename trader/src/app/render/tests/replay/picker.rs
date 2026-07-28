@@ -226,6 +226,35 @@ fn replay_screen_start_accepts_matching_cached_jsonl_without_local_file() {
 
 #[cfg(feature = "replay")]
 #[test]
+fn replay_auto_selection_recognizes_downloaded_server_bar_parquet() {
+    let cache_root = replay_cache_test_root("auto-parquet");
+    let manifest_path = write_replay_cache_manifest(&cache_root);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    manifest["files"][0]["format"] = json!("parquet");
+    manifest["files"][0]["relative_path"] =
+        json!("server-bars/2026-07-23_to_2026-07-24_1minute.parquet");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+    )
+    .expect("write parquet manifest");
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    config.replay_file_path =
+        std::env::temp_dir().join("trader-replay-auto-parquet-missing.Last.txt");
+    let mut app = App::new(config);
+    app.bar_type = BarType::minute(1);
+    app.candle_mode = CandleMode::Standard;
+
+    assert_eq!(app.replay_dataset_index, None);
+    assert!(app.replay_dataset_available());
+    assert!(app.replay_cache_can_serve_selected_bar());
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn replay_dataset_picker_selects_manifest_for_startup() {
     let cache_root = replay_cache_test_root("picker");
     let manifest_path = write_replay_cache_manifest(&cache_root);
@@ -257,6 +286,107 @@ fn replay_dataset_picker_selects_manifest_for_startup() {
         } => assert_eq!(replay_dataset_manifest, Some(manifest_path)),
         _ => panic!("expected enter-replay command"),
     }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_dataset_view_tui_creates_edits_selects_and_starts_saved_view() {
+    let cache_root = replay_cache_test_root("view-tui");
+    let manifest_path = write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root.clone();
+    config.replay_file_path = std::env::temp_dir().join("trader-replay-view-tui-missing.Last.txt");
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayDataset;
+    app.bar_type = BarType::minute(1);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Char('v')), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::DatasetViews);
+    assert_eq!(app.focus, Focus::ReplayViewList);
+
+    app.handle_replay_key(key(KeyCode::Char('n')), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplayViewId);
+    assert_eq!(
+        app.replay_dataset_views
+            .editor
+            .as_ref()
+            .expect("new editor")
+            .preset,
+        ReplayDatasetSessionPreset::FullSource
+    );
+    app.focus = Focus::ReplayViewSave;
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    let view_path = cache_root.join(".views/mesu6_2026_07_23.json");
+    assert_eq!(app.replay_dataset_view_path.as_ref(), Some(&view_path));
+    assert!(view_path.is_file());
+    assert_eq!(app.focus, Focus::ReplayViewList);
+
+    app.handle_replay_key(key(KeyCode::Char('e')), &cmd_tx);
+    app.focus = Focus::ReplayViewPreset;
+    for _ in 0..5 {
+        app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    }
+    assert_eq!(
+        app.replay_dataset_views
+            .editor
+            .as_ref()
+            .expect("edit editor")
+            .preset,
+        ReplayDatasetSessionPreset::CustomUtc
+    );
+    app.focus = Focus::ReplayViewSave;
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    let saved = crate::replay_cache::ReplayDatasetViewStore::new(&cache_root)
+        .load("mesu6_2026_07_23")
+        .expect("saved view");
+    assert_eq!(saved.session_preset, ReplayDatasetSessionPreset::CustomUtc);
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Library);
+    app.focus = Focus::ReplayMode;
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("view-backed replay command") {
+        ServiceCommand::EnterReplayMode {
+            replay_dataset_manifest,
+            replay_dataset_view,
+            ..
+        } => {
+            assert_eq!(replay_dataset_manifest, Some(manifest_path));
+            assert_eq!(replay_dataset_view, Some(view_path));
+        }
+        _ => panic!("expected enter-replay command"),
+    }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_dataset_view_tui_keeps_editor_open_after_validation_failure() {
+    let cache_root = replay_cache_test_root("view-tui-validation");
+    write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root.clone();
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayDataset;
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Char('v')), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Char('n')), &cmd_tx);
+    app.replay_dataset_views.editor.as_mut().expect("editor").id = "bad/id".to_string();
+    app.focus = Focus::ReplayViewSave;
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert!(app.replay_dataset_views.editor.is_some());
+    assert!(app.replay_dataset_views.message.contains("dataset view id"));
+    assert!(!cache_root.join(".views/bad/id.json").exists());
 }
 
 #[cfg(feature = "replay")]

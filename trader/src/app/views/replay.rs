@@ -30,7 +30,7 @@ impl App {
                     .map(|index| (index + 1).to_string())
                     .unwrap_or_else(|| "auto".to_string())
             )));
-            lines.push(Line::from("Up/Down browse | N new | D extend | A auto"));
+            lines.push(Line::from("Up/Dn | V views | N new | D ext | A auto"));
 
             const VISIBLE_DATASETS: usize = 4;
             let visible_start = self
@@ -168,7 +168,7 @@ impl App {
                     "unsupported"
                 }
             )),
-            Line::from("N new | D extend selected"),
+            Line::from("V views | N new | D extend"),
             Line::from("No live streams in Replay."),
         ]
     }
@@ -284,6 +284,15 @@ impl App {
             }
         )));
         lines.push(Line::from(format!(
+            "Replay engine: {}",
+            self.base_config.replay_engine_mode.label()
+        )));
+        #[cfg(feature = "replay")]
+        lines.push(Line::from(format!(
+            "Dataset window: {}",
+            self.replay_selected_view_label()
+        )));
+        lines.push(Line::from(format!(
             "Bar selection: {}",
             if self.replay_selected_bar_supported() {
                 "supported"
@@ -298,7 +307,7 @@ impl App {
             "Replay skips broker login and does not start live streams.",
         ));
         lines.push(Line::from(
-            "N opens a new dataset download; D opens the selected dataset prefilled for extension.",
+            "V manages saved ranges; N downloads a new dataset; D extends the selected dataset.",
         ));
         lines.push(Line::from(
             "Headless automation remains available through `trader download-replay-data`.",
@@ -341,7 +350,9 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
-    fn replay_selected_dataset(&self) -> Option<&crate::replay_cache::ReplayCacheDataset> {
+    pub(in crate::app) fn replay_selected_dataset(
+        &self,
+    ) -> Option<&crate::replay_cache::ReplayCacheDataset> {
         self.replay_dataset_index
             .and_then(|index| self.replay_cache_library.datasets.get(index))
     }
@@ -355,7 +366,7 @@ impl App {
         #[cfg(feature = "replay")]
         {
             self.replay_cache_library
-                .first_server_bars_jsonl(self.bar_type, self.effective_candle_mode(), None)
+                .first_server_bars(self.bar_type, self.effective_candle_mode(), None)
                 .is_some()
                 || self
                     .replay_cache_library
@@ -395,6 +406,16 @@ impl App {
         } else {
             "[Enter] Start Local Replay".to_string()
         }
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_selected_view_label(&self) -> String {
+        self.replay_dataset_view_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|value| value.to_str())
+            .map(|id| format!("saved view `{id}`"))
+            .unwrap_or_else(|| "full source coverage".to_string())
     }
 }
 
@@ -436,6 +457,9 @@ impl App {
         )));
         lines.push(Line::from(
             "Up/Down browses; Enter uses the selected cache; N adds data; D extends selected coverage; A uses automatic resolution.",
+        ));
+        lines.push(Line::from(
+            "V creates, edits, saves, and selects reusable dataset views.",
         ));
 
         const VISIBLE_DATASETS: usize = 8;

@@ -70,6 +70,34 @@ fn dataset_view_round_trips_and_resolves_warmup_without_mutating_source() {
 }
 
 #[test]
+fn dataset_view_library_lists_only_valid_views_for_the_selected_source() {
+    let root = temp_cache_dir("view-library");
+    let dataset = source_dataset(&root);
+    let store = ReplayDatasetViewStore::new(&root);
+    let mut later = sample_view(&root, &dataset);
+    later.id = "z_later".to_string();
+    let mut earlier = sample_view(&root, &dataset);
+    earlier.id = "a_earlier".to_string();
+    store.save(&later).expect("save later");
+    store.save(&earlier).expect("save earlier");
+    fs::write(root.join(".views/broken.json"), b"not json").expect("write broken view");
+
+    let library = store.list_for_dataset(&dataset);
+
+    assert_eq!(
+        library
+            .views
+            .iter()
+            .map(|resolved| resolved.view.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a_earlier", "z_later"]
+    );
+    assert_eq!(library.warnings.len(), 1);
+
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn dataset_view_rejects_warmup_outside_completed_source_coverage() {
     let root = temp_cache_dir("view-warmup-coverage");
     let dataset = source_dataset(&root);

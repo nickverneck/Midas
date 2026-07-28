@@ -1,4 +1,4 @@
-use crate::broker::{BrokerKind, CandleMode, default_broker, supports_broker};
+use crate::broker::{BrokerKind, CandleMode, ReplayEngineMode, default_broker, supports_broker};
 use anyhow::{Context, Result, bail};
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,7 @@ pub struct AppConfig {
     pub replay_file_path: PathBuf,
     pub replay_cache_dir: PathBuf,
     pub replay_bar_interval_ms: u64,
+    pub replay_engine_mode: ReplayEngineMode,
 }
 
 impl Default for AppConfig {
@@ -171,6 +172,7 @@ impl Default for AppConfig {
             replay_file_path: PathBuf::from("trader/market replay/ES 06-26.Last.txt"),
             replay_cache_dir: default_replay_cache_dir(),
             replay_bar_interval_ms: 5,
+            replay_engine_mode: ReplayEngineMode::default(),
         }
     }
 }
@@ -290,6 +292,9 @@ impl AppConfig {
         ])? {
             self.replay_bar_interval_ms = raw;
         }
+        if let Some(raw) = env_string_any(&["TRADER_REPLAY_ENGINE_MODE"]) {
+            self.replay_engine_mode = parse_replay_engine_mode(&raw)?;
+        }
         Ok(())
     }
 
@@ -325,6 +330,16 @@ impl AppConfig {
             }
         }
         Ok(())
+    }
+}
+
+fn parse_replay_engine_mode(raw: &str) -> Result<ReplayEngineMode> {
+    match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "legacy" | "compatibility" | "legacy_compatibility" => Ok(ReplayEngineMode::Legacy),
+        "deterministic" | "virtual_time" | "deterministic_virtual_time" => {
+            Ok(ReplayEngineMode::Deterministic)
+        }
+        other => bail!("invalid replay engine mode `{other}`; expected legacy or deterministic"),
     }
 }
 
@@ -446,6 +461,21 @@ mod tests {
                 .replay_cache_dir
                 .starts_with(env!("CARGO_MANIFEST_DIR"))
         );
+    }
+
+    #[test]
+    fn replay_engine_defaults_to_legacy_compatibility() {
+        let config: AppConfig = toml::from_str("").expect("default config");
+
+        assert_eq!(config.replay_engine_mode, ReplayEngineMode::Legacy);
+    }
+
+    #[test]
+    fn replay_engine_can_opt_into_deterministic_virtual_time() {
+        let config: AppConfig =
+            toml::from_str("replay_engine_mode = \"deterministic\"").expect("config");
+
+        assert_eq!(config.replay_engine_mode, ReplayEngineMode::Deterministic);
     }
 }
 

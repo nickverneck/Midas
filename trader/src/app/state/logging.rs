@@ -225,6 +225,10 @@ impl App {
         body.push_str(&format!("log_mode: {}\n", self.form.log_mode.label()));
         body.push_str(&format!("session_kind: {}\n", self.session_kind.label()));
         body.push_str(&format!("replay_speed: {}\n", self.replay_speed.label()));
+        body.push_str(&format!(
+            "replay_engine_mode: {}\n",
+            self.base_config.replay_engine_mode.label()
+        ));
         if let Some(window) = self.market.replay_window.as_ref() {
             body.push_str(&format!("replay_window_preset: {}\n", window.preset));
             body.push_str(&format!(

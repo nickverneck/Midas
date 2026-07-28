@@ -29,9 +29,17 @@ Implemented third slice (RBT-022):
 - Persisted `.run/trader-logs` include the preset, timezone, all three UTC boundaries, the local labeled range, and final warmup/evaluation row counters.
 - Carrying a position from warmup remains rejected. The currently supported policy is flat until evaluation.
 
+Implemented fourth slice (RBT-023):
+
+- The Replay dataset picker exposes a dedicated saved-view manager with `V`. Views are listed only for the selected source manifest; malformed, stale, or identity-mismatched view files are excluded with warnings.
+- The TUI can create and edit all Phase 3 presets: full source, Globex, New York RTH, Chicago RTH, custom local time with an IANA timezone, and custom UTC.
+- View IDs, dates, timestamps, timezones, warmup duration, source coverage, and the flat-until-evaluation policy are validated by the shared view model before an atomic save. A failed validation leaves the editor open and does not alter the selected view.
+- Saving selects the view, `Enter` selects an existing view, and `C` explicitly returns to full-source coverage. Replay startup now passes both the selected manifest and view path so the loader fails closed if their source identities differ.
+- The Replay screen labels whether startup will use full source coverage or a saved view. Automatic cache resolution recognizes both current Parquet server-bar downloads and legacy JSONL caches.
+- End-to-end validation used 1,380 downloaded MESU6 one-minute bars for 2026-07-27. A TUI-created New York RTH view loaded exactly 390 evaluation rows from 09:30 through 16:00 EDT without starting live user or order streams.
+
 Still pending:
 
-- The TUI needs view creation, editing, listing, and selection controls. The service/API path is wired, but the existing dataset picker intentionally continues to start a full manifest until those controls exist.
 - Phase 05 still owns a dedicated persisted backtest-result model and higher-level trade/signal analytics; RBT-022 now supplies the authoritative evaluation boundaries and row counts that model will consume.
 
 ## Goal
@@ -127,6 +135,23 @@ Acceptance criteria:
 Risks:
 
 - If runtime state is not warmed consistently, replay will not match live behavior at the start of a selected window.
+
+### RBT-023: Add TUI Dataset View Controls
+
+Controls:
+
+- `V` opens saved views for the selected cached dataset.
+- `N` creates a view; `E` edits the highlighted view.
+- `Enter` saves from the editor or selects from the list.
+- `C` clears the selected view and restores full-source replay.
+- `Esc` cancels an edit without saving, then returns to the Replay screen.
+
+Acceptance criteria:
+
+- Create, edit, save, list, select, and clear flows work without mutating source data.
+- Invalid inputs fail closed in the editor with an actionable error.
+- Startup uses the selected view's evaluation and warmup ranges.
+- Replay-disabled builds remain unaffected.
 
 ## Open Questions
 

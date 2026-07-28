@@ -8,6 +8,8 @@ mod load;
 mod state;
 #[cfg(feature = "replay")]
 mod ticks;
+#[cfg(feature = "replay")]
+mod virtual_time;
 mod worker;
 
 pub(crate) use load::load_replay_state;

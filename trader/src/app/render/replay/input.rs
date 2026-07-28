@@ -1,6 +1,16 @@
 use super::*;
 
 impl App {
+    #[cfg(not(feature = "replay"))]
+    fn open_replay_dataset_views(&mut self) {
+        self.status = "Saved dataset views require a replay-enabled build.".to_string();
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_selected_dataset_view_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     pub(in crate::app) fn handle_replay_key(
         &mut self,
         key: KeyEvent,
@@ -9,6 +19,11 @@ impl App {
         #[cfg(feature = "replay")]
         if self.replay_view == ReplayView::Downloader {
             self.handle_replay_downloader_key(key, cmd_tx);
+            return;
+        }
+        #[cfg(feature = "replay")]
+        if self.replay_view == ReplayView::DatasetViews {
+            self.handle_replay_dataset_views_key(key);
             return;
         }
 
@@ -93,6 +108,10 @@ impl App {
             },
             #[cfg(feature = "replay")]
             Focus::ReplayDataset => {
+                if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                    self.open_replay_dataset_views();
+                    return;
+                }
                 if matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
                     self.open_new_replay_downloader();
                     return;
@@ -121,10 +140,12 @@ impl App {
                             (current + 1) % count
                         };
                         self.replay_dataset_index = Some(next);
+                        self.replay_dataset_view_path = None;
                         return;
                     }
                     KeyCode::Char('a') => {
                         self.replay_dataset_index = None;
+                        self.replay_dataset_view_path = None;
                         return;
                     }
                     KeyCode::Enter => {
@@ -135,6 +156,10 @@ impl App {
                 }
             }
             Focus::ReplayMode => {
+                if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                    self.open_replay_dataset_views();
+                    return;
+                }
                 if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
                     self.open_selected_replay_downloader();
                     return;
@@ -224,6 +249,16 @@ impl App {
             | Focus::ReplayDownloadTags
             | Focus::ReplayDownloadCacheRoot
             | Focus::ReplayDownloadSubmit => {}
+            #[cfg(feature = "replay")]
+            Focus::ReplayViewList
+            | Focus::ReplayViewId
+            | Focus::ReplayViewPreset
+            | Focus::ReplayViewTradingDate
+            | Focus::ReplayViewStart
+            | Focus::ReplayViewEnd
+            | Focus::ReplayViewTimezone
+            | Focus::ReplayViewWarmupMinutes
+            | Focus::ReplayViewSave => {}
         }
     }
 
@@ -249,7 +284,7 @@ impl App {
             bar_type: self.bar_type,
             candle_mode: self.effective_candle_mode(),
             replay_dataset_manifest: self.replay_selected_dataset_manifest(),
-            replay_dataset_view: None,
+            replay_dataset_view: self.replay_selected_dataset_view_path(),
         });
         self.push_log(format!(
             "Replay mode requested: {} ({})",

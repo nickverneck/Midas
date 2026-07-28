@@ -38,6 +38,28 @@ impl ReplayDatasetSessionPreset {
             Self::CustomUtc => "Custom UTC",
         }
     }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::FullSource => Self::FuturesGlobex,
+            Self::FuturesGlobex => Self::FuturesRthNewYork,
+            Self::FuturesRthNewYork => Self::FuturesRthChicago,
+            Self::FuturesRthChicago => Self::CustomLocal,
+            Self::CustomLocal => Self::CustomUtc,
+            Self::CustomUtc => Self::FullSource,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::FullSource => Self::CustomUtc,
+            Self::FuturesGlobex => Self::FullSource,
+            Self::FuturesRthNewYork => Self::FuturesGlobex,
+            Self::FuturesRthChicago => Self::FuturesRthNewYork,
+            Self::CustomLocal => Self::FuturesRthChicago,
+            Self::CustomUtc => Self::CustomLocal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,6 +430,12 @@ pub struct ReplayDatasetViewStore {
     cache_root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayDatasetViewLibrary {
+    pub views: Vec<ResolvedReplayDatasetView>,
+    pub warnings: Vec<String>,
+}
+
 impl ReplayDatasetViewStore {
     pub fn new(cache_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -430,6 +458,66 @@ impl ReplayDatasetViewStore {
         let bytes = serde_json::to_vec_pretty(view).context("serialize replay dataset view")?;
         write_bytes_atomically(&path, &bytes)?;
         Ok(path)
+    }
+
+    pub fn list_for_dataset(&self, dataset: &ReplayCacheDataset) -> ReplayDatasetViewLibrary {
+        let mut library = ReplayDatasetViewLibrary {
+            views: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let expected_manifest_id =
+            match manifest_id_for_path(&self.cache_root, &dataset.manifest_path) {
+                Ok(id) => id,
+                Err(error) => {
+                    library.warnings.push(error.to_string());
+                    return library;
+                }
+            };
+        let views_dir = self.cache_root.join(REPLAY_DATASET_VIEWS_DIR);
+        let entries = match fs::read_dir(&views_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return library,
+            Err(error) => {
+                library.warnings.push(format!(
+                    "read replay dataset views {}: {error}",
+                    views_dir.display()
+                ));
+                return library;
+            }
+        };
+
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) => {
+                    library
+                        .warnings
+                        .push(format!("read replay dataset view directory entry: {error}"));
+                    continue;
+                }
+            };
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let view = match self.load_path(&path) {
+                Ok(view) => view,
+                Err(error) => {
+                    library.warnings.push(error.to_string());
+                    continue;
+                }
+            };
+            if view.source.manifest_id != expected_manifest_id {
+                continue;
+            }
+            match self.resolve_model(&view, path) {
+                Ok(resolved) => library.views.push(resolved),
+                Err(error) => library.warnings.push(error.to_string()),
+            }
+        }
+        library
+            .views
+            .sort_by(|left, right| left.view.id.cmp(&right.view.id));
+        library
     }
 
     pub fn load(&self, id: &str) -> Result<ReplayDatasetView> {

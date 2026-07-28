@@ -11,6 +11,25 @@ use std::sync::{
 #[cfg(feature = "replay")]
 static NEXT_REPLAY_DOWNLOAD_OPERATION_ID: OnceLock<AtomicU64> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayEngineMode {
+    /// Original async bar loop retained during the deterministic-engine migration.
+    #[default]
+    Legacy,
+    /// Market-time ordering is owned by the deterministic virtual event queue.
+    Deterministic,
+}
+
+impl ReplayEngineMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Legacy => "Legacy compatibility",
+            Self::Deterministic => "Deterministic virtual time",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplayWindowSnapshot {
     pub preset: String,

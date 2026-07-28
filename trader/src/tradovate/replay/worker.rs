@@ -1,3 +1,5 @@
+#[cfg(feature = "replay")]
+use super::virtual_time::{ReplayBarSchedule, ReplayVirtualEventKind};
 use super::*;
 
 pub(crate) fn spawn_replay_market_task(
@@ -80,20 +82,22 @@ async fn replay_market_worker_inner(
     let initial_status = replay_window.as_ref().map_or_else(
         || {
             format!(
-                "Replay {} loaded for {} ({}/{})",
+                "Replay {} loaded for {} ({}/{}) [{}]",
                 bar_type.mode_label(candle_mode),
                 contract.name,
                 history_loaded,
-                total_bars
+                total_bars,
+                cfg.replay_engine_mode.label()
             )
         },
         |window| {
             format!(
-                "Replay {} loaded for {} (warmup {} | evaluation 0/{})",
+                "Replay {} loaded for {} (warmup {} | evaluation 0/{}) [{}]",
                 bar_type.mode_label(candle_mode),
                 contract.name,
                 window.warmup_rows,
-                window.evaluation_rows_total
+                window.evaluation_rows_total,
+                cfg.replay_engine_mode.label()
             )
         },
     );
@@ -120,10 +124,21 @@ async fn replay_market_worker_inner(
     }
 
     let mut live_bars = 0usize;
-    for bar in &bars[history_loaded..] {
+    let evaluation_bars = &bars[history_loaded..];
+    let mut schedule = ReplayBarSchedule::new(cfg.replay_engine_mode, evaluation_bars)?;
+    while let Some(event) = schedule.next_bar(evaluation_bars) {
+        let ReplayVirtualEventKind::BarClose { bar_index } = event.kind else {
+            bail!("replay bar schedule emitted a non-bar event")
+        };
+        let bar = evaluation_bars
+            .get(bar_index)
+            .context("replay bar schedule referenced a missing bar")?;
+        if bar.ts_ns != event.market_ts_ns {
+            bail!("replay bar schedule timestamp does not match source bar")
+        }
         wait_for_replay_bar(
             series.closed_bars.last().map(|previous| previous.ts_ns),
-            bar.ts_ns,
+            event.market_ts_ns,
             cfg.replay_bar_interval_ms,
             replay_speed_rx,
         )
@@ -143,21 +158,23 @@ async fn replay_market_worker_inner(
         let status = replay_window.as_ref().map_or_else(
             || {
                 format!(
-                    "Replay {} streaming for {} ({}/{})",
+                    "Replay {} streaming for {} ({}/{}) [{}]",
                     bar_type.mode_label(candle_mode),
                     contract.name,
                     history_loaded + live_bars,
-                    total_bars
+                    total_bars,
+                    cfg.replay_engine_mode.label()
                 )
             },
             |window| {
                 format!(
-                    "Replay {} streaming for {} (warmup {} | evaluation {}/{})",
+                    "Replay {} streaming for {} (warmup {} | evaluation {}/{}) [{}]",
                     bar_type.mode_label(candle_mode),
                     contract.name,
                     window.warmup_rows,
                     window.evaluation_rows_processed,
-                    window.evaluation_rows_total
+                    window.evaluation_rows_total,
+                    cfg.replay_engine_mode.label()
                 )
             },
         );
@@ -179,9 +196,10 @@ async fn replay_market_worker_inner(
     }
 
     let _ = internal_tx.send(InternalEvent::UserSocketStatus(format!(
-        "Replay complete for {} ({})",
+        "Replay complete for {} ({}) [{}]",
         contract.name,
-        bar_type.label()
+        bar_type.label(),
+        cfg.replay_engine_mode.label()
     )));
     Ok(())
 }

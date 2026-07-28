@@ -11,7 +11,10 @@ use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, Replay
 use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 use crate::engine_registry::RunningEngine;
 #[cfg(feature = "replay")]
-use crate::replay_cache::{ReplayCacheLibrary, ReplayCacheSourceKind};
+use crate::replay_cache::{
+    ReplayCacheLibrary, ReplayCacheSourceKind, ReplayDatasetSessionPreset,
+    ResolvedReplayDatasetView,
+};
 use crate::strategies::ema_cross::ema_series;
 use crate::strategies::hma_angle::zero_lag_hma_series;
 use crate::strategies::hma_cross::hma_series;
@@ -84,9 +87,13 @@ pub struct App {
     #[cfg(feature = "replay")]
     replay_dataset_index: Option<usize>,
     #[cfg(feature = "replay")]
+    replay_dataset_view_path: Option<PathBuf>,
+    #[cfg(feature = "replay")]
     replay_view: ReplayView,
     #[cfg(feature = "replay")]
     replay_downloader: ReplayDownloaderState,
+    #[cfg(feature = "replay")]
+    replay_dataset_views: ReplayDatasetViewsState,
     last_log_at: Option<Instant>,
     last_market_update_at: Option<Instant>,
 }
@@ -165,6 +172,24 @@ enum Focus {
     #[cfg(feature = "replay")]
     ReplayDataset,
     #[cfg(feature = "replay")]
+    ReplayViewList,
+    #[cfg(feature = "replay")]
+    ReplayViewId,
+    #[cfg(feature = "replay")]
+    ReplayViewPreset,
+    #[cfg(feature = "replay")]
+    ReplayViewTradingDate,
+    #[cfg(feature = "replay")]
+    ReplayViewStart,
+    #[cfg(feature = "replay")]
+    ReplayViewEnd,
+    #[cfg(feature = "replay")]
+    ReplayViewTimezone,
+    #[cfg(feature = "replay")]
+    ReplayViewWarmupMinutes,
+    #[cfg(feature = "replay")]
+    ReplayViewSave,
+    #[cfg(feature = "replay")]
     ReplayDownloadProvider,
     #[cfg(feature = "replay")]
     ReplayDownloadEnv,
@@ -200,6 +225,29 @@ enum Focus {
 enum ReplayView {
     Library,
     Downloader,
+    DatasetViews,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Default)]
+struct ReplayDatasetViewsState {
+    views: Vec<ResolvedReplayDatasetView>,
+    warnings: Vec<String>,
+    selected_index: Option<usize>,
+    editor: Option<ReplayDatasetViewEditorState>,
+    message: String,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+struct ReplayDatasetViewEditorState {
+    id: String,
+    preset: ReplayDatasetSessionPreset,
+    trading_date: String,
+    start: String,
+    end: String,
+    timezone: String,
+    warmup_minutes: String,
 }
 
 #[cfg(feature = "replay")]

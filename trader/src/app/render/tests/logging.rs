@@ -138,6 +138,7 @@ fn persisted_log_body_includes_live_engine_review_metadata_without_secret_fields
     assert!(body.contains("other_live_engines: 1"));
     assert!(body.contains("session_kind: Replay"));
     assert!(body.contains("replay_speed: 10x"));
+    assert!(body.contains("replay_engine_mode: Legacy compatibility"));
     assert!(body.contains("capability_replay: true"));
     assert!(body.contains("capability_manual_orders: true"));
     assert!(body.contains("capability_automated_orders: true"));

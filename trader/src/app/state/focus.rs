@@ -137,6 +137,34 @@ impl App {
             return order;
         }
 
+        #[cfg(feature = "replay")]
+        if self.replay_view == ReplayView::DatasetViews {
+            let Some(editor) = self.replay_dataset_views.editor.as_ref() else {
+                return vec![Focus::ReplayViewList];
+            };
+            let mut order = vec![Focus::ReplayViewId, Focus::ReplayViewPreset];
+            match editor.preset {
+                ReplayDatasetSessionPreset::FullSource => {}
+                ReplayDatasetSessionPreset::FuturesGlobex
+                | ReplayDatasetSessionPreset::FuturesRthNewYork
+                | ReplayDatasetSessionPreset::FuturesRthChicago => {
+                    order.push(Focus::ReplayViewTradingDate);
+                }
+                ReplayDatasetSessionPreset::CustomLocal => {
+                    order.extend([
+                        Focus::ReplayViewStart,
+                        Focus::ReplayViewEnd,
+                        Focus::ReplayViewTimezone,
+                    ]);
+                }
+                ReplayDatasetSessionPreset::CustomUtc => {
+                    order.extend([Focus::ReplayViewStart, Focus::ReplayViewEnd]);
+                }
+            }
+            order.extend([Focus::ReplayViewWarmupMinutes, Focus::ReplayViewSave]);
+            return order;
+        }
+
         let mut order = vec![Focus::BarTypeToggle, Focus::BarValue];
         if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
@@ -263,9 +291,21 @@ impl App {
                 | Focus::ReplayDownloadTags
                 | Focus::ReplayDownloadCacheRoot
         );
+        #[cfg(feature = "replay")]
+        let replay_view_focus = matches!(
+            self.focus,
+            Focus::ReplayViewId
+                | Focus::ReplayViewTradingDate
+                | Focus::ReplayViewStart
+                | Focus::ReplayViewEnd
+                | Focus::ReplayViewTimezone
+                | Focus::ReplayViewWarmupMinutes
+        );
         #[cfg(not(feature = "replay"))]
         let replay_download_focus = false;
-        standard_focus || replay_download_focus
+        #[cfg(not(feature = "replay"))]
+        let replay_view_focus = false;
+        standard_focus || replay_download_focus || replay_view_focus
     }
 
     pub(in crate::app) fn is_free_text_focus(&self) -> bool {
@@ -294,8 +334,20 @@ impl App {
                 | Focus::ReplayDownloadTags
                 | Focus::ReplayDownloadCacheRoot
         );
+        #[cfg(feature = "replay")]
+        let replay_view_focus = matches!(
+            self.focus,
+            Focus::ReplayViewId
+                | Focus::ReplayViewTradingDate
+                | Focus::ReplayViewStart
+                | Focus::ReplayViewEnd
+                | Focus::ReplayViewTimezone
+                | Focus::ReplayViewWarmupMinutes
+        );
         #[cfg(not(feature = "replay"))]
         let replay_download_focus = false;
-        standard_focus || replay_download_focus
+        #[cfg(not(feature = "replay"))]
+        let replay_view_focus = false;
+        standard_focus || replay_download_focus || replay_view_focus
     }
 }

@@ -128,6 +128,18 @@ impl App {
                     };
                     return;
                 }
+                #[cfg(feature = "replay")]
+                if self.screen == Screen::Replay && self.replay_view == ReplayView::DatasetViews {
+                    if self.replay_dataset_views.editor.take().is_some() {
+                        self.focus = Focus::ReplayViewList;
+                        self.replay_dataset_views.message =
+                            "Edit cancelled; no view changes were saved.".to_string();
+                    } else {
+                        self.replay_view = ReplayView::Library;
+                        self.focus = Focus::ReplayDataset;
+                    }
+                    return;
+                }
                 if self.screen == Screen::Replay {
                     self.screen = Screen::Login;
                     self.focus = Focus::Env;
