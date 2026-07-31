@@ -20,6 +20,10 @@ pub(crate) enum InternalEvent {
     },
     #[cfg(feature = "replay")]
     ReplayBarrier(oneshot::Sender<()>),
+    #[cfg(feature = "replay")]
+    ReplayCompleted {
+        error: Option<String>,
+    },
     BrokerOrderAck(BrokerOrderAck),
     BrokerOrderFailed(BrokerOrderFailure),
     OrderStrategyAck(BrokerOrderStrategyAck),

@@ -152,6 +152,8 @@ pub struct AppConfig {
     /// Empty/absent means the normal bar/tick/quote replay paths are used.
     pub replay_dom_file_path: Option<PathBuf>,
     pub replay_cache_dir: PathBuf,
+    /// Root directory for durable replay result artifacts.
+    pub replay_result_dir: PathBuf,
     pub replay_bar_interval_ms: u64,
     pub replay_engine_mode: ReplayEngineMode,
     pub replay_fill_model: ReplayFillModel,
@@ -191,6 +193,7 @@ impl Default for AppConfig {
             replay_file_path: PathBuf::from("trader/market replay/ES 06-26.Last.txt"),
             replay_dom_file_path: None,
             replay_cache_dir: default_replay_cache_dir(),
+            replay_result_dir: PathBuf::from(".run/replay-results"),
             replay_bar_interval_ms: 5,
             replay_engine_mode: ReplayEngineMode::default(),
             replay_fill_model: ReplayFillModel::RawBarOpen,
@@ -317,6 +320,11 @@ impl AppConfig {
         }
         if let Some(raw) = env_string_any(&["TRADER_DATA_CACHE_DIR"]) {
             self.replay_cache_dir = PathBuf::from(raw);
+        }
+        if let Some(raw) =
+            env_string_any(&["TRADER_REPLAY_RESULT_DIR", "MIDAS_TUI_REPLAY_RESULT_DIR"])
+        {
+            self.replay_result_dir = PathBuf::from(raw);
         }
         if let Some(raw) = env_parse_any::<u64>(&[
             "TRADER_REPLAY_BAR_INTERVAL_MS",
@@ -583,6 +591,21 @@ mod tests {
         let config = AppConfig::load(Some(&path)).expect("load config");
 
         assert_eq!(config.replay_cache_dir, cache_dir);
+    }
+
+    #[test]
+    fn config_loads_replay_result_dir_from_file() {
+        let path = temp_config_path("result-root");
+        let result_dir = std::env::temp_dir().join("trader-replay-results-configured");
+        fs::write(
+            &path,
+            format!("replay_result_dir = '{}'\n", result_dir.display()),
+        )
+        .expect("write config");
+
+        let config = AppConfig::load(Some(&path)).expect("load config");
+
+        assert_eq!(config.replay_result_dir, result_dir);
     }
 
     #[test]

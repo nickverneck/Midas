@@ -45,6 +45,10 @@ pub(super) async fn handle_internal(
         InternalEvent::ReplayBarrier(response_tx) => {
             let _ = response_tx.send(());
         }
+        #[cfg(feature = "replay")]
+        InternalEvent::ReplayCompleted { error } => {
+            persist_replay_result(error, state, event_tx)?;
+        }
         InternalEvent::BrokerOrderAck(ack) => {
             handle_broker_order_ack(ack, state, event_tx, internal_tx)
         }
@@ -68,6 +72,82 @@ pub(super) async fn handle_internal(
             let _ = event_tx.send(ServiceEvent::Error(message));
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+fn persist_replay_result(
+    error: Option<String>,
+    state: &mut ServiceState,
+    event_tx: &UnboundedSender<ServiceEvent>,
+) -> Result<()> {
+    let Some(session) = state
+        .session
+        .as_ref()
+        .filter(|session| session.replay_enabled)
+    else {
+        return Ok(());
+    };
+    let Some(replay) = state.replay.as_ref() else {
+        return Ok(());
+    };
+
+    let config = session.cfg.clone();
+    let market = session.market.clone();
+    let strategy = session.execution_config.clone();
+    let bar_type = session.bar_type;
+    let candle_mode = session.candle_mode;
+    let ledger = state.replay_execution_ledger.snapshot().clone();
+    let completed_at_utc = Utc::now();
+    let run_id = session
+        .engine_run
+        .as_ref()
+        .map(|run| run.run_id.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "replay-{}-{}",
+                completed_at_utc.timestamp_millis(),
+                std::process::id()
+            )
+        });
+    let started_at_utc = session
+        .engine_run
+        .as_ref()
+        .map(|run| run.started_at_utc)
+        .or_else(|| {
+            market.bars.first().and_then(|bar| {
+                DateTime::<Utc>::from_timestamp(
+                    bar.ts_ns.div_euclid(1_000_000_000),
+                    bar.ts_ns.rem_euclid(1_000_000_000) as u32,
+                )
+            })
+        })
+        .unwrap_or(completed_at_utc);
+
+    let outcome = replay::write_replay_result(replay::ReplayResultInput {
+        config: &config,
+        replay,
+        market: &market,
+        ledger: &ledger,
+        strategy: &strategy,
+        bar_type,
+        candle_mode,
+        run_id: &run_id,
+        started_at_utc,
+        completed_at_utc,
+        error: error.as_deref(),
+    })?;
+    let status = if error.is_some() {
+        "failed"
+    } else {
+        "complete"
+    };
+    let _ = event_tx.send(ServiceEvent::Status(format!(
+        "Replay {status}; result saved to {} ({} fills, {} trades)",
+        outcome.result_path.display(),
+        outcome.fill_count,
+        outcome.trade_count
+    )));
     Ok(())
 }
 

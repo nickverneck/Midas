@@ -31,7 +31,7 @@ pub(crate) fn spawn_replay_market_task(
     {
         tokio::spawn(async move {
             let mut replay_speed_rx = replay_speed_rx;
-            if let Err(err) = replay_market_worker_inner(
+            let result = replay_market_worker_inner(
                 replay,
                 cfg,
                 contract,
@@ -41,9 +41,18 @@ pub(crate) fn spawn_replay_market_task(
                 &mut replay_speed_rx,
                 internal_tx.clone(),
             )
-            .await
-            {
-                let _ = internal_tx.send(InternalEvent::Error(format!("replay data: {err}")));
+            .await;
+            match result {
+                Ok(()) => {
+                    let _ = internal_tx.send(InternalEvent::ReplayCompleted { error: None });
+                }
+                Err(err) => {
+                    let message = format!("replay data: {err}");
+                    let _ = internal_tx.send(InternalEvent::Error(message.clone()));
+                    let _ = internal_tx.send(InternalEvent::ReplayCompleted {
+                        error: Some(message),
+                    });
+                }
             }
         })
     }
