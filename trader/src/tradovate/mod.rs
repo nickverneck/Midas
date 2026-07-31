@@ -87,6 +87,10 @@ use orders::{
     selected_strategy_key, sync_native_protection, sync_native_protection_target,
 };
 pub use profiler::{SwipeProfileOptions, run_swipe_profile};
+#[cfg(feature = "replay")]
+pub(crate) use replay::{
+    ReplayFeeSchedule, ReplayMarginConfig, analyze_replay_margin, reprice_replay_result,
+};
 
 include!("types.rs");
 include!("session.rs");

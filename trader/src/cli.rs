@@ -86,6 +86,56 @@ pub(crate) struct ReplayDownloadArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct RepriceReplayResultArgs {
+    /// Existing result.json to reprice without replaying market data.
+    #[arg(long)]
+    pub(crate) result: PathBuf,
+    /// Fee schedule name stored as the active scenario.
+    #[arg(long)]
+    pub(crate) name: String,
+    /// Currency label for the fee components.
+    #[arg(long, default_value = "USD")]
+    pub(crate) currency: String,
+    /// Broker commission per contract per side.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) commission_per_contract: f64,
+    /// Exchange fee per contract per side.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) exchange_per_contract: f64,
+    /// Clearing fee per contract per side.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) clearing_per_contract: f64,
+    /// Regulatory/NFA fee per contract per side.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) regulatory_per_contract: f64,
+    /// Miscellaneous fee or rebate per contract per side.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) misc_per_contract: f64,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct AnalyzeReplayMarginArgs {
+    /// Existing result.json to analyze without replaying market data.
+    #[arg(long)]
+    pub(crate) result: PathBuf,
+    /// Margin model label stored in the result metadata.
+    #[arg(long, default_value = "fixed_per_contract")]
+    pub(crate) model: String,
+    /// Currency label for the margin and account-size assumptions.
+    #[arg(long, default_value = "USD")]
+    pub(crate) currency: String,
+    /// Margin requirement per open contract.
+    #[arg(long)]
+    pub(crate) margin_per_contract: f64,
+    /// Fixed safety buffer added above the margin requirement.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) safety_buffer: f64,
+    /// Percentage safety buffer applied to the margin requirement.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) safety_buffer_percent: f64,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct CaptureReplayDomArgs {
     /// Exact contract symbol, for example MESU6 or GCZ6.
     #[arg(long)]
@@ -158,6 +208,12 @@ pub(crate) enum Mode {
     /// Download replay data into the local replay cache.
     #[command(name = "download-replay-data")]
     DownloadReplayData(ReplayDownloadArgs),
+    /// Reprice a saved replay result with an accounting-only fee schedule.
+    #[command(name = "reprice-replay-result")]
+    RepriceReplayResult(RepriceReplayResultArgs),
+    /// Analyze required starting capital for a saved replay result.
+    #[command(name = "analyze-replay-margin")]
+    AnalyzeReplayMargin(AnalyzeReplayMarginArgs),
     /// Capture historical Level 2 snapshots through a Tradovate Market Replay session.
     #[command(name = "capture-replay-dom")]
     CaptureReplayDom(CaptureReplayDomArgs),

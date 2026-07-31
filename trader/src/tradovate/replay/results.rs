@@ -1,3 +1,5 @@
+use super::fees::ReplayFeeSchedule;
+use super::risk::{ReplayMarginAnalysis, ReplayMarginConfig, compute_margin_analysis};
 use super::state::ReplayState;
 use crate::broker::{
     BarType, CandleMode, MarketSnapshot, ReplayExecutionFill, ReplayExecutionLedgerSnapshot,
@@ -16,7 +18,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const REPLAY_RESULT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const REPLAY_RESULT_SCHEMA_VERSION: u32 = 2;
+pub(crate) const FEE_NEUTRAL_SCENARIO_NAME: &str = "fee_neutral";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReplayResultWriteOutcome {
@@ -61,6 +64,12 @@ pub(crate) struct ReplayResultDocument {
     pub(crate) metadata: ReplayResultMetadata,
     pub(crate) summary: ReplayResultSummary,
     pub(crate) artifacts: ReplayResultArtifacts,
+    #[serde(default = "default_active_fee_scenario")]
+    pub(crate) active_fee_scenario: String,
+    #[serde(default)]
+    pub(crate) fee_scenarios: Vec<ReplayFeeScenario>,
+    #[serde(default)]
+    pub(crate) margin_analysis: Option<ReplayMarginAnalysis>,
     /// The fee-neutral ledger is embedded so a result is self-contained even
     /// when the CSV sidecars are moved or inspected independently.
     pub(crate) ledger: ReplayExecutionLedgerSnapshot,
@@ -134,6 +143,14 @@ pub(crate) struct ReplayResultSummary {
     pub(crate) precision: Vec<String>,
     pub(crate) exit_reason_counts: BTreeMap<String, usize>,
     pub(crate) evaluation_rows_processed: usize,
+    #[serde(default)]
+    pub(crate) required_starting_capital: Option<f64>,
+    #[serde(default)]
+    pub(crate) peak_margin_requirement: Option<f64>,
+    #[serde(default)]
+    pub(crate) minimum_equity_buffer_over_margin: Option<f64>,
+    #[serde(default)]
+    pub(crate) initial_capital_sufficient: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +160,40 @@ pub(crate) struct ReplayResultArtifacts {
     pub(crate) trades_csv: String,
     pub(crate) fills_csv: String,
     pub(crate) equity_csv: String,
+    #[serde(default)]
+    pub(crate) fee_scenarios_csv: Option<String>,
+    #[serde(default)]
+    pub(crate) margin_csv: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct ReplayFeeScenario {
+    pub(crate) schedule: ReplayFeeSchedule,
+    pub(crate) fees: f64,
+    pub(crate) gross_pnl: f64,
+    pub(crate) net_pnl: f64,
+    pub(crate) ending_equity: f64,
+    pub(crate) return_on_initial_capital_pct: Option<f64>,
+    pub(crate) max_drawdown: f64,
+    pub(crate) max_drawdown_pct: Option<f64>,
+    pub(crate) profit_factor: Option<f64>,
+}
+
+impl Default for ReplayFeeScenario {
+    fn default() -> Self {
+        Self {
+            schedule: ReplayFeeSchedule::default(),
+            fees: 0.0,
+            gross_pnl: 0.0,
+            net_pnl: 0.0,
+            ending_equity: 0.0,
+            return_on_initial_capital_pct: None,
+            max_drawdown: 0.0,
+            max_drawdown_pct: None,
+            profit_factor: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +208,8 @@ struct TradeRow {
     exit_timestamp_ns: Option<i64>,
     exit_price: Option<f64>,
     gross_realized_pnl: f64,
+    fees: f64,
+    net_realized_pnl: f64,
     exit_reason: Option<String>,
     fill_count: usize,
     execution_precision: String,
@@ -174,6 +227,7 @@ struct OpenTrade {
     exit_timestamp_ns: Option<i64>,
     exit_price: Option<f64>,
     gross_realized_pnl: f64,
+    fees: f64,
     exit_reason: Option<String>,
     fill_count: usize,
     execution_precisions: BTreeSet<String>,
@@ -184,6 +238,8 @@ struct EquityRow {
     timestamp_ns: i64,
     equity: f64,
     cumulative_gross_realized_pnl: f64,
+    cumulative_fees: f64,
+    cumulative_net_pnl: f64,
     position_qty: f64,
     mark_price: Option<f64>,
     execution_precision: String,
@@ -199,16 +255,22 @@ pub(crate) fn write_replay_result(
     input: ReplayResultInput<'_>,
 ) -> Result<ReplayResultWriteOutcome> {
     let fills = sorted_fills(input.ledger);
-    let trades = build_trade_rows(&fills);
+    let fee_schedule = ReplayFeeSchedule::default();
+    let trades = build_trade_rows(&fills, &fee_schedule);
     let initial_capital = replay_initial_capital(input.replay);
-    let equity = build_equity_rows(&fills, initial_capital, input.started_at_utc);
+    let equity = build_equity_rows(&fills, initial_capital, input.started_at_utc, &fee_schedule);
     let summary = build_summary(
         &fills,
         &trades,
         &equity,
         initial_capital,
-        input.replay.replay_window.as_ref(),
+        input
+            .replay
+            .replay_window
+            .as_ref()
+            .map_or(0, |value| value.evaluation_rows_processed),
     );
+    let fee_scenario = fee_scenario_from_summary(&fee_schedule, &summary);
     let metadata = build_metadata(&input, initial_capital, &fills);
     let status = if input.error.is_some() {
         ReplayResultStatus::Failed
@@ -239,7 +301,12 @@ pub(crate) fn write_replay_result(
             trades_csv: "trades.csv".to_string(),
             fills_csv: "fills.csv".to_string(),
             equity_csv: "equity.csv".to_string(),
+            fee_scenarios_csv: Some("fee-scenarios.csv".to_string()),
+            margin_csv: None,
         },
+        active_fee_scenario: fee_schedule.name.clone(),
+        fee_scenarios: vec![fee_scenario],
+        margin_analysis: None,
         ledger: input.ledger.clone(),
     };
 
@@ -254,6 +321,10 @@ pub(crate) fn write_replay_result(
     write_atomic(&fills_path, &fills_csv(&fills))?;
     write_atomic(&trades_path, &trades_csv(&trades))?;
     write_atomic(&equity_path, &equity_csv(&equity, initial_capital))?;
+    write_atomic(
+        &directory.join("fee-scenarios.csv"),
+        &fee_scenarios_csv(&document.fee_scenarios),
+    )?;
 
     Ok(ReplayResultWriteOutcome {
         result_path,
@@ -361,7 +432,33 @@ fn sorted_fills(ledger: &ReplayExecutionLedgerSnapshot) -> Vec<ReplayExecutionFi
     fills
 }
 
-fn build_trade_rows(fills: &[ReplayExecutionFill]) -> Vec<TradeRow> {
+fn margin_fills_for_identity(
+    fills: &[ReplayExecutionFill],
+    account_id: i64,
+    contract_id: i64,
+) -> Vec<ReplayExecutionFill> {
+    fills
+        .iter()
+        .filter(|fill| fill.account_id == account_id && fill.contract_id == contract_id)
+        .cloned()
+        .collect()
+}
+
+fn margin_fills_for_result(
+    document: &ReplayResultDocument,
+    fills: &[ReplayExecutionFill],
+) -> Vec<ReplayExecutionFill> {
+    margin_fills_for_identity(
+        fills,
+        document.metadata.account_id,
+        document.metadata.contract_id,
+    )
+}
+
+fn build_trade_rows(
+    fills: &[ReplayExecutionFill],
+    fee_schedule: &ReplayFeeSchedule,
+) -> Vec<TradeRow> {
     let mut open: BTreeMap<PositionKey, OpenTrade> = BTreeMap::new();
     let mut completed = Vec::new();
 
@@ -370,6 +467,8 @@ fn build_trade_rows(fills: &[ReplayExecutionFill]) -> Vec<TradeRow> {
         if quantity <= f64::EPSILON {
             continue;
         }
+        let fill_fee = fee_schedule.fee_for_quantity(quantity);
+        let mut remaining_fee = fill_fee;
         let is_buy = fill.side.eq_ignore_ascii_case("buy");
         let incoming_side = if is_buy { "long" } else { "short" };
         let signed = if is_buy { quantity } else { -quantity };
@@ -391,6 +490,8 @@ fn build_trade_rows(fills: &[ReplayExecutionFill]) -> Vec<TradeRow> {
                     / next_quantity.max(f64::EPSILON);
                 current.quantity = next_quantity;
                 current.fill_count += 1;
+                current.fees += fill_fee;
+                remaining_fee = 0.0;
                 current
                     .execution_precisions
                     .insert(fill.execution_precision.label().to_string());
@@ -401,6 +502,11 @@ fn build_trade_rows(fills: &[ReplayExecutionFill]) -> Vec<TradeRow> {
         if remaining > f64::EPSILON {
             if let Some(mut current) = open.remove(&key) {
                 let close_quantity = current.quantity.min(remaining);
+                let close_fee = if quantity > 0.0 {
+                    fill_fee * close_quantity / quantity
+                } else {
+                    0.0
+                };
                 let points = if current.side == "long" {
                     fill.price - current.entry_price
                 } else {
@@ -415,12 +521,14 @@ fn build_trade_rows(fills: &[ReplayExecutionFill]) -> Vec<TradeRow> {
                 current.exit_timestamp_ns = Some(fill.fill_timestamp_ns);
                 current.exit_price = Some(fill.price);
                 current.gross_realized_pnl += realized;
+                current.fees += close_fee;
                 current.exit_reason = fill.exit_reason.clone();
                 current.fill_count += 1;
                 current
                     .execution_precisions
                     .insert(fill.execution_precision.label().to_string());
                 remaining -= close_quantity;
+                remaining_fee -= close_fee;
                 if current.quantity <= f64::EPSILON {
                     completed.push(trade_row_from_open(current));
                 } else {
@@ -443,6 +551,7 @@ fn build_trade_rows(fills: &[ReplayExecutionFill]) -> Vec<TradeRow> {
                     exit_timestamp_ns: None,
                     exit_price: None,
                     gross_realized_pnl: 0.0,
+                    fees: remaining_fee,
                     exit_reason: None,
                     fill_count: 1,
                     execution_precisions: [fill.execution_precision.label().to_string()]
@@ -489,6 +598,8 @@ fn trade_row_from_open(open: OpenTrade) -> TradeRow {
         exit_timestamp_ns: open.exit_timestamp_ns,
         exit_price: open.exit_price,
         gross_realized_pnl: open.gross_realized_pnl,
+        fees: open.fees,
+        net_realized_pnl: open.gross_realized_pnl - open.fees,
         exit_reason: open.exit_reason,
         fill_count: open.fill_count,
         execution_precision,
@@ -499,13 +610,17 @@ fn build_equity_rows(
     fills: &[ReplayExecutionFill],
     initial_capital: f64,
     started_at_utc: DateTime<Utc>,
+    fee_schedule: &ReplayFeeSchedule,
 ) -> Vec<EquityRow> {
     let mut positions: BTreeMap<PositionKey, f64> = BTreeMap::new();
     let mut cumulative = 0.0;
+    let mut cumulative_fees = 0.0;
     let mut rows = vec![EquityRow {
         timestamp_ns: started_at_utc.timestamp_nanos_opt().unwrap_or_default(),
         equity: initial_capital,
         cumulative_gross_realized_pnl: 0.0,
+        cumulative_fees: 0.0,
+        cumulative_net_pnl: 0.0,
         position_qty: 0.0,
         mark_price: None,
         execution_precision: "baseline".to_string(),
@@ -523,11 +638,15 @@ fn build_equity_rows(
         };
         *positions.entry(key).or_default() += signed;
         cumulative += fill.gross_realized_pnl_delta.unwrap_or_default();
+        cumulative_fees += fee_schedule.fee_for_quantity(quantity);
+        let cumulative_net_pnl = cumulative - cumulative_fees;
         let position_qty = positions.values().copied().sum();
         rows.push(EquityRow {
             timestamp_ns: fill.fill_timestamp_ns,
-            equity: initial_capital + cumulative,
+            equity: initial_capital + cumulative_net_pnl,
             cumulative_gross_realized_pnl: cumulative,
+            cumulative_fees,
+            cumulative_net_pnl,
             position_qty,
             mark_price: Some(fill.price),
             execution_precision: fill.execution_precision.label().to_string(),
@@ -541,33 +660,35 @@ fn build_summary(
     trades: &[TradeRow],
     equity: &[EquityRow],
     initial_capital: f64,
-    window: Option<&crate::broker::ReplayWindowSnapshot>,
+    evaluation_rows_processed: usize,
 ) -> ReplayResultSummary {
     let gross_pnl = fills
         .iter()
         .filter_map(|fill| fill.gross_realized_pnl_delta)
         .sum::<f64>();
+    let fees = trades.iter().map(|trade| trade.fees).sum::<f64>();
+    let net_pnl = gross_pnl - fees;
     let closed = trades
         .iter()
         .filter(|trade| trade.exit_timestamp_ns.is_some())
         .collect::<Vec<_>>();
     let wins = closed
         .iter()
-        .filter(|trade| trade.gross_realized_pnl > 0.0)
+        .filter(|trade| trade.net_realized_pnl > 0.0)
         .count();
     let losses = closed
         .iter()
-        .filter(|trade| trade.gross_realized_pnl < 0.0)
+        .filter(|trade| trade.net_realized_pnl < 0.0)
         .count();
     let gross_wins = closed
         .iter()
-        .filter(|trade| trade.gross_realized_pnl > 0.0)
-        .map(|trade| trade.gross_realized_pnl)
+        .filter(|trade| trade.net_realized_pnl > 0.0)
+        .map(|trade| trade.net_realized_pnl)
         .sum::<f64>();
     let gross_losses = closed
         .iter()
-        .filter(|trade| trade.gross_realized_pnl < 0.0)
-        .map(|trade| trade.gross_realized_pnl.abs())
+        .filter(|trade| trade.net_realized_pnl < 0.0)
+        .map(|trade| trade.net_realized_pnl.abs())
         .sum::<f64>();
     let mut peak = initial_capital;
     let mut max_drawdown: f64 = 0.0;
@@ -583,15 +704,15 @@ fn build_summary(
             *exit_reason_counts.entry(reason.to_string()).or_insert(0) += 1;
         }
     }
-    let ending_equity = initial_capital + gross_pnl;
+    let ending_equity = initial_capital + net_pnl;
     ReplayResultSummary {
         initial_capital,
         ending_equity,
         gross_pnl,
-        net_pnl: gross_pnl,
-        fees: 0.0,
+        net_pnl,
+        fees,
         return_on_initial_capital_pct: (initial_capital > 0.0)
-            .then_some(gross_pnl / initial_capital * 100.0),
+            .then_some(net_pnl / initial_capital * 100.0),
         fill_count: fills.len(),
         trade_count: trades.len(),
         closed_trade_count: closed.len(),
@@ -607,8 +728,275 @@ fn build_summary(
             .fold(0.0, f64::max),
         precision: precision.into_iter().collect(),
         exit_reason_counts,
-        evaluation_rows_processed: window.map_or(0, |value| value.evaluation_rows_processed),
+        evaluation_rows_processed,
+        required_starting_capital: None,
+        peak_margin_requirement: None,
+        minimum_equity_buffer_over_margin: None,
+        initial_capital_sufficient: None,
     }
+}
+
+fn fee_scenario_from_summary(
+    schedule: &ReplayFeeSchedule,
+    summary: &ReplayResultSummary,
+) -> ReplayFeeScenario {
+    ReplayFeeScenario {
+        schedule: schedule.clone(),
+        fees: summary.fees,
+        gross_pnl: summary.gross_pnl,
+        net_pnl: summary.net_pnl,
+        ending_equity: summary.ending_equity,
+        return_on_initial_capital_pct: summary.return_on_initial_capital_pct,
+        max_drawdown: summary.max_drawdown,
+        max_drawdown_pct: summary.max_drawdown_pct,
+        profit_factor: summary.profit_factor,
+    }
+}
+
+fn fee_scenarios_csv(scenarios: &[ReplayFeeScenario]) -> Vec<u8> {
+    let mut output = String::from(
+        "name,currency,commission_per_contract,exchange_per_contract,clearing_per_contract,regulatory_per_contract,misc_per_contract,total_per_contract,fees,gross_pnl,net_pnl,ending_equity,return_on_initial_capital_pct,max_drawdown,max_drawdown_pct,profit_factor\n",
+    );
+    for scenario in scenarios {
+        let schedule = &scenario.schedule;
+        let row = [
+            schedule.name.clone(),
+            schedule.currency.clone(),
+            schedule.commission_per_contract.to_string(),
+            schedule.exchange_per_contract.to_string(),
+            schedule.clearing_per_contract.to_string(),
+            schedule.regulatory_per_contract.to_string(),
+            schedule.misc_per_contract.to_string(),
+            schedule.total_per_contract().to_string(),
+            scenario.fees.to_string(),
+            scenario.gross_pnl.to_string(),
+            scenario.net_pnl.to_string(),
+            scenario.ending_equity.to_string(),
+            optional(scenario.return_on_initial_capital_pct),
+            scenario.max_drawdown.to_string(),
+            optional(scenario.max_drawdown_pct),
+            optional(scenario.profit_factor),
+        ];
+        push_csv_row(&mut output, &row);
+    }
+    output.into_bytes()
+}
+
+fn apply_margin_to_summary(summary: &mut ReplayResultSummary, analysis: &ReplayMarginAnalysis) {
+    summary.required_starting_capital = Some(analysis.required_starting_capital);
+    summary.peak_margin_requirement = Some(analysis.peak_margin_requirement);
+    summary.minimum_equity_buffer_over_margin = Some(analysis.minimum_equity_buffer_over_margin);
+    summary.initial_capital_sufficient = Some(analysis.initial_capital_sufficient);
+}
+
+fn margin_analysis_csv(analysis: &ReplayMarginAnalysis) -> Vec<u8> {
+    let mut output = String::from(
+        "fee_scenario,model,currency,margin_per_contract,safety_buffer,safety_buffer_percent,initial_capital,max_open_position,peak_margin_requirement,minimum_equity_buffer_over_margin,required_starting_capital,initial_capital_sufficient,first_breach_timestamp_ns\n",
+    );
+    let row = [
+        analysis.fee_scenario.clone(),
+        analysis.model.clone(),
+        analysis.currency.clone(),
+        analysis.margin_per_contract.to_string(),
+        analysis.safety_buffer.to_string(),
+        analysis.safety_buffer_percent.to_string(),
+        analysis.initial_capital.to_string(),
+        analysis.max_open_position.to_string(),
+        analysis.peak_margin_requirement.to_string(),
+        analysis.minimum_equity_buffer_over_margin.to_string(),
+        analysis.required_starting_capital.to_string(),
+        analysis.initial_capital_sufficient.to_string(),
+        optional(analysis.first_breach_timestamp_ns),
+    ];
+    push_csv_row(&mut output, &row);
+    output.into_bytes()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayResultRepriceOutcome {
+    pub(crate) result_path: PathBuf,
+    pub(crate) scenario_name: String,
+    pub(crate) fees: f64,
+    pub(crate) net_pnl: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayMarginAnalysisOutcome {
+    pub(crate) result_path: PathBuf,
+    pub(crate) required_starting_capital: f64,
+    pub(crate) initial_capital_sufficient: bool,
+}
+
+/// Apply an accounting-only fee schedule to a completed result.
+///
+/// The embedded execution ledger is never changed.  The active summary and
+/// human-readable trade/equity exports are regenerated from that immutable
+/// ledger, while every selected schedule remains available in the result JSON
+/// and `fee-scenarios.csv`.
+pub(crate) fn reprice_replay_result(
+    result_path: &Path,
+    schedule: ReplayFeeSchedule,
+) -> Result<ReplayResultRepriceOutcome> {
+    schedule.validate()?;
+    let bytes = fs::read(result_path)
+        .with_context(|| format!("read replay result {}", result_path.display()))?;
+    let mut document: ReplayResultDocument = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse replay result {}", result_path.display()))?;
+    if !matches!(document.status, ReplayResultStatus::Completed) {
+        anyhow::bail!("cannot reprice a failed replay result");
+    }
+    if !document.ledger.fee_neutral {
+        anyhow::bail!("replay result ledger is not marked fee-neutral");
+    }
+    let existing_margin_config =
+        document
+            .margin_analysis
+            .as_ref()
+            .map(|analysis| ReplayMarginConfig {
+                model: analysis.model.clone(),
+                currency: analysis.currency.clone(),
+                margin_per_contract: analysis.margin_per_contract,
+                safety_buffer: analysis.safety_buffer,
+                safety_buffer_percent: analysis.safety_buffer_percent,
+            });
+    let directory = result_path
+        .parent()
+        .context("replay result path has no parent directory")?;
+    let fills = sorted_fills(&document.ledger);
+    let initial_capital = document.metadata.initial_capital;
+    if !initial_capital.is_finite() || initial_capital <= 0.0 {
+        anyhow::bail!("replay result has invalid initial capital");
+    }
+    let trades = build_trade_rows(&fills, &schedule);
+    let equity = build_equity_rows(&fills, initial_capital, document.started_at_utc, &schedule);
+    let summary = build_summary(
+        &fills,
+        &trades,
+        &equity,
+        initial_capital,
+        document.summary.evaluation_rows_processed,
+    );
+    let scenario = fee_scenario_from_summary(&schedule, &summary);
+
+    if document.fee_scenarios.is_empty() {
+        let neutral = ReplayFeeSchedule::default();
+        document
+            .fee_scenarios
+            .push(fee_scenario_from_summary(&neutral, &document.summary));
+    }
+    document
+        .fee_scenarios
+        .retain(|existing| existing.schedule.name != schedule.name);
+    document.fee_scenarios.push(scenario.clone());
+    document.schema_version = REPLAY_RESULT_SCHEMA_VERSION;
+    document.active_fee_scenario = schedule.name.clone();
+    document.metadata.fee_model = schedule.name.clone();
+    document.summary = summary;
+    document.artifacts.fee_scenarios_csv = Some("fee-scenarios.csv".to_string());
+
+    if let Some(margin_config) = existing_margin_config {
+        let margin_fills = margin_fills_for_result(&document, &fills);
+        let margin_analysis = compute_margin_analysis(
+            &margin_fills,
+            initial_capital,
+            document.started_at_utc,
+            &schedule,
+            &schedule.name,
+            &margin_config,
+        )?;
+        apply_margin_to_summary(&mut document.summary, &margin_analysis);
+        document.margin_analysis = Some(margin_analysis.clone());
+        document.artifacts.margin_csv = Some("margin.csv".to_string());
+        write_atomic(
+            &directory.join("margin.csv"),
+            &margin_analysis_csv(&margin_analysis),
+        )?;
+    }
+
+    write_atomic(&directory.join("trades.csv"), &trades_csv(&trades))?;
+    write_atomic(
+        &directory.join("equity.csv"),
+        &equity_csv(&equity, initial_capital),
+    )?;
+    write_atomic(
+        &directory.join("fee-scenarios.csv"),
+        &fee_scenarios_csv(&document.fee_scenarios),
+    )?;
+    write_atomic(
+        result_path,
+        &serde_json::to_vec_pretty(&document).context("serialize repriced replay result")?,
+    )?;
+
+    Ok(ReplayResultRepriceOutcome {
+        result_path: result_path.to_path_buf(),
+        scenario_name: schedule.name,
+        fees: document.summary.fees,
+        net_pnl: document.summary.net_pnl,
+    })
+}
+
+/// Add or refresh the account-size overlay for a completed result without
+/// replaying market data or changing the immutable execution ledger.
+pub(crate) fn analyze_replay_margin(
+    result_path: &Path,
+    config: ReplayMarginConfig,
+) -> Result<ReplayMarginAnalysisOutcome> {
+    config.validate()?;
+    let bytes = fs::read(result_path)
+        .with_context(|| format!("read replay result {}", result_path.display()))?;
+    let mut document: ReplayResultDocument = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse replay result {}", result_path.display()))?;
+    if !matches!(document.status, ReplayResultStatus::Completed) {
+        anyhow::bail!("cannot analyze a failed replay result");
+    }
+    if !document.ledger.fee_neutral {
+        anyhow::bail!("replay result ledger is not marked fee-neutral");
+    }
+    let directory = result_path
+        .parent()
+        .context("replay result path has no parent directory")?;
+    let fee_schedule = if let Some(scenario) = document
+        .fee_scenarios
+        .iter()
+        .find(|scenario| scenario.schedule.name == document.active_fee_scenario)
+    {
+        scenario.schedule.clone()
+    } else if document.active_fee_scenario == FEE_NEUTRAL_SCENARIO_NAME {
+        ReplayFeeSchedule::default()
+    } else {
+        anyhow::bail!(
+            "active fee scenario '{}' is not present in the result",
+            document.active_fee_scenario
+        );
+    };
+    let fills = sorted_fills(&document.ledger);
+    let margin_fills = margin_fills_for_result(&document, &fills);
+    let analysis = compute_margin_analysis(
+        &margin_fills,
+        document.metadata.initial_capital,
+        document.started_at_utc,
+        &fee_schedule,
+        &document.active_fee_scenario,
+        &config,
+    )?;
+    apply_margin_to_summary(&mut document.summary, &analysis);
+    document.metadata.margin_model = config.model.clone();
+    document.metadata.account_currency = config.currency.clone();
+    document.margin_analysis = Some(analysis.clone());
+    document.artifacts.margin_csv = Some("margin.csv".to_string());
+    write_atomic(
+        &directory.join("margin.csv"),
+        &margin_analysis_csv(&analysis),
+    )?;
+    write_atomic(
+        result_path,
+        &serde_json::to_vec_pretty(&document).context("serialize replay margin result")?,
+    )?;
+    Ok(ReplayMarginAnalysisOutcome {
+        result_path: result_path.to_path_buf(),
+        required_starting_capital: analysis.required_starting_capital,
+        initial_capital_sufficient: analysis.initial_capital_sufficient,
+    })
 }
 
 fn fills_csv(fills: &[ReplayExecutionFill]) -> Vec<u8> {
@@ -661,7 +1049,7 @@ fn fill_price_source_label(source: ReplayFillPriceSource) -> &'static str {
 
 fn trades_csv(trades: &[TradeRow]) -> Vec<u8> {
     let mut output = String::from(
-        "trade_id,account_id,contract_id,contract_name,side,quantity,entry_timestamp_ns,entry_price,exit_timestamp_ns,exit_price,gross_realized_pnl,exit_reason,fill_count,execution_precision\n",
+        "trade_id,account_id,contract_id,contract_name,side,quantity,entry_timestamp_ns,entry_price,exit_timestamp_ns,exit_price,gross_realized_pnl,fees,net_realized_pnl,exit_reason,fill_count,execution_precision\n",
     );
     for (index, trade) in trades.iter().enumerate() {
         let row = [
@@ -676,6 +1064,8 @@ fn trades_csv(trades: &[TradeRow]) -> Vec<u8> {
             optional(trade.exit_timestamp_ns),
             optional(trade.exit_price),
             trade.gross_realized_pnl.to_string(),
+            trade.fees.to_string(),
+            trade.net_realized_pnl.to_string(),
             trade.exit_reason.clone().unwrap_or_default(),
             trade.fill_count.to_string(),
             trade.execution_precision.clone(),
@@ -687,7 +1077,7 @@ fn trades_csv(trades: &[TradeRow]) -> Vec<u8> {
 
 fn equity_csv(rows: &[EquityRow], initial_capital: f64) -> Vec<u8> {
     let mut output = String::from(
-        "timestamp_ns,equity,initial_capital,cumulative_gross_realized_pnl,fees,position_qty,mark_price,execution_precision\n",
+        "timestamp_ns,equity,initial_capital,cumulative_gross_realized_pnl,cumulative_fees,cumulative_net_pnl,position_qty,mark_price,execution_precision\n",
     );
     for row in rows {
         let fields = [
@@ -695,7 +1085,8 @@ fn equity_csv(rows: &[EquityRow], initial_capital: f64) -> Vec<u8> {
             row.equity.to_string(),
             initial_capital.to_string(),
             row.cumulative_gross_realized_pnl.to_string(),
-            "0".to_string(),
+            row.cumulative_fees.to_string(),
+            row.cumulative_net_pnl.to_string(),
             row.position_qty.to_string(),
             optional(row.mark_price),
             row.execution_precision.clone(),
@@ -728,6 +1119,10 @@ fn csv_escape(value: &str) -> String {
 
 fn optional<T: Display>(value: Option<T>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn default_active_fee_scenario() -> String {
+    FEE_NEUTRAL_SCENARIO_NAME.to_string()
 }
 
 fn safe_path_component(value: &str) -> String {
@@ -929,10 +1324,170 @@ mod tests {
                 .expect("parse result JSON");
         assert_eq!(document.schema_version, REPLAY_RESULT_SCHEMA_VERSION);
         assert_eq!(document.summary.net_pnl, 5.0);
+        assert!(document.margin_analysis.is_none());
+        assert_eq!(document.active_fee_scenario, FEE_NEUTRAL_SCENARIO_NAME);
+        assert_eq!(document.fee_scenarios.len(), 1);
         let result_dir = outcome.result_path.parent().expect("result directory");
         assert!(result_dir.join("fills.csv").is_file());
         assert!(result_dir.join("trades.csv").is_file());
         assert!(result_dir.join("equity.csv").is_file());
+        assert!(result_dir.join("fee-scenarios.csv").is_file());
+        assert!(document.artifacts.margin_csv.is_none());
+        let mut legacy = serde_json::to_value(&document).expect("encode result");
+        let legacy_object = legacy.as_object_mut().expect("result object");
+        legacy_object.remove("active_fee_scenario");
+        legacy_object.remove("fee_scenarios");
+        legacy_object.remove("margin_analysis");
+        legacy_object
+            .get_mut("summary")
+            .and_then(Value::as_object_mut)
+            .expect("summary object")
+            .retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "required_starting_capital"
+                        | "peak_margin_requirement"
+                        | "minimum_equity_buffer_over_margin"
+                        | "initial_capital_sufficient"
+                )
+            });
+        legacy_object
+            .get_mut("artifacts")
+            .and_then(Value::as_object_mut)
+            .expect("artifact object")
+            .retain(|key, _| key != "fee_scenarios_csv" && key != "margin_csv");
+        let legacy_document: ReplayResultDocument =
+            serde_json::from_value(legacy).expect("parse v1 result");
+        assert_eq!(
+            legacy_document.active_fee_scenario,
+            FEE_NEUTRAL_SCENARIO_NAME
+        );
+        assert!(legacy_document.fee_scenarios.is_empty());
+        fs::remove_dir_all(root).expect("cleanup result directory");
+    }
+
+    #[test]
+    fn repricing_updates_accounting_without_mutating_ledger() {
+        let root = std::env::temp_dir().join(format!(
+            "trader-replay-reprice-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = AppConfig::default();
+        config.broker = crate::broker::BrokerKind::Tradovate;
+        config.env = TradingEnvironment::Sim;
+        config.replay_result_dir = root.clone();
+        let mut ledger = ReplayExecutionLedgerSnapshot::default();
+        ledger.schema_version = 3;
+        ledger.engine_mode = ReplayEngineMode::Deterministic;
+        ledger.fill_model = ReplayFillModel::RawBarOpen;
+        ledger.signal_source = "OHLC 1 Min".to_string();
+        ledger.fills = vec![
+            fill(1, "Buy", 1.0, 100.0, 1_000_000_000, None),
+            fill(2, "Sell", 1.0, 101.0, 2_000_000_000, Some(5.0)),
+        ];
+        ledger.gross_realized_pnl = 5.0;
+        let strategy = ExecutionStrategyConfig::default();
+        let market = MarketSnapshot {
+            contract_id: Some(99),
+            contract_name: Some("MESU6".to_string()),
+            candle_mode: CandleMode::Standard,
+            bars: vec![],
+            trade_markers: vec![],
+            session_profile: None,
+            value_per_point: Some(5.0),
+            tick_size: Some(0.25),
+            history_loaded: 1,
+            live_bars: 2,
+            replay_window: None,
+            status: "complete".to_string(),
+        };
+        let replay = replay_state();
+        let written = write_replay_result(ReplayResultInput {
+            config: &config,
+            replay: &replay,
+            market: &market,
+            ledger: &ledger,
+            strategy: &strategy,
+            bar_type: BarType::minute(1),
+            candle_mode: CandleMode::Standard,
+            run_id: "reprice-test",
+            started_at_utc: DateTime::from_timestamp(0, 0).unwrap(),
+            completed_at_utc: DateTime::from_timestamp(3, 0).unwrap(),
+            error: None,
+        })
+        .expect("write result");
+        let margin_config = ReplayMarginConfig {
+            margin_per_contract: 1_000.0,
+            safety_buffer: 100.0,
+            ..ReplayMarginConfig::default()
+        };
+        let margin = analyze_replay_margin(&written.result_path, margin_config)
+            .expect("analyze replay margin");
+        assert_eq!(margin.required_starting_capital, 1_100.0);
+        assert!(margin.initial_capital_sufficient);
+        let margin_document: ReplayResultDocument =
+            serde_json::from_slice(&fs::read(&written.result_path).expect("read margin result"))
+                .expect("parse margin result");
+        assert_eq!(
+            margin_document.summary.required_starting_capital,
+            Some(1_100.0)
+        );
+        assert!(margin_document.artifacts.margin_csv.is_some());
+        assert!(
+            written
+                .result_path
+                .parent()
+                .expect("result directory")
+                .join("margin.csv")
+                .is_file()
+        );
+        let schedule = ReplayFeeSchedule {
+            name: "broker_standard".to_string(),
+            commission_per_contract: 0.50,
+            ..ReplayFeeSchedule::default()
+        };
+        let repriced = reprice_replay_result(&written.result_path, schedule).expect("reprice");
+        assert_eq!(repriced.scenario_name, "broker_standard");
+        assert!((repriced.fees - 1.0).abs() < f64::EPSILON);
+        assert!((repriced.net_pnl - 4.0).abs() < f64::EPSILON);
+
+        let document: ReplayResultDocument =
+            serde_json::from_slice(&fs::read(&written.result_path).expect("read result"))
+                .expect("parse repriced result");
+        assert_eq!(document.schema_version, REPLAY_RESULT_SCHEMA_VERSION);
+        assert_eq!(document.active_fee_scenario, "broker_standard");
+        assert_eq!(document.fee_scenarios.len(), 2);
+        assert_eq!(document.ledger.fills, ledger.fills);
+        assert_eq!(document.summary.gross_pnl, 5.0);
+        assert_eq!(document.summary.fees, 1.0);
+        assert_eq!(document.summary.net_pnl, 4.0);
+        assert_eq!(
+            document
+                .margin_analysis
+                .as_ref()
+                .expect("repriced margin analysis")
+                .fee_scenario,
+            "broker_standard"
+        );
+        assert!(
+            document
+                .summary
+                .required_starting_capital
+                .expect("required starting capital")
+                > 1_100.0
+        );
+        let result_dir = written.result_path.parent().expect("result directory");
+        let fee_csv =
+            fs::read_to_string(result_dir.join("fee-scenarios.csv")).expect("read fee scenarios");
+        assert!(fee_csv.contains("broker_standard"));
+        let equity_csv = fs::read_to_string(result_dir.join("equity.csv")).expect("read equity");
+        assert!(equity_csv.contains("cumulative_net_pnl"));
+        let trades_csv = fs::read_to_string(result_dir.join("trades.csv")).expect("read trades");
+        assert!(trades_csv.contains("net_realized_pnl"));
         fs::remove_dir_all(root).expect("cleanup result directory");
     }
 
@@ -941,5 +1496,20 @@ mod tests {
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
         assert_eq!(csv_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn margin_overlay_filters_to_result_account_and_contract() {
+        let selected = fill(1, "Buy", 1.0, 100.0, 1_000_000_000, None);
+        let mut other_contract = fill(2, "Buy", 5.0, 100.0, 2_000_000_000, None);
+        other_contract.contract_id = 100;
+        let mut other_account = fill(3, "Buy", 5.0, 100.0, 3_000_000_000, None);
+        other_account.account_id = 2;
+        let filtered = margin_fills_for_identity(
+            &[selected.clone(), other_contract, other_account],
+            selected.account_id,
+            selected.contract_id,
+        );
+        assert_eq!(filtered, vec![selected]);
     }
 }

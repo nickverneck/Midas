@@ -1,4 +1,4 @@
-use crate::cli::ReplayDownloadArgs;
+use crate::cli::{AnalyzeReplayMarginArgs, ReplayDownloadArgs, RepriceReplayResultArgs};
 use crate::config::AppConfig;
 #[cfg(feature = "replay")]
 use anyhow::Context;
@@ -31,6 +31,85 @@ pub(crate) async fn download_replay_data(
 
         #[cfg(feature = "tradovate")]
         download_tradovate_replay(config, plan).await
+    }
+}
+
+pub(crate) fn reprice_replay_result(
+    config: &AppConfig,
+    args: RepriceReplayResultArgs,
+) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay result repricing requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = (config, args);
+        bail!("replay result repricing requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let _ = config;
+        let schedule = crate::tradovate::ReplayFeeSchedule {
+            name: args.name,
+            currency: args.currency,
+            commission_per_contract: args.commission_per_contract,
+            exchange_per_contract: args.exchange_per_contract,
+            clearing_per_contract: args.clearing_per_contract,
+            regulatory_per_contract: args.regulatory_per_contract,
+            misc_per_contract: args.misc_per_contract,
+        };
+        let outcome = crate::tradovate::reprice_replay_result(&args.result, schedule)?;
+        println!("Replay result repriced without replaying market data.");
+        println!("Scenario: {}", outcome.scenario_name);
+        println!("Fees: {:.8}", outcome.fees);
+        println!("Net PnL: {:.8}", outcome.net_pnl);
+        println!("Result: {}", outcome.result_path.display());
+        Ok(())
+    }
+}
+
+pub(crate) fn analyze_replay_margin(
+    config: &AppConfig,
+    args: AnalyzeReplayMarginArgs,
+) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay margin analysis requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = (config, args);
+        bail!("replay margin analysis requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let _ = config;
+        let margin = crate::tradovate::ReplayMarginConfig {
+            model: args.model,
+            currency: args.currency,
+            margin_per_contract: args.margin_per_contract,
+            safety_buffer: args.safety_buffer,
+            safety_buffer_percent: args.safety_buffer_percent,
+        };
+        let outcome = crate::tradovate::analyze_replay_margin(&args.result, margin)?;
+        println!("Replay margin analysis saved without replaying market data.");
+        println!(
+            "Required starting capital: {:.8}",
+            outcome.required_starting_capital
+        );
+        println!(
+            "Initial capital sufficient: {}",
+            outcome.initial_capital_sufficient
+        );
+        println!("Result: {}", outcome.result_path.display());
+        Ok(())
     }
 }
 
