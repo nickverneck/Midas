@@ -111,7 +111,7 @@ fn dashboard_summary_shows_replay_speed_in_replay_mode() {
     assert!(lines.iter().any(|line| line == "Mode: Replay"));
     assert!(lines.iter().any(|line| line == "Replay Speed: 5x"));
     assert!(lines.iter().any(|line| {
-        line == "Replay Ledger: 0 fill(s) | gross +0.00 | ignored in Legacy | schema v2"
+        line == "Replay Ledger: 0 fill(s) | gross +0.00 | ignored in Legacy | schema v3"
     }));
 }
 

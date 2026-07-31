@@ -1,6 +1,8 @@
 use super::*;
 #[cfg(feature = "replay")]
-use crate::broker::{ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig};
+use crate::broker::{
+    ReplayBarProtectionPolicy, ReplayEngineMode, ReplayFillModel, ReplayLatencyConfig,
+};
 
 pub(crate) enum InternalEvent {
     UserEntities(Vec<EntityEnvelope>),
@@ -80,12 +82,15 @@ pub(crate) enum BrokerCommand {
     #[cfg(feature = "replay")]
     ReplayBar {
         bar: Bar,
+        ticks: Vec<ReplayMarketTick>,
+        dom_updates: Vec<ReplayMarketDom>,
         bar_index: u64,
         response_tx: oneshot::Sender<()>,
     },
     #[cfg(feature = "replay")]
     ConfigureReplay {
         mode: ReplayEngineMode,
+        fill_model: ReplayFillModel,
         latency: ReplayLatencyConfig,
         bar_protection_policy: ReplayBarProtectionPolicy,
         response_tx: oneshot::Sender<()>,

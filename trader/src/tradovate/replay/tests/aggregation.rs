@@ -81,6 +81,7 @@ fn replay_state_derives_requested_local_file_bar_types() {
             value_per_point: Some(5.0),
             tick_size: Some(0.25),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::PriceTicks(Arc::from(
             vec![
                 ReplayTick {
@@ -137,6 +138,7 @@ fn raw_tick_replay_derives_volume_bars_and_preserves_trade_volume() {
             value_per_point: Some(5.0),
             tick_size: Some(0.25),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::RawTicks(Arc::from(
             vec![
                 ReplayTick {
@@ -283,6 +285,7 @@ fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
             value_per_point: Some(5.0),
             tick_size: Some(0.25),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::RawTicks(Arc::from(memory_ticks.into_boxed_slice())),
     };
 
@@ -316,10 +319,10 @@ fn cached_raw_tick_replay_lease_survives_cache_refresh() {
                     tick_id: Some(index + 1),
                     price: 100.0 + price_offset + index as f64 * 0.25,
                     size: 1.0,
-                    bid_price: None,
-                    bid_size: None,
-                    ask_price: None,
-                    ask_size: None,
+                    bid_price: Some(100.0 + price_offset + index as f64 * 0.25 - 0.25),
+                    bid_size: Some(1.0),
+                    ask_price: Some(100.0 + price_offset + index as f64 * 0.25 + 0.25),
+                    ask_size: Some(1.0),
                     chart_id: None,
                     trade_date: None,
                     packet_source: None,
@@ -384,6 +387,11 @@ fn cached_raw_tick_replay_lease_survives_cache_refresh() {
     assert_eq!(bars[0].open, 100.0);
     assert_eq!(bars[0].close, 100.25);
     assert_eq!(bars[1].open, 100.5);
+    let frames = state
+        .frames_for_type(BarType::minute(1))
+        .expect("leased tick frames");
+    assert_eq!(frames[0].ticks[0].bid_price, Some(99.75));
+    assert_eq!(frames[0].ticks[0].ask_price, Some(100.25));
 }
 
 #[test]
@@ -408,6 +416,7 @@ fn replay_state_keeps_duplicate_timestamp_derived_bars_distinct() {
             value_per_point: Some(5.0),
             tick_size: Some(0.25),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::PriceTicks(Arc::from(
             vec![
                 ReplayTick {
@@ -469,6 +478,7 @@ fn cached_server_bar_state_serves_only_cached_bar_shape() {
             value_per_point: Some(5.0),
             tick_size: Some(0.25),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::CachedServerBars {
             bar_type: BarType::volume(6500),
             source_label: "cache fixture".to_string(),

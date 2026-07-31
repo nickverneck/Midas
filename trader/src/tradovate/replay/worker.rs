@@ -2,7 +2,9 @@
 use super::virtual_time::{ReplayBarSchedule, ReplayVirtualEventKind};
 use super::*;
 #[cfg(feature = "replay")]
-use crate::broker::{ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig};
+use crate::broker::{
+    ReplayBarProtectionPolicy, ReplayEngineMode, ReplayFillModel, ReplayLatencyConfig,
+};
 
 pub(crate) fn spawn_replay_market_task(
     replay: ReplayState,
@@ -58,13 +60,34 @@ async fn replay_market_worker_inner(
     replay_speed_rx: &mut tokio::sync::watch::Receiver<ReplaySpeed>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let bars = replay.bars_for_type(bar_type)?;
+    let frames = replay.frames_for_type(bar_type)?;
+    let bars = frames
+        .iter()
+        .map(|frame| frame.bar.clone())
+        .collect::<Vec<_>>();
     if bars.is_empty() {
         bail!("no {} bars available in replay dataset", bar_type.label());
+    }
+    if cfg.replay_engine_mode == ReplayEngineMode::Deterministic
+        && cfg.replay_fill_model == ReplayFillModel::TickBidAsk
+        && frames.iter().all(|frame| frame.ticks.is_empty())
+    {
+        bail!(
+            "tick_bid_ask replay requires a raw-tick dataset; the selected replay source only provides bars"
+        );
+    }
+    if cfg.replay_engine_mode == ReplayEngineMode::Deterministic
+        && cfg.replay_fill_model == ReplayFillModel::Dom
+        && frames.iter().all(|frame| frame.dom_updates.is_empty())
+    {
+        bail!(
+            "dom replay requires an optional JSONL DOM snapshot file; the selected replay source has no Level 2 snapshots"
+        );
     }
     configure_replay_broker(
         &broker_tx,
         cfg.replay_engine_mode,
+        cfg.replay_fill_model,
         cfg.replay_latency_config(),
         cfg.replay_bar_protection_policy,
     )
@@ -156,7 +179,23 @@ async fn replay_market_worker_inner(
             replay_speed_rx,
         )
         .await;
-        process_replay_bar(&broker_tx, bar, bar_index as u64).await?;
+        let frame = frames
+            .get(history_loaded + bar_index)
+            .context("replay frame schedule referenced a missing frame")?;
+        process_replay_bar(
+            &broker_tx,
+            bar,
+            frame.ticks.to_vec(),
+            frame.dom_updates.to_vec(),
+            bar_index as u64,
+        )
+        .await?;
+        let evaluation_market_ts_ns = frame
+            .dom_updates
+            .last()
+            .map(|dom| dom.ts_ns)
+            .or_else(|| frame.ticks.last().map(|tick| tick.ts_ns))
+            .unwrap_or(event.market_ts_ns);
         let before_closed_len = series.closed_bars.len();
         let before_last_closed = series.closed_bars.last().cloned();
         let before_forming = series.forming_bar.clone();
@@ -218,8 +257,12 @@ async fn replay_market_worker_inner(
             }
             emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
             if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
-                drain_replay_broker(&broker_tx, Some(event.market_ts_ns), Some(bar_index as u64))
-                    .await?;
+                drain_replay_broker(
+                    &broker_tx,
+                    Some(evaluation_market_ts_ns),
+                    Some(bar_index as u64),
+                )
+                .await?;
             }
         }
     }
@@ -268,12 +311,16 @@ pub(super) fn replay_history_loaded(
 async fn process_replay_bar(
     broker_tx: &UnboundedSender<BrokerCommand>,
     bar: &Bar,
+    ticks: Vec<ReplayMarketTick>,
+    dom_updates: Vec<ReplayMarketDom>,
     bar_index: u64,
 ) -> Result<()> {
     let (response_tx, response_rx) = oneshot::channel();
     broker_tx
         .send(BrokerCommand::ReplayBar {
             bar: bar.clone(),
+            ticks,
+            dom_updates,
             bar_index,
             response_tx,
         })
@@ -287,6 +334,7 @@ async fn process_replay_bar(
 async fn configure_replay_broker(
     broker_tx: &UnboundedSender<BrokerCommand>,
     mode: ReplayEngineMode,
+    fill_model: ReplayFillModel,
     latency: ReplayLatencyConfig,
     bar_protection_policy: ReplayBarProtectionPolicy,
 ) -> Result<()> {
@@ -294,6 +342,7 @@ async fn configure_replay_broker(
     broker_tx
         .send(BrokerCommand::ConfigureReplay {
             mode,
+            fill_model,
             latency,
             bar_protection_policy,
             response_tx,

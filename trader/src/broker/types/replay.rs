@@ -144,7 +144,96 @@ impl Default for ReplaySpeed {
     }
 }
 
-pub const REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION: u32 = 2;
+pub const REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ReplayMarketTick {
+    pub ts_ns: i64,
+    pub last: f64,
+    pub size: Option<f64>,
+    pub bid_price: Option<f64>,
+    pub bid_size: Option<f64>,
+    pub ask_price: Option<f64>,
+    pub ask_size: Option<f64>,
+}
+
+/// One visible price level in a Level 2 replay snapshot.
+///
+/// The replay engine treats `size` as the quantity available to the simulated
+/// taker at this price.  It is deliberately a small value type so DOM files
+/// can be normalized before they enter the deterministic broker queue.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ReplayDomLevel {
+    pub price: f64,
+    pub size: f64,
+}
+
+/// A full (not delta) order-book snapshot at a market timestamp.
+///
+/// Bids are expected in descending price order and asks in ascending price
+/// order.  Replay loading normalizes these arrays, so callers constructing a
+/// snapshot directly do not need to sort them first.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplayMarketDom {
+    #[serde(alias = "timestamp_ns")]
+    pub ts_ns: i64,
+    #[serde(default)]
+    pub bids: Vec<ReplayDomLevel>,
+    #[serde(default)]
+    pub asks: Vec<ReplayDomLevel>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayFillModel {
+    #[default]
+    LegacyReferencePrice,
+    RawBarOpen,
+    TickBidAsk,
+    /// Consume visible Level 2 book levels at exchange arrival time.
+    Dom,
+}
+
+impl ReplayFillModel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LegacyReferencePrice => "legacy reference price",
+            Self::RawBarOpen => "raw next-bar open",
+            Self::TickBidAsk => "tick trade/bid/ask",
+            Self::Dom => "Level 2 DOM",
+        }
+    }
+
+    pub fn config_label(self) -> &'static str {
+        match self {
+            Self::LegacyReferencePrice => "legacy_reference_price",
+            Self::RawBarOpen => "raw_bar_open",
+            Self::TickBidAsk => "tick_bid_ask",
+            Self::Dom => "dom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayExecutionPrecision {
+    #[default]
+    BarApproximate,
+    TickExact,
+    QuoteExact,
+    DomAssisted,
+}
+
+impl ReplayExecutionPrecision {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BarApproximate => "bar approximate",
+            Self::TickExact => "tick exact",
+            Self::QuoteExact => "quote exact",
+            Self::DomAssisted => "DOM assisted",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -219,6 +308,10 @@ pub enum ReplayFillPriceSource {
     LegacyReferencePrice,
     RawBarOpen,
     RawBarOhlc,
+    TickTradeFallback,
+    TickBidAsk,
+    DomVisibleLevels,
+    DomTopOfBook,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -241,6 +334,8 @@ pub struct ReplayExecutionFill {
     pub acknowledgement_timestamp_ns: Option<i64>,
     pub fill_timestamp_ns: i64,
     pub fill_price_source: ReplayFillPriceSource,
+    #[serde(default)]
+    pub execution_precision: ReplayExecutionPrecision,
     pub exit_reason: Option<String>,
     pub latency_ms: u64,
     pub tick_size: Option<f64>,
@@ -254,6 +349,7 @@ pub struct ReplayExecutionLedgerSnapshot {
     pub schema_version: u32,
     pub fee_neutral: bool,
     pub engine_mode: ReplayEngineMode,
+    pub fill_model: ReplayFillModel,
     pub latency_model: ReplayLatencyModel,
     pub fixed_latency_ms: u64,
     pub latency_seed: Option<u64>,
@@ -270,6 +366,7 @@ impl Default for ReplayExecutionLedgerSnapshot {
             schema_version: REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION,
             fee_neutral: true,
             engine_mode: ReplayEngineMode::Legacy,
+            fill_model: ReplayFillModel::LegacyReferencePrice,
             latency_model: ReplayLatencyModel::IgnoredLegacy,
             fixed_latency_ms: 0,
             latency_seed: None,
@@ -287,6 +384,7 @@ impl ReplayExecutionLedgerSnapshot {
         ReplayExecutionLedgerSummary {
             schema_version: self.schema_version,
             engine_mode: self.engine_mode,
+            fill_model: self.fill_model,
             latency_model: self.latency_model,
             fixed_latency_ms: self.fixed_latency_ms,
             latency_seed: self.latency_seed,
@@ -304,6 +402,7 @@ impl ReplayExecutionLedgerSnapshot {
 pub struct ReplayExecutionLedgerSummary {
     pub schema_version: u32,
     pub engine_mode: ReplayEngineMode,
+    pub fill_model: ReplayFillModel,
     pub latency_model: ReplayLatencyModel,
     pub fixed_latency_ms: u64,
     pub latency_seed: Option<u64>,

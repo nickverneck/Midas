@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::broker::ReplayEngineMode;
+use crate::broker::{ReplayEngineMode, ReplayFillModel};
 use std::path::{Path, PathBuf};
 
 impl App {
@@ -291,8 +291,8 @@ impl App {
         lines.push(Line::from(format!(
             "Fill model: {}",
             match self.base_config.replay_engine_mode {
-                ReplayEngineMode::Legacy => "legacy reference price",
-                ReplayEngineMode::Deterministic => "raw next-bar open",
+                ReplayEngineMode::Legacy => ReplayFillModel::LegacyReferencePrice.label(),
+                ReplayEngineMode::Deterministic => self.base_config.replay_fill_model.label(),
             }
         )));
         lines.push(Line::from(match self.base_config.replay_engine_mode {

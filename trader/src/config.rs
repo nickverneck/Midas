@@ -1,6 +1,6 @@
 use crate::broker::{
-    BrokerKind, CandleMode, ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig,
-    ReplayLatencyModel, default_broker, supports_broker,
+    BrokerKind, CandleMode, ReplayBarProtectionPolicy, ReplayEngineMode, ReplayFillModel,
+    ReplayLatencyConfig, ReplayLatencyModel, default_broker, supports_broker,
 };
 use anyhow::{Context, Result, bail};
 use dotenvy::dotenv;
@@ -33,6 +33,13 @@ impl TradingEnvironment {
 
     pub fn market_ws_url(self) -> &'static str {
         "wss://md.tradovateapi.com/v1/websocket"
+    }
+
+    /// Market Replay uses a dedicated websocket. It replays the same market
+    /// data operations (including `md/subscribeDOM`) against the initialized
+    /// historical clock.
+    pub fn replay_ws_url(self) -> &'static str {
+        "wss://replay.tradovateapi.com/v1/websocket"
     }
 
     pub fn label(self) -> &'static str {
@@ -141,9 +148,13 @@ pub struct AppConfig {
     pub candle_mode: CandleMode,
     pub autoconnect: bool,
     pub replay_file_path: PathBuf,
+    /// Optional JSONL full-book snapshots for the Level 2 replay fill model.
+    /// Empty/absent means the normal bar/tick/quote replay paths are used.
+    pub replay_dom_file_path: Option<PathBuf>,
     pub replay_cache_dir: PathBuf,
     pub replay_bar_interval_ms: u64,
     pub replay_engine_mode: ReplayEngineMode,
+    pub replay_fill_model: ReplayFillModel,
     pub replay_latency_model: ReplayLatencyModel,
     pub replay_fixed_latency_ms: u64,
     pub replay_observed_latency_ms: Vec<u64>,
@@ -178,9 +189,11 @@ impl Default for AppConfig {
             candle_mode: CandleMode::Standard,
             autoconnect: false,
             replay_file_path: PathBuf::from("trader/market replay/ES 06-26.Last.txt"),
+            replay_dom_file_path: None,
             replay_cache_dir: default_replay_cache_dir(),
             replay_bar_interval_ms: 5,
             replay_engine_mode: ReplayEngineMode::default(),
+            replay_fill_model: ReplayFillModel::RawBarOpen,
             replay_latency_model: ReplayLatencyModel::Fixed,
             replay_fixed_latency_ms: 0,
             replay_observed_latency_ms: Vec::new(),
@@ -296,6 +309,12 @@ impl AppConfig {
         {
             self.replay_file_path = PathBuf::from(raw);
         }
+        if let Some(raw) = env_string_any(&[
+            "TRADER_REPLAY_DOM_FILE_PATH",
+            "MIDAS_TUI_REPLAY_DOM_FILE_PATH",
+        ]) {
+            self.replay_dom_file_path = (!raw.trim().is_empty()).then(|| PathBuf::from(raw));
+        }
         if let Some(raw) = env_string_any(&["TRADER_DATA_CACHE_DIR"]) {
             self.replay_cache_dir = PathBuf::from(raw);
         }
@@ -307,6 +326,9 @@ impl AppConfig {
         }
         if let Some(raw) = env_string_any(&["TRADER_REPLAY_ENGINE_MODE"]) {
             self.replay_engine_mode = parse_replay_engine_mode(&raw)?;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_REPLAY_FILL_MODEL"]) {
+            self.replay_fill_model = parse_replay_fill_model(&raw)?;
         }
         if let Some(raw) = env_string_any(&["TRADER_REPLAY_LATENCY_MODEL"]) {
             self.replay_latency_model = parse_replay_latency_model(&raw)?;
@@ -350,6 +372,9 @@ impl AppConfig {
             bail!("replay_bar_interval_ms must be > 0");
         }
         if self.replay_engine_mode == ReplayEngineMode::Deterministic {
+            if self.replay_fill_model == ReplayFillModel::LegacyReferencePrice {
+                bail!("deterministic replay cannot use legacy_reference_price fill model")
+            }
             match self.replay_latency_model {
                 ReplayLatencyModel::IgnoredLegacy => {
                     bail!("deterministic replay cannot use ignored_legacy latency")
@@ -368,6 +393,11 @@ impl AppConfig {
                 }
                 _ => {}
             }
+        }
+        if self.replay_fill_model == ReplayFillModel::Dom
+            && self.replay_engine_mode != ReplayEngineMode::Deterministic
+        {
+            bail!("Level 2 DOM replay requires deterministic replay_engine_mode")
         }
         if self.token_override.trim().is_empty() && matches!(self.auth_mode, AuthMode::Credentials)
         {
@@ -398,6 +428,20 @@ fn parse_replay_engine_mode(raw: &str) -> Result<ReplayEngineMode> {
             Ok(ReplayEngineMode::Deterministic)
         }
         other => bail!("invalid replay engine mode `{other}`; expected legacy or deterministic"),
+    }
+}
+
+fn parse_replay_fill_model(raw: &str) -> Result<ReplayFillModel> {
+    match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "legacy" | "legacy_reference_price" | "reference_price" => {
+            Ok(ReplayFillModel::LegacyReferencePrice)
+        }
+        "raw_bar_open" | "next_bar_open" | "bar_open" => Ok(ReplayFillModel::RawBarOpen),
+        "tick_bid_ask" | "ticks" | "tick" | "level1" | "level_1" => Ok(ReplayFillModel::TickBidAsk),
+        "dom" | "level2" | "level_2" | "depth" | "l2" => Ok(ReplayFillModel::Dom),
+        other => bail!(
+            "invalid replay fill model `{other}`; expected legacy_reference_price, raw_bar_open, tick_bid_ask, or dom"
+        ),
     }
 }
 
@@ -570,6 +614,52 @@ mod tests {
             toml::from_str("replay_engine_mode = \"deterministic\"").expect("config");
 
         assert_eq!(config.replay_engine_mode, ReplayEngineMode::Deterministic);
+        assert_eq!(config.replay_fill_model, ReplayFillModel::RawBarOpen);
+    }
+
+    #[test]
+    fn deterministic_replay_can_select_tick_bid_ask_fills() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            replay_engine_mode = "deterministic"
+            replay_fill_model = "tick_bid_ask"
+            "#,
+        )
+        .expect("config");
+
+        assert_eq!(config.replay_fill_model, ReplayFillModel::TickBidAsk);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn dom_replay_is_optional_and_loads_from_config() {
+        let default_config: AppConfig = toml::from_str("").expect("default config");
+        assert!(default_config.replay_dom_file_path.is_none());
+
+        let configured: AppConfig = toml::from_str(
+            r#"
+            replay_engine_mode = "deterministic"
+            replay_fill_model = "dom"
+            replay_dom_file_path = "replay/es.dom.jsonl"
+            "#,
+        )
+        .expect("config");
+
+        assert_eq!(configured.replay_fill_model, ReplayFillModel::Dom);
+        assert_eq!(
+            configured.replay_dom_file_path,
+            Some(PathBuf::from("replay/es.dom.jsonl"))
+        );
+        assert!(configured.validate().is_ok());
+    }
+
+    #[test]
+    fn dom_replay_requires_deterministic_engine_only_when_selected() {
+        let config = AppConfig {
+            replay_fill_model: ReplayFillModel::Dom,
+            ..AppConfig::default()
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]

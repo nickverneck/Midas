@@ -85,6 +85,47 @@ pub(crate) struct ReplayDownloadArgs {
     pub(crate) raw_minimum_split_minutes: u32,
 }
 
+#[derive(Debug, Clone, Args)]
+pub(crate) struct CaptureReplayDomArgs {
+    /// Exact contract symbol, for example MESU6 or GCZ6.
+    #[arg(long)]
+    pub(crate) contract: String,
+    /// Inclusive UTC start timestamp in RFC3339 form.
+    #[arg(long)]
+    pub(crate) start: String,
+    /// Exclusive UTC end timestamp in RFC3339 form.
+    #[arg(long)]
+    pub(crate) end: String,
+    /// JSONL output path for full-book snapshots.
+    #[arg(long)]
+    pub(crate) output: PathBuf,
+    /// Market Replay speed percentage (0-400).
+    #[arg(long, default_value_t = 400)]
+    pub(crate) speed: u16,
+    /// Initial balance used to initialize the disposable Market Replay account.
+    #[arg(long, default_value_t = 50_000.0)]
+    pub(crate) initial_balance: f64,
+    /// Permit replacing an existing output file.
+    #[arg(long)]
+    pub(crate) overwrite: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct CaptureLiveDomArgs {
+    /// Exact contract symbol, for example MESU6 or GCZ6.
+    #[arg(long)]
+    pub(crate) contract: String,
+    /// Capture duration in seconds.
+    #[arg(long, default_value_t = 300)]
+    pub(crate) duration_seconds: u64,
+    /// JSONL output path for full-book snapshots.
+    #[arg(long)]
+    pub(crate) output: PathBuf,
+    /// Permit replacing an existing output file.
+    #[arg(long)]
+    pub(crate) overwrite: bool,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum Mode {
     /// Run the background engine server.
@@ -117,4 +158,10 @@ pub(crate) enum Mode {
     /// Download replay data into the local replay cache.
     #[command(name = "download-replay-data")]
     DownloadReplayData(ReplayDownloadArgs),
+    /// Capture historical Level 2 snapshots through a Tradovate Market Replay session.
+    #[command(name = "capture-replay-dom")]
+    CaptureReplayDom(CaptureReplayDomArgs),
+    /// Capture live Level 2 snapshots in a separate, opt-in process.
+    #[command(name = "capture-live-dom")]
+    CaptureLiveDom(CaptureLiveDomArgs),
 }

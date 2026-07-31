@@ -2,7 +2,8 @@ use super::*;
 
 #[cfg(feature = "replay")]
 use crate::broker::{
-    ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig, ReplayLatencyModel,
+    ReplayBarProtectionPolicy, ReplayDomLevel, ReplayEngineMode, ReplayExecutionPrecision,
+    ReplayFillModel, ReplayLatencyConfig, ReplayLatencyModel, ReplayMarketDom, ReplayMarketTick,
 };
 #[cfg(feature = "replay")]
 use crate::tradovate::replay::virtual_time::{ReplayVirtualEventKind, ReplayVirtualEventQueue};
@@ -91,6 +92,90 @@ fn splitmix64(mut value: u64) -> u64 {
 }
 
 #[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy)]
+struct ReplayDomFill {
+    price: f64,
+    requested_qty: i32,
+    consumed_qty: f64,
+    levels_consumed: usize,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+struct ReplayDomBook {
+    bids: Vec<ReplayDomLevel>,
+    asks: Vec<ReplayDomLevel>,
+}
+
+#[cfg(feature = "replay")]
+impl ReplayDomBook {
+    fn from_snapshot(snapshot: &ReplayMarketDom) -> Self {
+        let mut bids = snapshot
+            .bids
+            .iter()
+            .copied()
+            .filter(|level| {
+                level.price.is_finite()
+                    && level.price > 0.0
+                    && level.size.is_finite()
+                    && level.size > 0.0
+            })
+            .collect::<Vec<_>>();
+        let mut asks = snapshot
+            .asks
+            .iter()
+            .copied()
+            .filter(|level| {
+                level.price.is_finite()
+                    && level.price > 0.0
+                    && level.size.is_finite()
+                    && level.size > 0.0
+            })
+            .collect::<Vec<_>>();
+        bids.sort_by(|left, right| right.price.total_cmp(&left.price));
+        asks.sort_by(|left, right| left.price.total_cmp(&right.price));
+        Self { bids, asks }
+    }
+
+    fn consume(&mut self, action: &str, requested_qty: i32) -> Result<ReplayDomFill> {
+        let requested_qty = requested_qty.abs().max(1);
+        let levels = match action.trim().to_ascii_lowercase().as_str() {
+            "buy" => &mut self.asks,
+            "sell" => &mut self.bids,
+            other => bail!("replay DOM cannot price unsupported market action `{other}`"),
+        };
+        let required = f64::from(requested_qty);
+        let available = levels.iter().map(|level| level.size).sum::<f64>();
+        if available + f64::EPSILON < required {
+            bail!(
+                "replay DOM rejected market {action}: visible depth {available:.4} is below requested quantity {requested_qty} (queue assumption: visible_levels_only)"
+            );
+        }
+
+        let mut remaining = required;
+        let mut notional = 0.0;
+        let mut levels_consumed = 0usize;
+        for level in levels.iter_mut() {
+            if remaining <= f64::EPSILON {
+                break;
+            }
+            let consumed = level.size.min(remaining);
+            notional += consumed * level.price;
+            level.size -= consumed;
+            remaining -= consumed;
+            levels_consumed = levels_consumed.saturating_add(1);
+        }
+        levels.retain(|level| level.size > f64::EPSILON);
+        Ok(ReplayDomFill {
+            price: notional / required,
+            requested_qty,
+            consumed_qty: required - remaining,
+            levels_consumed,
+        })
+    }
+}
+
+#[cfg(feature = "replay")]
 enum DeferredReplayCommandKind {
     MarketOrder(PendingMarketOrder),
     LiquidatePosition(PendingLiquidation),
@@ -146,28 +231,118 @@ impl DeferredReplayCommand {
         }
     }
 
-    fn execute(self, replay_state: &mut ReplayBrokerState, bar: &Bar) -> Vec<InternalEvent> {
+    fn execute(
+        self,
+        replay_state: &mut ReplayBrokerState,
+        bar: &Bar,
+        tick: Option<&ReplayMarketTick>,
+        dom: Option<&ReplayMarketDom>,
+        mut dom_book: Option<&mut ReplayDomBook>,
+        fill_model: ReplayFillModel,
+    ) -> Vec<InternalEvent> {
         let signal_ts_ns = self.signal_ts_ns.unwrap_or(bar.ts_ns);
         let exchange_arrival_ts_ns = self.exchange_arrival_ts_ns.unwrap_or(signal_ts_ns);
         let lifecycle_sequence = self.lifecycle_sequence;
         let latency_ms = self.latency_ms;
+        let execution_ts_ns = dom
+            .map(|dom| dom.ts_ns)
+            .or_else(|| tick.map(|tick| tick.ts_ns))
+            .unwrap_or(bar.ts_ns);
+        let (fill_source, precision) = replay_execution_metadata(fill_model, tick, dom);
+        let mut dom_fill = None;
         let mut events = match self.kind {
             DeferredReplayCommandKind::MarketOrder(mut order) => {
-                order.reference_ts_ns = Some(bar.ts_ns);
-                order.reference_price = Some(bar.open);
+                order.reference_ts_ns = Some(execution_ts_ns);
+                if let Some(book) = dom_book.as_deref_mut() {
+                    match book.consume(&order.order_action, order.order_qty) {
+                        Ok(fill) => {
+                            order.reference_price = Some(fill.price);
+                            dom_fill = Some(fill);
+                        }
+                        Err(error) => {
+                            return vec![InternalEvent::BrokerOrderFailed(BrokerOrderFailure {
+                                endpoint: "replay/order/placeorder",
+                                cl_ord_id: order.cl_ord_id,
+                                message: error.to_string(),
+                                target_qty: order.target_qty,
+                                stale_interrupt: false,
+                            })];
+                        }
+                    }
+                } else {
+                    order.reference_price = Some(replay_market_fill_price(
+                        &order.order_action,
+                        tick,
+                        bar.open,
+                    ));
+                }
                 replay_state
                     .simulate_market_order(order)
                     .unwrap_or_else(|failure| vec![InternalEvent::BrokerOrderFailed(failure)])
             }
             DeferredReplayCommandKind::LiquidatePosition(mut liquidation) => {
-                liquidation.reference_ts_ns = Some(bar.ts_ns);
-                liquidation.reference_price = Some(bar.open);
+                liquidation.reference_ts_ns = Some(execution_ts_ns);
+                let action = if replay_liquidation_is_buy(replay_state, &liquidation) {
+                    "Buy"
+                } else {
+                    "Sell"
+                };
+                if let Some(book) = dom_book.as_deref_mut() {
+                    let requested_qty = replay_state
+                        .positions
+                        .get(&StrategyProtectionKey {
+                            account_id: liquidation.account_id,
+                            contract_id: liquidation.contract_id,
+                        })
+                        .map(|position| position.qty.abs())
+                        .unwrap_or(1);
+                    match book.consume(action, requested_qty) {
+                        Ok(fill) => {
+                            liquidation.reference_price = Some(fill.price);
+                            dom_fill = Some(fill);
+                        }
+                        Err(error) => {
+                            return vec![InternalEvent::BrokerOrderFailed(BrokerOrderFailure {
+                                endpoint: "replay/order/liquidateposition",
+                                cl_ord_id: liquidation.request_id,
+                                message: error.to_string(),
+                                target_qty: liquidation.target_qty,
+                                stale_interrupt: false,
+                            })];
+                        }
+                    }
+                } else {
+                    liquidation.reference_price =
+                        Some(replay_market_fill_price(action, tick, bar.open));
+                }
                 replay_state
                     .simulate_liquidation(liquidation)
                     .unwrap_or_else(|failure| vec![InternalEvent::BrokerOrderFailed(failure)])
             }
             DeferredReplayCommandKind::OrderStrategy(mut strategy) => {
-                reprice_strategy_for_bar_open(&mut strategy, bar);
+                if let Some(book) = dom_book.as_deref_mut() {
+                    match book.consume(&strategy.order_action, strategy.entry_order_qty) {
+                        Ok(fill) => {
+                            reprice_strategy_for_dom(&mut strategy, execution_ts_ns, fill.price);
+                            dom_fill = Some(fill);
+                        }
+                        Err(error) => {
+                            return vec![InternalEvent::OrderStrategyFailed(
+                                BrokerOrderStrategyFailure {
+                                    endpoint: "replay/orderStrategy/startorderstrategy",
+                                    uuid: strategy.uuid,
+                                    message: error.to_string(),
+                                    target_qty: strategy.target_qty,
+                                    stale_interrupt: false,
+                                },
+                            )];
+                        }
+                    }
+                } else if let Some(tick) = tick {
+                    reprice_strategy_for_tick(&mut strategy, tick);
+                } else {
+                    reprice_strategy_for_bar_open(&mut strategy, bar);
+                }
                 replay_state
                     .simulate_order_strategy(strategy)
                     .unwrap_or_else(|failure| vec![InternalEvent::OrderStrategyFailed(failure)])
@@ -176,9 +351,65 @@ impl DeferredReplayCommand {
                 mut liquidation,
                 mut strategy,
             ) => {
-                liquidation.reference_ts_ns = Some(bar.ts_ns);
-                liquidation.reference_price = Some(bar.open);
-                reprice_strategy_for_bar_open(&mut strategy, bar);
+                liquidation.reference_ts_ns = Some(execution_ts_ns);
+                let action = if replay_liquidation_is_buy(replay_state, &liquidation) {
+                    "Buy"
+                } else {
+                    "Sell"
+                };
+                if let Some(book) = dom_book.as_deref_mut() {
+                    let original_book = book.clone();
+                    let requested_qty = replay_state
+                        .positions
+                        .get(&StrategyProtectionKey {
+                            account_id: liquidation.account_id,
+                            contract_id: liquidation.contract_id,
+                        })
+                        .map(|position| position.qty.abs())
+                        .unwrap_or(1);
+                    let liquidation_fill = match book.consume(action, requested_qty) {
+                        Ok(fill) => fill,
+                        Err(error) => {
+                            *book = original_book;
+                            return vec![InternalEvent::OrderStrategyFailed(
+                                BrokerOrderStrategyFailure {
+                                    endpoint: "replay/orderStrategy/startorderstrategy",
+                                    uuid: strategy.uuid,
+                                    message: error.to_string(),
+                                    target_qty: strategy.target_qty,
+                                    stale_interrupt: false,
+                                },
+                            )];
+                        }
+                    };
+                    let strategy_fill =
+                        match book.consume(&strategy.order_action, strategy.entry_order_qty) {
+                            Ok(fill) => fill,
+                            Err(error) => {
+                                *book = original_book;
+                                return vec![InternalEvent::OrderStrategyFailed(
+                                    BrokerOrderStrategyFailure {
+                                        endpoint: "replay/orderStrategy/startorderstrategy",
+                                        uuid: strategy.uuid,
+                                        message: error.to_string(),
+                                        target_qty: strategy.target_qty,
+                                        stale_interrupt: false,
+                                    },
+                                )];
+                            }
+                        };
+                    liquidation.reference_price = Some(liquidation_fill.price);
+                    reprice_strategy_for_dom(&mut strategy, execution_ts_ns, strategy_fill.price);
+                    dom_fill = Some(strategy_fill);
+                } else if let Some(tick) = tick {
+                    liquidation.reference_price =
+                        Some(replay_market_fill_price(action, Some(tick), bar.open));
+                    reprice_strategy_for_tick(&mut strategy, tick);
+                } else {
+                    liquidation.reference_price =
+                        Some(replay_market_fill_price(action, None, bar.open));
+                    reprice_strategy_for_bar_open(&mut strategy, bar);
+                }
                 replay_state
                     .simulate_liquidation_then_order_strategy(liquidation, strategy)
                     .unwrap_or_else(|failure| vec![InternalEvent::OrderStrategyFailed(failure)])
@@ -188,15 +419,19 @@ impl DeferredReplayCommand {
         annotate_replay_fill_events(
             &mut events,
             ReplayEngineMode::Deterministic,
-            "raw_bar_open",
+            fill_source,
             Some(lifecycle_sequence),
             Some(signal_ts_ns),
             Some(signal_ts_ns),
             Some(exchange_arrival_ts_ns),
-            Some(bar.ts_ns),
-            bar.ts_ns,
+            Some(execution_ts_ns),
+            execution_ts_ns,
             latency_ms,
+            precision,
         );
+        if let Some(dom_fill) = dom_fill {
+            annotate_replay_dom_fill_events(&mut events, dom_fill);
+        }
         events
     }
 }
@@ -237,6 +472,10 @@ impl ReplayLifecycleDispatchQueue {
         let dispatch = self.dispatch_events.remove(&event.sequence);
         Some((event.kind, dispatch))
     }
+
+    fn now_ns(&self) -> Option<i64> {
+        self.virtual_events.now_ns()
+    }
 }
 
 #[cfg(feature = "replay")]
@@ -262,8 +501,12 @@ fn schedule_pending_replay_commands(
             "deterministic replay command has no signal timestamp or replay-bar fallback",
         )?;
         let arrival_ts_ns = command.exchange_arrival_ts_ns.unwrap_or(signal_ts_ns);
+        let schedule_ts_ns = lifecycle
+            .now_ns()
+            .map_or(signal_ts_ns, |now| now.max(signal_ts_ns));
+        let arrival_schedule_ts_ns = schedule_ts_ns.max(arrival_ts_ns);
         lifecycle.schedule(
-            signal_ts_ns,
+            schedule_ts_ns,
             logical_step,
             ReplayVirtualEventKind::OrderSubmitted {
                 order_id: command.lifecycle_sequence,
@@ -271,7 +514,7 @@ fn schedule_pending_replay_commands(
             None,
         )?;
         lifecycle.schedule(
-            arrival_ts_ns,
+            arrival_schedule_ts_ns,
             logical_step,
             ReplayVirtualEventKind::OrderArrivesAtExchange {
                 order_id: command.lifecycle_sequence,
@@ -312,6 +555,178 @@ fn drain_replay_lifecycle_through(
 }
 
 #[cfg(feature = "replay")]
+fn process_replay_tick_bar(
+    replay_state: &mut ReplayBrokerState,
+    commands: &mut VecDeque<DeferredReplayCommand>,
+    lifecycle: &mut ReplayLifecycleDispatchQueue,
+    next_lifecycle_sequence: &mut u64,
+    last_logical_step: &mut u64,
+    bar: &Bar,
+    ticks: &[ReplayMarketTick],
+    bar_step: u64,
+    policy: ReplayBarProtectionPolicy,
+    fill_model: ReplayFillModel,
+    internal_tx: &UnboundedSender<InternalEvent>,
+) -> Result<()> {
+    for (tick_index, tick) in ticks.iter().enumerate() {
+        let tick_step = bar_step.saturating_add(tick_index as u64).saturating_add(1);
+        lifecycle.schedule(
+            tick.ts_ns,
+            tick_step,
+            ReplayVirtualEventKind::Tick { tick_index },
+            None,
+        )?;
+        // Arrival events use the prior logical step, so an order arriving at
+        // the exact tick timestamp is eligible for this tick rather than the
+        // following one.
+        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx);
+
+        // Existing protection is evaluated before newly arriving market
+        // commands. A bracket created by an entry cannot self-trigger on the
+        // same tick that filled the entry.
+        let mut protection_events = replay_state.simulate_replay_tick(tick, policy);
+        let protection_sequence = (!protection_events.is_empty()).then(|| {
+            let sequence = *next_lifecycle_sequence;
+            *next_lifecycle_sequence = (*next_lifecycle_sequence).saturating_add(1);
+            sequence
+        });
+        let (protection_source, protection_precision) =
+            replay_execution_metadata(fill_model, Some(tick), None);
+        annotate_replay_fill_events(
+            &mut protection_events,
+            ReplayEngineMode::Deterministic,
+            protection_source,
+            protection_sequence,
+            None,
+            None,
+            None,
+            Some(tick.ts_ns),
+            tick.ts_ns,
+            0,
+            protection_precision,
+        );
+        for event in protection_events {
+            let sequence = protection_sequence.unwrap_or_default();
+            let kind = replay_dispatch_kind(&event, sequence);
+            let is_fill = matches!(kind, ReplayVirtualEventKind::Fill { .. });
+            lifecycle.schedule(tick.ts_ns, tick_step, kind, Some(event))?;
+            if is_fill {
+                lifecycle.schedule(
+                    tick.ts_ns,
+                    tick_step,
+                    ReplayVirtualEventKind::ProtectionUpdate { order_id: sequence },
+                    None,
+                )?;
+            }
+        }
+        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx);
+
+        let mut waiting_commands = VecDeque::new();
+        while let Some(command) = commands.pop_front() {
+            if !command.arrived {
+                waiting_commands.push_back(command);
+                continue;
+            }
+            let sequence = command.lifecycle_sequence;
+            for event in command.execute(replay_state, bar, Some(tick), None, None, fill_model) {
+                let kind = replay_dispatch_kind(&event, sequence);
+                lifecycle.schedule(tick.ts_ns, tick_step, kind, Some(event))?;
+            }
+        }
+        *commands = waiting_commands;
+        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx);
+        *last_logical_step = (*last_logical_step).max(tick_step);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+fn process_replay_dom_bar(
+    replay_state: &mut ReplayBrokerState,
+    commands: &mut VecDeque<DeferredReplayCommand>,
+    lifecycle: &mut ReplayLifecycleDispatchQueue,
+    next_lifecycle_sequence: &mut u64,
+    last_logical_step: &mut u64,
+    bar: &Bar,
+    dom_updates: &[ReplayMarketDom],
+    bar_step: u64,
+    policy: ReplayBarProtectionPolicy,
+    fill_model: ReplayFillModel,
+    internal_tx: &UnboundedSender<InternalEvent>,
+) -> Result<()> {
+    for (dom_index, dom) in dom_updates.iter().enumerate() {
+        let dom_step = bar_step.saturating_add(dom_index as u64).saturating_add(1);
+        lifecycle.schedule(
+            dom.ts_ns,
+            dom_step,
+            ReplayVirtualEventKind::DomUpdate { dom_index },
+            None,
+        )?;
+        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx);
+
+        let mut protection_events = replay_state.simulate_replay_dom(dom, policy);
+        let protection_sequence = (!protection_events.is_empty()).then(|| {
+            let sequence = *next_lifecycle_sequence;
+            *next_lifecycle_sequence = (*next_lifecycle_sequence).saturating_add(1);
+            sequence
+        });
+        annotate_replay_fill_events(
+            &mut protection_events,
+            ReplayEngineMode::Deterministic,
+            "dom_top_of_book",
+            protection_sequence,
+            None,
+            None,
+            None,
+            Some(dom.ts_ns),
+            dom.ts_ns,
+            0,
+            ReplayExecutionPrecision::DomAssisted,
+        );
+        for event in protection_events {
+            let sequence = protection_sequence.unwrap_or_default();
+            let kind = replay_dispatch_kind(&event, sequence);
+            let is_fill = matches!(kind, ReplayVirtualEventKind::Fill { .. });
+            lifecycle.schedule(dom.ts_ns, dom_step, kind, Some(event))?;
+            if is_fill {
+                lifecycle.schedule(
+                    dom.ts_ns,
+                    dom_step,
+                    ReplayVirtualEventKind::ProtectionUpdate { order_id: sequence },
+                    None,
+                )?;
+            }
+        }
+        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx);
+
+        let mut dom_book = ReplayDomBook::from_snapshot(dom);
+        let mut waiting_commands = VecDeque::new();
+        while let Some(command) = commands.pop_front() {
+            if !command.arrived {
+                waiting_commands.push_back(command);
+                continue;
+            }
+            let sequence = command.lifecycle_sequence;
+            for event in command.execute(
+                replay_state,
+                bar,
+                None,
+                Some(dom),
+                Some(&mut dom_book),
+                fill_model,
+            ) {
+                let kind = replay_dispatch_kind(&event, sequence);
+                lifecycle.schedule(dom.ts_ns, dom_step, kind, Some(event))?;
+            }
+        }
+        *commands = waiting_commands;
+        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx);
+        *last_logical_step = (*last_logical_step).max(dom_step);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
 fn replay_dispatch_kind(event: &InternalEvent, lifecycle_sequence: u64) -> ReplayVirtualEventKind {
     match event {
         InternalEvent::BrokerOrderAck(_)
@@ -343,7 +758,7 @@ fn enqueue_deferred_replay_command(
     kind: DeferredReplayCommandKind,
 ) {
     let sequence = *next_lifecycle_sequence;
-    *next_lifecycle_sequence = next_lifecycle_sequence.saturating_add(1);
+    *next_lifecycle_sequence = (*next_lifecycle_sequence).saturating_add(1);
     queue.push_back(DeferredReplayCommand::new(sequence, fixed_latency_ms, kind));
 }
 
@@ -357,6 +772,109 @@ fn reprice_strategy_for_bar_open(strategy: &mut PendingOrderStrategyTransition, 
     strategy.stop_price = strategy.stop_price.map(|price| price + price_delta);
     strategy.reference_ts_ns = Some(bar.ts_ns);
     strategy.reference_price = Some(bar.open);
+}
+
+#[cfg(feature = "replay")]
+fn reprice_strategy_for_tick(
+    strategy: &mut PendingOrderStrategyTransition,
+    tick: &ReplayMarketTick,
+) {
+    // Preserve the configured TP/SL offsets around the executable side of the
+    // quote, not around the last-trade midpoint.
+    let execution_price = replay_market_fill_price(&strategy.order_action, Some(tick), tick.last);
+    let price_delta = strategy
+        .reference_price
+        .map(|reference_price| execution_price - reference_price)
+        .unwrap_or_default();
+    strategy.take_profit_price = strategy.take_profit_price.map(|price| price + price_delta);
+    strategy.stop_price = strategy.stop_price.map(|price| price + price_delta);
+    strategy.reference_ts_ns = Some(tick.ts_ns);
+    strategy.reference_price = Some(execution_price);
+}
+
+#[cfg(feature = "replay")]
+fn reprice_strategy_for_dom(
+    strategy: &mut PendingOrderStrategyTransition,
+    ts_ns: i64,
+    execution_price: f64,
+) {
+    let price_delta = strategy
+        .reference_price
+        .map(|reference_price| execution_price - reference_price)
+        .unwrap_or_default();
+    strategy.take_profit_price = strategy.take_profit_price.map(|price| price + price_delta);
+    strategy.stop_price = strategy.stop_price.map(|price| price + price_delta);
+    strategy.reference_ts_ns = Some(ts_ns);
+    strategy.reference_price = Some(execution_price);
+}
+
+#[cfg(feature = "replay")]
+fn replay_market_fill_price(action: &str, tick: Option<&ReplayMarketTick>, fallback: f64) -> f64 {
+    let Some(tick) = tick else {
+        return fallback;
+    };
+    match action.trim().to_ascii_lowercase().as_str() {
+        "buy" => tick
+            .ask_price
+            .filter(|price| price.is_finite() && *price > 0.0),
+        "sell" => tick
+            .bid_price
+            .filter(|price| price.is_finite() && *price > 0.0),
+        _ => None,
+    }
+    .unwrap_or(tick.last)
+}
+
+#[cfg(feature = "replay")]
+fn replay_liquidation_is_buy(state: &ReplayBrokerState, liquidation: &PendingLiquidation) -> bool {
+    state
+        .positions
+        .get(&StrategyProtectionKey {
+            account_id: liquidation.account_id,
+            contract_id: liquidation.contract_id,
+        })
+        .is_some_and(|position| position.qty < 0)
+}
+
+#[cfg(feature = "replay")]
+fn replay_execution_metadata(
+    fill_model: ReplayFillModel,
+    tick: Option<&ReplayMarketTick>,
+    dom: Option<&ReplayMarketDom>,
+) -> (&'static str, ReplayExecutionPrecision) {
+    match (fill_model, tick, dom) {
+        (ReplayFillModel::Dom, Some(_), Some(_)) => {
+            ("dom_visible_levels", ReplayExecutionPrecision::DomAssisted)
+        }
+        (ReplayFillModel::Dom, _, _) => {
+            ("dom_visible_levels", ReplayExecutionPrecision::DomAssisted)
+        }
+        (ReplayFillModel::TickBidAsk, Some(tick), _) if replay_tick_has_quote(tick) => {
+            ("tick_bid_ask", ReplayExecutionPrecision::QuoteExact)
+        }
+        (ReplayFillModel::TickBidAsk, Some(_), _) => {
+            ("tick_trade_fallback", ReplayExecutionPrecision::TickExact)
+        }
+        (ReplayFillModel::TickBidAsk, None, _) => {
+            ("raw_bar_open", ReplayExecutionPrecision::BarApproximate)
+        }
+        (ReplayFillModel::RawBarOpen, _, _) => {
+            ("raw_bar_open", ReplayExecutionPrecision::BarApproximate)
+        }
+        (ReplayFillModel::LegacyReferencePrice, _, _) => (
+            "legacy_reference_price",
+            ReplayExecutionPrecision::BarApproximate,
+        ),
+    }
+}
+
+#[cfg(feature = "replay")]
+fn replay_tick_has_quote(tick: &ReplayMarketTick) -> bool {
+    tick.bid_price
+        .is_some_and(|price| price.is_finite() && price > 0.0)
+        || tick
+            .ask_price
+            .is_some_and(|price| price.is_finite() && price > 0.0)
 }
 
 #[cfg(feature = "replay")]
@@ -383,6 +901,7 @@ fn annotate_replay_fill_events(
     acknowledgement_ts_ns: Option<i64>,
     fill_ts_ns: i64,
     latency_ms: u64,
+    precision: ReplayExecutionPrecision,
 ) {
     for event in events {
         let InternalEvent::UserEntities(entities) = event else {
@@ -405,6 +924,15 @@ fn annotate_replay_fill_events(
             fill.insert("replayFillSource".to_string(), json!(fill_source));
             fill.insert("replayFillTimestampNs".to_string(), json!(fill_ts_ns));
             fill.insert("replayLatencyMs".to_string(), json!(latency_ms));
+            fill.insert(
+                "replayExecutionPrecision".to_string(),
+                json!(match precision {
+                    ReplayExecutionPrecision::BarApproximate => "bar_approximate",
+                    ReplayExecutionPrecision::TickExact => "tick_exact",
+                    ReplayExecutionPrecision::QuoteExact => "quote_exact",
+                    ReplayExecutionPrecision::DomAssisted => "dom_assisted",
+                }),
+            );
             if let Some(sequence) = lifecycle_sequence {
                 fill.insert("replayLifecycleSequence".to_string(), json!(sequence));
             }
@@ -430,6 +958,39 @@ fn annotate_replay_fill_events(
     }
 }
 
+#[cfg(feature = "replay")]
+fn annotate_replay_dom_fill_events(events: &mut [InternalEvent], dom_fill: ReplayDomFill) {
+    for event in events {
+        let InternalEvent::UserEntities(entities) = event else {
+            continue;
+        };
+        for envelope in entities {
+            if envelope.deleted || !envelope.entity_type.eq_ignore_ascii_case("fill") {
+                continue;
+            }
+            let Some(fill) = envelope.entity.as_object_mut() else {
+                continue;
+            };
+            fill.insert(
+                "replayDomQueueAssumption".to_string(),
+                json!("visible_levels_only"),
+            );
+            fill.insert(
+                "replayDomRequestedQty".to_string(),
+                json!(dom_fill.requested_qty),
+            );
+            fill.insert(
+                "replayDomConsumedQty".to_string(),
+                json!(dom_fill.consumed_qty),
+            );
+            fill.insert(
+                "replayDomLevelsConsumed".to_string(),
+                json!(dom_fill.levels_consumed),
+            );
+        }
+    }
+}
+
 pub(crate) fn spawn_broker_gateway_task(
     request_rx: UnboundedReceiver<BrokerCommand>,
     internal_tx: UnboundedSender<InternalEvent>,
@@ -445,11 +1006,15 @@ async fn broker_gateway_worker(
     #[cfg(feature = "replay")]
     let mut replay_engine_mode = ReplayEngineMode::Legacy;
     #[cfg(feature = "replay")]
+    let mut replay_fill_model = ReplayFillModel::LegacyReferencePrice;
+    #[cfg(feature = "replay")]
     let mut replay_latency_sampler = ReplayLatencySampler::default();
     #[cfg(feature = "replay")]
     let mut replay_bar_protection_policy = ReplayBarProtectionPolicy::NearestOpen;
     #[cfg(feature = "replay")]
     let mut next_replay_lifecycle_sequence = 1_u64;
+    #[cfg(feature = "replay")]
+    let mut replay_last_logical_step = 0_u64;
     #[cfg(feature = "replay")]
     let mut deferred_replay_commands = VecDeque::<DeferredReplayCommand>::new();
     #[cfg(feature = "replay")]
@@ -639,10 +1204,14 @@ async fn broker_gateway_worker(
             #[cfg(feature = "replay")]
             BrokerCommand::ReplayBar {
                 bar,
+                ticks,
+                dom_updates,
                 bar_index,
                 response_tx,
             } => {
-                let bar_step = replay_bar_open_step(bar_index);
+                let bar_step =
+                    replay_bar_open_step(bar_index).max(replay_last_logical_step.saturating_add(1));
+                replay_last_logical_step = bar_step;
                 if deferred_replay_commands
                     .iter()
                     .any(|command| !command.scheduled)
@@ -679,6 +1248,53 @@ async fn broker_gateway_worker(
                     &internal_tx,
                 );
 
+                if replay_engine_mode == ReplayEngineMode::Deterministic
+                    && replay_fill_model == ReplayFillModel::TickBidAsk
+                {
+                    if let Err(error) = process_replay_tick_bar(
+                        &mut replay_state,
+                        &mut deferred_replay_commands,
+                        &mut replay_lifecycle,
+                        &mut next_replay_lifecycle_sequence,
+                        &mut replay_last_logical_step,
+                        &bar,
+                        &ticks,
+                        bar_step,
+                        replay_bar_protection_policy,
+                        replay_fill_model,
+                        &internal_tx,
+                    ) {
+                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                            "deterministic replay tick lifecycle: {error}"
+                        )));
+                    }
+                    let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
+                    continue;
+                }
+                if replay_engine_mode == ReplayEngineMode::Deterministic
+                    && replay_fill_model == ReplayFillModel::Dom
+                {
+                    if let Err(error) = process_replay_dom_bar(
+                        &mut replay_state,
+                        &mut deferred_replay_commands,
+                        &mut replay_lifecycle,
+                        &mut next_replay_lifecycle_sequence,
+                        &mut replay_last_logical_step,
+                        &bar,
+                        &dom_updates,
+                        bar_step,
+                        replay_bar_protection_policy,
+                        replay_fill_model,
+                        &internal_tx,
+                    ) {
+                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                            "deterministic replay DOM lifecycle: {error}"
+                        )));
+                    }
+                    let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
+                    continue;
+                }
+
                 let mut waiting_commands = VecDeque::new();
                 while let Some(command) = deferred_replay_commands.pop_front() {
                     if !command.arrived {
@@ -686,7 +1302,14 @@ async fn broker_gateway_worker(
                         continue;
                     }
                     let lifecycle_sequence = command.lifecycle_sequence;
-                    for event in command.execute(&mut replay_state, &bar) {
+                    for event in command.execute(
+                        &mut replay_state,
+                        &bar,
+                        None,
+                        None,
+                        None,
+                        replay_fill_model,
+                    ) {
                         let kind = replay_dispatch_kind(&event, lifecycle_sequence);
                         if let Err(error) =
                             replay_lifecycle.schedule(bar.ts_ns, bar_step, kind, Some(event))
@@ -722,6 +1345,7 @@ async fn broker_gateway_worker(
                     None,
                     bar.ts_ns,
                     0,
+                    ReplayExecutionPrecision::BarApproximate,
                 );
                 for event in protection_events {
                     let lifecycle_sequence = protection_sequence.unwrap_or_default();
@@ -764,6 +1388,7 @@ async fn broker_gateway_worker(
             #[cfg(feature = "replay")]
             BrokerCommand::ConfigureReplay {
                 mode,
+                fill_model,
                 latency,
                 bar_protection_policy,
                 response_tx,
@@ -772,7 +1397,9 @@ async fn broker_gateway_worker(
                 deferred_replay_commands.clear();
                 replay_lifecycle = ReplayLifecycleDispatchQueue::default();
                 next_replay_lifecycle_sequence = 1;
+                replay_last_logical_step = 0;
                 replay_engine_mode = mode;
+                replay_fill_model = fill_model;
                 replay_latency_sampler.reset(latency);
                 replay_bar_protection_policy = bar_protection_policy;
                 let _ = response_tx.send(());
@@ -783,7 +1410,10 @@ async fn broker_gateway_worker(
                 evaluation_id,
                 response_tx,
             } => {
-                let coordinator_step = evaluation_id.map(replay_evaluation_step);
+                let coordinator_step = evaluation_id.map(|evaluation_id| {
+                    replay_evaluation_step(evaluation_id)
+                        .max(replay_last_logical_step.saturating_add(1))
+                });
                 if let (Some(market_ts_ns), Some(evaluation_id), Some(coordinator_step)) =
                     (market_ts_ns, evaluation_id, coordinator_step)
                 {
@@ -838,6 +1468,9 @@ async fn broker_gateway_worker(
                         coordinator_step,
                         &internal_tx,
                     );
+                }
+                if let Some(coordinator_step) = coordinator_step {
+                    replay_last_logical_step = replay_last_logical_step.max(coordinator_step);
                 }
                 let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
             }
@@ -927,6 +1560,43 @@ mod tests {
         .await;
     }
 
+    async fn configure_tick_bid_ask(
+        broker_tx: &UnboundedSender<BrokerCommand>,
+        fixed_latency_ms: u64,
+    ) {
+        let (response_tx, response_rx) = oneshot::channel();
+        broker_tx
+            .send(BrokerCommand::ConfigureReplay {
+                mode: ReplayEngineMode::Deterministic,
+                fill_model: ReplayFillModel::TickBidAsk,
+                latency: ReplayLatencyConfig {
+                    fixed_latency_ms,
+                    ..ReplayLatencyConfig::default()
+                },
+                bar_protection_policy: ReplayBarProtectionPolicy::Conservative,
+                response_tx,
+            })
+            .unwrap();
+        response_rx.await.unwrap();
+    }
+
+    async fn configure_dom(broker_tx: &UnboundedSender<BrokerCommand>, fixed_latency_ms: u64) {
+        let (response_tx, response_rx) = oneshot::channel();
+        broker_tx
+            .send(BrokerCommand::ConfigureReplay {
+                mode: ReplayEngineMode::Deterministic,
+                fill_model: ReplayFillModel::Dom,
+                latency: ReplayLatencyConfig {
+                    fixed_latency_ms,
+                    ..ReplayLatencyConfig::default()
+                },
+                bar_protection_policy: ReplayBarProtectionPolicy::Conservative,
+                response_tx,
+            })
+            .unwrap();
+        response_rx.await.unwrap();
+    }
+
     async fn configure_with(
         broker_tx: &UnboundedSender<BrokerCommand>,
         mode: ReplayEngineMode,
@@ -937,6 +1607,10 @@ mod tests {
         broker_tx
             .send(BrokerCommand::ConfigureReplay {
                 mode,
+                fill_model: match mode {
+                    ReplayEngineMode::Legacy => ReplayFillModel::LegacyReferencePrice,
+                    ReplayEngineMode::Deterministic => ReplayFillModel::RawBarOpen,
+                },
                 latency,
                 bar_protection_policy,
                 response_tx,
@@ -951,10 +1625,22 @@ mod tests {
         bar: Bar,
         bar_index: u64,
     ) -> Vec<InternalEvent> {
+        process_tick_bar(broker_tx, internal_rx, bar, Vec::new(), bar_index).await
+    }
+
+    async fn process_tick_bar(
+        broker_tx: &UnboundedSender<BrokerCommand>,
+        internal_rx: &mut UnboundedReceiver<InternalEvent>,
+        bar: Bar,
+        ticks: Vec<ReplayMarketTick>,
+        bar_index: u64,
+    ) -> Vec<InternalEvent> {
         let (response_tx, response_rx) = oneshot::channel();
         broker_tx
             .send(BrokerCommand::ReplayBar {
                 bar,
+                ticks,
+                dom_updates: Vec::new(),
                 bar_index,
                 response_tx,
             })
@@ -972,6 +1658,55 @@ mod tests {
         }
         response_rx.await.unwrap();
         events
+    }
+
+    async fn process_dom_bar(
+        broker_tx: &UnboundedSender<BrokerCommand>,
+        internal_rx: &mut UnboundedReceiver<InternalEvent>,
+        bar: Bar,
+        dom_updates: Vec<ReplayMarketDom>,
+        bar_index: u64,
+    ) -> Vec<InternalEvent> {
+        let (response_tx, response_rx) = oneshot::channel();
+        broker_tx
+            .send(BrokerCommand::ReplayBar {
+                bar,
+                ticks: Vec::new(),
+                dom_updates,
+                bar_index,
+                response_tx,
+            })
+            .unwrap();
+
+        let mut events = Vec::new();
+        loop {
+            match internal_rx.recv().await.expect("gateway event") {
+                InternalEvent::ReplayBarrier(response_tx) => {
+                    let _ = response_tx.send(());
+                    break;
+                }
+                event => events.push(event),
+            }
+        }
+        response_rx.await.unwrap();
+        events
+    }
+
+    fn replay_tick(
+        ts_ns: i64,
+        last: f64,
+        bid_price: Option<f64>,
+        ask_price: Option<f64>,
+    ) -> ReplayMarketTick {
+        ReplayMarketTick {
+            ts_ns,
+            last,
+            size: Some(1.0),
+            bid_price,
+            bid_size: bid_price.map(|_| 1.0),
+            ask_price,
+            ask_size: ask_price.map(|_| 1.0),
+        }
     }
 
     async fn drain_broker(
@@ -1120,6 +1855,486 @@ mod tests {
                 ..
             })
         )));
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_tick_market_order_uses_ask_and_quote_precision() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_tick_bid_ask(&broker_tx, 0).await;
+
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        broker_tx
+            .send(BrokerCommand::MarketOrder {
+                request_tx,
+                order: market_order(1, 100.0),
+            })
+            .unwrap();
+
+        let events = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.0),
+            vec![replay_tick(11, 100.0, Some(99.75), Some(100.25))],
+            0,
+        )
+        .await;
+        let fill = fill_from_events(&events).expect("tick market fill");
+        assert_eq!(fill.get("price").and_then(Value::as_f64), Some(100.25));
+        assert_eq!(fill.get("timestamp").and_then(Value::as_i64), Some(11));
+        assert_eq!(
+            fill.get("replayFillSource").and_then(Value::as_str),
+            Some("tick_bid_ask")
+        );
+        assert_eq!(
+            fill.get("replayExecutionPrecision").and_then(Value::as_str),
+            Some("quote_exact")
+        );
+        assert_eq!(
+            fill.get("replayFillTimestampNs").and_then(Value::as_i64),
+            Some(11)
+        );
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_dom_market_order_consumes_visible_ask_levels() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_dom(&broker_tx, 0).await;
+
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut order = market_order(1, 100.0);
+        order.order_qty = 2;
+        order.simulated_next_qty = 2;
+        order.target_qty = Some(2);
+        broker_tx
+            .send(BrokerCommand::MarketOrder { request_tx, order })
+            .unwrap();
+
+        let events = process_dom_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.0),
+            vec![ReplayMarketDom {
+                ts_ns: 11,
+                bids: vec![ReplayDomLevel {
+                    price: 100.0,
+                    size: 5.0,
+                }],
+                asks: vec![
+                    ReplayDomLevel {
+                        price: 100.25,
+                        size: 1.0,
+                    },
+                    ReplayDomLevel {
+                        price: 100.5,
+                        size: 3.0,
+                    },
+                ],
+            }],
+            0,
+        )
+        .await;
+        let fill = fill_from_events(&events).expect("DOM market fill");
+        assert_eq!(fill.get("price").and_then(Value::as_f64), Some(100.375));
+        assert_eq!(fill.get("timestamp").and_then(Value::as_i64), Some(11));
+        assert_eq!(
+            fill.get("replayFillSource").and_then(Value::as_str),
+            Some("dom_visible_levels")
+        );
+        assert_eq!(
+            fill.get("replayExecutionPrecision").and_then(Value::as_str),
+            Some("dom_assisted")
+        );
+        assert_eq!(
+            fill.get("replayDomQueueAssumption").and_then(Value::as_str),
+            Some("visible_levels_only")
+        );
+        assert_eq!(
+            fill.get("replayDomLevelsConsumed").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            fill.get("replayDomConsumedQty").and_then(Value::as_f64),
+            Some(2.0)
+        );
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_dom_market_order_rejects_insufficient_visible_depth() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_dom(&broker_tx, 0).await;
+
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut order = market_order(1, 100.0);
+        order.order_qty = 2;
+        order.simulated_next_qty = 2;
+        order.target_qty = Some(2);
+        broker_tx
+            .send(BrokerCommand::MarketOrder { request_tx, order })
+            .unwrap();
+
+        let events = process_dom_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.0),
+            vec![ReplayMarketDom {
+                ts_ns: 11,
+                bids: Vec::new(),
+                asks: vec![ReplayDomLevel {
+                    price: 100.25,
+                    size: 1.0,
+                }],
+            }],
+            0,
+        )
+        .await;
+        assert!(fill_from_events(&events).is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            InternalEvent::BrokerOrderFailed(BrokerOrderFailure { message, .. })
+                if message.contains("visible depth")
+        )));
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_dom_protection_uses_executable_top_of_book() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_dom(&broker_tx, 0).await;
+
+        let mut strategy = order_strategy(1, 100.0);
+        strategy.take_profit_price = Some(101.0);
+        strategy.stop_price = Some(99.0);
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        broker_tx
+            .send(BrokerCommand::OrderStrategy {
+                request_tx,
+                strategy,
+            })
+            .unwrap();
+
+        let entry = process_dom_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.0),
+            vec![ReplayMarketDom {
+                ts_ns: 11,
+                bids: vec![ReplayDomLevel {
+                    price: 100.0,
+                    size: 5.0,
+                }],
+                asks: vec![ReplayDomLevel {
+                    price: 100.25,
+                    size: 5.0,
+                }],
+            }],
+            0,
+        )
+        .await;
+        let entry_fill = fill_from_events(&entry).expect("DOM strategy entry");
+        assert_eq!(
+            entry_fill.get("price").and_then(Value::as_f64),
+            Some(100.25)
+        );
+
+        let exit = process_dom_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(20, 100.0),
+            vec![ReplayMarketDom {
+                ts_ns: 21,
+                bids: vec![ReplayDomLevel {
+                    price: 99.0,
+                    size: 5.0,
+                }],
+                asks: vec![ReplayDomLevel {
+                    price: 99.25,
+                    size: 5.0,
+                }],
+            }],
+            1,
+        )
+        .await;
+        let stop_fill = fills_from_events(&exit)
+            .into_iter()
+            .find(|fill| fill.get("replayExitReason").is_some())
+            .expect("DOM protection fill");
+        assert_eq!(stop_fill.get("price").and_then(Value::as_f64), Some(99.0));
+        assert_eq!(
+            stop_fill.get("replayFillSource").and_then(Value::as_str),
+            Some("dom_top_of_book")
+        );
+        assert_eq!(
+            stop_fill
+                .get("replayExecutionPrecision")
+                .and_then(Value::as_str),
+            Some("dom_assisted")
+        );
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_tick_model_does_not_fall_back_to_empty_bar_open() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_tick_bid_ask(&broker_tx, 0).await;
+
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        broker_tx
+            .send(BrokerCommand::MarketOrder {
+                request_tx,
+                order: market_order(1, 100.0),
+            })
+            .unwrap();
+
+        let empty = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 101.0),
+            Vec::new(),
+            0,
+        )
+        .await;
+        assert!(fill_from_events(&empty).is_none());
+
+        let later = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(20, 102.0),
+            vec![replay_tick(21, 102.0, Some(101.75), Some(102.25))],
+            1,
+        )
+        .await;
+        let fill = fill_from_events(&later).expect("later tick fill");
+        assert_eq!(fill.get("price").and_then(Value::as_f64), Some(102.25));
+        assert_eq!(fill.get("timestamp").and_then(Value::as_i64), Some(21));
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_trade_only_tick_fill_is_marked_tick_exact() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_tick_bid_ask(&broker_tx, 0).await;
+
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        broker_tx
+            .send(BrokerCommand::MarketOrder {
+                request_tx,
+                order: market_order(1, 100.0),
+            })
+            .unwrap();
+        let events = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.5),
+            vec![replay_tick(11, 100.5, None, None)],
+            0,
+        )
+        .await;
+        let fill = fill_from_events(&events).expect("trade-only tick fill");
+        assert_eq!(fill.get("price").and_then(Value::as_f64), Some(100.5));
+        assert_eq!(
+            fill.get("replayFillSource").and_then(Value::as_str),
+            Some("tick_trade_fallback")
+        );
+        assert_eq!(
+            fill.get("replayExecutionPrecision").and_then(Value::as_str),
+            Some("tick_exact")
+        );
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_tick_protection_follows_tick_order_and_uses_bid_for_sell_stop() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_tick_bid_ask(&broker_tx, 0).await;
+
+        let mut strategy = order_strategy(1, 100.0);
+        strategy.take_profit_price = Some(101.0);
+        strategy.stop_price = Some(99.0);
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        broker_tx
+            .send(BrokerCommand::OrderStrategy {
+                request_tx,
+                strategy,
+            })
+            .unwrap();
+
+        let entry = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.0),
+            vec![replay_tick(11, 100.0, Some(99.75), Some(100.25))],
+            0,
+        )
+        .await;
+        let entry_fill = fill_from_events(&entry).expect("tick strategy entry");
+        assert_eq!(
+            entry_fill.get("price").and_then(Value::as_f64),
+            Some(100.25)
+        );
+        assert!(
+            fills_from_events(&entry)
+                .iter()
+                .all(|fill| fill.get("replayExitReason").is_none())
+        );
+
+        // The stop is reachable on the first tick, while the target is only
+        // reachable on the second. Tick mode must take the stop rather than
+        // applying a bar-level target/stop ambiguity policy.
+        let exit = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(20, 100.0),
+            vec![
+                replay_tick(20, 99.0, Some(98.75), Some(99.0)),
+                replay_tick(21, 101.0, Some(101.0), Some(101.25)),
+            ],
+            1,
+        )
+        .await;
+        let stop_fill = fills_from_events(&exit)
+            .into_iter()
+            .find(|fill| fill.get("replayExitReason").is_some())
+            .expect("tick stop fill");
+        assert_eq!(stop_fill.get("price").and_then(Value::as_f64), Some(98.75));
+        assert_eq!(stop_fill.get("timestamp").and_then(Value::as_i64), Some(20));
+        assert_eq!(
+            stop_fill.get("replayExitReason").and_then(Value::as_str),
+            Some("stop_loss")
+        );
+        assert_eq!(
+            stop_fill
+                .get("replayExecutionPrecision")
+                .and_then(Value::as_str),
+            Some("quote_exact")
+        );
+
+        drop(broker_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deterministic_tick_trailing_update_applies_on_the_following_tick() {
+        let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_broker_gateway_task(broker_rx, internal_tx);
+        configure_tick_bid_ask(&broker_tx, 0).await;
+
+        let mut strategy = order_strategy(1, 100.0);
+        strategy.take_profit_price = None;
+        strategy.stop_price = Some(95.0);
+        strategy.replay_auto_trail = Some(ReplayAutoTrail {
+            trigger_offset: 2.0,
+            stop_offset: 1.0,
+            frequency: 1.0,
+        });
+        let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        broker_tx
+            .send(BrokerCommand::OrderStrategy {
+                request_tx,
+                strategy,
+            })
+            .unwrap();
+
+        let _entry = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(10, 100.0),
+            vec![replay_tick(11, 100.0, Some(99.75), Some(100.25))],
+            0,
+        )
+        .await;
+        let tightened = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(20, 102.5),
+            vec![replay_tick(20, 102.5, Some(102.25), Some(102.75))],
+            1,
+        )
+        .await;
+        let trailing_order = tightened
+            .iter()
+            .filter_map(|event| match event {
+                InternalEvent::UserEntities(entities) => Some(entities),
+                _ => None,
+            })
+            .flatten()
+            .find(|entity| {
+                entity.entity_type == "order"
+                    && entity
+                        .entity
+                        .get("replayTrailingActive")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+            })
+            .expect("tick trailing update");
+        assert_eq!(
+            trailing_order
+                .entity
+                .get("stopPrice")
+                .and_then(Value::as_f64),
+            Some(101.25)
+        );
+        assert!(fills_from_events(&tightened).is_empty());
+
+        let exit = process_tick_bar(
+            &broker_tx,
+            &mut internal_rx,
+            replay_bar(30, 100.75),
+            vec![replay_tick(31, 100.75, Some(100.5), Some(101.0))],
+            2,
+        )
+        .await;
+        let trailing_fill = fills_from_events(&exit)
+            .into_iter()
+            .find(|fill| fill.get("replayExitReason").is_some())
+            .expect("tick trailing fill");
+        assert_eq!(
+            trailing_fill
+                .get("replayExitReason")
+                .and_then(Value::as_str),
+            Some("trailing_stop")
+        );
+        assert_eq!(
+            trailing_fill.get("price").and_then(Value::as_f64),
+            Some(100.5)
+        );
+        assert_eq!(
+            trailing_fill
+                .get("replayExecutionPrecision")
+                .and_then(Value::as_str),
+            Some("quote_exact")
+        );
 
         drop(broker_tx);
         task.await.unwrap();

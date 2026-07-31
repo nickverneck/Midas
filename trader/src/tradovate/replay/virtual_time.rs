@@ -144,6 +144,10 @@ impl ReplayVirtualEventQueue {
         self.pop_next()
     }
 
+    pub(crate) fn now_ns(&self) -> Option<i64> {
+        self.clock.now_ns()
+    }
+
     #[allow(dead_code)]
     pub(super) fn clock(&self) -> ReplayVirtualClock {
         self.clock

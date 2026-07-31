@@ -63,6 +63,45 @@ async fn main() -> Result<()> {
         let config = AppConfig::load(cli.config.as_deref())?;
         return download_replay_data(&config, args).await;
     }
+    #[cfg(feature = "tradovate")]
+    if let Some(Mode::CaptureReplayDom(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return tradovate::capture_replay_dom(
+            &config,
+            tradovate::DomCaptureOptions {
+                contract: args.contract,
+                start: args.start,
+                end: args.end,
+                output: args.output,
+                speed: args.speed,
+                initial_balance: args.initial_balance,
+                overwrite: args.overwrite,
+            },
+        )
+        .await;
+    }
+    #[cfg(not(feature = "tradovate"))]
+    if matches!(cli.mode, Some(Mode::CaptureReplayDom(_))) {
+        anyhow::bail!("historical DOM capture requires the Tradovate feature");
+    }
+    #[cfg(feature = "tradovate")]
+    if let Some(Mode::CaptureLiveDom(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return tradovate::capture_live_dom(
+            &config,
+            tradovate::LiveDomCaptureOptions {
+                contract: args.contract,
+                duration_seconds: args.duration_seconds,
+                output: args.output,
+                overwrite: args.overwrite,
+            },
+        )
+        .await;
+    }
+    #[cfg(not(feature = "tradovate"))]
+    if matches!(cli.mode, Some(Mode::CaptureLiveDom(_))) {
+        anyhow::bail!("live DOM capture requires the Tradovate feature");
+    }
     if matches!(cli.mode, Some(Mode::Engine)) {
         return run_engine_server(&cli.engine_socket).await;
     }

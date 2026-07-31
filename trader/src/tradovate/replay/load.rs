@@ -1,6 +1,9 @@
 use super::*;
 
 #[cfg(feature = "replay")]
+use crate::broker::{ReplayDomLevel, ReplayFillModel};
+
+#[cfg(feature = "replay")]
 use super::instrument::{
     infer_contract_name, infer_tick_size, infer_value_per_point, replay_contract_id,
 };
@@ -71,6 +74,11 @@ pub(super) fn load_replay_state_blocking(
     selected_view_path: Option<&Path>,
 ) -> Result<ReplayState> {
     let library = ReplayCacheLibrary::scan(&cfg.replay_cache_dir);
+    let dom_updates = if cfg.replay_fill_model == ReplayFillModel::Dom {
+        load_replay_dom_updates(cfg.replay_dom_file_path.as_deref())?
+    } else {
+        Vec::new()
+    };
     if let Some(view_path) = selected_view_path {
         let store = crate::replay_cache::ReplayDatasetViewStore::new(&cfg.replay_cache_dir);
         let view = store.load_path(view_path)?;
@@ -93,12 +101,15 @@ pub(super) fn load_replay_state_blocking(
             .server_bars_file_for(bar_type, candle_mode, Some(&resolved.requested_coverage()))
             .is_some()
         {
-            return replay_state_from_cached_server_bars(
-                resolved.load_server_bars(bar_type, candle_mode)?,
-                bar_type,
-                candle_mode,
-                Some(resolved.evaluation_range),
-                Some(replay_window),
+            return attach_dom_updates(
+                replay_state_from_cached_server_bars(
+                    resolved.load_server_bars(bar_type, candle_mode)?,
+                    bar_type,
+                    candle_mode,
+                    Some(resolved.evaluation_range),
+                    Some(replay_window),
+                )?,
+                &dom_updates,
             );
         }
         if resolved
@@ -111,11 +122,14 @@ pub(super) fn load_replay_state_blocking(
                 .dataset
                 .resolve_raw_ticks_parquet_files(Some(&coverage))
                 .context("load raw-tick replay dataset view")?;
-            return replay_state_from_cached_raw_ticks(
-                cached,
-                Some(resolved.load_range),
-                Some(resolved.evaluation_range),
-                Some(replay_window),
+            return attach_dom_updates(
+                replay_state_from_cached_raw_ticks(
+                    cached,
+                    Some(resolved.load_range),
+                    Some(resolved.evaluation_range),
+                    Some(replay_window),
+                )?,
+                &dom_updates,
             );
         }
         bail!(
@@ -138,24 +152,30 @@ pub(super) fn load_replay_state_blocking(
             .server_bars_file_for(bar_type, candle_mode, None)
             .is_some()
         {
-            return replay_state_from_cached_server_bars(
-                crate::replay_cache::load_server_bars_cache_file(
-                    dataset,
+            return attach_dom_updates(
+                replay_state_from_cached_server_bars(
+                    crate::replay_cache::load_server_bars_cache_file(
+                        dataset,
+                        bar_type,
+                        candle_mode,
+                        None,
+                    )?,
                     bar_type,
                     candle_mode,
                     None,
+                    None,
                 )?,
-                bar_type,
-                candle_mode,
-                None,
-                None,
+                &dom_updates,
             );
         }
         if dataset.raw_ticks_parquet_file_for(None).is_some() {
             let cached = dataset
                 .resolve_raw_ticks_parquet_files(None)
                 .context("load selected raw-tick replay dataset")?;
-            return replay_state_from_cached_raw_ticks(cached, None, None, None);
+            return attach_dom_updates(
+                replay_state_from_cached_raw_ticks(cached, None, None, None)?,
+                &dom_updates,
+            );
         }
         bail!(
             "selected replay dataset does not support {}",
@@ -163,13 +183,22 @@ pub(super) fn load_replay_state_blocking(
         );
     }
     if let Some(cached) = library.load_first_server_bars(bar_type, candle_mode, None)? {
-        return replay_state_from_cached_server_bars(cached, bar_type, candle_mode, None, None);
+        return attach_dom_updates(
+            replay_state_from_cached_server_bars(cached, bar_type, candle_mode, None, None)?,
+            &dom_updates,
+        );
     }
     if let Some(cached) = library.resolve_unique_raw_ticks_parquet_files(None)? {
-        return replay_state_from_cached_raw_ticks(cached, None, None, None);
+        return attach_dom_updates(
+            replay_state_from_cached_raw_ticks(cached, None, None, None)?,
+            &dom_updates,
+        );
     }
 
-    load_local_tick_replay_state_blocking(&cfg.replay_file_path)
+    attach_dom_updates(
+        load_local_tick_replay_state_blocking(&cfg.replay_file_path)?,
+        &dom_updates,
+    )
 }
 
 #[cfg(feature = "replay")]
@@ -228,6 +257,7 @@ fn load_local_tick_replay_state_blocking(path: &Path) -> Result<ReplayState> {
             value_per_point: Some(value_per_point),
             tick_size: Some(tick_size),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::PriceTicks(Arc::from(ticks.into_boxed_slice())),
     })
 }
@@ -249,6 +279,19 @@ pub(super) fn replay_state_from_cached_raw_ticks(
         .contract
         .id
         .unwrap_or_else(|| replay_contract_id(&cached.manifest_path));
+    let mut execution_ticks = Vec::new();
+    crate::replay_cache::stream_resolved_raw_ticks(&cached, timestamp_range.as_ref(), |row| {
+        execution_ticks.push(ReplayMarketTick {
+            ts_ns: row.ts_ns,
+            last: row.price,
+            size: Some(row.size),
+            bid_price: row.bid_price,
+            bid_size: row.bid_size,
+            ask_price: row.ask_price,
+            ask_size: row.ask_size,
+        });
+        Ok(())
+    })?;
     Ok(ReplayState {
         evaluation_range,
         replay_window,
@@ -269,9 +312,11 @@ pub(super) fn replay_state_from_cached_raw_ticks(
             value_per_point: Some(cached.manifest.tick_specs.value_per_point),
             tick_size: Some(cached.manifest.tick_specs.tick_size),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::CachedRawTicks {
             resolved: cached,
             timestamp_range,
+            execution_ticks: Arc::from(execution_ticks.into_boxed_slice()),
         },
     })
 }
@@ -336,12 +381,96 @@ fn replay_state_from_cached_server_bars(
             value_per_point: Some(cached.manifest.tick_specs.value_per_point),
             tick_size: Some(cached.manifest.tick_specs.tick_size),
         },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::CachedServerBars {
             bars: Arc::from(bars.into_boxed_slice()),
             bar_type: data_bar_type,
             source_label,
         },
     })
+}
+
+#[cfg(feature = "replay")]
+fn attach_dom_updates(
+    mut state: ReplayState,
+    dom_updates: &[ReplayMarketDom],
+) -> Result<ReplayState> {
+    state.dom_updates = Arc::from(dom_updates.to_vec().into_boxed_slice());
+    Ok(state)
+}
+
+#[cfg(feature = "replay")]
+fn load_replay_dom_updates(path: Option<&Path>) -> Result<Vec<ReplayMarketDom>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let resolved_path = resolve_replay_path(path)?;
+    let file = File::open(&resolved_path)
+        .with_context(|| format!("open replay DOM file {}", resolved_path.display()))?;
+    let reader = BufReader::new(file);
+    let mut updates = Vec::new();
+    for (line_index, line) in reader.lines().enumerate() {
+        let line =
+            line.with_context(|| format!("read replay DOM file {}", resolved_path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut dom = serde_json::from_str::<ReplayMarketDom>(&line).with_context(|| {
+            format!(
+                "parse replay DOM snapshot {} in {}",
+                line_index,
+                resolved_path.display()
+            )
+        })?;
+        normalize_replay_dom(&mut dom).with_context(|| {
+            format!(
+                "validate replay DOM snapshot {} in {}",
+                line_index,
+                resolved_path.display()
+            )
+        })?;
+        updates.push(dom);
+    }
+    if updates.is_empty() {
+        bail!(
+            "replay DOM file {} contained no snapshots",
+            resolved_path.display()
+        );
+    }
+    updates.sort_by_key(|dom| dom.ts_ns);
+    Ok(updates)
+}
+
+#[cfg(feature = "replay")]
+fn normalize_replay_dom(dom: &mut ReplayMarketDom) -> Result<()> {
+    if dom.ts_ns <= 0 {
+        bail!("DOM timestamp must be positive nanoseconds");
+    }
+    normalize_replay_dom_side(&mut dom.bids, true)?;
+    normalize_replay_dom_side(&mut dom.asks, false)?;
+    if dom.bids.is_empty() && dom.asks.is_empty() {
+        bail!("DOM snapshot has no positive-size bid or ask levels");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+fn normalize_replay_dom_side(levels: &mut Vec<ReplayDomLevel>, descending: bool) -> Result<()> {
+    levels.retain(|level| level.size.is_finite() && level.size > 0.0);
+    if levels
+        .iter()
+        .any(|level| !level.price.is_finite() || level.price <= 0.0)
+    {
+        bail!("DOM levels require finite positive prices");
+    }
+    levels.sort_by(|left, right| {
+        if descending {
+            right.price.total_cmp(&left.price)
+        } else {
+            left.price.total_cmp(&right.price)
+        }
+    });
+    Ok(())
 }
 
 #[cfg(feature = "replay")]
@@ -410,5 +539,59 @@ pub(super) fn replay_path_candidates(
 fn push_replay_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
     if !candidates.iter().any(|existing| existing == &candidate) {
         candidates.push(candidate);
+    }
+}
+
+#[cfg(all(test, feature = "replay"))]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn replay_dom_jsonl_loader_sorts_and_normalizes_levels() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "trader-replay-dom-{}-{suffix}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"ts_ns\":2,\"bids\":[{\"price\":100.0,\"size\":0.0},{\"price\":99.75,\"size\":3.0}],\"asks\":[{\"price\":100.5,\"size\":2.0},{\"price\":100.25,\"size\":1.0}]}\n",
+                "{\"ts_ns\":1,\"bids\":[{\"price\":99.5,\"size\":1.0}],\"asks\":[{\"price\":100.0,\"size\":1.0}]}\n",
+            ),
+        )
+        .expect("write DOM fixture");
+
+        let updates = load_replay_dom_updates(Some(&path)).expect("load DOM fixture");
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].ts_ns, 1);
+        assert_eq!(updates[1].ts_ns, 2);
+        assert_eq!(updates[1].bids[0].price, 99.75);
+        assert_eq!(updates[1].asks[0].price, 100.25);
+        assert_eq!(updates[1].bids.len(), 1);
+
+        std::fs::remove_file(path).expect("remove DOM fixture");
+    }
+
+    #[test]
+    fn replay_dom_jsonl_loader_rejects_empty_books() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "trader-replay-dom-empty-{}-{suffix}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{"ts_ns":1,"bids":[],"asks":[]}"#).expect("write DOM fixture");
+
+        let error = load_replay_dom_updates(Some(&path)).expect_err("empty DOM should fail");
+        assert!(format!("{error:#}").contains("no positive-size"));
+
+        std::fs::remove_file(path).expect("remove DOM fixture");
     }
 }

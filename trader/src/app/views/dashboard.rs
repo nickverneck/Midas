@@ -21,6 +21,10 @@ impl App {
                 self.replay_execution_ledger.schema_version
             )));
             lines.push(Line::from(format!(
+                "Replay Fill Model: {}",
+                self.replay_execution_ledger.fill_model.label()
+            )));
+            lines.push(Line::from(format!(
                 "Replay Protection: {}",
                 self.replay_execution_ledger.bar_protection_policy.label()
             )));

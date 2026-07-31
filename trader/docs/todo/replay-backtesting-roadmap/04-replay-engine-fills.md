@@ -6,7 +6,7 @@ Move replay from "bar stream plus immediate fills" toward deterministic virtual-
 
 Fast-forward must change wall-clock speed only. Accuracy should depend on market timestamps and the fill model, not on how fast the UI renders.
 
-## Implementation Status (2026-07-30)
+## Implementation Status (2026-07-31)
 
 The first Phase 4 slice is implemented behind an explicit compatibility boundary:
 
@@ -65,7 +65,7 @@ The sixth Phase 4 slice adds reproducible observed-latency models:
 - Observed modes consume the configured `replay_observed_latency_ms` sample population. Deterministic startup fails closed when a required population is empty.
 - `seeded_observed` performs deterministic empirical sampling with `replay_latency_seed`; identical samples, seed, and order sequence produce the same latency trace.
 - Each deferred command owns its sampled latency, and each fill records that actual sample rather than a session-wide placeholder.
-- Ledger schema v2 records the latency model, optional seed, observed sample count, and bar-protection policy. Missing v2 fields deserialize to safe defaults for v1 compatibility.
+- Ledger schema v3 records the latency model, fill model, optional seed, observed sample count, bar-protection policy, and execution precision. Older v2 snapshots deserialize with safe bar-approximate defaults for the new fields.
 
 The seventh Phase 4 slice consolidates deterministic ordering under one broker coordinator queue:
 
@@ -74,22 +74,65 @@ The seventh Phase 4 slice consolidates deterministic ordering under one broker c
 - Worker barriers carry stable bar/evaluation ids. Those ids derive monotonic open/evaluation logical steps and preserve duplicate provider timestamps.
 - Headless and TUI replay continue through the same worker/service/gateway path; rendering speed remains outside virtual-time ordering.
 
-RBT-030 and RBT-031 are now implemented for the deterministic bar engine, RBT-033 is implemented for the documented coarse-bar policy, and RBT-032 Level 0b remains the active fill level. It is not yet a tick-level replay engine:
+The eighth Phase 4 slice implements the Level 1 tick/trade/quote fill path:
+
+- Raw replay frames carry their source ticks through the existing broker barrier without changing the strategy evaluation cadence.
+- `ReplayFillModel::TickBidAsk` fills market buys at the ask and market sells at the bid when quotes are present; trade-only data uses the tick trade as an explicit fallback.
+- Stops and limits are evaluated in source-tick order. A stop reached before a target wins by sequence, so the coarse-bar ambiguity policy is not applied when ticks are available.
+- Tick-driven trailing activation and tightening become effective on the following tick, preventing same-tick lookahead after a strategy entry or trail update.
+- Every fill records `replayFillSource` and `replayExecutionPrecision`: `quote_exact`, `tick_exact`, or `bar_approximate`.
+- Cached raw-tick bid/ask data is available to the execution path. Tick mode never silently falls back to an empty bar open; it waits for the next usable tick.
+- `replay_fill_model = "tick_bid_ask"` and `TRADER_REPLAY_FILL_MODEL` select Level 1. Bar-only and Legacy modes remain explicit compatibility choices.
+
+The ninth Phase 4 slice adds optional Level 2 DOM-assisted execution:
+
+- `ReplayMarketDom` represents timestamped full-book snapshots with visible bid and ask levels. DOM is an enrichment path, not a requirement: the default bar model and the Level 1 tick/quote model continue to work without a DOM file.
+- `replay_fill_model = "dom"` (deterministic mode only) consumes visible ask levels for buys and visible bid levels for sells at the exchange-arrival timestamp. Multiple levels produce a deterministic volume-weighted average price.
+- The queue assumption is explicit and conservative: `visible_levels_only`. If the requested quantity exceeds visible depth, the simulated order is rejected instead of inventing hidden liquidity or silently falling back to a bar/tick price.
+- Full-book snapshots can be supplied through the optional `replay_dom_file_path` / `TRADER_REPLAY_DOM_FILE_PATH` JSONL sidecar. Each line contains `ts_ns`, `bids`, and `asks`; snapshots are normalized and grouped with replay bars before entering the broker coordinator.
+- DOM updates are scheduled as `DomUpdate` virtual-time events. DOM top-of-book protection checks use executable bid/ask prices and are labeled `dom_top_of_book`; market fills are labeled `dom_visible_levels` with `dom_assisted` precision and depth-consumption metadata.
+- This slice does not claim exact exchange queue position. A competition account may expose live DOM, but historical replay depth still depends on the provider's Market Replay entitlement and the snapshots returned for the requested contract/date.
+
+The tenth Phase 4 slice adds explicit DOM capture paths:
+
+- `capture-replay-dom` uses Tradovate's dedicated Market Replay WebSocket, checks replay entitlement, initializes the historical clock, subscribes with `md/subscribeDOM`, and writes normalized full-book snapshots to the documented JSONL sidecar.
+- `capture-live-dom` is a separate opt-in command/process using the normal market-data WebSocket. The live trading engine does not start this subscription, task, or writer unless the user explicitly launches the capture command, so normal live execution has no added DOM overhead.
+- Both capture paths require an exact contract symbol, preserve provider timestamps, map Tradovate `offers` to replay `asks`, reject unsafe output replacement unless `--overwrite` is supplied, and fail clearly when the provider returns no usable depth.
+- Historical capture uses the disposable Market Replay session only for market data; it does not start account sync or send orders.
+
+Capture examples:
+
+```bash
+cargo run --features replay -- capture-replay-dom \
+  --contract GCZ6 \
+  --start 2026-07-30T13:30:00Z \
+  --end 2026-07-30T14:00:00Z \
+  --output .run/replay-cache/GCZ6.dom.jsonl
+
+# Separate, opt-in live recorder; the normal engine is not modified or slowed.
+cargo run -- capture-live-dom \
+  --contract GCZ6 \
+  --duration-seconds 300 \
+  --output .run/live-captures/GCZ6.dom.jsonl
+```
+
+RBT-030, RBT-031, and RBT-032 Levels 0/0b/1/2 are now implemented for deterministic replay. RBT-033 is implemented for the documented coarse-bar policy, tick sequence path, and optional DOM top-of-book path. Historical and standalone live DOM capture are now available through explicit CLI commands:
 
 - In the coarse bar model, acknowledgement and fill occur together when the first eligible raw bar is processed.
 - TP/SL checks still use raw bar OHLC. The configured ambiguity policy makes results reproducible but does not reconstruct the real intrabar path.
-- Bar trailing updates intentionally become effective on the next source bar; exact same-bar activation/update/fill requires ticks.
-- Source bar timestamps are the available scheduling timestamps; tick/quote arrival within a bar is unavailable until the validated raw-tick path is connected.
-- Tick/quote and DOM fills remain later Phase 4 work.
+- Bar trailing updates intentionally become effective on the next source bar; tick trailing updates become effective on the next source tick.
+- Tick/quote arrival within a bar is available when the selected dataset contains raw ticks. Cached server-bar datasets remain bar-approximate.
+- DOM remains optional and is never inferred from Level 1 bid/ask metadata. Without a sidecar, selecting `dom` fails closed with a clear dataset error; selecting bar or tick/quote models remains unaffected. The sidecar can be produced by `capture-replay-dom` or `capture-live-dom`.
 - Observed latency samples are supplied through configuration; automatically importing a population from saved live logs can be added as a convenience without changing the sampler.
 - The ledger currently lives for the engine session. Durable `result.json`/CSV/Parquet output belongs to Phase 5.
 
 Validation for this slice:
 
-- Default suite: 273 tests passed.
-- Replay-feature suite: 445 tests passed.
-- All-feature suite: 448 tests passed.
-- Safe local TUI replay: cached MESU6, 1-minute OHLC, 1,380 rows, deterministic mode, strategy disarmed, manual orders unavailable, zero persisted errors, and no engine left running after exit.
+- Default suite: 279 tests passed.
+- Replay-feature suite: 463 tests passed.
+- All-feature suite: 466 tests passed.
+- Level 1 regressions cover quote-side market pricing, trade-only fallback, empty-bar waiting, tick-order TP/SL selection, and next-tick trailing activation. Level 2 regressions cover multi-level VWAP consumption, insufficient-depth rejection, DOM top-of-book protection, JSONL normalization, and optional-config compatibility.
+- The existing safe local TUI replay remains covered for cached MESU6, 1-minute OHLC, deterministic mode, strategy disarmed, manual orders unavailable, zero persisted errors, and clean engine shutdown.
 - All-feature build, formatting check, and diff whitespace check passed.
 
 ## Current Code
@@ -104,7 +147,11 @@ Validation for this slice:
 - Deterministic acknowledgement RTT metadata records each command's sampled latency; Legacy acknowledgement RTT remains `0`.
 - TP/SL fills use raw OHLC plus the explicit ambiguity policy. Trailing levels tighten after completed bars for next-bar effectiveness.
 - `ReplayExecutionLedgerState` owns fee-neutral, append-only fill capture in `src/tradovate/replay/ledger.rs`.
-- `ReplayExecutionLedgerSnapshot` is the backward-compatible serializable schema-v2 boundary consumed later by Phase 5 result persistence and analytics.
+- `ReplayExecutionLedgerSnapshot` is the backward-compatible serializable schema-v3 boundary consumed later by Phase 5 result persistence and analytics; v2 fills default to bar-approximate precision when the new field is absent.
+- `ReplayMarketTick` carries last trade, size, bid/ask prices, and optional quote sizes from raw replay sources.
+- `ReplayFillModel::TickBidAsk` is coordinated in `src/tradovate/gateway/broker.rs`; `ReplayBrokerState::simulate_replay_tick` owns tick-order protection and trailing transitions.
+- `ReplayMarketDom` carries optional full-book snapshots. `ReplayBarFrame` and `BrokerCommand::ReplayBar` propagate those snapshots only when present; the default replay path carries an empty DOM slice.
+- `ReplayFillModel::Dom` is coordinated in `src/tradovate/gateway/broker.rs`; `ReplayDomBook` consumes visible levels and records the queue/depth assumption on fills. `src/tradovate/replay/load.rs` owns the optional JSONL sidecar parser.
 
 ## Expected Cross-Strategy Behavior
 
@@ -133,7 +180,7 @@ Replay fills should be stored as an immutable execution ledger before fees and a
 
 ### RBT-030: Define Virtual-Time Event Queue
 
-Status: implemented for bar-level replay. The broker coordinator owns one virtual-time queue for every supported raw-bar, evaluation, and execution lifecycle phase. Validated raw tick/quote input remains the dependency for intrabar events.
+Status: implemented for bar-level, Level 1, and optional Level 2 replay. The broker coordinator owns one virtual-time queue for raw-bar, tick, DOM, evaluation, and execution lifecycle phases.
 
 Events:
 
@@ -150,7 +197,7 @@ Events:
 
 Dependencies:
 
-- RBT-012 for tick-level mode.
+- Raw tick/quote dataset support (available through the replay cache and local tick sources).
 
 Acceptance criteria:
 
@@ -197,7 +244,7 @@ Risks:
 
 ### RBT-032: Implement Fill Model Levels
 
-Status: in progress. Legacy reference-price and raw next-bar-open models are explicit, and ledger results separate signal source from fill source. Tick and DOM levels remain.
+Status: implemented through Level 2. Legacy reference-price, raw next-bar-open, tick trade/bid/ask, and optional DOM models are explicit, and ledger results separate signal chart source from fill source.
 
 Level 0: Legacy bar close
 
@@ -214,20 +261,21 @@ Level 0b: Raw next-bar open
 
 Level 1: Tick trade model
 
-- Market buy fills at ask if available, else next trade price plus slippage rule.
-- Market sell fills at bid if available, else next trade price minus slippage rule.
-- Stops/limits are evaluated against tick sequence, not bar OHLC.
+- Market buy fills at ask if available, else the arriving trade price.
+- Market sell fills at bid if available, else the arriving trade price.
+- Stops/limits are evaluated against the ordered tick sequence, not bar OHLC. Tick mode records quote-exact precision when either quote side is present and tick-exact precision for trade-only input.
+- Tick-driven trailing updates are applied after protection evaluation and are executable beginning with the following tick.
 
 Level 2: DOM snapshot model
 
 - Market orders consume visible book levels at arrival timestamp.
-- Limit orders use deterministic queue assumptions.
+- Market fills record weighted-average price, requested/consumed quantity, levels consumed, and the `visible_levels_only` queue assumption.
+- Top-of-book protection uses executable bid/ask prices. Exact order queue position and hidden liquidity remain outside this slice; capture is available, but provider history/entitlement still determines whether snapshots exist.
 
 Dependencies:
 
 - RBT-030.
-- RBT-012 for Level 1.
-- DOM capture/probe for Level 2.
+- Tradovate Market Replay entitlement for historical DOM capture, or an explicitly launched live capture process for current DOM data.
 
 Acceptance criteria:
 
@@ -245,7 +293,7 @@ Risks:
 
 ### RBT-033: Simulate Broker-Native Protection
 
-Status: implemented for the documented coarse-bar model. Fixed TP/SL, explicit both-reachable policy, next-bar-effective auto-trailing, initial broker stop behavior, and all three reversal command paths share the deterministic coordinator. Exact intrabar parity remains dependent on Level 1 ticks.
+Status: implemented for the documented coarse-bar model, Level 1 tick sequence, and optional Level 2 top-of-book path. Fixed TP/SL, explicit both-reachable policy for OHLC, tick-order protection, DOM executable-side protection, next-event-effective auto-trailing, initial broker stop behavior, and all three reversal command paths share the deterministic coordinator. Exact queue/market-depth parity remains outside the visible-levels-only assumption.
 
 The live app uses broker-native TP/SL/trailing when configured. Backtests need a simulation equivalent:
 

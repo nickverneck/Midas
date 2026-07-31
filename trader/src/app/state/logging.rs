@@ -234,8 +234,18 @@ impl App {
             "replay_fill_model: {}\n",
             match self.base_config.replay_engine_mode {
                 ReplayEngineMode::Legacy => "legacy_reference_price",
-                ReplayEngineMode::Deterministic => "raw_next_bar_open",
+                ReplayEngineMode::Deterministic =>
+                    self.base_config.replay_fill_model.config_label(),
             }
+        ));
+        body.push_str(&format!(
+            "replay_dom_file_path: {}\n",
+            self.base_config
+                .replay_dom_file_path
+                .as_deref()
+                .map_or("(not configured)".to_string(), |path| path
+                    .display()
+                    .to_string())
         ));
         body.push_str(&format!(
             "replay_latency_model: {}\n",
@@ -260,6 +270,10 @@ impl App {
         body.push_str(&format!(
             "replay_ledger_schema_version: {}\n",
             self.replay_execution_ledger.schema_version
+        ));
+        body.push_str(&format!(
+            "replay_ledger_fill_model: {}\n",
+            self.replay_execution_ledger.fill_model.config_label()
         ));
         body.push_str(&format!(
             "replay_ledger_fill_count: {}\n",

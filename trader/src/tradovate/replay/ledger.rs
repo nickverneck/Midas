@@ -1,11 +1,11 @@
 use super::*;
 use crate::broker::{
     REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION, ReplayBarProtectionPolicy, ReplayEngineMode,
-    ReplayExecutionLedgerSnapshot, ReplayExecutionLedgerSummary, ReplayLatencyConfig,
-    ReplayLatencyModel,
+    ReplayExecutionLedgerSnapshot, ReplayExecutionLedgerSummary, ReplayFillModel,
+    ReplayLatencyConfig, ReplayLatencyModel,
 };
 #[cfg(feature = "replay")]
-use crate::broker::{ReplayExecutionFill, ReplayFillPriceSource};
+use crate::broker::{ReplayExecutionFill, ReplayExecutionPrecision, ReplayFillPriceSource};
 #[cfg(feature = "replay")]
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,11 +61,37 @@ impl ReplayExecutionLedgerState {
         bar_type: BarType,
         candle_mode: CandleMode,
     ) -> Self {
+        Self::new_with_fill_config(
+            engine_mode,
+            match engine_mode {
+                ReplayEngineMode::Legacy => ReplayFillModel::LegacyReferencePrice,
+                ReplayEngineMode::Deterministic => ReplayFillModel::RawBarOpen,
+            },
+            latency,
+            bar_protection_policy,
+            bar_type,
+            candle_mode,
+        )
+    }
+
+    pub fn new_with_fill_config(
+        engine_mode: ReplayEngineMode,
+        fill_model: ReplayFillModel,
+        latency: &ReplayLatencyConfig,
+        bar_protection_policy: ReplayBarProtectionPolicy,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+    ) -> Self {
+        let fill_model = match engine_mode {
+            ReplayEngineMode::Legacy => ReplayFillModel::LegacyReferencePrice,
+            ReplayEngineMode::Deterministic => fill_model,
+        };
         Self {
             snapshot: ReplayExecutionLedgerSnapshot {
                 schema_version: REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION,
                 fee_neutral: true,
                 engine_mode,
+                fill_model,
                 latency_model: match engine_mode {
                     ReplayEngineMode::Legacy => ReplayLatencyModel::IgnoredLegacy,
                     ReplayEngineMode::Deterministic => latency.model,
@@ -231,6 +257,7 @@ fn parse_fill(
         acknowledgement_timestamp_ns: json_i64(value, "replayAcknowledgementTimestampNs"),
         fill_timestamp_ns,
         fill_price_source: parse_fill_source(value, ledger.engine_mode),
+        execution_precision: parse_execution_precision(value),
         exit_reason: value
             .get("replayExitReason")
             .and_then(Value::as_str)
@@ -253,9 +280,27 @@ fn parse_fill_source(value: &Value, engine_mode: ReplayEngineMode) -> ReplayFill
     {
         "raw_bar_open" => ReplayFillPriceSource::RawBarOpen,
         "raw_bar_ohlc" => ReplayFillPriceSource::RawBarOhlc,
+        "tick_trade_fallback" => ReplayFillPriceSource::TickTradeFallback,
+        "tick_bid_ask" => ReplayFillPriceSource::TickBidAsk,
+        "dom_visible_levels" => ReplayFillPriceSource::DomVisibleLevels,
+        "dom_top_of_book" => ReplayFillPriceSource::DomTopOfBook,
         "legacy_reference_price" => ReplayFillPriceSource::LegacyReferencePrice,
         _ if engine_mode == ReplayEngineMode::Deterministic => ReplayFillPriceSource::RawBarOpen,
         _ => ReplayFillPriceSource::LegacyReferencePrice,
+    }
+}
+
+#[cfg(feature = "replay")]
+fn parse_execution_precision(value: &Value) -> ReplayExecutionPrecision {
+    match value
+        .get("replayExecutionPrecision")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "tick_exact" => ReplayExecutionPrecision::TickExact,
+        "quote_exact" => ReplayExecutionPrecision::QuoteExact,
+        "dom_assisted" => ReplayExecutionPrecision::DomAssisted,
+        _ => ReplayExecutionPrecision::BarApproximate,
     }
 }
 
@@ -352,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_v2_records_reproducible_latency_and_protection_configuration() {
+    fn ledger_v3_records_reproducible_fill_and_protection_configuration() {
         let latency = ReplayLatencyConfig {
             model: ReplayLatencyModel::SeededObserved,
             fixed_latency_ms: 0,
@@ -368,13 +413,112 @@ mod tests {
         );
 
         let snapshot = ledger.snapshot();
-        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(snapshot.schema_version, 3);
+        assert_eq!(snapshot.fill_model, ReplayFillModel::RawBarOpen);
         assert_eq!(snapshot.latency_model, ReplayLatencyModel::SeededObserved);
         assert_eq!(snapshot.latency_seed, Some(91));
         assert_eq!(snapshot.observed_latency_sample_count, 3);
         assert_eq!(
             snapshot.bar_protection_policy,
             ReplayBarProtectionPolicy::Optimistic
+        );
+    }
+
+    #[test]
+    fn ledger_parses_tick_precision_and_defaults_legacy_fills_to_bar_approximate() {
+        let mut ledger = ReplayExecutionLedgerState::new_with_fill_config(
+            ReplayEngineMode::Deterministic,
+            ReplayFillModel::TickBidAsk,
+            &ReplayLatencyConfig::default(),
+            ReplayBarProtectionPolicy::Conservative,
+            BarType::minute(1),
+            CandleMode::Standard,
+        );
+        let tick_fill = fill(json!({
+            "id": 200,
+            "accountId": 7,
+            "contractId": 11,
+            "orderId": 2000,
+            "source": "replay",
+            "symbol": "MESU6",
+            "price": 5000.25,
+            "qty": 1,
+            "buySell": "Buy",
+            "timestamp": 2_000,
+            "replayFillSource": "tick_bid_ask",
+            "replayExecutionPrecision": "quote_exact"
+        }));
+        assert_eq!(ledger.append_entities(&[tick_fill], &market()), 1);
+        assert_eq!(
+            ledger.snapshot().fills[0].execution_precision,
+            ReplayExecutionPrecision::QuoteExact
+        );
+
+        let mut legacy_snapshot = json!({
+            "schema_version": 2,
+            "fee_neutral": true,
+            "engine_mode": "deterministic",
+            "latency_model": "fixed",
+            "fixed_latency_ms": 0,
+            "observed_latency_sample_count": 0,
+            "bar_protection_policy": "conservative",
+            "signal_source": "1 Minute",
+            "gross_realized_pnl": 0.0,
+            "fills": [serde_json::to_value(&ledger.snapshot().fills[0]).unwrap()]
+        });
+        let mut legacy_fill = legacy_snapshot["fills"][0].clone();
+        legacy_fill
+            .as_object_mut()
+            .expect("fill object")
+            .remove("execution_precision");
+        legacy_snapshot
+            .as_object_mut()
+            .expect("snapshot object")
+            .get_mut("fills")
+            .and_then(Value::as_array_mut)
+            .expect("fills array")[0] = legacy_fill;
+        let decoded: ReplayExecutionLedgerSnapshot =
+            serde_json::from_value(legacy_snapshot).expect("legacy ledger snapshot");
+        assert_eq!(
+            decoded.fills[0].execution_precision,
+            ReplayExecutionPrecision::BarApproximate
+        );
+    }
+
+    #[test]
+    fn ledger_preserves_dom_fill_price_sources() {
+        let mut ledger = ReplayExecutionLedgerState::new_with_fill_config(
+            ReplayEngineMode::Deterministic,
+            ReplayFillModel::Dom,
+            &ReplayLatencyConfig::default(),
+            ReplayBarProtectionPolicy::Conservative,
+            BarType::minute(1),
+            CandleMode::Standard,
+        );
+        let dom_fill = fill(json!({
+            "id": 300,
+            "accountId": 7,
+            "contractId": 11,
+            "orderId": 3000,
+            "source": "replay",
+            "symbol": "MESU6",
+            "price": 5000.375,
+            "qty": 2,
+            "buySell": "Buy",
+            "timestamp": 3_000,
+            "replayFillSource": "dom_visible_levels",
+            "replayExecutionPrecision": "dom_assisted",
+            "replayDomQueueAssumption": "visible_levels_only",
+            "replayDomLevelsConsumed": 2
+        }));
+        assert_eq!(ledger.append_entities(&[dom_fill], &market()), 1);
+        assert_eq!(
+            ledger.snapshot().fills[0].fill_price_source,
+            ReplayFillPriceSource::DomVisibleLevels
+        );
+        assert_eq!(
+            ledger.snapshot().fills[0].execution_precision,
+            ReplayExecutionPrecision::DomAssisted
         );
     }
 

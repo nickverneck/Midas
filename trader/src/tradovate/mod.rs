@@ -8,6 +8,9 @@ use crate::broker::{
     ReplayWindowSnapshot, ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide,
     infer_session_profile,
 };
+use crate::broker::{ReplayDomLevel, ReplayMarketDom};
+#[cfg(any(feature = "replay", test))]
+use crate::broker::{ReplayExecutionPrecision, ReplayMarketTick};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategies::ema_cross::EmaCrossExecutionState;
 use crate::strategies::hma_angle::HmaAngleExecutionState;
@@ -90,6 +93,7 @@ include!("session.rs");
 include!("auth.rs");
 include!("latency.rs");
 include!("market.rs");
+include!("dom_capture.rs");
 include!("store.rs");
 
 fn tradovate_capabilities() -> BrokerCapabilities {

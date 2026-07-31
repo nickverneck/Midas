@@ -137,8 +137,9 @@ pub(super) async fn enter_replay_mode(
     seed_replay_user_store(&accounts, &mut user_store);
 
     state.replay = Some(replay.clone());
-    state.replay_execution_ledger = replay::ReplayExecutionLedgerState::new_with_config(
+    state.replay_execution_ledger = replay::ReplayExecutionLedgerState::new_with_fill_config(
         cfg.replay_engine_mode,
+        cfg.replay_fill_model,
         &cfg.replay_latency_config(),
         cfg.replay_bar_protection_policy,
         bar_type,
