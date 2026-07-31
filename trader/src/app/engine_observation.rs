@@ -224,6 +224,8 @@ impl EngineSummary {
             }
             ServiceEvent::ExecutionProbe(_) => {}
             ServiceEvent::ReplaySpeedUpdated(_) => {}
+            ServiceEvent::ReplayExecutionLedgerUpdated(_) => {}
+            ServiceEvent::ReplayExecutionLedgerSnapshot(_) => {}
             ServiceEvent::ReplayDownloadProgress { .. }
             | ServiceEvent::ReplayDownloadContractSearchResults { .. }
             | ServiceEvent::ReplayDownloadContractInspected { .. }

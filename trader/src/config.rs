@@ -1,4 +1,7 @@
-use crate::broker::{BrokerKind, CandleMode, ReplayEngineMode, default_broker, supports_broker};
+use crate::broker::{
+    BrokerKind, CandleMode, ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig,
+    ReplayLatencyModel, default_broker, supports_broker,
+};
 use anyhow::{Context, Result, bail};
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
@@ -141,6 +144,11 @@ pub struct AppConfig {
     pub replay_cache_dir: PathBuf,
     pub replay_bar_interval_ms: u64,
     pub replay_engine_mode: ReplayEngineMode,
+    pub replay_latency_model: ReplayLatencyModel,
+    pub replay_fixed_latency_ms: u64,
+    pub replay_observed_latency_ms: Vec<u64>,
+    pub replay_latency_seed: u64,
+    pub replay_bar_protection_policy: ReplayBarProtectionPolicy,
 }
 
 impl Default for AppConfig {
@@ -173,6 +181,11 @@ impl Default for AppConfig {
             replay_cache_dir: default_replay_cache_dir(),
             replay_bar_interval_ms: 5,
             replay_engine_mode: ReplayEngineMode::default(),
+            replay_latency_model: ReplayLatencyModel::Fixed,
+            replay_fixed_latency_ms: 0,
+            replay_observed_latency_ms: Vec::new(),
+            replay_latency_seed: 1,
+            replay_bar_protection_policy: ReplayBarProtectionPolicy::Conservative,
         }
     }
 }
@@ -295,6 +308,22 @@ impl AppConfig {
         if let Some(raw) = env_string_any(&["TRADER_REPLAY_ENGINE_MODE"]) {
             self.replay_engine_mode = parse_replay_engine_mode(&raw)?;
         }
+        if let Some(raw) = env_string_any(&["TRADER_REPLAY_LATENCY_MODEL"]) {
+            self.replay_latency_model = parse_replay_latency_model(&raw)?;
+        }
+        if let Some(raw) = env_parse_any::<u64>(&["TRADER_REPLAY_FIXED_LATENCY_MS"])? {
+            self.replay_fixed_latency_ms = raw;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_REPLAY_OBSERVED_LATENCY_MS"]) {
+            self.replay_observed_latency_ms =
+                parse_u64_list(&raw, "TRADER_REPLAY_OBSERVED_LATENCY_MS")?;
+        }
+        if let Some(raw) = env_parse_any::<u64>(&["TRADER_REPLAY_LATENCY_SEED"])? {
+            self.replay_latency_seed = raw;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_REPLAY_BAR_PROTECTION_POLICY"]) {
+            self.replay_bar_protection_policy = parse_replay_bar_protection_policy(&raw)?;
+        }
         Ok(())
     }
 
@@ -320,6 +349,26 @@ impl AppConfig {
         if self.replay_bar_interval_ms == 0 {
             bail!("replay_bar_interval_ms must be > 0");
         }
+        if self.replay_engine_mode == ReplayEngineMode::Deterministic {
+            match self.replay_latency_model {
+                ReplayLatencyModel::IgnoredLegacy => {
+                    bail!("deterministic replay cannot use ignored_legacy latency")
+                }
+                ReplayLatencyModel::Fixed => {}
+                ReplayLatencyModel::ObservedMean
+                | ReplayLatencyModel::ObservedP95
+                | ReplayLatencyModel::ObservedP99
+                | ReplayLatencyModel::SeededObserved
+                    if self.replay_observed_latency_ms.is_empty() =>
+                {
+                    bail!(
+                        "{} replay latency requires replay_observed_latency_ms samples",
+                        self.replay_latency_model.label()
+                    )
+                }
+                _ => {}
+            }
+        }
         if self.token_override.trim().is_empty() && matches!(self.auth_mode, AuthMode::Credentials)
         {
             if self.username.trim().is_empty() {
@@ -331,6 +380,15 @@ impl AppConfig {
         }
         Ok(())
     }
+
+    pub fn replay_latency_config(&self) -> ReplayLatencyConfig {
+        ReplayLatencyConfig {
+            model: self.replay_latency_model,
+            fixed_latency_ms: self.replay_fixed_latency_ms,
+            observed_samples_ms: self.replay_observed_latency_ms.clone(),
+            seed: self.replay_latency_seed,
+        }
+    }
 }
 
 fn parse_replay_engine_mode(raw: &str) -> Result<ReplayEngineMode> {
@@ -341,6 +399,42 @@ fn parse_replay_engine_mode(raw: &str) -> Result<ReplayEngineMode> {
         }
         other => bail!("invalid replay engine mode `{other}`; expected legacy or deterministic"),
     }
+}
+
+fn parse_replay_latency_model(raw: &str) -> Result<ReplayLatencyModel> {
+    match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "fixed" | "zero" => Ok(ReplayLatencyModel::Fixed),
+        "observed_mean" | "mean" | "average" => Ok(ReplayLatencyModel::ObservedMean),
+        "observed_p95" | "p95" => Ok(ReplayLatencyModel::ObservedP95),
+        "observed_p99" | "p99" => Ok(ReplayLatencyModel::ObservedP99),
+        "seeded_observed" | "seeded" | "distribution" => Ok(ReplayLatencyModel::SeededObserved),
+        other => bail!(
+            "invalid replay latency model `{other}`; expected fixed, observed_mean, observed_p95, observed_p99, or seeded_observed"
+        ),
+    }
+}
+
+fn parse_replay_bar_protection_policy(raw: &str) -> Result<ReplayBarProtectionPolicy> {
+    match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "conservative" | "stop_first" => Ok(ReplayBarProtectionPolicy::Conservative),
+        "optimistic" | "target_first" => Ok(ReplayBarProtectionPolicy::Optimistic),
+        "nearest_open" | "nearest" => Ok(ReplayBarProtectionPolicy::NearestOpen),
+        other => bail!(
+            "invalid replay bar protection policy `{other}`; expected conservative, optimistic, or nearest_open"
+        ),
+    }
+}
+
+fn parse_u64_list(raw: &str, key: &str) -> Result<Vec<u64>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| format!("invalid {key} sample `{value}`"))
+        })
+        .collect()
 }
 
 fn parse_broker(raw: &str) -> Result<BrokerKind> {
@@ -476,6 +570,58 @@ mod tests {
             toml::from_str("replay_engine_mode = \"deterministic\"").expect("config");
 
         assert_eq!(config.replay_engine_mode, ReplayEngineMode::Deterministic);
+    }
+
+    #[test]
+    fn replay_fixed_latency_defaults_to_zero_and_loads_from_config() {
+        let default_config: AppConfig = toml::from_str("").expect("default config");
+        assert_eq!(default_config.replay_fixed_latency_ms, 0);
+
+        let configured: AppConfig =
+            toml::from_str("replay_fixed_latency_ms = 175").expect("config");
+        assert_eq!(configured.replay_fixed_latency_ms, 175);
+    }
+
+    #[test]
+    fn replay_observed_latency_and_protection_policy_load_from_config() {
+        let configured: AppConfig = toml::from_str(
+            r#"
+            replay_engine_mode = "deterministic"
+            replay_latency_model = "seeded_observed"
+            replay_observed_latency_ms = [35, 60, 125]
+            replay_latency_seed = 77
+            replay_bar_protection_policy = "optimistic"
+            "#,
+        )
+        .expect("config");
+
+        assert_eq!(
+            configured.replay_latency_model,
+            ReplayLatencyModel::SeededObserved
+        );
+        assert_eq!(configured.replay_observed_latency_ms, vec![35, 60, 125]);
+        assert_eq!(configured.replay_latency_seed, 77);
+        assert_eq!(
+            configured.replay_bar_protection_policy,
+            ReplayBarProtectionPolicy::Optimistic
+        );
+        assert!(configured.validate().is_ok());
+    }
+
+    #[test]
+    fn deterministic_observed_latency_requires_samples() {
+        let config = AppConfig {
+            replay_engine_mode: ReplayEngineMode::Deterministic,
+            replay_latency_model: ReplayLatencyModel::ObservedP95,
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires replay_observed_latency_ms")
+        );
     }
 }
 

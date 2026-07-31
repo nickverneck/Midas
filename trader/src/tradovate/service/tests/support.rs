@@ -55,6 +55,7 @@ pub(super) fn test_state(session: SessionState) -> ServiceState {
         broker_tx,
         replay_speed_tx,
         replay_speed: ReplaySpeed::default(),
+        replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
         session: Some(session),
         replay: None,
         user_task: None,

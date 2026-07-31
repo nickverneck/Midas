@@ -225,6 +225,11 @@ pub(super) fn build_order_strategy_request(
         reference_price,
         take_profit_price,
         stop_price,
+        replay_auto_trail: auto_trail.map(|auto_trail| ReplayAutoTrail {
+            trigger_offset: auto_trail.trigger,
+            stop_offset: auto_trail.stop_loss,
+            frequency: auto_trail.freq,
+        }),
         reason_suffix: reason_suffix.map(ToString::to_string),
         key,
     })

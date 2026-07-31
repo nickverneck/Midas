@@ -159,6 +159,56 @@ fn virtual_clock_rejects_events_scheduled_behind_it() {
 }
 
 #[test]
+fn later_logical_step_allows_a_new_cycle_at_the_same_market_timestamp() {
+    let mut queue = ReplayVirtualEventQueue::default();
+    queue
+        .schedule_at_step(100, 1, ReplayVirtualEventKind::Fill { fill_id: 1 })
+        .unwrap();
+    let first = queue.pop_next().unwrap();
+    assert_eq!(first.logical_step, 1);
+
+    queue
+        .schedule_at_step(
+            100,
+            2,
+            ReplayVirtualEventKind::OrderSubmitted { order_id: 2 },
+        )
+        .unwrap();
+    let second = queue.pop_next().unwrap();
+    assert_eq!(second.logical_step, 2);
+    assert!(matches!(
+        second.kind,
+        ReplayVirtualEventKind::OrderSubmitted { order_id: 2 }
+    ));
+}
+
+#[test]
+fn bounded_pop_does_not_consume_a_future_lifecycle_event() {
+    let mut queue = ReplayVirtualEventQueue::default();
+    queue
+        .schedule_at_step(
+            100,
+            1,
+            ReplayVirtualEventKind::OrderSubmitted { order_id: 1 },
+        )
+        .unwrap();
+    queue
+        .schedule_at_step(
+            150,
+            1,
+            ReplayVirtualEventKind::OrderArrivesAtExchange { order_id: 1 },
+        )
+        .unwrap();
+
+    assert!(queue.pop_next_through(100, 1, u8::MAX).is_some());
+    assert!(queue.pop_next_through(100, 1, u8::MAX).is_none());
+    assert!(matches!(
+        queue.pop_next().unwrap().kind,
+        ReplayVirtualEventKind::OrderArrivesAtExchange { order_id: 1 }
+    ));
+}
+
+#[test]
 fn legacy_and_deterministic_schedules_match_for_ordered_bars() {
     let bars = vec![bar(10), bar(20), bar(30)];
 
@@ -205,6 +255,20 @@ fn replay_speed_changes_wall_pacing_not_virtual_event_trace() {
     assert_eq!(wall_delays[0], Duration::from_secs(60));
     assert_eq!(wall_delays[1], Duration::from_secs(30));
     assert_eq!(wall_delays[4], Duration::from_millis(2_400));
+}
+
+#[test]
+fn strategy_evaluation_inherits_its_bar_close_market_timestamp() {
+    let mut schedule = ReplayBarSchedule::new(ReplayEngineMode::Deterministic, &[bar(42)]).unwrap();
+    let bar_close = schedule.next_bar(&[bar(42)]).unwrap();
+    let evaluation = bar_close.strategy_evaluation_after_bar().unwrap();
+
+    assert_eq!(evaluation.market_ts_ns, 42);
+    assert_eq!(evaluation.sequence, bar_close.sequence);
+    assert!(matches!(
+        evaluation.kind,
+        ReplayVirtualEventKind::StrategyEvaluation { evaluation_id: 0 }
+    ));
 }
 
 fn drain_bar_schedule(mode: ReplayEngineMode, bars: &[Bar]) -> Vec<(i64, usize)> {

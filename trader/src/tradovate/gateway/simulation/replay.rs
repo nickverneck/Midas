@@ -1,6 +1,8 @@
 use super::state::ReplayBrokerState;
 #[cfg(any(feature = "replay", test))]
 use super::*;
+#[cfg(any(feature = "replay", test))]
+use crate::broker::ReplayBarProtectionPolicy;
 
 #[cfg(any(feature = "replay", test))]
 #[derive(Debug, Clone)]
@@ -9,24 +11,25 @@ struct ReplayTriggeredOrder {
     key: StrategyProtectionKey,
     distance_to_open: f64,
     stop_order: bool,
+    ambiguous_bar: bool,
 }
 
 impl ReplayBrokerState {
     #[cfg(any(feature = "replay", test))]
-    pub(crate) fn simulate_replay_bar(&mut self, bar: &Bar) -> Vec<InternalEvent> {
-        let triggered_order_ids = self
-            .triggered_replay_orders(bar)
-            .into_iter()
-            .map(|triggered| triggered.order_id)
-            .collect::<Vec<_>>();
-        if triggered_order_ids.is_empty() {
-            return Vec::new();
-        }
-
+    pub(crate) fn simulate_replay_bar(
+        &mut self,
+        bar: &Bar,
+        policy: ReplayBarProtectionPolicy,
+    ) -> Vec<InternalEvent> {
+        let triggered_orders = self.triggered_replay_orders(bar, policy);
         let mut envelopes = Vec::new();
-        for order_id in triggered_order_ids {
-            envelopes.extend(self.fill_replay_order(order_id, bar));
+        for triggered in triggered_orders {
+            envelopes.extend(self.fill_replay_order(triggered, bar, policy));
         }
+        // Bar-only trailing changes are based on the completed bar and become
+        // executable on the next raw bar. This prevents current-bar high/low
+        // lookahead from manufacturing an intrabar stop path.
+        envelopes.extend(self.update_replay_trailing_orders(bar));
 
         if envelopes.is_empty() {
             Vec::new()
@@ -36,10 +39,14 @@ impl ReplayBrokerState {
     }
 
     #[cfg(any(feature = "replay", test))]
-    fn triggered_replay_orders(&self, bar: &Bar) -> Vec<ReplayTriggeredOrder> {
+    fn triggered_replay_orders(
+        &self,
+        bar: &Bar,
+        policy: ReplayBarProtectionPolicy,
+    ) -> Vec<ReplayTriggeredOrder> {
         const EPSILON: f64 = 1e-9;
 
-        let mut selected = HashMap::<StrategyProtectionKey, ReplayTriggeredOrder>::new();
+        let mut candidates = HashMap::<StrategyProtectionKey, Vec<ReplayTriggeredOrder>>::new();
         for (order_id, active) in &self.active_orders {
             let Some(key) = replay_order_key(&active.order) else {
                 continue;
@@ -59,33 +66,61 @@ impl ReplayBrokerState {
                 key,
                 distance_to_open: replay_order_distance_to_open(&active.order, bar),
                 stop_order: replay_order_is_stop(&active.order),
+                ambiguous_bar: false,
             };
-            let replace = match selected.get(&key) {
-                None => true,
-                Some(current) => {
-                    candidate.distance_to_open + EPSILON < current.distance_to_open
-                        || ((candidate.distance_to_open - current.distance_to_open).abs()
-                            <= EPSILON
-                            && candidate.stop_order
-                            && !current.stop_order)
-                        || ((candidate.distance_to_open - current.distance_to_open).abs()
-                            <= EPSILON
-                            && candidate.stop_order == current.stop_order
-                            && candidate.order_id < current.order_id)
-                }
-            };
-            if replace {
-                selected.insert(key, candidate);
-            }
+            candidates.entry(key).or_default().push(candidate);
         }
 
-        let mut triggered = selected.into_values().collect::<Vec<_>>();
+        let mut triggered = candidates
+            .into_values()
+            .filter_map(|group| {
+                let ambiguous_bar = group.iter().any(|item| item.stop_order)
+                    && group.iter().any(|item| !item.stop_order);
+                let mut selected = group[0].clone();
+                for candidate in group.into_iter().skip(1) {
+                    let prefer_candidate = match policy {
+                        ReplayBarProtectionPolicy::Conservative
+                            if candidate.stop_order != selected.stop_order =>
+                        {
+                            candidate.stop_order
+                        }
+                        ReplayBarProtectionPolicy::Optimistic
+                            if candidate.stop_order != selected.stop_order =>
+                        {
+                            !candidate.stop_order
+                        }
+                        _ => {
+                            candidate.distance_to_open + EPSILON < selected.distance_to_open
+                                || ((candidate.distance_to_open - selected.distance_to_open).abs()
+                                    <= EPSILON
+                                    && candidate.stop_order
+                                    && !selected.stop_order)
+                                || ((candidate.distance_to_open - selected.distance_to_open).abs()
+                                    <= EPSILON
+                                    && candidate.stop_order == selected.stop_order
+                                    && candidate.order_id < selected.order_id)
+                        }
+                    };
+                    if prefer_candidate {
+                        selected = candidate;
+                    }
+                }
+                selected.ambiguous_bar = ambiguous_bar;
+                Some(selected)
+            })
+            .collect::<Vec<_>>();
         triggered.sort_by_key(|item| (item.key.account_id, item.key.contract_id, item.order_id));
         triggered
     }
 
     #[cfg(any(feature = "replay", test))]
-    fn fill_replay_order(&mut self, order_id: i64, bar: &Bar) -> Vec<EntityEnvelope> {
+    fn fill_replay_order(
+        &mut self,
+        triggered: ReplayTriggeredOrder,
+        bar: &Bar,
+        policy: ReplayBarProtectionPolicy,
+    ) -> Vec<EntityEnvelope> {
+        let order_id = triggered.order_id;
         let Some(order) = self
             .active_orders
             .get(&order_id)
@@ -164,6 +199,9 @@ impl ReplayBrokerState {
                 }),
             });
         }
+        let trailing_exit = active
+            .replay_auto_trail
+            .is_some_and(|trail| trail.active && replay_order_is_stop(&active.order));
         envelopes.push(EntityEnvelope {
             entity_type: "executionReport".to_string(),
             deleted: false,
@@ -194,6 +232,22 @@ impl ReplayBrokerState {
                 "buySell": action,
                 "timestamp": ts_ns,
                 "symbol": contract_name,
+                "replayFillSource": "raw_bar_ohlc",
+                "replayFillTimestampNs": ts_ns,
+                "replayProtectionOrderId": order_id,
+                "replayExitReason": if trailing_exit {
+                    "trailing_stop"
+                } else if replay_order_is_stop(&active.order) {
+                    "stop_loss"
+                } else {
+                    "take_profit"
+                },
+                "replayBarProtectionPolicy": match policy {
+                    ReplayBarProtectionPolicy::Conservative => "conservative",
+                    ReplayBarProtectionPolicy::Optimistic => "optimistic",
+                    ReplayBarProtectionPolicy::NearestOpen => "nearest_open",
+                },
+                "replayAmbiguousBar": triggered.ambiguous_bar,
             }),
         });
         envelopes.extend(self.update_position(key, &contract_name, next_qty, fill_price));
@@ -205,6 +259,74 @@ impl ReplayBrokerState {
             envelopes.extend(self.cancel_orders_for_key_except(key, &[order_id]));
         }
 
+        envelopes
+    }
+
+    #[cfg(any(feature = "replay", test))]
+    fn update_replay_trailing_orders(&mut self, bar: &Bar) -> Vec<EntityEnvelope> {
+        const EPSILON: f64 = 1e-9;
+        let order_ids = self.active_orders.keys().copied().collect::<Vec<_>>();
+        let mut envelopes = Vec::new();
+        for order_id in order_ids {
+            let Some(active) = self.active_orders.get_mut(&order_id) else {
+                continue;
+            };
+            let Some(mut trail) = active.replay_auto_trail else {
+                continue;
+            };
+            let Some(current_stop) = replay_order_trigger_price(&active.order) else {
+                continue;
+            };
+            let exit_is_sell = active
+                .order
+                .get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|action| action.eq_ignore_ascii_case("Sell"));
+            let triggered = if exit_is_sell {
+                bar.high + EPSILON >= trail.entry_price + trail.trigger_offset
+            } else {
+                bar.low - EPSILON <= trail.entry_price - trail.trigger_offset
+            };
+            if !trail.active && !triggered {
+                continue;
+            }
+            trail.active = true;
+            let raw_candidate = if exit_is_sell {
+                bar.high - trail.stop_offset
+            } else {
+                bar.low + trail.stop_offset
+            };
+            let frequency = trail.frequency.max(EPSILON);
+            let tightened = if exit_is_sell {
+                let steps = ((raw_candidate - current_stop) / frequency)
+                    .floor()
+                    .max(0.0);
+                current_stop + steps * frequency
+            } else {
+                let steps = ((current_stop - raw_candidate) / frequency)
+                    .floor()
+                    .max(0.0);
+                current_stop - steps * frequency
+            };
+            let improves = if exit_is_sell {
+                tightened > current_stop + EPSILON
+            } else {
+                tightened < current_stop - EPSILON
+            };
+            active.replay_auto_trail = Some(trail);
+            let Some(order) = active.order.as_object_mut() else {
+                continue;
+            };
+            order.insert("replayTrailingActive".to_string(), json!(true));
+            if improves {
+                order.insert("stopPrice".to_string(), json!(tightened));
+            }
+            envelopes.push(EntityEnvelope {
+                entity_type: "order".to_string(),
+                deleted: false,
+                entity: active.order.clone(),
+            });
+        }
         envelopes
     }
 }

@@ -27,6 +27,7 @@ pub async fn service_loop(
         broker_tx,
         replay_speed_tx,
         replay_speed: ReplaySpeed::default(),
+        replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
         session: None,
         replay: None,
         user_task: None,

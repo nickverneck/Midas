@@ -1,6 +1,8 @@
 #[cfg(feature = "replay")]
 use super::virtual_time::{ReplayBarSchedule, ReplayVirtualEventKind};
 use super::*;
+#[cfg(feature = "replay")]
+use crate::broker::{ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig};
 
 pub(crate) fn spawn_replay_market_task(
     replay: ReplayState,
@@ -60,6 +62,13 @@ async fn replay_market_worker_inner(
     if bars.is_empty() {
         bail!("no {} bars available in replay dataset", bar_type.label());
     }
+    configure_replay_broker(
+        &broker_tx,
+        cfg.replay_engine_mode,
+        cfg.replay_latency_config(),
+        cfg.replay_bar_protection_policy,
+    )
+    .await?;
 
     let total_bars = bars.len();
     let evaluation_start_ns = replay.evaluation_start_ns()?;
@@ -117,7 +126,10 @@ async fn replay_market_worker_inner(
             None,
             &series,
         ) {
-            let _ = internal_tx.send(InternalEvent::Market(update));
+            emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
+            if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
+                drain_replay_broker(&broker_tx, None, None).await?;
+            }
         }
     } else {
         let _ = internal_tx.send(InternalEvent::UserSocketStatus(initial_status));
@@ -127,6 +139,7 @@ async fn replay_market_worker_inner(
     let evaluation_bars = &bars[history_loaded..];
     let mut schedule = ReplayBarSchedule::new(cfg.replay_engine_mode, evaluation_bars)?;
     while let Some(event) = schedule.next_bar(evaluation_bars) {
+        let strategy_evaluation = event.strategy_evaluation_after_bar()?;
         let ReplayVirtualEventKind::BarClose { bar_index } = event.kind else {
             bail!("replay bar schedule emitted a non-bar event")
         };
@@ -143,7 +156,7 @@ async fn replay_market_worker_inner(
             replay_speed_rx,
         )
         .await;
-        process_replay_bar(&broker_tx, bar).await?;
+        process_replay_bar(&broker_tx, bar, bar_index as u64).await?;
         let before_closed_len = series.closed_bars.len();
         let before_last_closed = series.closed_bars.last().cloned();
         let before_forming = series.forming_bar.clone();
@@ -191,7 +204,23 @@ async fn replay_market_worker_inner(
             &series,
         ) {
             update.replay_window = replay_window.clone();
-            let _ = internal_tx.send(InternalEvent::Market(update));
+            if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
+                let ReplayVirtualEventKind::StrategyEvaluation { evaluation_id } =
+                    strategy_evaluation.kind
+                else {
+                    bail!("deterministic replay did not schedule strategy evaluation")
+                };
+                if evaluation_id != bar_index as u64
+                    || strategy_evaluation.market_ts_ns != event.market_ts_ns
+                {
+                    bail!("deterministic strategy evaluation does not match replay bar")
+                }
+            }
+            emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
+            if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
+                drain_replay_broker(&broker_tx, Some(event.market_ts_ns), Some(bar_index as u64))
+                    .await?;
+            }
         }
     }
 
@@ -236,16 +265,88 @@ pub(super) fn replay_history_loaded(
 }
 
 #[cfg(feature = "replay")]
-async fn process_replay_bar(broker_tx: &UnboundedSender<BrokerCommand>, bar: &Bar) -> Result<()> {
+async fn process_replay_bar(
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    bar: &Bar,
+    bar_index: u64,
+) -> Result<()> {
     let (response_tx, response_rx) = oneshot::channel();
     broker_tx
         .send(BrokerCommand::ReplayBar {
             bar: bar.clone(),
+            bar_index,
             response_tx,
         })
         .map_err(|_| anyhow::anyhow!("replay broker task is unavailable"))?;
-    let _ = response_rx.await;
-    Ok(())
+    response_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("replay bar processing was cancelled"))
+}
+
+#[cfg(feature = "replay")]
+async fn configure_replay_broker(
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    mode: ReplayEngineMode,
+    latency: ReplayLatencyConfig,
+    bar_protection_policy: ReplayBarProtectionPolicy,
+) -> Result<()> {
+    let (response_tx, response_rx) = oneshot::channel();
+    broker_tx
+        .send(BrokerCommand::ConfigureReplay {
+            mode,
+            latency,
+            bar_protection_policy,
+            response_tx,
+        })
+        .map_err(|_| anyhow::anyhow!("replay broker task is unavailable"))?;
+    response_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("replay broker configuration was cancelled"))
+}
+
+#[cfg(feature = "replay")]
+async fn emit_replay_market_update(
+    mode: ReplayEngineMode,
+    update: MarketUpdate,
+    internal_tx: &UnboundedSender<InternalEvent>,
+) -> Result<()> {
+    if mode == ReplayEngineMode::Legacy {
+        internal_tx
+            .send(InternalEvent::Market(update))
+            .map_err(|_| anyhow::anyhow!("replay service is unavailable"))?;
+        return Ok(());
+    }
+
+    let (response_tx, response_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalEvent::ReplayMarket {
+            update,
+            response_tx,
+        })
+        .map_err(|_| anyhow::anyhow!("replay service is unavailable"))?;
+    response_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("replay strategy evaluation was cancelled"))?
+        .map_err(|message| anyhow::anyhow!(message))
+}
+
+#[cfg(feature = "replay")]
+async fn drain_replay_broker(
+    broker_tx: &UnboundedSender<BrokerCommand>,
+    market_ts_ns: Option<i64>,
+    evaluation_id: Option<u64>,
+) -> Result<()> {
+    let (response_tx, response_rx) = oneshot::channel();
+    broker_tx
+        .send(BrokerCommand::ReplayDrain {
+            market_ts_ns,
+            evaluation_id,
+            response_tx,
+        })
+        .map_err(|_| anyhow::anyhow!("replay broker task is unavailable"))?;
+    response_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("replay broker drain was cancelled"))
 }
 
 #[cfg(feature = "replay")]

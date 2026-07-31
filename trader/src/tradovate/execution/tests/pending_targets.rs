@@ -383,7 +383,9 @@ fn strategy_loop_rechecks_latest_bar_when_pending_target_reaches_with_live_broke
             BrokerCommand::NativeProtection { .. } => {}
             BrokerCommand::LiquidatePosition { .. } => {}
             #[cfg(feature = "replay")]
-            BrokerCommand::ReplayBar { .. } => {}
+            BrokerCommand::ReplayBar { .. }
+            | BrokerCommand::ConfigureReplay { .. }
+            | BrokerCommand::ReplayDrain { .. } => {}
         }
     }
     assert!(saw_buy, "buy reversal should be queued");

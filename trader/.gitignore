@@ -1,9 +1,11 @@
 ninja-login.sh
 docs/*
 !docs/large-file-refactoring.md
+!docs/GCZ6_MINUTE_BAR_FEED_LAG.md
 !docs/todo/
 docs/todo/*
 !docs/todo/replay-backtesting-roadmap/
 docs/todo/replay-backtesting-roadmap/*
 !docs/todo/replay-backtesting-roadmap/03-session-range-selection.md
+!docs/todo/replay-backtesting-roadmap/04-replay-engine-fills.md
 .run/

@@ -32,6 +32,19 @@ pub(super) async fn handle_internal(
         InternalEvent::Market(update) => {
             handle_market_update(update, state, event_tx, market_tx, internal_tx)?
         }
+        #[cfg(feature = "replay")]
+        InternalEvent::ReplayMarket {
+            update,
+            response_tx,
+        } => {
+            let result = handle_market_update(update, state, event_tx, market_tx, internal_tx);
+            let response = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+            let _ = response_tx.send(response);
+        }
+        #[cfg(feature = "replay")]
+        InternalEvent::ReplayBarrier(response_tx) => {
+            let _ = response_tx.send(());
+        }
         InternalEvent::BrokerOrderAck(ack) => {
             handle_broker_order_ack(ack, state, event_tx, internal_tx)
         }
@@ -64,6 +77,28 @@ fn handle_user_entities(
     event_tx: &UnboundedSender<ServiceEvent>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
+    #[cfg(feature = "replay")]
+    let replay_ledger_changed = state
+        .session
+        .as_ref()
+        .filter(|session| session.replay_enabled)
+        .map(|session| replay::ReplayLedgerMarketContext {
+            contract_name: session
+                .selected_contract
+                .as_ref()
+                .map(|contract| contract.name.clone())
+                .or_else(|| session.market.contract_name.clone())
+                .unwrap_or_default(),
+            tick_size: session.market.tick_size,
+            value_per_point: session.market.value_per_point,
+        })
+        .map(|context| {
+            state
+                .replay_execution_ledger
+                .append_entities(&entities, &context)
+                > 0
+        })
+        .unwrap_or(false);
     let history_entities_changed = entities.iter().any(|envelope| {
         matches!(
             envelope.entity_type.to_ascii_lowercase().as_str(),
@@ -126,6 +161,12 @@ fn handle_user_entities(
     request_snapshot_refresh(state, &internal_tx);
     if latency_changed {
         let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+    }
+    #[cfg(feature = "replay")]
+    if replay_ledger_changed {
+        let _ = event_tx.send(ServiceEvent::ReplayExecutionLedgerUpdated(
+            state.replay_execution_ledger.summary(),
+        ));
     }
     Ok(())
 }

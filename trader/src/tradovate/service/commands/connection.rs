@@ -137,6 +137,13 @@ pub(super) async fn enter_replay_mode(
     seed_replay_user_store(&accounts, &mut user_store);
 
     state.replay = Some(replay.clone());
+    state.replay_execution_ledger = replay::ReplayExecutionLedgerState::new_with_config(
+        cfg.replay_engine_mode,
+        &cfg.replay_latency_config(),
+        cfg.replay_bar_protection_policy,
+        bar_type,
+        candle_mode,
+    );
     state.session = Some(SessionState {
         cfg: cfg.clone(),
         session_kind: SessionKind::Replay,
@@ -185,6 +192,12 @@ pub(super) async fn enter_replay_mode(
     });
     let _ = event_tx.send(ServiceEvent::Latency(state.latency));
     let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
+    let _ = event_tx.send(ServiceEvent::ReplayExecutionLedgerUpdated(
+        state.replay_execution_ledger.summary(),
+    ));
+    let _ = event_tx.send(ServiceEvent::ReplayExecutionLedgerSnapshot(
+        state.replay_execution_ledger.snapshot().clone(),
+    ));
     if let Some(session) = state.session.as_ref() {
         emit_execution_state(event_tx, session);
     }
@@ -231,6 +244,12 @@ pub(in crate::tradovate::service) async fn replay_state(
     let _ = event_tx.send(ServiceEvent::Latency(state.latency));
     if session.replay_enabled {
         let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
+        let _ = event_tx.send(ServiceEvent::ReplayExecutionLedgerUpdated(
+            state.replay_execution_ledger.summary(),
+        ));
+        let _ = event_tx.send(ServiceEvent::ReplayExecutionLedgerSnapshot(
+            state.replay_execution_ledger.snapshot().clone(),
+        ));
     }
     emit_execution_state(event_tx, session);
     emit_engine_history(event_tx, session);
@@ -244,6 +263,7 @@ async fn reset_state_for_new_session(
     shutdown_tasks(state).await;
     state.latency = LatencySnapshot::default();
     state.replay_speed = ReplaySpeed::default();
+    state.replay_execution_ledger = replay::ReplayExecutionLedgerState::default();
     let _ = state.replay_speed_tx.send(state.replay_speed);
     let _ = market_tx.send(MarketSnapshot::default());
 }

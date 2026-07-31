@@ -52,6 +52,7 @@ fn replay_bar_fills_take_profit_and_clears_sibling_strategy_orders() {
             }),
             link_id: Some(5001),
             strategy_id: Some(strategy_id),
+            replay_auto_trail: None,
         },
     );
     broker.active_orders.insert(
@@ -73,17 +74,21 @@ fn replay_bar_fills_take_profit_and_clears_sibling_strategy_orders() {
             }),
             link_id: Some(5002),
             strategy_id: Some(strategy_id),
+            replay_auto_trail: None,
         },
     );
 
-    let events = broker.simulate_replay_bar(&Bar {
-        ts_ns: 123,
-        open: 6601.0,
-        high: 6604.5,
-        low: 6599.5,
-        close: 6604.0,
-        volume: None,
-    });
+    let events = broker.simulate_replay_bar(
+        &Bar {
+            ts_ns: 123,
+            open: 6601.0,
+            high: 6604.5,
+            low: 6599.5,
+            close: 6604.0,
+            volume: None,
+        },
+        crate::broker::ReplayBarProtectionPolicy::NearestOpen,
+    );
 
     assert_eq!(events.len(), 1);
     let envelopes = match &events[0] {

@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::broker::ReplayEngineMode;
 use std::path::{Path, PathBuf};
 
 impl App {
@@ -286,6 +287,40 @@ impl App {
         lines.push(Line::from(format!(
             "Replay engine: {}",
             self.base_config.replay_engine_mode.label()
+        )));
+        lines.push(Line::from(format!(
+            "Fill model: {}",
+            match self.base_config.replay_engine_mode {
+                ReplayEngineMode::Legacy => "legacy reference price",
+                ReplayEngineMode::Deterministic => "raw next-bar open",
+            }
+        )));
+        lines.push(Line::from(match self.base_config.replay_engine_mode {
+            ReplayEngineMode::Legacy => "Latency model: ignored in Legacy".to_string(),
+            ReplayEngineMode::Deterministic => {
+                let detail = match self.base_config.replay_latency_model {
+                    ReplayLatencyModel::Fixed => {
+                        format!("{}ms", self.base_config.replay_fixed_latency_ms)
+                    }
+                    ReplayLatencyModel::SeededObserved => format!(
+                        "{} samples, seed {}",
+                        self.base_config.replay_observed_latency_ms.len(),
+                        self.base_config.replay_latency_seed
+                    ),
+                    _ => format!(
+                        "{} samples",
+                        self.base_config.replay_observed_latency_ms.len()
+                    ),
+                };
+                format!(
+                    "Latency model: {} ({detail})",
+                    self.base_config.replay_latency_model.label()
+                )
+            }
+        }));
+        lines.push(Line::from(format!(
+            "Bar protection: {}",
+            self.base_config.replay_bar_protection_policy.label()
         )));
         #[cfg(feature = "replay")]
         lines.push(Line::from(format!(

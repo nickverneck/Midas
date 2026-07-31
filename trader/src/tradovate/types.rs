@@ -48,6 +48,7 @@ struct ServiceState {
     broker_tx: UnboundedSender<BrokerCommand>,
     replay_speed_tx: tokio::sync::watch::Sender<ReplaySpeed>,
     replay_speed: ReplaySpeed,
+    replay_execution_ledger: replay::ReplayExecutionLedgerState,
     session: Option<SessionState>,
     replay: Option<replay::ReplayState>,
     user_task: Option<JoinHandle<()>>,

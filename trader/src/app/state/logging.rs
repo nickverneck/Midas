@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::broker::ReplayEngineMode;
 
 impl LogEntry {
     pub(in crate::app) fn render_line(&self) -> String {
@@ -228,6 +229,49 @@ impl App {
         body.push_str(&format!(
             "replay_engine_mode: {}\n",
             self.base_config.replay_engine_mode.label()
+        ));
+        body.push_str(&format!(
+            "replay_fill_model: {}\n",
+            match self.base_config.replay_engine_mode {
+                ReplayEngineMode::Legacy => "legacy_reference_price",
+                ReplayEngineMode::Deterministic => "raw_next_bar_open",
+            }
+        ));
+        body.push_str(&format!(
+            "replay_latency_model: {}\n",
+            self.base_config.replay_latency_model.label()
+        ));
+        body.push_str(&format!(
+            "replay_fixed_latency_ms: {}\n",
+            self.base_config.replay_fixed_latency_ms
+        ));
+        body.push_str(&format!(
+            "replay_observed_latency_sample_count: {}\n",
+            self.base_config.replay_observed_latency_ms.len()
+        ));
+        body.push_str(&format!(
+            "replay_latency_seed: {}\n",
+            self.base_config.replay_latency_seed
+        ));
+        body.push_str(&format!(
+            "replay_bar_protection_policy: {}\n",
+            self.base_config.replay_bar_protection_policy.label()
+        ));
+        body.push_str(&format!(
+            "replay_ledger_schema_version: {}\n",
+            self.replay_execution_ledger.schema_version
+        ));
+        body.push_str(&format!(
+            "replay_ledger_fill_count: {}\n",
+            self.replay_execution_ledger.fill_count
+        ));
+        body.push_str(&format!(
+            "replay_ledger_gross_realized_pnl: {:.8}\n",
+            self.replay_execution_ledger.gross_realized_pnl
+        ));
+        body.push_str(&format!(
+            "replay_signal_source: {}\n",
+            self.replay_execution_ledger.signal_source
         ));
         if let Some(window) = self.market.replay_window.as_ref() {
             body.push_str(&format!("replay_window_preset: {}\n", window.preset));

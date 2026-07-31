@@ -1,6 +1,6 @@
 use super::{
     helpers::{exit_action_for_target, synthetic_ts_ns},
-    state::{ReplayBrokerState, SimActiveOrder, SimOrderStrategyState},
+    state::{ReplayBrokerState, SimActiveOrder, SimOrderStrategyState, SimReplayAutoTrail},
     *,
 };
 
@@ -61,10 +61,19 @@ impl ReplayBrokerState {
             "contractId": order.contract_id,
             "orderId": order_id,
             "source": "replay",
+            "symbol": order.contract_name,
             "price": fill_price,
             "qty": order.order_qty,
             "buySell": order.order_action,
             "timestamp": ts_ns,
+            "replayEngineMode": "legacy",
+            "replayFillSource": "legacy_reference_price",
+            "replaySignalTimestampNs": ts_ns,
+            "replaySubmissionTimestampNs": ts_ns,
+            "replayExchangeArrivalTimestampNs": ts_ns,
+            "replayAcknowledgementTimestampNs": ts_ns,
+            "replayFillTimestampNs": ts_ns,
+            "replayLatencyMs": 0,
         });
         envelopes.push(EntityEnvelope {
             entity_type: "order".to_string(),
@@ -187,10 +196,19 @@ impl ReplayBrokerState {
                 "contractId": liquidation.contract_id,
                 "orderId": order_id,
                 "source": "replay",
+                "symbol": liquidation.contract_name,
                 "price": fill_price,
                 "qty": order_qty,
                 "buySell": order_action,
                 "timestamp": ts_ns,
+                "replayEngineMode": "legacy",
+                "replayFillSource": "legacy_reference_price",
+                "replaySignalTimestampNs": ts_ns,
+                "replaySubmissionTimestampNs": ts_ns,
+                "replayExchangeArrivalTimestampNs": ts_ns,
+                "replayAcknowledgementTimestampNs": ts_ns,
+                "replayFillTimestampNs": ts_ns,
+                "replayLatencyMs": 0,
             }),
         });
         envelopes.extend(self.update_position(key, &liquidation.contract_name, 0, fill_price));
@@ -349,10 +367,19 @@ impl ReplayBrokerState {
                 "orderId": entry_order_id,
                 "orderStrategyId": order_strategy_id,
                 "source": "replay",
+                "symbol": strategy.contract_name,
                 "price": fill_price,
                 "qty": strategy.entry_order_qty,
                 "buySell": strategy.order_action,
                 "timestamp": ts_ns,
+                "replayEngineMode": "legacy",
+                "replayFillSource": "legacy_reference_price",
+                "replaySignalTimestampNs": ts_ns,
+                "replaySubmissionTimestampNs": ts_ns,
+                "replayExchangeArrivalTimestampNs": ts_ns,
+                "replayAcknowledgementTimestampNs": ts_ns,
+                "replayFillTimestampNs": ts_ns,
+                "replayLatencyMs": 0,
             }),
         });
 
@@ -383,6 +410,7 @@ impl ReplayBrokerState {
                     order: tp_order.clone(),
                     link_id: Some(tp_link_id),
                     strategy_id: Some(order_strategy_id),
+                    replay_auto_trail: None,
                 },
             );
             strategy_state.order_ids.push(tp_order_id);
@@ -418,6 +446,7 @@ impl ReplayBrokerState {
                 "ordStatus": "Working",
                 "clOrdId": format!("{}-sl", strategy.uuid),
                 "orderStrategyId": order_strategy_id,
+                "replayTrailingActive": false,
             });
             self.active_orders.insert(
                 stop_order_id,
@@ -425,6 +454,13 @@ impl ReplayBrokerState {
                     order: stop_order.clone(),
                     link_id: Some(stop_link_id),
                     strategy_id: Some(order_strategy_id),
+                    replay_auto_trail: strategy.replay_auto_trail.map(|trail| SimReplayAutoTrail {
+                        entry_price: fill_price,
+                        trigger_offset: trail.trigger_offset,
+                        stop_offset: trail.stop_offset,
+                        frequency: trail.frequency,
+                        active: false,
+                    }),
                 },
             );
             strategy_state.order_ids.push(stop_order_id);

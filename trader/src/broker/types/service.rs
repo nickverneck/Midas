@@ -1,7 +1,8 @@
 use super::{
     AccountInfo, AccountSnapshot, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, ExecutionProbeSnapshot, LatencySnapshot,
-    MarketSnapshot, ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplaySpeed, TradeMarker,
+    MarketSnapshot, ReplayDownloadCacheTarget, ReplayDownloadOperationId,
+    ReplayExecutionLedgerSnapshot, ReplayExecutionLedgerSummary, ReplaySpeed, TradeMarker,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategy::{ExecutionStateSnapshot, ExecutionStrategyConfig};
@@ -127,6 +128,8 @@ pub enum ServiceEvent {
     ExecutionState(ExecutionStateSnapshot),
     ExecutionProbe(ExecutionProbeSnapshot),
     ReplaySpeedUpdated(ReplaySpeed),
+    ReplayExecutionLedgerUpdated(ReplayExecutionLedgerSummary),
+    ReplayExecutionLedgerSnapshot(ReplayExecutionLedgerSnapshot),
     ReplayDownloadProgress {
         operation_id: ReplayDownloadOperationId,
         phase: ReplayDownloadPhase,

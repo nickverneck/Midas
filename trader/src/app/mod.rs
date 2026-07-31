@@ -3,8 +3,8 @@ use crate::broker::ManualOrderAction;
 use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, InstrumentSessionWindow, LatencySnapshot,
-    MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind, TradeMarker,
-    TradeMarkerSide, compiled_brokers, default_broker,
+    MarketSnapshot, ReplayExecutionLedgerSummary, ReplayLatencyModel, ReplaySpeed, ServiceCommand,
+    ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
 };
 #[cfg(feature = "replay")]
 use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};
@@ -84,6 +84,7 @@ pub struct App {
     latency: LatencySnapshot,
     session_kind: SessionKind,
     replay_speed: ReplaySpeed,
+    replay_execution_ledger: ReplayExecutionLedgerSummary,
     #[cfg(feature = "replay")]
     replay_dataset_index: Option<usize>,
     #[cfg(feature = "replay")]

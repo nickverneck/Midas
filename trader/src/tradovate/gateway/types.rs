@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "replay")]
+use crate::broker::{ReplayBarProtectionPolicy, ReplayEngineMode, ReplayLatencyConfig};
 
 pub(crate) enum InternalEvent {
     UserEntities(Vec<EntityEnvelope>),
@@ -9,6 +11,13 @@ pub(crate) enum InternalEvent {
     RestLatencyMeasured(u64),
     UserSocketStatus(String),
     Market(MarketUpdate),
+    #[cfg(feature = "replay")]
+    ReplayMarket {
+        update: MarketUpdate,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+    #[cfg(feature = "replay")]
+    ReplayBarrier(oneshot::Sender<()>),
     BrokerOrderAck(BrokerOrderAck),
     BrokerOrderFailed(BrokerOrderFailure),
     OrderStrategyAck(BrokerOrderStrategyAck),
@@ -71,6 +80,20 @@ pub(crate) enum BrokerCommand {
     #[cfg(feature = "replay")]
     ReplayBar {
         bar: Bar,
+        bar_index: u64,
+        response_tx: oneshot::Sender<()>,
+    },
+    #[cfg(feature = "replay")]
+    ConfigureReplay {
+        mode: ReplayEngineMode,
+        latency: ReplayLatencyConfig,
+        bar_protection_policy: ReplayBarProtectionPolicy,
+        response_tx: oneshot::Sender<()>,
+    },
+    #[cfg(feature = "replay")]
+    ReplayDrain {
+        market_ts_ns: Option<i64>,
+        evaluation_id: Option<u64>,
         response_tx: oneshot::Sender<()>,
     },
 }
@@ -125,8 +148,16 @@ pub(crate) struct PendingOrderStrategyTransition {
     pub(crate) reference_price: Option<f64>,
     pub(crate) take_profit_price: Option<f64>,
     pub(crate) stop_price: Option<f64>,
+    pub(crate) replay_auto_trail: Option<ReplayAutoTrail>,
     pub(crate) reason_suffix: Option<String>,
     pub(crate) key: StrategyProtectionKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ReplayAutoTrail {
+    pub(crate) trigger_offset: f64,
+    pub(crate) stop_offset: f64,
+    pub(crate) frequency: f64,
 }
 
 pub(crate) struct BrokerOrderAck {

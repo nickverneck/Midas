@@ -13,6 +13,16 @@ pub(crate) struct SimActiveOrder {
     pub(crate) order: Value,
     pub(crate) link_id: Option<i64>,
     pub(crate) strategy_id: Option<i64>,
+    pub(crate) replay_auto_trail: Option<SimReplayAutoTrail>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SimReplayAutoTrail {
+    pub(crate) entry_price: f64,
+    pub(crate) trigger_offset: f64,
+    pub(crate) stop_offset: f64,
+    pub(crate) frequency: f64,
+    pub(crate) active: bool,
 }
 
 #[derive(Debug, Clone)]

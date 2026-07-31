@@ -143,3 +143,179 @@ impl Default for ReplaySpeed {
         Self::Realtime
     }
 }
+
+pub const REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayLatencyModel {
+    #[default]
+    IgnoredLegacy,
+    Fixed,
+    ObservedMean,
+    ObservedP95,
+    ObservedP99,
+    SeededObserved,
+}
+
+impl ReplayLatencyModel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::IgnoredLegacy => "ignored in Legacy",
+            Self::Fixed => "fixed",
+            Self::ObservedMean => "observed mean",
+            Self::ObservedP95 => "observed p95",
+            Self::ObservedP99 => "observed p99",
+            Self::SeededObserved => "seeded observed sample",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayLatencyConfig {
+    pub model: ReplayLatencyModel,
+    pub fixed_latency_ms: u64,
+    pub observed_samples_ms: Vec<u64>,
+    pub seed: u64,
+}
+
+impl Default for ReplayLatencyConfig {
+    fn default() -> Self {
+        Self {
+            model: ReplayLatencyModel::Fixed,
+            fixed_latency_ms: 0,
+            observed_samples_ms: Vec::new(),
+            seed: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayBarProtectionPolicy {
+    /// When OHLC reaches both bracket legs, assume the adverse stop happened first.
+    #[default]
+    Conservative,
+    /// When OHLC reaches both bracket legs, assume the profit target happened first.
+    Optimistic,
+    /// Select the reachable leg nearest the raw bar open; ties choose the stop.
+    NearestOpen,
+}
+
+impl ReplayBarProtectionPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative stop-first",
+            Self::Optimistic => "optimistic target-first",
+            Self::NearestOpen => "nearest raw open",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayFillPriceSource {
+    #[default]
+    LegacyReferencePrice,
+    RawBarOpen,
+    RawBarOhlc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplayExecutionFill {
+    pub sequence: u64,
+    pub lifecycle_sequence: Option<u64>,
+    pub fill_id: i64,
+    pub order_id: i64,
+    pub order_strategy_id: Option<i64>,
+    pub protection_order_id: Option<i64>,
+    pub account_id: i64,
+    pub contract_id: i64,
+    pub contract_name: String,
+    pub side: String,
+    pub quantity: f64,
+    pub price: f64,
+    pub signal_timestamp_ns: Option<i64>,
+    pub submission_timestamp_ns: Option<i64>,
+    pub exchange_arrival_timestamp_ns: Option<i64>,
+    pub acknowledgement_timestamp_ns: Option<i64>,
+    pub fill_timestamp_ns: i64,
+    pub fill_price_source: ReplayFillPriceSource,
+    pub exit_reason: Option<String>,
+    pub latency_ms: u64,
+    pub tick_size: Option<f64>,
+    pub value_per_point: Option<f64>,
+    pub gross_realized_pnl_delta: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ReplayExecutionLedgerSnapshot {
+    pub schema_version: u32,
+    pub fee_neutral: bool,
+    pub engine_mode: ReplayEngineMode,
+    pub latency_model: ReplayLatencyModel,
+    pub fixed_latency_ms: u64,
+    pub latency_seed: Option<u64>,
+    pub observed_latency_sample_count: usize,
+    pub bar_protection_policy: ReplayBarProtectionPolicy,
+    pub signal_source: String,
+    pub gross_realized_pnl: f64,
+    pub fills: Vec<ReplayExecutionFill>,
+}
+
+impl Default for ReplayExecutionLedgerSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION,
+            fee_neutral: true,
+            engine_mode: ReplayEngineMode::Legacy,
+            latency_model: ReplayLatencyModel::IgnoredLegacy,
+            fixed_latency_ms: 0,
+            latency_seed: None,
+            observed_latency_sample_count: 0,
+            bar_protection_policy: ReplayBarProtectionPolicy::NearestOpen,
+            signal_source: String::new(),
+            gross_realized_pnl: 0.0,
+            fills: Vec::new(),
+        }
+    }
+}
+
+impl ReplayExecutionLedgerSnapshot {
+    pub fn summary(&self) -> ReplayExecutionLedgerSummary {
+        ReplayExecutionLedgerSummary {
+            schema_version: self.schema_version,
+            engine_mode: self.engine_mode,
+            latency_model: self.latency_model,
+            fixed_latency_ms: self.fixed_latency_ms,
+            latency_seed: self.latency_seed,
+            observed_latency_sample_count: self.observed_latency_sample_count,
+            bar_protection_policy: self.bar_protection_policy,
+            signal_source: self.signal_source.clone(),
+            fill_count: self.fills.len(),
+            gross_realized_pnl: self.gross_realized_pnl,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ReplayExecutionLedgerSummary {
+    pub schema_version: u32,
+    pub engine_mode: ReplayEngineMode,
+    pub latency_model: ReplayLatencyModel,
+    pub fixed_latency_ms: u64,
+    pub latency_seed: Option<u64>,
+    pub observed_latency_sample_count: usize,
+    pub bar_protection_policy: ReplayBarProtectionPolicy,
+    pub signal_source: String,
+    pub fill_count: usize,
+    pub gross_realized_pnl: f64,
+}
+
+impl Default for ReplayExecutionLedgerSummary {
+    fn default() -> Self {
+        ReplayExecutionLedgerSnapshot::default().summary()
+    }
+}

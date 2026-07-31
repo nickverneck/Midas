@@ -180,6 +180,12 @@ async fn replay_state_reemits_existing_engine_history_for_tui_reattach() {
         event,
         ServiceEvent::EngineHistoryUpdated(history) if history.run_id == expected_run_id
     )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::ReplayExecutionLedgerSnapshot(snapshot)
+            if snapshot.schema_version == crate::broker::REPLAY_EXECUTION_LEDGER_SCHEMA_VERSION
+                && snapshot.fills.is_empty()
+    )));
 }
 
 #[tokio::test]

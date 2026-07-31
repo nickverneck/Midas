@@ -56,6 +56,7 @@ impl App {
             latency: LatencySnapshot::default(),
             session_kind: SessionKind::Live,
             replay_speed: ReplaySpeed::default(),
+            replay_execution_ledger: ReplayExecutionLedgerSummary::default(),
             #[cfg(feature = "replay")]
             replay_dataset_index: None,
             #[cfg(feature = "replay")]
@@ -163,6 +164,7 @@ impl App {
         self.strategy_runtime = StrategyRuntimeState::default();
         self.latency = LatencySnapshot::default();
         self.replay_speed = ReplaySpeed::default();
+        self.replay_execution_ledger = ReplayExecutionLedgerSummary::default();
         self.last_market_update_at = None;
         self.status = message.clone();
         self.push_log(message);
@@ -257,6 +259,7 @@ impl App {
                 self.form.auth_mode = auth_mode;
                 self.session_kind = session_kind;
                 self.replay_speed = ReplaySpeed::default();
+                self.replay_execution_ledger = ReplayExecutionLedgerSummary::default();
                 if session_kind == SessionKind::Replay {
                     self.screen = Screen::Strategy;
                     self.focus = Focus::StrategyKind;
@@ -296,6 +299,7 @@ impl App {
                 self.strategy_runtime = StrategyRuntimeState::default();
                 self.latency = LatencySnapshot::default();
                 self.replay_speed = ReplaySpeed::default();
+                self.replay_execution_ledger = ReplayExecutionLedgerSummary::default();
                 self.last_market_update_at = None;
                 self.status = "Disconnected".to_string();
                 self.push_log("Disconnected".to_string());
@@ -355,6 +359,12 @@ impl App {
             ServiceEvent::ExecutionProbe(_) => {}
             ServiceEvent::ReplaySpeedUpdated(speed) => {
                 self.replay_speed = speed;
+            }
+            ServiceEvent::ReplayExecutionLedgerUpdated(summary) => {
+                self.replay_execution_ledger = summary;
+            }
+            ServiceEvent::ReplayExecutionLedgerSnapshot(snapshot) => {
+                self.replay_execution_ledger = snapshot.summary();
             }
             ServiceEvent::ReplayDownloadProgress {
                 operation_id,

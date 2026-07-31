@@ -13,6 +13,17 @@ impl App {
                 "Replay Speed: {}",
                 self.replay_speed.label()
             )));
+            lines.push(Line::from(format!(
+                "Replay Ledger: {} fill(s) | gross {:+.2} | {} | schema v{}",
+                self.replay_execution_ledger.fill_count,
+                self.replay_execution_ledger.gross_realized_pnl,
+                self.replay_execution_ledger.latency_model.label(),
+                self.replay_execution_ledger.schema_version
+            )));
+            lines.push(Line::from(format!(
+                "Replay Protection: {}",
+                self.replay_execution_ledger.bar_protection_policy.label()
+            )));
             if let Some(window) = self.market.replay_window.as_ref() {
                 lines.push(Line::from(format!(
                     "Replay Window: {} | {}",

@@ -139,6 +139,11 @@ fn persisted_log_body_includes_live_engine_review_metadata_without_secret_fields
     assert!(body.contains("session_kind: Replay"));
     assert!(body.contains("replay_speed: 10x"));
     assert!(body.contains("replay_engine_mode: Legacy compatibility"));
+    assert!(body.contains("replay_fill_model: legacy_reference_price"));
+    assert!(body.contains("replay_fixed_latency_ms: 0"));
+    assert!(body.contains("replay_ledger_schema_version: 2"));
+    assert!(body.contains("replay_ledger_fill_count: 0"));
+    assert!(body.contains("replay_ledger_gross_realized_pnl: 0.00000000"));
     assert!(body.contains("capability_replay: true"));
     assert!(body.contains("capability_manual_orders: true"));
     assert!(body.contains("capability_automated_orders: true"));

@@ -40,6 +40,7 @@ fn replay_run_lines_label_disabled_start_states() {
 fn replay_run_lines_identify_the_selected_engine_mode() {
     let mut config = AppConfig::default();
     config.replay_engine_mode = crate::broker::ReplayEngineMode::Deterministic;
+    config.replay_fixed_latency_ms = 75;
     let app = App::new(config);
 
     let lines = rendered_text(app.replay_run_control_lines());
@@ -47,6 +48,36 @@ fn replay_run_lines_identify_the_selected_engine_mode() {
         lines
             .iter()
             .any(|line| line == "Replay engine: Deterministic virtual time")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Fill model: raw next-bar open")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Latency model: fixed (75ms)")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Bar protection: conservative stop-first")
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_run_lines_mark_fixed_latency_as_ignored_in_legacy_mode() {
+    let mut config = AppConfig::default();
+    config.replay_fixed_latency_ms = 75;
+    let app = App::new(config);
+
+    let lines = rendered_text(app.replay_run_control_lines());
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Latency model: ignored in Legacy")
     );
 }
 
@@ -79,6 +110,9 @@ fn dashboard_summary_shows_replay_speed_in_replay_mode() {
 
     assert!(lines.iter().any(|line| line == "Mode: Replay"));
     assert!(lines.iter().any(|line| line == "Replay Speed: 5x"));
+    assert!(lines.iter().any(|line| {
+        line == "Replay Ledger: 0 fill(s) | gross +0.00 | ignored in Legacy | schema v2"
+    }));
 }
 
 #[test]
