@@ -23,7 +23,8 @@ use broker_path::{
 #[allow(unused_imports)]
 pub(crate) use debug::{
     TradovateStrategyDecisionDebug, debug_pending_target, debug_target_qty,
-    format_tradovate_strategy_decision, strategy_bar_debug_position,
+    format_tradovate_strategy_decision, record_replay_signal_diagnostic,
+    strategy_bar_debug_position,
 };
 use debug::{emit_guarded_strategy_eval_debug, guarded_strategy_eval_context};
 pub(crate) use evaluation::*;

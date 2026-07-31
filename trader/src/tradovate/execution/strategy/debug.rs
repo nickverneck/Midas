@@ -1,6 +1,107 @@
 use super::*;
 use crate::strategy_debug::{StrategyDecisionDebug, format_strategy_decision};
 
+/// Append one structured strategy decision row when replay diagnostics are
+/// explicitly enabled. The helper is deliberately a no-op for live sessions
+/// and for the default replay configuration.
+pub(crate) fn record_replay_signal_diagnostic(
+    session: &mut SessionState,
+    signal_bar_ts: i64,
+    signal: StrategySignal,
+    actual_qty: i32,
+    effective_qty: i32,
+    target_qty: Option<i32>,
+    decision: &str,
+    gate_reason: &str,
+    order_action: Option<&str>,
+    order_qty: Option<i32>,
+    strategy_detail: &str,
+) {
+    if !session.replay_enabled || !session.cfg.replay_signal_diagnostics {
+        return;
+    }
+
+    let (bar, bar_index, bar_count, snapshot) = {
+        let bars = signal_evaluation_bars(session);
+        let Some(index) = bars.iter().position(|bar| bar.ts_ns == signal_bar_ts) else {
+            return;
+        };
+        let bar = bars[index].clone();
+        let snapshot = snapshot_active_execution_strategy(session, &bars[..=index], effective_qty);
+        (bar, Some(index + 1), bars.len(), snapshot)
+    };
+    let raw_signal = signal_direction(snapshot.raw_buy_signal, snapshot.raw_sell_signal);
+    let effective_signal = signal_direction(
+        snapshot.effective_buy_signal,
+        snapshot.effective_sell_signal,
+    );
+    let strategy = active_native_slug(session).to_string();
+    let signal_timing = active_signal_timing_label(session).to_string();
+    let signal_delay_bars = signal_delay_bars(session);
+    let fingerprint = Some(bar_fingerprint(&bar));
+
+    session.execution_runtime.replay_signal_diagnostics.push(
+        crate::broker::ReplaySignalDiagnostic {
+            bar_timestamp_ns: bar.ts_ns,
+            bar_open: bar.open,
+            bar_high: bar.high,
+            bar_low: bar.low,
+            bar_close: bar.close,
+            bar_index,
+            bar_count,
+            strategy,
+            execution_path: decision_path(session),
+            signal_timing,
+            signal_delay_bars,
+            signal: signal.label().to_string(),
+            raw_signal,
+            effective_signal,
+            raw_buy_signal: snapshot.raw_buy_signal,
+            raw_sell_signal: snapshot.raw_sell_signal,
+            effective_buy_signal: snapshot.effective_buy_signal,
+            effective_sell_signal: snapshot.effective_sell_signal,
+            current_position_qty: actual_qty,
+            effective_position_qty: effective_qty,
+            target_qty,
+            decision: decision.to_string(),
+            gate_reason: gate_reason.to_string(),
+            order_action: order_action.map(ToString::to_string),
+            order_qty,
+            indicator_name: snapshot.indicator_name.to_string(),
+            previous_fast_indicator: snapshot.previous_fast_indicator,
+            previous_slow_indicator: snapshot.previous_slow_indicator,
+            fast_indicator: snapshot.fast_indicator,
+            slow_indicator: snapshot.slow_indicator,
+            auxiliary_name: snapshot.auxiliary_name.map(ToString::to_string),
+            auxiliary_value: snapshot.auxiliary_value,
+            hold_reason: snapshot.hold_reason.map(ToString::to_string),
+            strategy_detail: strategy_detail.to_string(),
+            fingerprint,
+        },
+    );
+}
+
+fn signal_direction(buy: bool, sell: bool) -> String {
+    match (buy, sell) {
+        (true, true) => "buy+sell".to_string(),
+        (true, false) => "buy".to_string(),
+        (false, true) => "sell".to_string(),
+        (false, false) => "none".to_string(),
+    }
+}
+
+fn decision_path(session: &SessionState) -> String {
+    if session.execution_config.kind != StrategyKind::Native {
+        "non_native".to_string()
+    } else {
+        match session.execution_config.native_execution_path {
+            NativeExecutionPath::Guarded => "guarded".to_string(),
+            NativeExecutionPath::SimpleDiagnostic => "simple diagnostic".to_string(),
+            NativeExecutionPath::HmaDirect => "hma direct".to_string(),
+        }
+    }
+}
+
 pub(super) fn guarded_strategy_eval_context(session: &SessionState, actual_qty: i32) -> String {
     let mut context = execution_observability_context(session);
     if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {

@@ -157,6 +157,50 @@ pub struct ReplayMarketTick {
     pub ask_size: Option<f64>,
 }
 
+/// Structured per-bar strategy diagnostics captured by an opt-in replay run.
+///
+/// This is intentionally a broker-independent value type so replay result
+/// writers and analytics consumers can inspect strategy decisions without
+/// parsing the human-oriented debug log. Live sessions never append rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplaySignalDiagnostic {
+    pub bar_timestamp_ns: i64,
+    pub bar_open: f64,
+    pub bar_high: f64,
+    pub bar_low: f64,
+    pub bar_close: f64,
+    pub bar_index: Option<usize>,
+    pub bar_count: usize,
+    pub strategy: String,
+    pub execution_path: String,
+    pub signal_timing: String,
+    pub signal_delay_bars: usize,
+    pub signal: String,
+    pub raw_signal: String,
+    pub effective_signal: String,
+    pub raw_buy_signal: bool,
+    pub raw_sell_signal: bool,
+    pub effective_buy_signal: bool,
+    pub effective_sell_signal: bool,
+    pub current_position_qty: i32,
+    pub effective_position_qty: i32,
+    pub target_qty: Option<i32>,
+    pub decision: String,
+    pub gate_reason: String,
+    pub order_action: Option<String>,
+    pub order_qty: Option<i32>,
+    pub indicator_name: String,
+    pub previous_fast_indicator: Option<f64>,
+    pub previous_slow_indicator: Option<f64>,
+    pub fast_indicator: Option<f64>,
+    pub slow_indicator: Option<f64>,
+    pub auxiliary_name: Option<String>,
+    pub auxiliary_value: Option<f64>,
+    pub hold_reason: Option<String>,
+    pub strategy_detail: String,
+    pub fingerprint: Option<u64>,
+}
+
 /// One visible price level in a Level 2 replay snapshot.
 ///
 /// The replay engine treats `size` as the quantity available to the simulated

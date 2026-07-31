@@ -97,6 +97,12 @@ fn persist_replay_result(
     let strategy = session.execution_config.clone();
     let bar_type = session.bar_type;
     let candle_mode = session.candle_mode;
+    let signal_diagnostics = session.cfg.replay_signal_diagnostics.then_some(
+        session
+            .execution_runtime
+            .replay_signal_diagnostics
+            .as_slice(),
+    );
     let ledger = state.replay_execution_ledger.snapshot().clone();
     let completed_at_utc = Utc::now();
     let run_id = session
@@ -136,17 +142,34 @@ fn persist_replay_result(
         started_at_utc,
         completed_at_utc,
         error: error.as_deref(),
+        signal_diagnostics,
     })?;
     let status = if error.is_some() {
         "failed"
     } else {
         "complete"
     };
+    let margin_suffix = match (
+        outcome.required_starting_capital,
+        outcome.initial_capital_sufficient,
+    ) {
+        (Some(required), Some(sufficient)) => format!(
+            "; required capital {:.2} (selected capital {})",
+            required,
+            if sufficient {
+                "sufficient"
+            } else {
+                "insufficient"
+            }
+        ),
+        _ => String::new(),
+    };
     let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Replay {status}; result saved to {} ({} fills, {} trades)",
+        "Replay {status}; result saved to {} ({} fills, {} trades){}",
         outcome.result_path.display(),
         outcome.fill_count,
-        outcome.trade_count
+        outcome.trade_count,
+        margin_suffix
     )));
     Ok(())
 }

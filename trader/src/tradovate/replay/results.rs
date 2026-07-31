@@ -3,7 +3,7 @@ use super::risk::{ReplayMarginAnalysis, ReplayMarginConfig, compute_margin_analy
 use super::state::ReplayState;
 use crate::broker::{
     BarType, CandleMode, MarketSnapshot, ReplayExecutionFill, ReplayExecutionLedgerSnapshot,
-    ReplayFillPriceSource,
+    ReplayFillPriceSource, ReplaySignalDiagnostic,
 };
 use crate::config::{AppConfig, TradingEnvironment};
 use crate::strategy::ExecutionStrategyConfig;
@@ -18,7 +18,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const REPLAY_RESULT_SCHEMA_VERSION: u32 = 2;
+pub(crate) const REPLAY_RESULT_SCHEMA_VERSION: u32 = 3;
 pub(crate) const FEE_NEUTRAL_SCENARIO_NAME: &str = "fee_neutral";
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,23 @@ pub(crate) struct ReplayResultWriteOutcome {
     pub(crate) result_path: PathBuf,
     pub(crate) fill_count: usize,
     pub(crate) trade_count: usize,
+    pub(crate) required_starting_capital: Option<f64>,
+    pub(crate) initial_capital_sufficient: Option<bool>,
+}
+
+/// One durable replay result discovered under the configured result root.
+/// The path is retained so the analytics screen can identify the exact run
+/// directory without opening a sidecar file.
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayResultEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) document: ReplayResultDocument,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReplayResultLibrarySnapshot {
+    pub(crate) entries: Vec<ReplayResultEntry>,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +58,7 @@ pub(crate) struct ReplayResultInput<'a> {
     pub(crate) started_at_utc: DateTime<Utc>,
     pub(crate) completed_at_utc: DateTime<Utc>,
     pub(crate) error: Option<&'a str>,
+    pub(crate) signal_diagnostics: Option<&'a [ReplaySignalDiagnostic]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,9 +88,72 @@ pub(crate) struct ReplayResultDocument {
     pub(crate) fee_scenarios: Vec<ReplayFeeScenario>,
     #[serde(default)]
     pub(crate) margin_analysis: Option<ReplayMarginAnalysis>,
+    #[serde(default)]
+    pub(crate) trade_excursions: Option<Vec<ReplayTradeExcursion>>,
     /// The fee-neutral ledger is embedded so a result is self-contained even
     /// when the CSV sidecars are moved or inspected independently.
     pub(crate) ledger: ReplayExecutionLedgerSnapshot,
+}
+
+/// Load the saved result documents below a replay result root for the
+/// read-only analytics screen. Invalid individual runs are skipped and
+/// returned as warnings so one damaged artifact does not hide other runs.
+pub(crate) fn load_replay_result_entries(root: &Path) -> ReplayResultLibrarySnapshot {
+    let mut snapshot = ReplayResultLibrarySnapshot::default();
+    let mut candidates = Vec::new();
+
+    if root.is_file() {
+        candidates.push(root.to_path_buf());
+    } else if root.is_dir() {
+        match fs::read_dir(root) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.file_name().is_some_and(|name| name == "result.json")
+                    {
+                        candidates.push(path);
+                    } else if path.is_dir() {
+                        let result_path = path.join("result.json");
+                        if result_path.is_file() {
+                            candidates.push(result_path);
+                        }
+                    }
+                }
+            }
+            Err(error) => snapshot.warnings.push(format!(
+                "Could not scan replay result directory {}: {error}",
+                root.display()
+            )),
+        }
+    }
+
+    for path in candidates {
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                snapshot
+                    .warnings
+                    .push(format!("Could not read {}: {error}", path.display()));
+                continue;
+            }
+        };
+        match serde_json::from_slice::<ReplayResultDocument>(&bytes) {
+            Ok(document) => snapshot.entries.push(ReplayResultEntry { path, document }),
+            Err(error) => snapshot.warnings.push(format!(
+                "Could not parse replay result {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    snapshot.entries.sort_by(|left, right| {
+        right
+            .document
+            .completed_at_utc
+            .cmp(&left.document.completed_at_utc)
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    snapshot
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +191,8 @@ pub(crate) struct ReplayResultMetadata {
     pub(crate) replay_file_path: String,
     pub(crate) replay_dom_file_path: Option<String>,
     pub(crate) replay_cache_dir: String,
+    #[serde(default)]
+    pub(crate) post_exit_continuation_horizon_bars: usize,
     pub(crate) dataset_view: Option<String>,
     pub(crate) evaluation_start_utc: Option<DateTime<Utc>>,
     pub(crate) evaluation_end_utc: Option<DateTime<Utc>>,
@@ -119,6 +202,10 @@ pub(crate) struct ReplayResultMetadata {
     pub(crate) warmup_rows: usize,
     pub(crate) evaluation_rows_total: usize,
     pub(crate) evaluation_rows_processed: usize,
+    #[serde(default)]
+    pub(crate) signal_diagnostics_enabled: bool,
+    #[serde(default)]
+    pub(crate) signal_diagnostic_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +238,22 @@ pub(crate) struct ReplayResultSummary {
     pub(crate) minimum_equity_buffer_over_margin: Option<f64>,
     #[serde(default)]
     pub(crate) initial_capital_sufficient: Option<bool>,
+    #[serde(default)]
+    pub(crate) average_mfe_pnl: Option<f64>,
+    #[serde(default)]
+    pub(crate) average_mae_pnl: Option<f64>,
+    #[serde(default)]
+    pub(crate) average_giveback: Option<f64>,
+    #[serde(default)]
+    pub(crate) median_giveback: Option<f64>,
+    #[serde(default)]
+    pub(crate) largest_giveback: Option<f64>,
+    #[serde(default)]
+    pub(crate) average_mfe_capture_ratio: Option<f64>,
+    #[serde(default)]
+    pub(crate) average_post_exit_favorable_pnl: Option<f64>,
+    #[serde(default)]
+    pub(crate) largest_post_exit_favorable_pnl: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +267,58 @@ pub(crate) struct ReplayResultArtifacts {
     pub(crate) fee_scenarios_csv: Option<String>,
     #[serde(default)]
     pub(crate) margin_csv: Option<String>,
+    #[serde(default)]
+    pub(crate) trade_excursions_csv: Option<String>,
+    #[serde(default)]
+    pub(crate) signals_csv: Option<String>,
+}
+
+/// Per-trade opportunity and adverse-path measurements. Prices are always
+/// based on the tradable replay path; synthetic candle values are never used
+/// for excursion pricing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ReplayTradeExcursion {
+    pub(crate) trade_id: usize,
+    pub(crate) account_id: i64,
+    pub(crate) contract_id: i64,
+    pub(crate) contract_name: String,
+    pub(crate) side: String,
+    pub(crate) quantity: f64,
+    pub(crate) entry_timestamp_ns: i64,
+    pub(crate) entry_price: f64,
+    pub(crate) exit_timestamp_ns: Option<i64>,
+    pub(crate) exit_price: Option<f64>,
+    pub(crate) realized_gross_pnl: f64,
+    #[serde(default)]
+    pub(crate) realized_net_pnl: f64,
+    #[serde(default)]
+    pub(crate) exit_reason: Option<String>,
+    pub(crate) mfe_points: f64,
+    pub(crate) mae_points: f64,
+    pub(crate) mfe_price: f64,
+    pub(crate) mae_price: f64,
+    pub(crate) mfe_pnl: Option<f64>,
+    pub(crate) mae_pnl: Option<f64>,
+    pub(crate) giveback: Option<f64>,
+    pub(crate) mfe_capture_ratio: Option<f64>,
+    pub(crate) mfe_timestamp_ns: Option<i64>,
+    pub(crate) time_to_mfe_ns: Option<i64>,
+    pub(crate) time_from_mfe_to_exit_ns: Option<i64>,
+    pub(crate) bars_to_mfe: Option<usize>,
+    pub(crate) ticks_to_mfe: Option<usize>,
+    pub(crate) bars_from_mfe_to_exit: Option<usize>,
+    pub(crate) ticks_from_mfe_to_exit: Option<usize>,
+    #[serde(default)]
+    pub(crate) post_exit_favorable_points: Option<f64>,
+    #[serde(default)]
+    pub(crate) post_exit_favorable_price: Option<f64>,
+    #[serde(default)]
+    pub(crate) post_exit_favorable_pnl: Option<f64>,
+    #[serde(default)]
+    pub(crate) post_exit_favorable_timestamp_ns: Option<i64>,
+    #[serde(default)]
+    pub(crate) post_exit_bars_observed: Option<usize>,
+    pub(crate) path_precision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -251,15 +406,53 @@ struct PositionKey {
     contract_id: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExcursionPoint {
+    timestamp_ns: i64,
+    high: f64,
+    low: f64,
+    bar_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExcursionPathPrecision {
+    TickExact,
+    BarApproximate,
+}
+
+impl ExcursionPathPrecision {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TickExact => "tick_exact",
+            Self::BarApproximate => "bar_approximate",
+        }
+    }
+
+    fn is_tick_exact(self) -> bool {
+        matches!(self, Self::TickExact)
+    }
+}
+
 pub(crate) fn write_replay_result(
     input: ReplayResultInput<'_>,
 ) -> Result<ReplayResultWriteOutcome> {
     let fills = sorted_fills(input.ledger);
     let fee_schedule = ReplayFeeSchedule::default();
     let trades = build_trade_rows(&fills, &fee_schedule);
-    let initial_capital = replay_initial_capital(input.replay);
+    let initial_capital = replay_initial_capital(input.replay, input.config.replay_initial_capital);
+    let trade_excursions = if input.error.is_none() {
+        build_trade_excursions(
+            input.replay,
+            input.bar_type,
+            &trades,
+            input.market,
+            input.config.replay_post_exit_continuation_bars,
+        )?
+    } else {
+        None
+    };
     let equity = build_equity_rows(&fills, initial_capital, input.started_at_utc, &fee_schedule);
-    let summary = build_summary(
+    let mut summary = build_summary(
         &fills,
         &trades,
         &equity,
@@ -270,6 +463,7 @@ pub(crate) fn write_replay_result(
             .as_ref()
             .map_or(0, |value| value.evaluation_rows_processed),
     );
+    apply_excursion_summary(&mut summary, trade_excursions.as_deref());
     let fee_scenario = fee_scenario_from_summary(&fee_schedule, &summary);
     let metadata = build_metadata(&input, initial_capital, &fills);
     let status = if input.error.is_some() {
@@ -277,6 +471,32 @@ pub(crate) fn write_replay_result(
     } else {
         ReplayResultStatus::Completed
     };
+    let margin_config = if matches!(status, ReplayResultStatus::Completed) {
+        configured_margin_config(input.config)?
+    } else {
+        None
+    };
+    let margin_analysis = margin_config
+        .as_ref()
+        .map(|config| {
+            let margin_fills = margin_fills_for_identity(
+                &fills,
+                input.replay.account.id,
+                input.replay.contract.id,
+            );
+            compute_margin_analysis(
+                &margin_fills,
+                initial_capital,
+                input.started_at_utc,
+                &fee_schedule,
+                &fee_schedule.name,
+                config,
+            )
+        })
+        .transpose()?;
+    if let Some(analysis) = margin_analysis.as_ref() {
+        apply_margin_to_summary(&mut summary, analysis);
+    }
 
     let directory = input
         .config
@@ -302,11 +522,16 @@ pub(crate) fn write_replay_result(
             fills_csv: "fills.csv".to_string(),
             equity_csv: "equity.csv".to_string(),
             fee_scenarios_csv: Some("fee-scenarios.csv".to_string()),
-            margin_csv: None,
+            margin_csv: margin_analysis.as_ref().map(|_| "margin.csv".to_string()),
+            trade_excursions_csv: trade_excursions
+                .as_ref()
+                .map(|_| "trade-excursions.csv".to_string()),
+            signals_csv: input.signal_diagnostics.map(|_| "signals.csv".to_string()),
         },
         active_fee_scenario: fee_schedule.name.clone(),
         fee_scenarios: vec![fee_scenario],
-        margin_analysis: None,
+        margin_analysis: margin_analysis.clone(),
+        trade_excursions: trade_excursions.clone(),
         ledger: input.ledger.clone(),
     };
 
@@ -319,18 +544,307 @@ pub(crate) fn write_replay_result(
         &serde_json::to_vec_pretty(&document).context("serialize replay result JSON")?,
     )?;
     write_atomic(&fills_path, &fills_csv(&fills))?;
-    write_atomic(&trades_path, &trades_csv(&trades))?;
+    write_atomic(
+        &trades_path,
+        &trades_csv(&trades, trade_excursions.as_deref()),
+    )?;
     write_atomic(&equity_path, &equity_csv(&equity, initial_capital))?;
     write_atomic(
         &directory.join("fee-scenarios.csv"),
         &fee_scenarios_csv(&document.fee_scenarios),
     )?;
+    if let Some(analysis) = margin_analysis.as_ref() {
+        write_atomic(
+            &directory.join("margin.csv"),
+            &margin_analysis_csv(analysis),
+        )?;
+    }
+    if let Some(excursions) = trade_excursions.as_ref() {
+        write_atomic(
+            &directory.join("trade-excursions.csv"),
+            &trade_excursions_csv(excursions),
+        )?;
+    }
+    if let Some(diagnostics) = input.signal_diagnostics {
+        write_atomic(&directory.join("signals.csv"), &signals_csv(diagnostics))?;
+    }
 
     Ok(ReplayResultWriteOutcome {
         result_path,
         fill_count: fills.len(),
         trade_count: trades.len(),
+        required_starting_capital: margin_analysis
+            .as_ref()
+            .map(|analysis| analysis.required_starting_capital),
+        initial_capital_sufficient: margin_analysis
+            .as_ref()
+            .map(|analysis| analysis.initial_capital_sufficient),
     })
+}
+
+fn build_trade_excursions(
+    replay: &ReplayState,
+    bar_type: BarType,
+    trades: &[TradeRow],
+    market: &MarketSnapshot,
+    post_exit_horizon_bars: usize,
+) -> Result<Option<Vec<ReplayTradeExcursion>>> {
+    if trades.is_empty() {
+        return Ok(None);
+    }
+
+    let frames = replay.frames_for_type(bar_type)?;
+    let has_ticks = frames.iter().any(|frame| !frame.ticks.is_empty());
+    let precision = if has_ticks {
+        ExcursionPathPrecision::TickExact
+    } else {
+        ExcursionPathPrecision::BarApproximate
+    };
+    let mut points = Vec::new();
+    if has_ticks {
+        for (bar_index, frame) in frames.iter().enumerate() {
+            for tick in frame.ticks.iter().copied() {
+                if tick.last.is_finite() {
+                    points.push(ExcursionPoint {
+                        timestamp_ns: tick.ts_ns,
+                        high: tick.last,
+                        low: tick.last,
+                        bar_index,
+                    });
+                }
+            }
+        }
+    } else {
+        for (bar_index, frame) in frames.iter().enumerate() {
+            if !frame.bar.high.is_finite() || !frame.bar.low.is_finite() {
+                continue;
+            }
+            points.push(ExcursionPoint {
+                timestamp_ns: frame.bar.ts_ns,
+                high: frame.bar.high.max(frame.bar.low),
+                low: frame.bar.low.min(frame.bar.high),
+                bar_index,
+            });
+        }
+    }
+    if points.is_empty() {
+        return Ok(None);
+    }
+    points.sort_by_key(|point| point.timestamp_ns);
+
+    let value_per_point = market
+        .value_per_point
+        .or(replay.market_specs.value_per_point)
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let mut excursions = Vec::with_capacity(trades.len());
+    for (index, trade) in trades.iter().enumerate() {
+        excursions.push(excursion_for_trade(
+            index + 1,
+            trade,
+            &points,
+            precision,
+            value_per_point,
+            post_exit_horizon_bars,
+        ));
+    }
+    Ok(Some(excursions))
+}
+
+fn excursion_for_trade(
+    trade_id: usize,
+    trade: &TradeRow,
+    points: &[ExcursionPoint],
+    precision: ExcursionPathPrecision,
+    value_per_point: Option<f64>,
+    post_exit_horizon_bars: usize,
+) -> ReplayTradeExcursion {
+    let entry_timestamp_ns = trade.entry_timestamp_ns;
+    let end_timestamp_ns = trade.exit_timestamp_ns.unwrap_or(i64::MAX);
+    let start_index = points.partition_point(|point| point.timestamp_ns < entry_timestamp_ns);
+    let end_index = points.partition_point(|point| point.timestamp_ns <= end_timestamp_ns);
+    let mut mfe_points = 0.0;
+    let mut mae_points = 0.0;
+    let mut mfe_price = trade.entry_price;
+    let mut mae_price = trade.entry_price;
+    let mut mfe_timestamp_ns = Some(entry_timestamp_ns);
+    let mut mfe_index = None;
+
+    for (offset, point) in points[start_index..end_index].iter().enumerate() {
+        let favorable_points;
+        let adverse_points;
+        let favorable_price;
+        let adverse_price;
+        if trade.side.eq_ignore_ascii_case("long") {
+            favorable_points = (point.high - trade.entry_price).max(0.0);
+            adverse_points = (trade.entry_price - point.low).max(0.0);
+            favorable_price = point.high;
+            adverse_price = point.low;
+        } else {
+            favorable_points = (trade.entry_price - point.low).max(0.0);
+            adverse_points = (point.high - trade.entry_price).max(0.0);
+            favorable_price = point.low;
+            adverse_price = point.high;
+        }
+        if favorable_points > mfe_points {
+            mfe_points = favorable_points;
+            mfe_price = favorable_price;
+            mfe_timestamp_ns = Some(point.timestamp_ns);
+            mfe_index = Some(start_index + offset);
+        }
+        if adverse_points > mae_points {
+            mae_points = adverse_points;
+            mae_price = adverse_price;
+        }
+    }
+
+    let mfe_pnl = value_per_point.map(|value| mfe_points * trade.quantity * value);
+    let mae_pnl = value_per_point.map(|value| mae_points * trade.quantity * value);
+    let giveback = mfe_pnl.map(|mfe| mfe - trade.gross_realized_pnl);
+    let mfe_capture_ratio = mfe_pnl
+        .filter(|mfe| *mfe > 0.0)
+        .map(|mfe| trade.gross_realized_pnl / mfe);
+    let time_to_mfe_ns =
+        mfe_timestamp_ns.map(|timestamp| timestamp.saturating_sub(entry_timestamp_ns));
+    let time_from_mfe_to_exit_ns = trade
+        .exit_timestamp_ns
+        .zip(mfe_timestamp_ns)
+        .map(|(exit, mfe)| exit.saturating_sub(mfe));
+    let observations_to_mfe = mfe_index.map(|index| index.saturating_sub(start_index) + 1);
+    let observations_from_mfe_to_exit = trade
+        .exit_timestamp_ns
+        .and_then(|_| mfe_index.map(|index| end_index.saturating_sub(index).saturating_sub(1)));
+    let (bars_to_mfe, ticks_to_mfe) = if precision.is_tick_exact() {
+        (None, observations_to_mfe)
+    } else {
+        (observations_to_mfe, None)
+    };
+    let (bars_from_mfe_to_exit, ticks_from_mfe_to_exit) = if precision.is_tick_exact() {
+        (None, observations_from_mfe_to_exit)
+    } else {
+        (observations_from_mfe_to_exit, None)
+    };
+    let (
+        post_exit_favorable_points,
+        post_exit_favorable_price,
+        post_exit_favorable_pnl,
+        post_exit_favorable_timestamp_ns,
+        post_exit_bars_observed,
+    ) = post_exit_continuation(trade, points, post_exit_horizon_bars, value_per_point);
+
+    ReplayTradeExcursion {
+        trade_id,
+        account_id: trade.account_id,
+        contract_id: trade.contract_id,
+        contract_name: trade.contract_name.clone(),
+        side: trade.side.clone(),
+        quantity: trade.quantity,
+        entry_timestamp_ns,
+        entry_price: trade.entry_price,
+        exit_timestamp_ns: trade.exit_timestamp_ns,
+        exit_price: trade.exit_price,
+        realized_gross_pnl: trade.gross_realized_pnl,
+        realized_net_pnl: trade.net_realized_pnl,
+        exit_reason: trade.exit_reason.clone(),
+        mfe_points,
+        mae_points,
+        mfe_price,
+        mae_price,
+        mfe_pnl,
+        mae_pnl,
+        giveback,
+        mfe_capture_ratio,
+        mfe_timestamp_ns,
+        time_to_mfe_ns,
+        time_from_mfe_to_exit_ns,
+        bars_to_mfe,
+        ticks_to_mfe,
+        bars_from_mfe_to_exit,
+        ticks_from_mfe_to_exit,
+        post_exit_favorable_points,
+        post_exit_favorable_price,
+        post_exit_favorable_pnl,
+        post_exit_favorable_timestamp_ns,
+        post_exit_bars_observed,
+        path_precision: precision.label().to_string(),
+    }
+}
+
+fn post_exit_continuation(
+    trade: &TradeRow,
+    points: &[ExcursionPoint],
+    horizon_bars: usize,
+    value_per_point: Option<f64>,
+) -> (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    Option<usize>,
+) {
+    let Some(exit_timestamp_ns) = trade.exit_timestamp_ns else {
+        return (None, None, None, None, None);
+    };
+    let Some(exit_price) = trade.exit_price.filter(|price| price.is_finite()) else {
+        return (None, None, None, None, None);
+    };
+    if horizon_bars == 0 {
+        return (None, None, None, None, None);
+    }
+
+    let start_index = points.partition_point(|point| point.timestamp_ns <= exit_timestamp_ns);
+    let Some(first_point) = points.get(start_index) else {
+        return (None, None, None, None, None);
+    };
+    let first_bar_index = first_point.bar_index;
+    let last_bar_index = first_bar_index.saturating_add(horizon_bars - 1);
+    let mut favorable_points = 0.0;
+    let mut favorable_price = exit_price;
+    let mut favorable_timestamp_ns = None;
+    let mut last_observed_bar_index = first_bar_index;
+
+    for point in points.iter().skip(start_index) {
+        if point.bar_index > last_bar_index {
+            break;
+        }
+        last_observed_bar_index = point.bar_index;
+        let (candidate_points, candidate_price) = if trade.side.eq_ignore_ascii_case("long") {
+            ((point.high - exit_price).max(0.0), point.high)
+        } else {
+            ((exit_price - point.low).max(0.0), point.low)
+        };
+        if candidate_points > favorable_points {
+            favorable_points = candidate_points;
+            favorable_price = candidate_price;
+            favorable_timestamp_ns = Some(point.timestamp_ns);
+        }
+    }
+
+    (
+        Some(favorable_points),
+        Some(favorable_price),
+        value_per_point.map(|value| favorable_points * trade.quantity * value),
+        favorable_timestamp_ns,
+        Some(
+            last_observed_bar_index
+                .saturating_sub(first_bar_index)
+                .saturating_add(1),
+        ),
+    )
+}
+
+fn configured_margin_config(config: &AppConfig) -> Result<Option<ReplayMarginConfig>> {
+    if config.replay_margin_per_contract <= 0.0 {
+        return Ok(None);
+    }
+    let margin = ReplayMarginConfig {
+        model: config.replay_margin_model.clone(),
+        currency: config.replay_account_currency.clone(),
+        margin_per_contract: config.replay_margin_per_contract,
+        safety_buffer: config.replay_safety_buffer,
+        safety_buffer_percent: config.replay_safety_buffer_percent,
+    };
+    margin.validate()?;
+    Ok(Some(margin))
 }
 
 fn build_metadata(
@@ -367,8 +881,12 @@ fn build_metadata(
         bar_protection_policy: input.ledger.bar_protection_policy,
         fee_model: "fee_neutral".to_string(),
         initial_capital,
-        account_currency: "USD".to_string(),
-        margin_model: "not_configured".to_string(),
+        account_currency: input.config.replay_account_currency.clone(),
+        margin_model: if input.config.replay_margin_per_contract > 0.0 {
+            input.config.replay_margin_model.clone()
+        } else {
+            "not_configured".to_string()
+        },
         account_id: input.replay.account.id,
         account_name: input.replay.account.name.clone(),
         contract_id: input.replay.contract.id,
@@ -393,6 +911,7 @@ fn build_metadata(
             .as_ref()
             .map(|path| path.display().to_string()),
         replay_cache_dir: input.config.replay_cache_dir.display().to_string(),
+        post_exit_continuation_horizon_bars: input.config.replay_post_exit_continuation_bars,
         dataset_view: window.map(|value| value.preset.clone()),
         evaluation_start_utc: window
             .map(|value| value.evaluation_start)
@@ -408,15 +927,17 @@ fn build_metadata(
         evaluation_rows_processed: window.map_or(input.market.live_bars, |value| {
             value.evaluation_rows_processed
         }),
+        signal_diagnostics_enabled: input.signal_diagnostics.is_some(),
+        signal_diagnostic_count: input.signal_diagnostics.map_or(0, |rows| rows.len()),
     }
 }
 
-fn replay_initial_capital(replay: &ReplayState) -> f64 {
+fn replay_initial_capital(replay: &ReplayState, fallback: f64) -> f64 {
     ["startingBalance", "balance", "netLiq"]
         .iter()
         .find_map(|key| replay.account.raw.get(*key).and_then(json_f64))
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(100_000.0)
+        .unwrap_or(fallback)
 }
 
 fn json_f64(value: &Value) -> Option<f64> {
@@ -530,6 +1051,11 @@ fn build_trade_rows(
                 remaining -= close_quantity;
                 remaining_fee -= close_fee;
                 if current.quantity <= f64::EPSILON {
+                    // Preserve the quantity represented by this completed
+                    // trade row. The open position is decremented above, so
+                    // leaving the zero remainder here would make closed
+                    // trades (and their excursion PnL) report quantity zero.
+                    current.quantity = close_quantity;
                     completed.push(trade_row_from_open(current));
                 } else {
                     open.insert(key, current);
@@ -733,6 +1259,14 @@ fn build_summary(
         peak_margin_requirement: None,
         minimum_equity_buffer_over_margin: None,
         initial_capital_sufficient: None,
+        average_mfe_pnl: None,
+        average_mae_pnl: None,
+        average_giveback: None,
+        median_giveback: None,
+        largest_giveback: None,
+        average_mfe_capture_ratio: None,
+        average_post_exit_favorable_pnl: None,
+        largest_post_exit_favorable_pnl: None,
     }
 }
 
@@ -782,6 +1316,63 @@ fn fee_scenarios_csv(scenarios: &[ReplayFeeScenario]) -> Vec<u8> {
     output.into_bytes()
 }
 
+fn apply_excursion_summary(
+    summary: &mut ReplayResultSummary,
+    excursions: Option<&[ReplayTradeExcursion]>,
+) {
+    let Some(excursions) = excursions else {
+        return;
+    };
+    summary.average_mfe_pnl = average_optional(excursions.iter().map(|row| row.mfe_pnl));
+    summary.average_mae_pnl = average_optional(excursions.iter().map(|row| row.mae_pnl));
+    let givebacks = excursions
+        .iter()
+        .filter_map(|row| row.giveback)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    summary.average_giveback =
+        (!givebacks.is_empty()).then(|| givebacks.iter().sum::<f64>() / givebacks.len() as f64);
+    summary.largest_giveback = givebacks.iter().copied().reduce(f64::max);
+    summary.median_giveback = median(givebacks);
+    summary.average_mfe_capture_ratio = average_optional(
+        excursions
+            .iter()
+            .map(|row| row.mfe_capture_ratio)
+            .filter(|value| value.is_none_or(|value| value.is_finite())),
+    );
+    let post_exit_favorable_pnl = excursions
+        .iter()
+        .filter_map(|row| row.post_exit_favorable_pnl)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    summary.average_post_exit_favorable_pnl = (!post_exit_favorable_pnl.is_empty()).then(|| {
+        post_exit_favorable_pnl.iter().sum::<f64>() / post_exit_favorable_pnl.len() as f64
+    });
+    summary.largest_post_exit_favorable_pnl =
+        post_exit_favorable_pnl.iter().copied().reduce(f64::max);
+}
+
+fn average_optional(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    let values = values
+        .flatten()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2.0)
+    } else {
+        Some(values[middle])
+    }
+}
+
 fn apply_margin_to_summary(summary: &mut ReplayResultSummary, analysis: &ReplayMarginAnalysis) {
     summary.required_starting_capital = Some(analysis.required_starting_capital);
     summary.peak_margin_requirement = Some(analysis.peak_margin_requirement);
@@ -809,6 +1400,52 @@ fn margin_analysis_csv(analysis: &ReplayMarginAnalysis) -> Vec<u8> {
         optional(analysis.first_breach_timestamp_ns),
     ];
     push_csv_row(&mut output, &row);
+    output.into_bytes()
+}
+
+fn trade_excursions_csv(excursions: &[ReplayTradeExcursion]) -> Vec<u8> {
+    let mut output = String::from(
+        "trade_id,account_id,contract_id,contract_name,side,quantity,entry_timestamp_ns,entry_price,exit_timestamp_ns,exit_price,realized_gross_pnl,realized_net_pnl,exit_reason,mfe_points,mae_points,mfe_price,mae_price,mfe_pnl,mae_pnl,giveback,mfe_capture_ratio,mfe_timestamp_ns,time_to_mfe_ns,time_from_mfe_to_exit_ns,bars_to_mfe,ticks_to_mfe,bars_from_mfe_to_exit,ticks_from_mfe_to_exit,post_exit_favorable_points,post_exit_favorable_price,post_exit_favorable_pnl,post_exit_favorable_timestamp_ns,post_exit_bars_observed,path_precision\n",
+    );
+    for excursion in excursions {
+        let row = [
+            excursion.trade_id.to_string(),
+            excursion.account_id.to_string(),
+            excursion.contract_id.to_string(),
+            excursion.contract_name.clone(),
+            excursion.side.clone(),
+            excursion.quantity.to_string(),
+            excursion.entry_timestamp_ns.to_string(),
+            excursion.entry_price.to_string(),
+            optional(excursion.exit_timestamp_ns),
+            optional(excursion.exit_price),
+            excursion.realized_gross_pnl.to_string(),
+            excursion.realized_net_pnl.to_string(),
+            excursion.exit_reason.clone().unwrap_or_default(),
+            excursion.mfe_points.to_string(),
+            excursion.mae_points.to_string(),
+            excursion.mfe_price.to_string(),
+            excursion.mae_price.to_string(),
+            optional(excursion.mfe_pnl),
+            optional(excursion.mae_pnl),
+            optional(excursion.giveback),
+            optional(excursion.mfe_capture_ratio),
+            optional(excursion.mfe_timestamp_ns),
+            optional(excursion.time_to_mfe_ns),
+            optional(excursion.time_from_mfe_to_exit_ns),
+            optional(excursion.bars_to_mfe),
+            optional(excursion.ticks_to_mfe),
+            optional(excursion.bars_from_mfe_to_exit),
+            optional(excursion.ticks_from_mfe_to_exit),
+            optional(excursion.post_exit_favorable_points),
+            optional(excursion.post_exit_favorable_price),
+            optional(excursion.post_exit_favorable_pnl),
+            optional(excursion.post_exit_favorable_timestamp_ns),
+            optional(excursion.post_exit_bars_observed),
+            excursion.path_precision.clone(),
+        ];
+        push_csv_row(&mut output, &row);
+    }
     output.into_bytes()
 }
 
@@ -869,13 +1506,14 @@ pub(crate) fn reprice_replay_result(
     }
     let trades = build_trade_rows(&fills, &schedule);
     let equity = build_equity_rows(&fills, initial_capital, document.started_at_utc, &schedule);
-    let summary = build_summary(
+    let mut summary = build_summary(
         &fills,
         &trades,
         &equity,
         initial_capital,
         document.summary.evaluation_rows_processed,
     );
+    apply_excursion_summary(&mut summary, document.trade_excursions.as_deref());
     let scenario = fee_scenario_from_summary(&schedule, &summary);
 
     if document.fee_scenarios.is_empty() {
@@ -913,7 +1551,10 @@ pub(crate) fn reprice_replay_result(
         )?;
     }
 
-    write_atomic(&directory.join("trades.csv"), &trades_csv(&trades))?;
+    write_atomic(
+        &directory.join("trades.csv"),
+        &trades_csv(&trades, document.trade_excursions.as_deref()),
+    )?;
     write_atomic(
         &directory.join("equity.csv"),
         &equity_csv(&equity, initial_capital),
@@ -922,6 +1563,12 @@ pub(crate) fn reprice_replay_result(
         &directory.join("fee-scenarios.csv"),
         &fee_scenarios_csv(&document.fee_scenarios),
     )?;
+    if let Some(excursions) = document.trade_excursions.as_ref() {
+        write_atomic(
+            &directory.join("trade-excursions.csv"),
+            &trade_excursions_csv(excursions),
+        )?;
+    }
     write_atomic(
         result_path,
         &serde_json::to_vec_pretty(&document).context("serialize repriced replay result")?,
@@ -1035,6 +1682,53 @@ fn fills_csv(fills: &[ReplayExecutionFill]) -> Vec<u8> {
     output.into_bytes()
 }
 
+fn signals_csv(rows: &[ReplaySignalDiagnostic]) -> Vec<u8> {
+    let mut output = String::from(
+        "bar_timestamp_ns,bar_open,bar_high,bar_low,bar_close,bar_index,bar_count,strategy,execution_path,signal_timing,signal_delay_bars,signal,raw_signal,effective_signal,raw_buy_signal,raw_sell_signal,effective_buy_signal,effective_sell_signal,current_position_qty,effective_position_qty,target_qty,decision,gate_reason,order_action,order_qty,indicator_name,previous_fast_indicator,previous_slow_indicator,fast_indicator,slow_indicator,auxiliary_name,auxiliary_value,hold_reason,strategy_detail,fingerprint\n",
+    );
+    for row in rows {
+        let fields = [
+            row.bar_timestamp_ns.to_string(),
+            row.bar_open.to_string(),
+            row.bar_high.to_string(),
+            row.bar_low.to_string(),
+            row.bar_close.to_string(),
+            optional(row.bar_index),
+            row.bar_count.to_string(),
+            row.strategy.clone(),
+            row.execution_path.clone(),
+            row.signal_timing.clone(),
+            row.signal_delay_bars.to_string(),
+            row.signal.clone(),
+            row.raw_signal.clone(),
+            row.effective_signal.clone(),
+            row.raw_buy_signal.to_string(),
+            row.raw_sell_signal.to_string(),
+            row.effective_buy_signal.to_string(),
+            row.effective_sell_signal.to_string(),
+            row.current_position_qty.to_string(),
+            row.effective_position_qty.to_string(),
+            optional(row.target_qty),
+            row.decision.clone(),
+            row.gate_reason.clone(),
+            row.order_action.clone().unwrap_or_default(),
+            optional(row.order_qty),
+            row.indicator_name.clone(),
+            optional(row.previous_fast_indicator),
+            optional(row.previous_slow_indicator),
+            optional(row.fast_indicator),
+            optional(row.slow_indicator),
+            row.auxiliary_name.clone().unwrap_or_default(),
+            optional(row.auxiliary_value),
+            row.hold_reason.clone().unwrap_or_default(),
+            row.strategy_detail.clone(),
+            optional(row.fingerprint),
+        ];
+        push_csv_row(&mut output, &fields);
+    }
+    output.into_bytes()
+}
+
 fn fill_price_source_label(source: ReplayFillPriceSource) -> &'static str {
     match source {
         ReplayFillPriceSource::LegacyReferencePrice => "legacy_reference_price",
@@ -1047,11 +1741,12 @@ fn fill_price_source_label(source: ReplayFillPriceSource) -> &'static str {
     }
 }
 
-fn trades_csv(trades: &[TradeRow]) -> Vec<u8> {
+fn trades_csv(trades: &[TradeRow], excursions: Option<&[ReplayTradeExcursion]>) -> Vec<u8> {
     let mut output = String::from(
-        "trade_id,account_id,contract_id,contract_name,side,quantity,entry_timestamp_ns,entry_price,exit_timestamp_ns,exit_price,gross_realized_pnl,fees,net_realized_pnl,exit_reason,fill_count,execution_precision\n",
+        "trade_id,account_id,contract_id,contract_name,side,quantity,entry_timestamp_ns,entry_price,exit_timestamp_ns,exit_price,gross_realized_pnl,fees,net_realized_pnl,exit_reason,fill_count,execution_precision,mfe_points,mae_points,mfe_pnl,mae_pnl,giveback,mfe_capture_ratio,mfe_timestamp_ns,time_to_mfe_ns,time_from_mfe_to_exit_ns,bars_to_mfe,ticks_to_mfe,bars_from_mfe_to_exit,ticks_from_mfe_to_exit,post_exit_favorable_points,post_exit_favorable_price,post_exit_favorable_pnl,post_exit_favorable_timestamp_ns,post_exit_bars_observed,path_precision\n",
     );
     for (index, trade) in trades.iter().enumerate() {
+        let excursion = excursions.and_then(|rows| rows.get(index));
         let row = [
             (index + 1).to_string(),
             trade.account_id.to_string(),
@@ -1069,6 +1764,27 @@ fn trades_csv(trades: &[TradeRow]) -> Vec<u8> {
             trade.exit_reason.clone().unwrap_or_default(),
             trade.fill_count.to_string(),
             trade.execution_precision.clone(),
+            excursion.map_or_else(String::new, |row| row.mfe_points.to_string()),
+            excursion.map_or_else(String::new, |row| row.mae_points.to_string()),
+            excursion.map_or_else(String::new, |row| optional(row.mfe_pnl)),
+            excursion.map_or_else(String::new, |row| optional(row.mae_pnl)),
+            excursion.map_or_else(String::new, |row| optional(row.giveback)),
+            excursion.map_or_else(String::new, |row| optional(row.mfe_capture_ratio)),
+            excursion.map_or_else(String::new, |row| optional(row.mfe_timestamp_ns)),
+            excursion.map_or_else(String::new, |row| optional(row.time_to_mfe_ns)),
+            excursion.map_or_else(String::new, |row| optional(row.time_from_mfe_to_exit_ns)),
+            excursion.map_or_else(String::new, |row| optional(row.bars_to_mfe)),
+            excursion.map_or_else(String::new, |row| optional(row.ticks_to_mfe)),
+            excursion.map_or_else(String::new, |row| optional(row.bars_from_mfe_to_exit)),
+            excursion.map_or_else(String::new, |row| optional(row.ticks_from_mfe_to_exit)),
+            excursion.map_or_else(String::new, |row| optional(row.post_exit_favorable_points)),
+            excursion.map_or_else(String::new, |row| optional(row.post_exit_favorable_price)),
+            excursion.map_or_else(String::new, |row| optional(row.post_exit_favorable_pnl)),
+            excursion.map_or_else(String::new, |row| {
+                optional(row.post_exit_favorable_timestamp_ns)
+            }),
+            excursion.map_or_else(String::new, |row| optional(row.post_exit_bars_observed)),
+            excursion.map_or_else(String::new, |row| row.path_precision.clone()),
         ];
         push_csv_row(&mut output, &row);
     }
@@ -1180,7 +1896,7 @@ mod tests {
     use crate::broker::{
         AccountInfo, ContractSuggestion, ReplayEngineMode, ReplayExecutionPrecision,
         ReplayFillModel, ReplayFillPriceSource, ReplayLatencyModel, ReplayMarketDom,
-        ReplayWindowSnapshot,
+        ReplaySignalDiagnostic, ReplayWindowSnapshot,
     };
     use crate::config::TradingEnvironment;
     use crate::tradovate::MarketSpecs;
@@ -1225,6 +1941,36 @@ mod tests {
         }
     }
 
+    fn replay_state_with_ticks() -> ReplayState {
+        let mut replay = replay_state();
+        replay.data = ReplayDataSource::PriceTicks(std::sync::Arc::from(
+            vec![
+                ReplayTick {
+                    ts_ns: 1_000_000_000,
+                    last: 100.0,
+                    size: Some(1.0),
+                },
+                ReplayTick {
+                    ts_ns: 1_500_000_000,
+                    last: 103.0,
+                    size: Some(1.0),
+                },
+                ReplayTick {
+                    ts_ns: 2_000_000_000,
+                    last: 98.0,
+                    size: Some(1.0),
+                },
+                ReplayTick {
+                    ts_ns: 2_500_000_000,
+                    last: 104.0,
+                    size: Some(1.0),
+                },
+            ]
+            .into_boxed_slice(),
+        ));
+        replay
+    }
+
     fn fill(
         id: i64,
         side: &str,
@@ -1262,6 +2008,148 @@ mod tests {
     }
 
     #[test]
+    fn excursion_math_reports_tick_exact_opportunity_and_giveback() {
+        let trade = TradeRow {
+            account_id: 1,
+            contract_id: 99,
+            contract_name: "MESU6".to_string(),
+            side: "long".to_string(),
+            quantity: 1.0,
+            entry_timestamp_ns: 10,
+            entry_price: 100.0,
+            exit_timestamp_ns: Some(30),
+            exit_price: Some(101.6),
+            gross_realized_pnl: 8.0,
+            fees: 0.0,
+            net_realized_pnl: 8.0,
+            exit_reason: None,
+            fill_count: 2,
+            execution_precision: "tick_exact".to_string(),
+        };
+        let points = [
+            ExcursionPoint {
+                timestamp_ns: 10,
+                high: 100.0,
+                low: 100.0,
+                bar_index: 0,
+            },
+            ExcursionPoint {
+                timestamp_ns: 20,
+                high: 103.0,
+                low: 99.0,
+                bar_index: 1,
+            },
+            ExcursionPoint {
+                timestamp_ns: 30,
+                high: 102.0,
+                low: 98.0,
+                bar_index: 2,
+            },
+        ];
+
+        let excursion = excursion_for_trade(
+            7,
+            &trade,
+            &points,
+            ExcursionPathPrecision::TickExact,
+            Some(5.0),
+            0,
+        );
+
+        assert_eq!(excursion.trade_id, 7);
+        assert_eq!(excursion.mfe_points, 3.0);
+        assert_eq!(excursion.mae_points, 2.0);
+        assert_eq!(excursion.mfe_price, 103.0);
+        assert_eq!(excursion.mae_price, 98.0);
+        assert_eq!(excursion.mfe_pnl, Some(15.0));
+        assert_eq!(excursion.mae_pnl, Some(10.0));
+        assert_eq!(excursion.giveback, Some(7.0));
+        assert_eq!(excursion.mfe_capture_ratio, Some(8.0 / 15.0));
+        assert_eq!(excursion.mfe_timestamp_ns, Some(20));
+        assert_eq!(excursion.time_to_mfe_ns, Some(10));
+        assert_eq!(excursion.time_from_mfe_to_exit_ns, Some(10));
+        assert_eq!(excursion.ticks_to_mfe, Some(2));
+        assert_eq!(excursion.ticks_from_mfe_to_exit, Some(1));
+        assert_eq!(excursion.bars_to_mfe, None);
+        assert_eq!(excursion.path_precision, "tick_exact");
+    }
+
+    #[test]
+    fn excursion_math_marks_bar_path_as_approximate_and_handles_shorts() {
+        let trade = TradeRow {
+            account_id: 1,
+            contract_id: 99,
+            contract_name: "MESU6".to_string(),
+            side: "short".to_string(),
+            quantity: 1.0,
+            entry_timestamp_ns: 10,
+            entry_price: 100.0,
+            exit_timestamp_ns: Some(30),
+            exit_price: Some(97.0),
+            gross_realized_pnl: 15.0,
+            fees: 0.0,
+            net_realized_pnl: 15.0,
+            exit_reason: None,
+            fill_count: 2,
+            execution_precision: "bar_approximate".to_string(),
+        };
+        let points = [
+            ExcursionPoint {
+                timestamp_ns: 10,
+                high: 100.0,
+                low: 100.0,
+                bar_index: 0,
+            },
+            ExcursionPoint {
+                timestamp_ns: 20,
+                high: 102.0,
+                low: 96.0,
+                bar_index: 1,
+            },
+            ExcursionPoint {
+                timestamp_ns: 30,
+                high: 99.0,
+                low: 97.0,
+                bar_index: 2,
+            },
+        ];
+
+        let excursion = excursion_for_trade(
+            8,
+            &trade,
+            &points,
+            ExcursionPathPrecision::BarApproximate,
+            Some(5.0),
+            0,
+        );
+
+        assert_eq!(excursion.mfe_points, 4.0);
+        assert_eq!(excursion.mae_points, 2.0);
+        assert_eq!(excursion.mfe_price, 96.0);
+        assert_eq!(excursion.mae_price, 102.0);
+        assert_eq!(excursion.mfe_pnl, Some(20.0));
+        assert_eq!(excursion.mae_pnl, Some(10.0));
+        assert_eq!(excursion.giveback, Some(5.0));
+        assert_eq!(excursion.bars_to_mfe, Some(2));
+        assert_eq!(excursion.bars_from_mfe_to_exit, Some(1));
+        assert_eq!(excursion.ticks_to_mfe, None);
+        assert_eq!(excursion.path_precision, "bar_approximate");
+    }
+
+    #[test]
+    fn replay_result_capital_prefers_account_value_then_config_fallback() {
+        let replay = replay_state();
+        assert_eq!(replay_initial_capital(&replay, 25_000.0), 10_000.0);
+
+        let mut missing_account_value = replay;
+        missing_account_value.account.raw = json!({});
+        assert_eq!(
+            replay_initial_capital(&missing_account_value, 25_000.0),
+            25_000.0
+        );
+    }
+
+    #[test]
     fn result_writer_saves_versioned_json_and_csv_sidecars() {
         let root = std::env::temp_dir().join(format!(
             "trader-replay-results-{}-{}",
@@ -1275,6 +2163,11 @@ mod tests {
         config.broker = crate::broker::BrokerKind::Tradovate;
         config.env = TradingEnvironment::Sim;
         config.replay_result_dir = root.clone();
+        config.replay_initial_capital = 10_000.0;
+        config.replay_margin_per_contract = 1_000.0;
+        config.replay_safety_buffer = 100.0;
+        config.replay_post_exit_continuation_bars = 2;
+        config.replay_signal_diagnostics = true;
         let mut ledger = ReplayExecutionLedgerSnapshot::default();
         ledger.schema_version = 3;
         ledger.engine_mode = ReplayEngineMode::Deterministic;
@@ -1301,7 +2194,44 @@ mod tests {
             replay_window: None,
             status: "complete".to_string(),
         };
-        let replay = replay_state();
+        let replay = replay_state_with_ticks();
+        let diagnostic = ReplaySignalDiagnostic {
+            bar_timestamp_ns: 1_000_000_000,
+            bar_open: 100.0,
+            bar_high: 102.0,
+            bar_low: 99.0,
+            bar_close: 101.0,
+            bar_index: Some(1),
+            bar_count: 2,
+            strategy: "ema_cross".to_string(),
+            execution_path: "guarded".to_string(),
+            signal_timing: "closed bar".to_string(),
+            signal_delay_bars: 1,
+            signal: "Buy".to_string(),
+            raw_signal: "buy".to_string(),
+            effective_signal: "buy".to_string(),
+            raw_buy_signal: true,
+            raw_sell_signal: false,
+            effective_buy_signal: true,
+            effective_sell_signal: false,
+            current_position_qty: 0,
+            effective_position_qty: 0,
+            target_qty: Some(1),
+            decision: "dispatching".to_string(),
+            gate_reason: "target delta passed all guarded execution gates".to_string(),
+            order_action: Some("Buy".to_string()),
+            order_qty: Some(1),
+            indicator_name: "EMA".to_string(),
+            previous_fast_indicator: Some(99.0),
+            previous_slow_indicator: Some(100.0),
+            fast_indicator: Some(101.0),
+            slow_indicator: Some(100.5),
+            auxiliary_name: None,
+            auxiliary_value: None,
+            hold_reason: None,
+            strategy_detail: "Signal: Buy,detail".to_string(),
+            fingerprint: Some(42),
+        };
         let outcome = write_replay_result(ReplayResultInput {
             config: &config,
             replay: &replay,
@@ -1314,6 +2244,7 @@ mod tests {
             started_at_utc: DateTime::from_timestamp(0, 0).unwrap(),
             completed_at_utc: DateTime::from_timestamp(3, 0).unwrap(),
             error: None,
+            signal_diagnostics: Some(std::slice::from_ref(&diagnostic)),
         })
         .expect("write result");
 
@@ -1322,9 +2253,53 @@ mod tests {
         let document: ReplayResultDocument =
             serde_json::from_slice(&fs::read(&outcome.result_path).expect("read result JSON"))
                 .expect("parse result JSON");
+        let library = load_replay_result_entries(&root);
+        assert_eq!(library.entries.len(), 1);
+        assert!(library.warnings.is_empty());
+        assert_eq!(library.entries[0].document.run_id, "test-run");
         assert_eq!(document.schema_version, REPLAY_RESULT_SCHEMA_VERSION);
         assert_eq!(document.summary.net_pnl, 5.0);
-        assert!(document.margin_analysis.is_none());
+        assert_eq!(document.metadata.initial_capital, 10_000.0);
+        assert_eq!(document.metadata.margin_model, "fixed_per_contract");
+        assert_eq!(document.metadata.account_currency, "USD");
+        assert_eq!(document.metadata.post_exit_continuation_horizon_bars, 2);
+        assert!(document.metadata.signal_diagnostics_enabled);
+        assert_eq!(document.metadata.signal_diagnostic_count, 1);
+        assert_eq!(document.summary.required_starting_capital, Some(1_100.0));
+        assert_eq!(document.summary.initial_capital_sufficient, Some(true));
+        let excursion = document
+            .trade_excursions
+            .as_ref()
+            .and_then(|rows| rows.first())
+            .expect("tick-path excursion");
+        assert_eq!(excursion.path_precision, "tick_exact");
+        assert_eq!(excursion.mfe_points, 3.0);
+        assert_eq!(excursion.mae_points, 2.0);
+        assert_eq!(excursion.mfe_pnl, Some(15.0));
+        assert_eq!(excursion.mae_pnl, Some(10.0));
+        assert_eq!(excursion.giveback, Some(10.0));
+        assert_eq!(excursion.mfe_timestamp_ns, Some(1_500_000_000));
+        assert_eq!(excursion.ticks_to_mfe, Some(2));
+        assert_eq!(excursion.ticks_from_mfe_to_exit, Some(1));
+        assert_eq!(excursion.post_exit_favorable_points, Some(3.0));
+        assert_eq!(excursion.post_exit_favorable_price, Some(104.0));
+        assert_eq!(excursion.post_exit_favorable_pnl, Some(15.0));
+        assert_eq!(
+            excursion.post_exit_favorable_timestamp_ns,
+            Some(2_500_000_000)
+        );
+        assert_eq!(excursion.post_exit_bars_observed, Some(1));
+        assert_eq!(document.summary.average_mfe_pnl, Some(15.0));
+        assert_eq!(document.summary.average_mae_pnl, Some(10.0));
+        assert_eq!(document.summary.average_giveback, Some(10.0));
+        assert_eq!(document.summary.median_giveback, Some(10.0));
+        assert_eq!(document.summary.largest_giveback, Some(10.0));
+        assert_eq!(document.summary.average_mfe_capture_ratio, Some(5.0 / 15.0));
+        assert_eq!(document.summary.average_post_exit_favorable_pnl, Some(15.0));
+        assert_eq!(document.summary.largest_post_exit_favorable_pnl, Some(15.0));
+        assert_eq!(outcome.required_starting_capital, Some(1_100.0));
+        assert_eq!(outcome.initial_capital_sufficient, Some(true));
+        assert!(document.margin_analysis.is_some());
         assert_eq!(document.active_fee_scenario, FEE_NEUTRAL_SCENARIO_NAME);
         assert_eq!(document.fee_scenarios.len(), 1);
         let result_dir = outcome.result_path.parent().expect("result directory");
@@ -1332,7 +2307,21 @@ mod tests {
         assert!(result_dir.join("trades.csv").is_file());
         assert!(result_dir.join("equity.csv").is_file());
         assert!(result_dir.join("fee-scenarios.csv").is_file());
-        assert!(document.artifacts.margin_csv.is_none());
+        assert!(result_dir.join("signals.csv").is_file());
+        let signals_csv = fs::read_to_string(result_dir.join("signals.csv")).expect("read signals");
+        assert!(signals_csv.starts_with("bar_timestamp_ns,bar_open,bar_high"));
+        assert!(signals_csv.contains("dispatching"));
+        assert!(signals_csv.contains("\"Signal: Buy,detail\""));
+        let excursions_csv =
+            fs::read_to_string(result_dir.join("trade-excursions.csv")).expect("read excursions");
+        assert!(excursions_csv.starts_with("trade_id,account_id,contract_id"));
+        assert!(excursions_csv.contains("tick_exact"));
+        assert_eq!(
+            document.artifacts.trade_excursions_csv.as_deref(),
+            Some("trade-excursions.csv")
+        );
+        assert_eq!(document.artifacts.margin_csv.as_deref(), Some("margin.csv"));
+        assert!(result_dir.join("margin.csv").is_file());
         let mut legacy = serde_json::to_value(&document).expect("encode result");
         let legacy_object = legacy.as_object_mut().expect("result object");
         legacy_object.remove("active_fee_scenario");
@@ -1349,13 +2338,34 @@ mod tests {
                         | "peak_margin_requirement"
                         | "minimum_equity_buffer_over_margin"
                         | "initial_capital_sufficient"
+                        | "average_mfe_pnl"
+                        | "average_mae_pnl"
+                        | "average_giveback"
+                        | "median_giveback"
+                        | "largest_giveback"
+                        | "average_mfe_capture_ratio"
+                        | "average_post_exit_favorable_pnl"
+                        | "largest_post_exit_favorable_pnl"
                 )
             });
         legacy_object
             .get_mut("artifacts")
             .and_then(Value::as_object_mut)
             .expect("artifact object")
-            .retain(|key, _| key != "fee_scenarios_csv" && key != "margin_csv");
+            .retain(|key, _| {
+                key != "fee_scenarios_csv"
+                    && key != "margin_csv"
+                    && key != "trade_excursions_csv"
+                    && key != "signals_csv"
+            });
+        legacy_object
+            .get_mut("metadata")
+            .and_then(Value::as_object_mut)
+            .expect("metadata object")
+            .retain(|key, _| {
+                key != "signal_diagnostics_enabled" && key != "signal_diagnostic_count"
+            });
+        legacy_object.remove("trade_excursions");
         let legacy_document: ReplayResultDocument =
             serde_json::from_value(legacy).expect("parse v1 result");
         assert_eq!(
@@ -1380,6 +2390,7 @@ mod tests {
         config.broker = crate::broker::BrokerKind::Tradovate;
         config.env = TradingEnvironment::Sim;
         config.replay_result_dir = root.clone();
+        config.replay_post_exit_continuation_bars = 2;
         let mut ledger = ReplayExecutionLedgerSnapshot::default();
         ledger.schema_version = 3;
         ledger.engine_mode = ReplayEngineMode::Deterministic;
@@ -1405,7 +2416,7 @@ mod tests {
             replay_window: None,
             status: "complete".to_string(),
         };
-        let replay = replay_state();
+        let replay = replay_state_with_ticks();
         let written = write_replay_result(ReplayResultInput {
             config: &config,
             replay: &replay,
@@ -1418,8 +2429,22 @@ mod tests {
             started_at_utc: DateTime::from_timestamp(0, 0).unwrap(),
             completed_at_utc: DateTime::from_timestamp(3, 0).unwrap(),
             error: None,
+            signal_diagnostics: None,
         })
         .expect("write result");
+        let neutral_document: ReplayResultDocument =
+            serde_json::from_slice(&fs::read(&written.result_path).expect("read neutral result"))
+                .expect("parse neutral result");
+        assert!(neutral_document.margin_analysis.is_none());
+        assert_eq!(neutral_document.metadata.margin_model, "not_configured");
+        assert_eq!(
+            neutral_document
+                .trade_excursions
+                .as_ref()
+                .and_then(|rows| rows.first())
+                .map(|row| row.mfe_pnl),
+            Some(Some(15.0))
+        );
         let margin_config = ReplayMarginConfig {
             margin_per_contract: 1_000.0,
             safety_buffer: 100.0,
@@ -1462,6 +2487,22 @@ mod tests {
         assert_eq!(document.active_fee_scenario, "broker_standard");
         assert_eq!(document.fee_scenarios.len(), 2);
         assert_eq!(document.ledger.fills, ledger.fills);
+        assert_eq!(
+            document
+                .trade_excursions
+                .as_ref()
+                .and_then(|rows| rows.first())
+                .map(|row| row.giveback),
+            Some(Some(10.0))
+        );
+        assert_eq!(
+            document
+                .trade_excursions
+                .as_ref()
+                .and_then(|rows| rows.first())
+                .map(|row| row.post_exit_favorable_pnl),
+            Some(Some(15.0))
+        );
         assert_eq!(document.summary.gross_pnl, 5.0);
         assert_eq!(document.summary.fees, 1.0);
         assert_eq!(document.summary.net_pnl, 4.0);
@@ -1488,6 +2529,9 @@ mod tests {
         assert!(equity_csv.contains("cumulative_net_pnl"));
         let trades_csv = fs::read_to_string(result_dir.join("trades.csv")).expect("read trades");
         assert!(trades_csv.contains("net_realized_pnl"));
+        assert!(trades_csv.contains("mfe_points"));
+        assert!(trades_csv.contains(",15,"));
+        assert!(result_dir.join("trade-excursions.csv").is_file());
         fs::remove_dir_all(root).expect("cleanup result directory");
     }
 

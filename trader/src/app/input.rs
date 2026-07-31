@@ -26,6 +26,7 @@ impl App {
                 | KeyCode::F(4)
                 | KeyCode::F(6)
                 | KeyCode::F(7)
+                | KeyCode::F(8)
         ) && self.retain_active_replay_downloader()
         {
             return;
@@ -36,6 +37,13 @@ impl App {
                 self.status =
                     "Attach or create an engine first, then press F7 for Replay.".to_string();
                 self.push_log(self.status.clone());
+                return;
+            }
+            if key.code == KeyCode::F(8) && self.analytics_affordance_visible() {
+                self.analytics_return_screen = self.screen;
+                self.screen = Screen::Analytics;
+                #[cfg(feature = "replay")]
+                self.replay_analytics.refresh();
                 return;
             }
             self.handle_engine_select_key(key);
@@ -99,6 +107,16 @@ impl App {
                 self.focus = Focus::BarTypeToggle;
                 return;
             }
+            KeyCode::F(8) => {
+                if !self.analytics_affordance_visible() {
+                    return;
+                }
+                self.analytics_return_screen = self.screen;
+                self.screen = Screen::Analytics;
+                #[cfg(feature = "replay")]
+                self.replay_analytics.refresh();
+                return;
+            }
             KeyCode::Esc => {
                 #[cfg(feature = "replay")]
                 if self.screen == Screen::Replay && self.replay_view == ReplayView::Downloader {
@@ -143,6 +161,8 @@ impl App {
                 if self.screen == Screen::Replay {
                     self.screen = Screen::Login;
                     self.focus = Focus::Env;
+                } else if self.screen == Screen::Analytics {
+                    self.screen = self.analytics_return_screen;
                 } else if self.screen == Screen::Login && self.available_brokers.len() > 1 {
                     self.screen = Screen::BrokerSelect;
                     self.focus = Focus::BrokerList;
@@ -180,6 +200,7 @@ impl App {
             Screen::Selection => self.handle_selection_key(key, cmd_tx),
             Screen::Dashboard => self.handle_dashboard_key(key, cmd_tx),
             Screen::Stats => self.handle_session_stats_key(key, cmd_tx),
+            Screen::Analytics => self.handle_analytics_key(key),
         }
     }
 

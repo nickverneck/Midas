@@ -1,5 +1,94 @@
 use super::*;
 
+/// Indicator values and gate inputs associated with one strategy evaluation.
+/// This is kept separate from the execution tuple so existing order paths can
+/// continue to use their compact return values while replay diagnostics opt in
+/// to the richer snapshot.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StrategyEvaluationSnapshot {
+    pub(crate) indicator_name: &'static str,
+    pub(crate) previous_fast_indicator: Option<f64>,
+    pub(crate) previous_slow_indicator: Option<f64>,
+    pub(crate) fast_indicator: Option<f64>,
+    pub(crate) slow_indicator: Option<f64>,
+    pub(crate) auxiliary_name: Option<&'static str>,
+    pub(crate) auxiliary_value: Option<f64>,
+    pub(crate) raw_buy_signal: bool,
+    pub(crate) raw_sell_signal: bool,
+    pub(crate) effective_buy_signal: bool,
+    pub(crate) effective_sell_signal: bool,
+    pub(crate) hold_reason: Option<&'static str>,
+}
+
+/// Re-evaluate a selected bar window without mutating execution state and
+/// expose the indicator inputs needed by the replay signal artifact.
+pub(crate) fn snapshot_active_execution_strategy(
+    session: &SessionState,
+    bars: &[Bar],
+    current_qty: i32,
+) -> StrategyEvaluationSnapshot {
+    let current_side = side_from_signed_qty(current_qty);
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaAngle => {
+            let evaluation = session
+                .execution_config
+                .native_hma
+                .evaluate(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "HMA",
+                fast_indicator: evaluation.latest_hma,
+                slow_indicator: evaluation.lookback_hma,
+                auxiliary_name: Some("angle"),
+                auxiliary_value: evaluation.angle,
+                raw_buy_signal: evaluation.raw_buy_signal,
+                raw_sell_signal: evaluation.raw_sell_signal,
+                effective_buy_signal: evaluation.effective_buy_signal,
+                effective_sell_signal: evaluation.effective_sell_signal,
+                hold_reason: evaluation.hold_reason,
+                ..Default::default()
+            }
+        }
+        NativeStrategyKind::EmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_ema
+                .evaluate(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "EMA",
+                previous_fast_indicator: evaluation.previous_fast_ema,
+                previous_slow_indicator: evaluation.previous_slow_ema,
+                fast_indicator: evaluation.fast_ema,
+                slow_indicator: evaluation.slow_ema,
+                raw_buy_signal: evaluation.raw_buy_signal,
+                raw_sell_signal: evaluation.raw_sell_signal,
+                effective_buy_signal: evaluation.effective_buy_signal,
+                effective_sell_signal: evaluation.effective_sell_signal,
+                hold_reason: evaluation.hold_reason,
+                ..Default::default()
+            }
+        }
+        NativeStrategyKind::HmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_hma_cross
+                .evaluate(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "HMA",
+                previous_fast_indicator: evaluation.previous_fast_hma,
+                previous_slow_indicator: evaluation.previous_slow_hma,
+                fast_indicator: evaluation.fast_hma,
+                slow_indicator: evaluation.slow_hma,
+                raw_buy_signal: evaluation.raw_buy_signal,
+                raw_sell_signal: evaluation.raw_sell_signal,
+                effective_buy_signal: evaluation.effective_buy_signal,
+                effective_sell_signal: evaluation.effective_sell_signal,
+                hold_reason: evaluation.hold_reason,
+                ..Default::default()
+            }
+        }
+    }
+}
+
 pub(crate) fn evaluate_active_execution_strategy(
     session: &SessionState,
     bars: &[Bar],

@@ -1,3 +1,4 @@
+mod analytics;
 mod dashboard;
 mod login;
 mod replay;

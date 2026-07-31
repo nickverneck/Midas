@@ -165,7 +165,22 @@ impl App {
                 "F5/Ctrl+S save logs".to_string(),
                 "q quit".to_string(),
             ],
+            Screen::Analytics => vec![
+                "F8 refresh/open analytics".to_string(),
+                "Tab runs/trades".to_string(),
+                "Up/Down select".to_string(),
+                "Left/Right fee scenario".to_string(),
+                "s sort trades".to_string(),
+                "c compare run".to_string(),
+                "r refresh files".to_string(),
+                "Esc return".to_string(),
+                "F5/Ctrl+S save logs".to_string(),
+                "q quit".to_string(),
+            ],
         };
+        if self.analytics_affordance_visible() && self.screen != Screen::Analytics {
+            items.push("F8 analytics".to_string());
+        }
         items.retain(|item| !item.is_empty());
         items.join(" | ")
     }
@@ -176,6 +191,9 @@ impl App {
             titles.push("Replay");
         }
         titles.extend(["Selection", "Strategy", "Dashboard"]);
+        if self.analytics_affordance_visible() {
+            titles.push("Analytics");
+        }
         if self.session_stats_affordance_visible() {
             titles.push("Stats");
         }
@@ -205,6 +223,7 @@ impl App {
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",
             Screen::Stats => "Stats",
+            Screen::Analytics => "Analytics",
         }
     }
 

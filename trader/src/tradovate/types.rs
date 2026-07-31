@@ -188,6 +188,9 @@ struct ExecutionRuntimeState {
     hma_execution: HmaAngleExecutionState,
     ema_execution: EmaCrossExecutionState,
     hma_cross_execution: HmaCrossExecutionState,
+    /// Replay-only structured strategy decision rows. Kept in runtime state
+    /// so live session construction remains allocation-free and unchanged.
+    replay_signal_diagnostics: Vec<crate::broker::ReplaySignalDiagnostic>,
 }
 
 impl ExecutionRuntimeState {

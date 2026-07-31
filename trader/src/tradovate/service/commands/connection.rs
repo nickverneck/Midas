@@ -134,7 +134,7 @@ pub(super) async fn enter_replay_mode(
     let selected_account_id = accounts.first().map(|account| account.id);
     let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut user_store = UserSyncStore::default();
-    seed_replay_user_store(&accounts, &mut user_store);
+    seed_replay_user_store(&accounts, &mut user_store, cfg.replay_initial_capital);
 
     state.replay = Some(replay.clone());
     state.replay_execution_ledger = replay::ReplayExecutionLedgerState::new_with_fill_config(
@@ -269,7 +269,11 @@ async fn reset_state_for_new_session(
     let _ = market_tx.send(MarketSnapshot::default());
 }
 
-fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
+fn seed_replay_user_store(
+    accounts: &[AccountInfo],
+    store: &mut UserSyncStore,
+    initial_capital: f64,
+) {
     for account in accounts {
         store.apply(EntityEnvelope {
             entity_type: "account".to_string(),
@@ -278,9 +282,9 @@ fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
                 "id": account.id,
                 "source": "replay",
                 "name": account.name,
-                "startingBalance": 100000.0,
-                "balance": 100000.0,
-                "netLiq": 100000.0
+                "startingBalance": initial_capital,
+                "balance": initial_capital,
+                "netLiq": initial_capital
             }),
         });
         store.apply(EntityEnvelope {
@@ -290,10 +294,10 @@ fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
                 "id": account.id,
                 "accountId": account.id,
                 "source": "replay",
-                "startingBalance": 100000.0,
-                "balance": 100000.0,
-                "netLiq": 100000.0,
-                "cashBalance": 100000.0,
+                "startingBalance": initial_capital,
+                "balance": initial_capital,
+                "netLiq": initial_capital,
+                "cashBalance": initial_capital,
                 "realizedPnL": 0.0
             }),
         });
@@ -304,8 +308,8 @@ fn seed_replay_user_store(accounts: &[AccountInfo], store: &mut UserSyncStore) {
                 "id": account.id,
                 "accountId": account.id,
                 "source": "replay",
-                "startingBalance": 100000.0,
-                "cashBalance": 100000.0,
+                "startingBalance": initial_capital,
+                "cashBalance": initial_capital,
                 "realizedPnL": 0.0
             }),
         });

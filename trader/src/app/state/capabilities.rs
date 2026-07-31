@@ -17,6 +17,10 @@ impl App {
         self.broker_supports_replay()
     }
 
+    pub(in crate::app) fn analytics_affordance_visible(&self) -> bool {
+        self.broker_supports_replay()
+    }
+
     pub(in crate::app) fn session_stats_affordance_visible(&self) -> bool {
         self.session_stats.enabled
     }

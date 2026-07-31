@@ -13,6 +13,8 @@ impl App {
         let replay_cache_library = ReplayCacheLibrary::scan(&config.replay_cache_dir);
         #[cfg(feature = "replay")]
         let replay_downloader = ReplayDownloaderState::new(&config);
+        #[cfg(feature = "replay")]
+        let replay_analytics = ReplayAnalyticsState::new(config.replay_result_dir.clone());
         let mut app = Self {
             base_config: config,
             #[cfg(feature = "replay")]
@@ -67,6 +69,9 @@ impl App {
             replay_downloader,
             #[cfg(feature = "replay")]
             replay_dataset_views: ReplayDatasetViewsState::default(),
+            #[cfg(feature = "replay")]
+            replay_analytics,
+            analytics_return_screen: Screen::EngineSelect,
             last_log_at: None,
             last_market_update_at: None,
         };

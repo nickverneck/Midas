@@ -58,7 +58,7 @@ mod history;
 mod orders;
 mod profiler;
 mod protocol;
-mod replay;
+pub(crate) mod replay;
 mod service;
 
 use self::protocol::*;

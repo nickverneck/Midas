@@ -29,10 +29,12 @@ impl App {
 
         match key.code {
             KeyCode::BackTab => {
+                self.clear_strategy_numeric_input();
                 self.focus = self.prev_replay_focus();
                 return;
             }
             KeyCode::Tab => {
+                self.clear_strategy_numeric_input();
                 self.focus = self.next_replay_focus();
                 return;
             }
@@ -106,6 +108,50 @@ impl App {
                 }
                 _ => {}
             },
+            #[cfg(feature = "replay")]
+            Focus::ReplayInitialCapital => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::ReplayInitialCapital,
+                    &mut self.base_config.replay_initial_capital,
+                    key,
+                    1.0,
+                    1_000.0,
+                );
+            }
+            #[cfg(feature = "replay")]
+            Focus::ReplayMarginPerContract => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::ReplayMarginPerContract,
+                    &mut self.base_config.replay_margin_per_contract,
+                    key,
+                    0.0,
+                    100.0,
+                );
+            }
+            #[cfg(feature = "replay")]
+            Focus::ReplaySafetyBuffer => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::ReplaySafetyBuffer,
+                    &mut self.base_config.replay_safety_buffer,
+                    key,
+                    0.0,
+                    100.0,
+                );
+            }
+            #[cfg(feature = "replay")]
+            Focus::ReplaySafetyBufferPercent => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::ReplaySafetyBufferPercent,
+                    &mut self.base_config.replay_safety_buffer_percent,
+                    key,
+                    0.0,
+                    1.0,
+                );
+            }
             #[cfg(feature = "replay")]
             Focus::ReplayDataset => {
                 if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {

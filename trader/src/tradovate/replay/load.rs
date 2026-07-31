@@ -108,6 +108,7 @@ pub(super) fn load_replay_state_blocking(
                     candle_mode,
                     Some(resolved.evaluation_range),
                     Some(replay_window),
+                    cfg.replay_initial_capital,
                 )?,
                 &dom_updates,
             );
@@ -128,6 +129,7 @@ pub(super) fn load_replay_state_blocking(
                     Some(resolved.load_range),
                     Some(resolved.evaluation_range),
                     Some(replay_window),
+                    cfg.replay_initial_capital,
                 )?,
                 &dom_updates,
             );
@@ -164,6 +166,7 @@ pub(super) fn load_replay_state_blocking(
                     candle_mode,
                     None,
                     None,
+                    cfg.replay_initial_capital,
                 )?,
                 &dom_updates,
             );
@@ -173,7 +176,13 @@ pub(super) fn load_replay_state_blocking(
                 .resolve_raw_ticks_parquet_files(None)
                 .context("load selected raw-tick replay dataset")?;
             return attach_dom_updates(
-                replay_state_from_cached_raw_ticks(cached, None, None, None)?,
+                replay_state_from_cached_raw_ticks(
+                    cached,
+                    None,
+                    None,
+                    None,
+                    cfg.replay_initial_capital,
+                )?,
                 &dom_updates,
             );
         }
@@ -184,25 +193,38 @@ pub(super) fn load_replay_state_blocking(
     }
     if let Some(cached) = library.load_first_server_bars(bar_type, candle_mode, None)? {
         return attach_dom_updates(
-            replay_state_from_cached_server_bars(cached, bar_type, candle_mode, None, None)?,
+            replay_state_from_cached_server_bars(
+                cached,
+                bar_type,
+                candle_mode,
+                None,
+                None,
+                cfg.replay_initial_capital,
+            )?,
             &dom_updates,
         );
     }
     if let Some(cached) = library.resolve_unique_raw_ticks_parquet_files(None)? {
         return attach_dom_updates(
-            replay_state_from_cached_raw_ticks(cached, None, None, None)?,
+            replay_state_from_cached_raw_ticks(
+                cached,
+                None,
+                None,
+                None,
+                cfg.replay_initial_capital,
+            )?,
             &dom_updates,
         );
     }
 
     attach_dom_updates(
-        load_local_tick_replay_state_blocking(&cfg.replay_file_path)?,
+        load_local_tick_replay_state_blocking(&cfg.replay_file_path, cfg.replay_initial_capital)?,
         &dom_updates,
     )
 }
 
 #[cfg(feature = "replay")]
-fn load_local_tick_replay_state_blocking(path: &Path) -> Result<ReplayState> {
+fn load_local_tick_replay_state_blocking(path: &Path, initial_capital: f64) -> Result<ReplayState> {
     let resolved_path = resolve_replay_path(path)?;
     let file = File::open(&resolved_path)
         .with_context(|| format!("open replay file {}", resolved_path.display()))?;
@@ -245,7 +267,7 @@ fn load_local_tick_replay_state_blocking(path: &Path) -> Result<ReplayState> {
             "configuredPath": path.display().to_string(),
         }),
     };
-    let account = replay_account("replay");
+    let account = replay_account("replay", initial_capital);
 
     Ok(ReplayState {
         evaluation_range: None,
@@ -268,6 +290,7 @@ pub(super) fn replay_state_from_cached_raw_ticks(
     timestamp_range: Option<crate::replay_cache::ReplayCacheTimeRange>,
     evaluation_range: Option<crate::replay_cache::ReplayCacheTimeRange>,
     replay_window: Option<ReplayWindowSnapshot>,
+    initial_capital: f64,
 ) -> Result<ReplayState> {
     let contract_name = if cached.manifest.contract.symbol.trim().is_empty() {
         "Replay Cache".to_string()
@@ -306,7 +329,7 @@ pub(super) fn replay_state_from_cached_raw_ticks(
                 "dataPaths": cached.files.iter().map(|file| file.data_path.display().to_string()).collect::<Vec<_>>(),
             }),
         },
-        account: replay_account("replay-cache"),
+        account: replay_account("replay-cache", initial_capital),
         market_specs: MarketSpecs {
             session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
             value_per_point: Some(cached.manifest.tick_specs.value_per_point),
@@ -328,6 +351,7 @@ fn replay_state_from_cached_server_bars(
     requested_candle_mode: CandleMode,
     evaluation_range: Option<crate::replay_cache::ReplayCacheTimeRange>,
     replay_window: Option<ReplayWindowSnapshot>,
+    initial_capital: f64,
 ) -> Result<ReplayState> {
     let contract_name = if cached.manifest.contract.symbol.trim().is_empty() {
         "Replay Cache".to_string()
@@ -375,7 +399,7 @@ fn replay_state_from_cached_server_bars(
                 "requestedCandleMode": requested_candle_mode,
             }),
         },
-        account: replay_account("replay-cache"),
+        account: replay_account("replay-cache", initial_capital),
         market_specs: MarketSpecs {
             session_profile: Some(session_profile),
             value_per_point: Some(cached.manifest.tick_specs.value_per_point),
@@ -474,7 +498,7 @@ fn normalize_replay_dom_side(levels: &mut Vec<ReplayDomLevel>, descending: bool)
 }
 
 #[cfg(feature = "replay")]
-fn replay_account(source: &str) -> AccountInfo {
+fn replay_account(source: &str, initial_capital: f64) -> AccountInfo {
     AccountInfo {
         id: 1,
         name: "REPLAY".to_string(),
@@ -482,8 +506,8 @@ fn replay_account(source: &str) -> AccountInfo {
             "id": 1,
             "name": "REPLAY",
             "source": source,
-            "startingBalance": 100000.0,
-            "balance": 100000.0,
+            "startingBalance": initial_capital,
+            "balance": initial_capital,
         }),
     }
 }

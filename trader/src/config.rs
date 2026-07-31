@@ -154,6 +154,25 @@ pub struct AppConfig {
     pub replay_cache_dir: PathBuf,
     /// Root directory for durable replay result artifacts.
     pub replay_result_dir: PathBuf,
+    /// Starting account equity used by replay-only account and margin analytics.
+    pub replay_initial_capital: f64,
+    /// Currency label for replay account and margin analytics.
+    pub replay_account_currency: String,
+    /// Label for the replay margin assumption. The first supported calculation is fixed per contract.
+    pub replay_margin_model: String,
+    /// Fixed margin requirement per open contract. Zero disables automatic margin analytics.
+    pub replay_margin_per_contract: f64,
+    /// Fixed safety buffer added above replay margin requirements.
+    pub replay_safety_buffer: f64,
+    /// Percentage safety buffer applied to replay margin requirements.
+    pub replay_safety_buffer_percent: f64,
+    /// Optional number of selected replay bars to inspect after each exit for
+    /// favorable continuation. Zero disables post-exit continuation analytics.
+    pub replay_post_exit_continuation_bars: usize,
+    /// Persist one structured strategy decision row per replay evaluation.
+    /// Disabled by default to keep normal replay artifacts and live execution
+    /// lightweight.
+    pub replay_signal_diagnostics: bool,
     pub replay_bar_interval_ms: u64,
     pub replay_engine_mode: ReplayEngineMode,
     pub replay_fill_model: ReplayFillModel,
@@ -194,6 +213,14 @@ impl Default for AppConfig {
             replay_dom_file_path: None,
             replay_cache_dir: default_replay_cache_dir(),
             replay_result_dir: PathBuf::from(".run/replay-results"),
+            replay_initial_capital: 100_000.0,
+            replay_account_currency: "USD".to_string(),
+            replay_margin_model: "fixed_per_contract".to_string(),
+            replay_margin_per_contract: 0.0,
+            replay_safety_buffer: 0.0,
+            replay_safety_buffer_percent: 0.0,
+            replay_post_exit_continuation_bars: 0,
+            replay_signal_diagnostics: false,
             replay_bar_interval_ms: 5,
             replay_engine_mode: ReplayEngineMode::default(),
             replay_fill_model: ReplayFillModel::RawBarOpen,
@@ -326,6 +353,54 @@ impl AppConfig {
         {
             self.replay_result_dir = PathBuf::from(raw);
         }
+        if let Some(raw) = env_parse_any::<f64>(&[
+            "TRADER_REPLAY_INITIAL_CAPITAL",
+            "MIDAS_TUI_REPLAY_INITIAL_CAPITAL",
+        ])? {
+            self.replay_initial_capital = raw;
+        }
+        if let Some(raw) = env_string_any(&[
+            "TRADER_REPLAY_ACCOUNT_CURRENCY",
+            "MIDAS_TUI_REPLAY_ACCOUNT_CURRENCY",
+        ]) {
+            self.replay_account_currency = raw;
+        }
+        if let Some(raw) = env_string_any(&[
+            "TRADER_REPLAY_MARGIN_MODEL",
+            "MIDAS_TUI_REPLAY_MARGIN_MODEL",
+        ]) {
+            self.replay_margin_model = raw;
+        }
+        if let Some(raw) = env_parse_any::<f64>(&[
+            "TRADER_REPLAY_MARGIN_PER_CONTRACT",
+            "MIDAS_TUI_REPLAY_MARGIN_PER_CONTRACT",
+        ])? {
+            self.replay_margin_per_contract = raw;
+        }
+        if let Some(raw) = env_parse_any::<f64>(&[
+            "TRADER_REPLAY_SAFETY_BUFFER",
+            "MIDAS_TUI_REPLAY_SAFETY_BUFFER",
+        ])? {
+            self.replay_safety_buffer = raw;
+        }
+        if let Some(raw) = env_parse_any::<f64>(&[
+            "TRADER_REPLAY_SAFETY_BUFFER_PERCENT",
+            "MIDAS_TUI_REPLAY_SAFETY_BUFFER_PERCENT",
+        ])? {
+            self.replay_safety_buffer_percent = raw;
+        }
+        if let Some(raw) = env_parse_any::<usize>(&[
+            "TRADER_REPLAY_POST_EXIT_CONTINUATION_BARS",
+            "MIDAS_TUI_REPLAY_POST_EXIT_CONTINUATION_BARS",
+        ])? {
+            self.replay_post_exit_continuation_bars = raw;
+        }
+        if let Some(raw) = env_bool_any(&[
+            "TRADER_REPLAY_SIGNAL_DIAGNOSTICS",
+            "MIDAS_TUI_REPLAY_SIGNAL_DIAGNOSTICS",
+        ])? {
+            self.replay_signal_diagnostics = raw;
+        }
         if let Some(raw) = env_parse_any::<u64>(&[
             "TRADER_REPLAY_BAR_INTERVAL_MS",
             "MIDAS_TUI_REPLAY_BAR_INTERVAL_MS",
@@ -378,6 +453,25 @@ impl AppConfig {
         }
         if self.replay_bar_interval_ms == 0 {
             bail!("replay_bar_interval_ms must be > 0");
+        }
+        if !self.replay_initial_capital.is_finite() || self.replay_initial_capital <= 0.0 {
+            bail!("replay_initial_capital must be finite and greater than zero");
+        }
+        if self.replay_account_currency.trim().is_empty() {
+            bail!("replay_account_currency cannot be empty");
+        }
+        if self.replay_margin_model.trim().is_empty() {
+            bail!("replay_margin_model cannot be empty");
+        }
+        if !self.replay_margin_per_contract.is_finite() || self.replay_margin_per_contract < 0.0 {
+            bail!("replay_margin_per_contract must be finite and non-negative");
+        }
+        if !self.replay_safety_buffer.is_finite() || self.replay_safety_buffer < 0.0 {
+            bail!("replay_safety_buffer must be finite and non-negative");
+        }
+        if !self.replay_safety_buffer_percent.is_finite() || self.replay_safety_buffer_percent < 0.0
+        {
+            bail!("replay_safety_buffer_percent must be finite and non-negative");
         }
         if self.replay_engine_mode == ReplayEngineMode::Deterministic {
             if self.replay_fill_model == ReplayFillModel::LegacyReferencePrice {
@@ -606,6 +700,46 @@ mod tests {
         let config = AppConfig::load(Some(&path)).expect("load config");
 
         assert_eq!(config.replay_result_dir, result_dir);
+    }
+
+    #[test]
+    fn replay_account_and_margin_defaults_are_explicit() {
+        let config: AppConfig = toml::from_str("").expect("default config");
+
+        assert_eq!(config.replay_initial_capital, 100_000.0);
+        assert_eq!(config.replay_account_currency, "USD");
+        assert_eq!(config.replay_margin_model, "fixed_per_contract");
+        assert_eq!(config.replay_margin_per_contract, 0.0);
+        assert_eq!(config.replay_safety_buffer, 0.0);
+        assert_eq!(config.replay_safety_buffer_percent, 0.0);
+        assert_eq!(config.replay_post_exit_continuation_bars, 0);
+        assert!(!config.replay_signal_diagnostics);
+    }
+
+    #[test]
+    fn replay_account_and_margin_controls_load_from_file() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            replay_initial_capital = 25000.0
+            replay_account_currency = "EUR"
+            replay_margin_model = "fixed_per_contract"
+            replay_margin_per_contract = 1400.0
+            replay_safety_buffer = 250.0
+            replay_safety_buffer_percent = 12.5
+            replay_post_exit_continuation_bars = 8
+            replay_signal_diagnostics = true
+            "#,
+        )
+        .expect("configured replay account");
+
+        assert_eq!(config.replay_initial_capital, 25_000.0);
+        assert_eq!(config.replay_account_currency, "EUR");
+        assert_eq!(config.replay_margin_per_contract, 1_400.0);
+        assert_eq!(config.replay_safety_buffer, 250.0);
+        assert_eq!(config.replay_safety_buffer_percent, 12.5);
+        assert_eq!(config.replay_post_exit_continuation_bars, 8);
+        assert!(config.replay_signal_diagnostics);
+        assert!(config.validate().is_ok());
     }
 
     #[test]

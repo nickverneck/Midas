@@ -96,11 +96,16 @@ fn load_replay_state_prefers_matching_cached_server_bars() {
     let mut cfg = AppConfig::default();
     cfg.replay_cache_dir = cache_root;
     cfg.replay_file_path = PathBuf::from("/tmp/trader-replay-missing-local.Last.txt");
+    cfg.replay_initial_capital = 12_345.0;
     let state =
         load_replay_state_blocking(&cfg, BarType::minute(1), CandleMode::HeikinAshi, None, None)
             .expect("load replay state from cache");
 
     assert_eq!(replay_contract(&state).name, "MESU6");
+    assert_eq!(
+        state.account.raw["startingBalance"].as_f64(),
+        Some(12_345.0)
+    );
     let bars = state
         .bars_for_type(BarType::minute(1))
         .expect("cached bars");

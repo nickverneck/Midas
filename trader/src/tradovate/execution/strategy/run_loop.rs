@@ -262,6 +262,19 @@ pub(crate) fn maybe_run_execution_strategy(
     if let Some(window) = session_window_at(session, protection_bar.ts_ns) {
         if window.hold_entries {
             if actual_market_qty != 0 {
+                record_replay_signal_diagnostic(
+                    session,
+                    signal_bar.ts_ns,
+                    signal,
+                    actual_market_qty,
+                    current_qty,
+                    Some(0),
+                    "session_hold_flattening",
+                    "session hold requires flattening before the close/reopen window",
+                    Some(if actual_market_qty > 0 { "Sell" } else { "Buy" }),
+                    Some(actual_market_qty.abs()),
+                    &debug_summary,
+                );
                 emit_guarded_strategy_eval_debug(
                     event_tx,
                     session,
@@ -329,6 +342,19 @@ pub(crate) fn maybe_run_execution_strategy(
                 return Ok(());
             }
 
+            record_replay_signal_diagnostic(
+                session,
+                signal_bar.ts_ns,
+                signal,
+                actual_market_qty,
+                current_qty,
+                target_qty_for_signal(signal, current_qty, session.execution_config.order_qty),
+                "session_hold_blocked_entries",
+                "session hold blocks new entries while flat",
+                None,
+                None,
+                &debug_summary,
+            );
             emit_guarded_strategy_eval_debug(
                 event_tx,
                 session,
@@ -359,6 +385,19 @@ pub(crate) fn maybe_run_execution_strategy(
     let Some(target_qty) =
         target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
     else {
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_market_qty,
+            current_qty,
+            None,
+            "no_target",
+            "signal did not produce a target position",
+            None,
+            None,
+            &debug_summary,
+        );
         emit_guarded_strategy_eval_debug(
             event_tx,
             session,
@@ -376,6 +415,19 @@ pub(crate) fn maybe_run_execution_strategy(
     };
 
     if target_qty == current_qty {
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_market_qty,
+            current_qty,
+            Some(target_qty),
+            "target_already_current",
+            "target position already matches effective position",
+            None,
+            None,
+            &debug_summary,
+        );
         emit_guarded_strategy_eval_debug(
             event_tx,
             session,
@@ -396,6 +448,19 @@ pub(crate) fn maybe_run_execution_strategy(
         session.execution_runtime.last_summary = format!(
             "Signal on closed bar {} already dispatched; waiting for a new signal bar.",
             signal_bar.ts_ns
+        );
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_market_qty,
+            current_qty,
+            Some(target_qty),
+            "closed_bar_already_dispatched",
+            "same closed-bar signal was already dispatched",
+            None,
+            None,
+            &debug_summary,
         );
         emit_guarded_strategy_eval_debug(
             event_tx,
@@ -419,6 +484,19 @@ pub(crate) fn maybe_run_execution_strategy(
             signal.label(),
             signal.label()
         );
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_market_qty,
+            current_qty,
+            Some(target_qty),
+            "flat_entry_already_consumed",
+            "entry side was already consumed while flat",
+            None,
+            None,
+            &debug_summary,
+        );
         emit_guarded_strategy_eval_debug(
             event_tx,
             session,
@@ -435,6 +513,23 @@ pub(crate) fn maybe_run_execution_strategy(
         return Ok(());
     }
 
+    record_replay_signal_diagnostic(
+        session,
+        signal_bar.ts_ns,
+        signal,
+        actual_market_qty,
+        current_qty,
+        Some(target_qty),
+        "dispatching",
+        "target delta passed all guarded execution gates",
+        Some(if target_qty > current_qty {
+            "Buy"
+        } else {
+            "Sell"
+        }),
+        Some(target_qty.saturating_sub(current_qty).abs()),
+        &debug_summary,
+    );
     emit_guarded_strategy_eval_debug(
         event_tx,
         session,

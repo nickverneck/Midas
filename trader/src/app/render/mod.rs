@@ -1,5 +1,6 @@
 use super::*;
 
+mod analytics;
 mod broker;
 mod chrome;
 mod dashboard;
@@ -34,6 +35,7 @@ impl App {
             Screen::Selection => self.render_selection_screen(frame, layout[1]),
             Screen::Dashboard => self.render_dashboard(frame, layout[1]),
             Screen::Stats => self.render_session_stats_screen(frame, layout[1]),
+            Screen::Analytics => self.render_analytics_screen(frame, layout[1]),
         }
         self.render_logs(frame, layout[2]);
     }

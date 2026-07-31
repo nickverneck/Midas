@@ -28,6 +28,17 @@ replay_file_path = "trader/market replay/ES 06-26.Last.txt"
 # Optional JSONL full-book snapshots for replay_fill_model = "dom".
 # Each line: {"ts_ns": 0, "bids": [{"price": 1.0, "size": 1.0}], "asks": [{"price": 1.25, "size": 1.0}]}
 # replay_dom_file_path = "trader/market replay/ES 06-26.dom.jsonl"
+replay_initial_capital = 100000.0
+replay_account_currency = "USD"
+replay_margin_model = "fixed_per_contract"
+# Zero disables automatic margin analysis in saved replay results.
+replay_margin_per_contract = 0.0
+replay_safety_buffer = 0.0
+replay_safety_buffer_percent = 0.0
+# Optional post-exit continuation window in selected replay bars; zero disables it.
+replay_post_exit_continuation_bars = 0
+# Optional structured per-bar strategy diagnostics (signals.csv) for replay runs.
+replay_signal_diagnostics = false
 replay_bar_interval_ms = 5
 replay_engine_mode = "legacy"
 replay_fill_model = "raw_bar_open"

@@ -370,8 +370,8 @@ fn cached_raw_tick_replay_lease_survives_cache_refresh() {
         .expect("resolve first cache")
         .expect("first dataset");
     let old_path = resolved.files[0].data_path.clone();
-    let state =
-        replay_state_from_cached_raw_ticks(resolved, None, None, None).expect("build replay state");
+    let state = replay_state_from_cached_raw_ticks(resolved, None, None, None, 100_000.0)
+        .expect("build replay state");
 
     let refreshed = write_raw_ticks_parquet_cache(write(make_rows(10.0))).expect("refresh cache");
     assert_ne!(refreshed.data_path, old_path);

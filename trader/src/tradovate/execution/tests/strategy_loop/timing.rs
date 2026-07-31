@@ -12,6 +12,8 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
     session.execution_config.native_ema.fast_length = 2;
     session.execution_config.native_ema.slow_length = 4;
     session.execution_runtime.armed = true;
+    session.replay_enabled = true;
+    session.cfg.replay_signal_diagnostics = true;
     session.execution_runtime.pending_target_qty = Some(-1);
     session.execution_runtime.last_closed_bar_ts = Some(5);
     session.order_submit_in_flight = true;
@@ -77,6 +79,43 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
                 && message.contains("decision=dispatching")
                 && message.contains("signal=Buy")
     )));
+    let diagnostic = session
+        .execution_runtime
+        .replay_signal_diagnostics
+        .first()
+        .expect("opt-in replay should capture the evaluated signal");
+    assert_eq!(diagnostic.decision, "dispatching");
+    assert_eq!(diagnostic.order_action.as_deref(), Some("Buy"));
+    assert_eq!(diagnostic.order_qty, Some(2));
+    assert_eq!(diagnostic.indicator_name, "EMA");
+    assert_eq!(diagnostic.bar_timestamp_ns, 7);
+}
+
+#[test]
+fn live_signal_diagnostics_remain_disabled_even_when_enabled() {
+    let mut session = test_session();
+    session.cfg.replay_signal_diagnostics = true;
+
+    record_replay_signal_diagnostic(
+        &mut session,
+        1,
+        StrategySignal::EnterLong,
+        0,
+        0,
+        Some(1),
+        "dispatching",
+        "test",
+        Some("Buy"),
+        Some(1),
+        "test",
+    );
+
+    assert!(
+        session
+            .execution_runtime
+            .replay_signal_diagnostics
+            .is_empty()
+    );
 }
 
 #[test]

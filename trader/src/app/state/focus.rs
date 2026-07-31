@@ -170,7 +170,13 @@ impl App {
             order.push(Focus::CandleModeToggle);
         }
         #[cfg(feature = "replay")]
-        order.push(Focus::ReplayDataset);
+        order.extend([
+            Focus::ReplayInitialCapital,
+            Focus::ReplayMarginPerContract,
+            Focus::ReplaySafetyBuffer,
+            Focus::ReplaySafetyBufferPercent,
+            Focus::ReplayDataset,
+        ]);
         order.push(Focus::ReplayMode);
         order
     }
@@ -292,6 +298,14 @@ impl App {
                 | Focus::ReplayDownloadCacheRoot
         );
         #[cfg(feature = "replay")]
+        let replay_setup_numeric_focus = matches!(
+            self.focus,
+            Focus::ReplayInitialCapital
+                | Focus::ReplayMarginPerContract
+                | Focus::ReplaySafetyBuffer
+                | Focus::ReplaySafetyBufferPercent
+        );
+        #[cfg(feature = "replay")]
         let replay_view_focus = matches!(
             self.focus,
             Focus::ReplayViewId
@@ -304,8 +318,10 @@ impl App {
         #[cfg(not(feature = "replay"))]
         let replay_download_focus = false;
         #[cfg(not(feature = "replay"))]
+        let replay_setup_numeric_focus = false;
+        #[cfg(not(feature = "replay"))]
         let replay_view_focus = false;
-        standard_focus || replay_download_focus || replay_view_focus
+        standard_focus || replay_download_focus || replay_setup_numeric_focus || replay_view_focus
     }
 
     pub(in crate::app) fn is_free_text_focus(&self) -> bool {

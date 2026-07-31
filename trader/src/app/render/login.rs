@@ -104,6 +104,10 @@ impl App {
             | Focus::ContractList => {}
             #[cfg(feature = "replay")]
             Focus::ReplayDataset
+            | Focus::ReplayInitialCapital
+            | Focus::ReplayMarginPerContract
+            | Focus::ReplaySafetyBuffer
+            | Focus::ReplaySafetyBufferPercent
             | Focus::ReplayViewList
             | Focus::ReplayViewId
             | Focus::ReplayViewPreset

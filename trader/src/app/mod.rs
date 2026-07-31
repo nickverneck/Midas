@@ -22,6 +22,11 @@ use crate::strategy::{
     LuaSourceMode, NativeExecutionPath, NativeReversalMode, NativeSignalTiming, NativeStrategyKind,
     StrategyKind, StrategyState,
 };
+#[cfg(feature = "replay")]
+use crate::tradovate::replay::{
+    ReplayResultEntry, ReplayResultLibrarySnapshot, ReplayTradeExcursion,
+    load_replay_result_entries,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -95,6 +100,9 @@ pub struct App {
     replay_downloader: ReplayDownloaderState,
     #[cfg(feature = "replay")]
     replay_dataset_views: ReplayDatasetViewsState,
+    #[cfg(feature = "replay")]
+    replay_analytics: ReplayAnalyticsState,
+    analytics_return_screen: Screen,
     last_log_at: Option<Instant>,
     last_market_update_at: Option<Instant>,
 }
@@ -172,6 +180,14 @@ enum Focus {
     CandleModeToggle,
     #[cfg(feature = "replay")]
     ReplayDataset,
+    #[cfg(feature = "replay")]
+    ReplayInitialCapital,
+    #[cfg(feature = "replay")]
+    ReplayMarginPerContract,
+    #[cfg(feature = "replay")]
+    ReplaySafetyBuffer,
+    #[cfg(feature = "replay")]
+    ReplaySafetyBufferPercent,
     #[cfg(feature = "replay")]
     ReplayViewList,
     #[cfg(feature = "replay")]
@@ -353,6 +369,160 @@ enum Screen {
     Selection,
     Dashboard,
     Stats,
+    Analytics,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnalyticsFocus {
+    Runs,
+    Trades,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnalyticsTradeSort {
+    TradeId,
+    LargestGiveback,
+    LowestCapture,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+struct ReplayAnalyticsState {
+    root: PathBuf,
+    entries: Vec<ReplayResultEntry>,
+    warnings: Vec<String>,
+    selected_run: usize,
+    selected_trade: usize,
+    selected_fee_scenario: usize,
+    comparison_run: Option<usize>,
+    focus: AnalyticsFocus,
+    trade_sort: AnalyticsTradeSort,
+}
+
+#[cfg(feature = "replay")]
+impl ReplayAnalyticsState {
+    fn new(root: PathBuf) -> Self {
+        let mut state = Self {
+            root,
+            entries: Vec::new(),
+            warnings: Vec::new(),
+            selected_run: 0,
+            selected_trade: 0,
+            selected_fee_scenario: 0,
+            comparison_run: None,
+            focus: AnalyticsFocus::Runs,
+            trade_sort: AnalyticsTradeSort::TradeId,
+        };
+        state.refresh();
+        state
+    }
+
+    fn refresh(&mut self) {
+        let selected_path = self
+            .entries
+            .get(self.selected_run)
+            .map(|entry| entry.path.clone());
+        let comparison_path = self.comparison_entry().map(|entry| entry.path.clone());
+        let ReplayResultLibrarySnapshot { entries, warnings } =
+            load_replay_result_entries(&self.root);
+        self.entries = entries;
+        self.warnings = warnings;
+        self.selected_run = selected_path
+            .and_then(|path| self.entries.iter().position(|entry| entry.path == path))
+            .unwrap_or(0);
+        self.comparison_run = comparison_path
+            .and_then(|path| self.entries.iter().position(|entry| entry.path == path));
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
+        if self.entries.is_empty() {
+            self.selected_run = 0;
+            self.selected_trade = 0;
+            self.selected_fee_scenario = 0;
+            return;
+        }
+        self.selected_run = self.selected_run.min(self.entries.len() - 1);
+        let trade_count = self.sorted_trades().len();
+        self.selected_trade = self.selected_trade.min(trade_count.saturating_sub(1));
+        let fee_count = self
+            .selected_entry()
+            .map(|entry| entry.document.fee_scenarios.len())
+            .unwrap_or_default();
+        self.selected_fee_scenario = self.selected_fee_scenario.min(fee_count.saturating_sub(1));
+    }
+
+    fn selected_entry(&self) -> Option<&ReplayResultEntry> {
+        self.entries.get(self.selected_run)
+    }
+
+    fn selected_excursions(&self) -> &[ReplayTradeExcursion] {
+        self.selected_entry()
+            .and_then(|entry| entry.document.trade_excursions.as_deref())
+            .unwrap_or(&[])
+    }
+
+    fn sorted_trades(&self) -> Vec<&ReplayTradeExcursion> {
+        let mut trades = self.selected_excursions().iter().collect::<Vec<_>>();
+        match self.trade_sort {
+            AnalyticsTradeSort::TradeId => trades.sort_by_key(|trade| trade.trade_id),
+            AnalyticsTradeSort::LargestGiveback => trades.sort_by(|left, right| {
+                right
+                    .giveback
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .total_cmp(&left.giveback.unwrap_or(f64::NEG_INFINITY))
+                    .then_with(|| left.trade_id.cmp(&right.trade_id))
+            }),
+            AnalyticsTradeSort::LowestCapture => trades.sort_by(|left, right| {
+                left.mfe_capture_ratio
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&right.mfe_capture_ratio.unwrap_or(f64::INFINITY))
+                    .then_with(|| left.trade_id.cmp(&right.trade_id))
+            }),
+        }
+        trades
+    }
+
+    fn selected_fee_scenario(&self) -> Option<&crate::tradovate::replay::ReplayFeeScenario> {
+        self.selected_entry()
+            .and_then(|entry| entry.document.fee_scenarios.get(self.selected_fee_scenario))
+    }
+
+    fn comparison_entry(&self) -> Option<&ReplayResultEntry> {
+        self.comparison_run
+            .and_then(|index| self.entries.get(index))
+    }
+
+    fn cycle_sort(&mut self) {
+        self.trade_sort = match self.trade_sort {
+            AnalyticsTradeSort::TradeId => AnalyticsTradeSort::LargestGiveback,
+            AnalyticsTradeSort::LargestGiveback => AnalyticsTradeSort::LowestCapture,
+            AnalyticsTradeSort::LowestCapture => AnalyticsTradeSort::TradeId,
+        };
+        self.selected_trade = 0;
+    }
+
+    fn cycle_fee_scenario(&mut self, direction: i32) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let count = entry.document.fee_scenarios.len();
+        if count == 0 {
+            self.selected_fee_scenario = 0;
+            return;
+        }
+        self.selected_fee_scenario = if direction < 0 {
+            if self.selected_fee_scenario == 0 {
+                count - 1
+            } else {
+                self.selected_fee_scenario - 1
+            }
+        } else {
+            (self.selected_fee_scenario + 1) % count
+        };
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

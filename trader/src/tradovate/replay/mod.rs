@@ -27,7 +27,9 @@ pub(crate) use ledger::ReplayLedgerMarketContext;
 pub(crate) use load::load_replay_state;
 #[cfg(feature = "replay")]
 pub(crate) use results::{
-    ReplayResultInput, analyze_replay_margin, reprice_replay_result, write_replay_result,
+    ReplayFeeScenario, ReplayResultEntry, ReplayResultInput, ReplayResultLibrarySnapshot,
+    ReplayResultStatus, ReplayTradeExcursion, analyze_replay_margin, load_replay_result_entries,
+    reprice_replay_result, write_replay_result,
 };
 #[cfg(feature = "replay")]
 pub(crate) use risk::ReplayMarginConfig;

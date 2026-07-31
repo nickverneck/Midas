@@ -73,6 +73,64 @@ fn replay_screen_start_uses_selected_market_controls() {
 
 #[cfg(feature = "replay")]
 #[test]
+fn replay_setup_edits_capital_and_margin_controls() {
+    let path = replay_test_file("setup-controls");
+    let mut config = AppConfig::default();
+    config.replay_file_path = path.clone();
+    config.replay_initial_capital = 10_000.0;
+    config.replay_margin_per_contract = 0.0;
+    config.replay_safety_buffer = 0.0;
+    config.replay_safety_buffer_percent = 0.0;
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+
+    app.focus = Focus::ReplayInitialCapital;
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    app.focus = Focus::ReplayMarginPerContract;
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    app.focus = Focus::ReplaySafetyBuffer;
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    app.focus = Focus::ReplaySafetyBufferPercent;
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+
+    assert_eq!(app.base_config.replay_initial_capital, 11_000.0);
+    assert_eq!(app.base_config.replay_margin_per_contract, 100.0);
+    assert_eq!(app.base_config.replay_safety_buffer, 100.0);
+    assert_eq!(app.base_config.replay_safety_buffer_percent, 1.0);
+
+    let lines = rendered_text(app.replay_run_control_lines());
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Initial capital (USD): 11000")
+    );
+    assert!(lines.iter().any(|line| line == "Margin/contract: 100"));
+    assert!(lines.iter().any(|line| line == "Safety buffer: 100"));
+    assert!(lines.iter().any(|line| line == "Safety buffer %: 1"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Margin model: fixed_per_contract | analysis enabled")
+    );
+
+    app.focus = Focus::ReplayMode;
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    match cmd_rx.try_recv().expect("expected replay start command") {
+        ServiceCommand::EnterReplayMode { config, .. } => {
+            assert_eq!(config.replay_initial_capital, 11_000.0);
+            assert_eq!(config.replay_margin_per_contract, 100.0);
+            assert_eq!(config.replay_safety_buffer, 100.0);
+            assert_eq!(config.replay_safety_buffer_percent, 1.0);
+            assert_eq!(config.app_version, AppConfig::default().app_version);
+        }
+        _ => panic!("expected enter-replay command"),
+    }
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn replay_dataset_lines_expose_ready_and_missing_metadata() {
     let path = replay_test_file("metadata");
     let mut config = AppConfig::default();

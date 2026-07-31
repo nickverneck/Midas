@@ -93,6 +93,19 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             actual_qty,
             hma_cross_market_debug(session, actual_qty)
         );
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_qty,
+            actual_qty,
+            None,
+            "no_target",
+            "signal did not produce a target position",
+            None,
+            None,
+            &debug_summary,
+        );
         let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
             session,
             TradovateStrategyDecisionDebug {
@@ -122,6 +135,19 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             signal_bar.ts_ns,
             actual_qty,
             hma_cross_market_debug(session, actual_qty)
+        );
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_qty,
+            actual_qty,
+            Some(target_qty),
+            "target_already_actual",
+            "target position already matches actual position",
+            None,
+            None,
+            &debug_summary,
         );
         let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
             session,
@@ -158,6 +184,19 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             target_qty,
             hma_cross_market_debug(session, actual_qty)
         );
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_qty,
+            actual_qty,
+            Some(target_qty),
+            "closed_bar_already_dispatched",
+            "same closed-bar signal was already dispatched",
+            None,
+            None,
+            &debug_summary,
+        );
         let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
             session,
             TradovateStrategyDecisionDebug {
@@ -191,6 +230,19 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             actual_qty,
             target_qty,
             hma_cross_market_debug(session, actual_qty)
+        );
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_qty,
+            actual_qty,
+            Some(target_qty),
+            "flat_entry_already_consumed",
+            "entry side was already consumed while flat",
+            None,
+            None,
+            &debug_summary,
         );
         let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
             session,
@@ -272,6 +324,19 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         order_action,
         order_qty,
         hma_cross_market_debug(session, actual_qty)
+    );
+    record_replay_signal_diagnostic(
+        session,
+        signal_bar.ts_ns,
+        signal,
+        actual_qty,
+        actual_qty,
+        Some(target_qty),
+        "dispatching",
+        "target delta passed all HMA direct execution gates",
+        Some(order_action),
+        Some(order_qty),
+        &debug_summary,
     );
     let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
         session,

@@ -161,6 +161,32 @@ impl App {
                 self.replay_start_action_label(),
                 self.focus == Focus::ReplayMode,
             ),
+            styled_line(
+                format!(
+                    "Initial capital ({}): {}",
+                    self.base_config.replay_account_currency,
+                    self.replay_initial_capital_text()
+                ),
+                self.replay_initial_capital_focused(),
+            ),
+            styled_line(
+                format!(
+                    "Margin/contract: {}",
+                    self.replay_margin_per_contract_text()
+                ),
+                self.replay_margin_per_contract_focused(),
+            ),
+            styled_line(
+                format!("Safety buffer: {}", self.replay_safety_buffer_text()),
+                self.replay_safety_buffer_focused(),
+            ),
+            styled_line(
+                format!(
+                    "Safety buffer %: {}",
+                    self.replay_safety_buffer_percent_text()
+                ),
+                self.replay_safety_buffer_percent_focused(),
+            ),
             Line::from(format!(
                 "Bar: {}",
                 if self.replay_selected_bar_supported() {
@@ -274,6 +300,43 @@ impl App {
             self.replay_start_action_label(),
             self.focus == Focus::ReplayMode,
         ));
+        lines.extend([
+            styled_line(
+                format!(
+                    "Initial capital ({}): {}",
+                    self.base_config.replay_account_currency,
+                    self.replay_initial_capital_text()
+                ),
+                self.replay_initial_capital_focused(),
+            ),
+            styled_line(
+                format!(
+                    "Margin/contract: {}",
+                    self.replay_margin_per_contract_text()
+                ),
+                self.replay_margin_per_contract_focused(),
+            ),
+            styled_line(
+                format!("Safety buffer: {}", self.replay_safety_buffer_text()),
+                self.replay_safety_buffer_focused(),
+            ),
+            styled_line(
+                format!(
+                    "Safety buffer %: {}",
+                    self.replay_safety_buffer_percent_text()
+                ),
+                self.replay_safety_buffer_percent_focused(),
+            ),
+            Line::from(format!(
+                "Margin model: {} | analysis {}",
+                self.base_config.replay_margin_model,
+                if self.base_config.replay_margin_per_contract > 0.0 {
+                    "enabled"
+                } else {
+                    "disabled (set margin/contract > 0)"
+                }
+            )),
+        ]);
         lines.push(Line::from(format!(
             "Replay source: {}",
             if self.replay_cache_can_serve_selected_bar() {
@@ -441,6 +504,98 @@ impl App {
         } else {
             "[Enter] Start Local Replay".to_string()
         }
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_initial_capital_focused(&self) -> bool {
+        self.focus == Focus::ReplayInitialCapital
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_initial_capital_focused(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_margin_per_contract_focused(&self) -> bool {
+        self.focus == Focus::ReplayMarginPerContract
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_margin_per_contract_focused(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_safety_buffer_focused(&self) -> bool {
+        self.focus == Focus::ReplaySafetyBuffer
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_safety_buffer_focused(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_safety_buffer_percent_focused(&self) -> bool {
+        self.focus == Focus::ReplaySafetyBufferPercent
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_safety_buffer_percent_focused(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_initial_capital_text(&self) -> String {
+        self.strategy_numeric_value(
+            Focus::ReplayInitialCapital,
+            format_float_input(self.base_config.replay_initial_capital),
+        )
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_initial_capital_text(&self) -> String {
+        format_float_input(self.base_config.replay_initial_capital)
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_margin_per_contract_text(&self) -> String {
+        self.strategy_numeric_value(
+            Focus::ReplayMarginPerContract,
+            format_float_input(self.base_config.replay_margin_per_contract),
+        )
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_margin_per_contract_text(&self) -> String {
+        format_float_input(self.base_config.replay_margin_per_contract)
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_safety_buffer_text(&self) -> String {
+        self.strategy_numeric_value(
+            Focus::ReplaySafetyBuffer,
+            format_float_input(self.base_config.replay_safety_buffer),
+        )
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_safety_buffer_text(&self) -> String {
+        format_float_input(self.base_config.replay_safety_buffer)
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_safety_buffer_percent_text(&self) -> String {
+        self.strategy_numeric_value(
+            Focus::ReplaySafetyBufferPercent,
+            format_float_input(self.base_config.replay_safety_buffer_percent),
+        )
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_safety_buffer_percent_text(&self) -> String {
+        format_float_input(self.base_config.replay_safety_buffer_percent)
     }
 
     #[cfg(feature = "replay")]

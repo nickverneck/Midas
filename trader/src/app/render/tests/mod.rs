@@ -1,3 +1,4 @@
+mod analytics;
 mod broker_login;
 mod dashboard;
 mod engine;

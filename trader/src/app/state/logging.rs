@@ -169,6 +169,7 @@ impl App {
             Screen::Strategy => "Strategy",
             Screen::Dashboard => "Dashboard",
             Screen::Stats => "Stats",
+            Screen::Analytics => "Analytics",
         };
         let selected_account = self
             .accounts
