@@ -172,8 +172,8 @@ fn raw_tick_replay_derives_volume_bars_and_preserves_trade_volume() {
     assert_eq!(bars[1].volume, Some(50.0));
 }
 
-#[test]
-fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
+#[tokio::test]
+async fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
     let cache_root = temp_cache_dir("streaming-parity");
     let base = dt("2026-07-23T00:00:00Z");
     let prices_and_sizes = [
@@ -262,6 +262,9 @@ fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
         .resolve_unique_raw_ticks_parquet_files(None)
         .expect("resolve cache")
         .expect("raw dataset");
+    let cached_state =
+        replay_state_from_cached_raw_ticks(resolved.clone(), None, None, None, 100_000.0)
+            .expect("build cached state");
     let memory_ticks = rows
         .iter()
         .map(replay_tick_from_cache_row)
@@ -302,11 +305,37 @@ fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
             "{} parity",
             bar_type.label()
         );
+        let buffered = cached_state
+            .frames_for_type(bar_type)
+            .expect("buffered cached frames");
+        let mut stream = cached_state
+            .frame_stream_for_type(bar_type)
+            .expect("create cached frame stream");
+        let mut streamed = Vec::new();
+        while let Some(frame) = stream.next().await.expect("read cached frame") {
+            streamed.push(frame);
+        }
+        stream.finish().await.expect("finish cached frame stream");
+        assert_eq!(
+            streamed.len(),
+            buffered.len(),
+            "{} frame count",
+            bar_type.label()
+        );
+        for (streamed, buffered) in streamed.iter().zip(buffered.iter()) {
+            assert_eq!(streamed.bar, buffered.bar, "{} bar", bar_type.label());
+            assert_eq!(
+                streamed.ticks.as_ref(),
+                buffered.ticks.as_ref(),
+                "{} ticks",
+                bar_type.label()
+            );
+        }
     }
 }
 
-#[test]
-fn cached_raw_tick_replay_lease_survives_cache_refresh() {
+#[tokio::test]
+async fn cached_raw_tick_replay_stream_survives_cache_refresh() {
     let cache_root = temp_cache_dir("refresh-lease");
     let base = dt("2026-07-23T00:00:00Z");
     let make_rows = |price_offset: f64| {
@@ -374,19 +403,13 @@ fn cached_raw_tick_replay_lease_survives_cache_refresh() {
         .expect("build replay state");
     let second_state = replay_state_from_cached_raw_ticks(resolved, None, None, None, 100_000.0)
         .expect("build second replay state");
-    match (&state.data, &second_state.data) {
+    assert!(matches!(
+        (&state.data, &second_state.data),
         (
-            ReplayDataSource::CachedRawTicks {
-                execution_ticks: first,
-                ..
-            },
-            ReplayDataSource::CachedRawTicks {
-                execution_ticks: second,
-                ..
-            },
-        ) => assert!(Arc::ptr_eq(first, second)),
-        _ => panic!("expected cached raw-tick replay states"),
-    }
+            ReplayDataSource::CachedRawTicks { .. },
+            ReplayDataSource::CachedRawTicks { .. }
+        )
+    ));
 
     let refreshed = write_raw_ticks_parquet_cache(write(make_rows(10.0))).expect("refresh cache");
     assert_ne!(refreshed.data_path, old_path);
@@ -407,6 +430,21 @@ fn cached_raw_tick_replay_lease_survives_cache_refresh() {
         .expect("leased tick frames");
     assert_eq!(frames[0].ticks[0].bid_price, Some(99.75));
     assert_eq!(frames[0].ticks[0].ask_price, Some(100.25));
+
+    let mut stream = state
+        .frame_stream_for_type(BarType::minute(1))
+        .expect("create bounded tick frame stream");
+    let mut streamed_frames = Vec::new();
+    while let Some(frame) = stream.next().await.expect("read streamed frame") {
+        streamed_frames.push(frame);
+    }
+    stream.finish().await.expect("finish bounded tick stream");
+    assert_eq!(streamed_frames.len(), frames.len());
+    for (streamed, buffered) in streamed_frames.iter().zip(frames.iter()) {
+        assert_eq!(streamed.bar, buffered.bar);
+        assert_eq!(streamed.ticks.as_ref(), buffered.ticks.as_ref());
+        assert_eq!(streamed.dom_updates.as_ref(), buffered.dom_updates.as_ref());
+    }
 }
 
 #[test]

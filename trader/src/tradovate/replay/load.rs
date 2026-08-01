@@ -18,128 +18,12 @@ use crate::replay_cache::{
 #[cfg(feature = "replay")]
 use anyhow::Context;
 #[cfg(feature = "replay")]
-use std::collections::HashMap;
-#[cfg(feature = "replay")]
 use std::fs::File;
 #[cfg(feature = "replay")]
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 #[cfg(feature = "replay")]
 use std::path::PathBuf;
-#[cfg(feature = "replay")]
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-
-#[cfg(feature = "replay")]
-const MAX_SHARED_RAW_TICK_CACHE_ENTRIES: usize = 64;
-
-#[cfg(feature = "replay")]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SharedRawTickFileKey {
-    data_path: PathBuf,
-    data_len: u64,
-    modified_ns: Option<u128>,
-    data_hash: Option<String>,
-}
-
-#[cfg(feature = "replay")]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SharedRawTicksKey {
-    files: Vec<SharedRawTickFileKey>,
-    range: Option<(i64, i64)>,
-}
-
-#[cfg(feature = "replay")]
-static SHARED_RAW_TICKS: OnceLock<Mutex<HashMap<SharedRawTicksKey, Weak<[ReplayMarketTick]>>>> =
-    OnceLock::new();
-
-#[cfg(feature = "replay")]
-fn shared_raw_ticks_cache() -> &'static Mutex<HashMap<SharedRawTicksKey, Weak<[ReplayMarketTick]>>>
-{
-    SHARED_RAW_TICKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(feature = "replay")]
-fn shared_raw_ticks_key(
-    cached: &ReplayCacheResolvedRawTicks,
-    timestamp_range: Option<&crate::replay_cache::ReplayCacheTimeRange>,
-) -> Result<SharedRawTicksKey> {
-    let files = cached
-        .files
-        .iter()
-        .map(|file| {
-            let data_path =
-                std::fs::canonicalize(&file.data_path).unwrap_or_else(|_| file.data_path.clone());
-            let metadata = file
-                .data_file
-                .metadata()
-                .with_context(|| format!("inspect {}", file.data_path.display()))?;
-            let modified_ns = metadata.modified().ok().and_then(|modified| {
-                modified
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|duration| duration.as_nanos())
-            });
-            Ok(SharedRawTickFileKey {
-                data_path,
-                data_len: metadata.len(),
-                modified_ns,
-                data_hash: file
-                    .file
-                    .data_hash
-                    .as_ref()
-                    .map(|hash| format!("{}:{}", hash.algorithm, hash.value)),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let range = timestamp_range.map(|range| range.bounds_ns()).transpose()?;
-    Ok(SharedRawTicksKey { files, range })
-}
-
-#[cfg(feature = "replay")]
-fn load_shared_raw_ticks(
-    key: SharedRawTicksKey,
-    cached: &ReplayCacheResolvedRawTicks,
-    timestamp_range: Option<&crate::replay_cache::ReplayCacheTimeRange>,
-) -> Result<Arc<[ReplayMarketTick]>> {
-    let mut cache = shared_raw_ticks_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.retain(|_, value| value.strong_count() > 0);
-    if let Some(shared) = cache.get(&key).and_then(Weak::upgrade) {
-        return Ok(shared);
-    }
-
-    // Hold the lock across the decode so parallel sweep children do not each
-    // materialize the same raw-tick stream on a cache miss.
-    let mut execution_ticks = Vec::new();
-    crate::replay_cache::stream_resolved_raw_ticks(cached, timestamp_range, |row| {
-        execution_ticks.push(ReplayMarketTick {
-            ts_ns: row.ts_ns,
-            last: row.price,
-            size: Some(row.size),
-            bid_price: row.bid_price,
-            bid_size: row.bid_size,
-            ask_price: row.ask_price,
-            ask_size: row.ask_size,
-        });
-        Ok(())
-    })?;
-    let shared = Arc::from(execution_ticks.into_boxed_slice());
-    if cache.len() >= MAX_SHARED_RAW_TICK_CACHE_ENTRIES {
-        if let Some(stale) = cache
-            .iter()
-            .find(|(_, value)| value.strong_count() == 0)
-            .map(|(key, _)| key.clone())
-        {
-            cache.remove(&stale);
-        } else if let Some(oldest) = cache.keys().next().cloned() {
-            cache.remove(&oldest);
-        }
-    }
-    cache.insert(key, Arc::downgrade(&shared));
-    Ok(shared)
-}
-
 pub(crate) async fn load_replay_state(
     cfg: &AppConfig,
     bar_type: BarType,
@@ -443,8 +327,6 @@ pub(super) fn replay_state_from_cached_raw_ticks(
         .contract
         .id
         .unwrap_or_else(|| replay_contract_id(&cached.manifest_path));
-    let shared_key = shared_raw_ticks_key(&cached, timestamp_range.as_ref())?;
-    let execution_ticks = load_shared_raw_ticks(shared_key, &cached, timestamp_range.as_ref())?;
     Ok(ReplayState {
         evaluation_range,
         replay_window,
@@ -469,7 +351,6 @@ pub(super) fn replay_state_from_cached_raw_ticks(
         data: ReplayDataSource::CachedRawTicks {
             resolved: cached,
             timestamp_range,
-            execution_ticks,
         },
     })
 }

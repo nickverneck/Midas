@@ -69,17 +69,14 @@ async fn replay_market_worker_inner(
     replay_speed_rx: &mut tokio::sync::watch::Receiver<ReplaySpeed>,
     internal_tx: UnboundedSender<InternalEvent>,
 ) -> Result<()> {
-    let frames = replay.frames_for_type(bar_type)?;
-    let bars = frames
-        .iter()
-        .map(|frame| frame.bar.clone())
-        .collect::<Vec<_>>();
+    let mut frame_stream = replay.frame_stream_for_type(bar_type)?;
+    let bars = frame_stream.bars().to_vec();
     if bars.is_empty() {
         bail!("no {} bars available in replay dataset", bar_type.label());
     }
     if cfg.replay_engine_mode == ReplayEngineMode::Deterministic
         && cfg.replay_fill_model == ReplayFillModel::TickBidAsk
-        && frames.iter().all(|frame| frame.ticks.is_empty())
+        && !replay.has_execution_tick_data()
     {
         bail!(
             "tick_bid_ask replay requires a raw-tick dataset; the selected replay source only provides bars"
@@ -87,7 +84,7 @@ async fn replay_market_worker_inner(
     }
     if cfg.replay_engine_mode == ReplayEngineMode::Deterministic
         && cfg.replay_fill_model == ReplayFillModel::Dom
-        && frames.iter().all(|frame| frame.dom_updates.is_empty())
+        && replay.dom_updates.is_empty()
     {
         bail!(
             "dom replay requires an optional JSONL DOM snapshot file; the selected replay source has no Level 2 snapshots"
@@ -170,6 +167,12 @@ async fn replay_market_worker_inner(
     let mut live_bars = 0usize;
     let evaluation_bars = &bars[history_loaded..];
     let mut schedule = ReplayBarSchedule::new(cfg.replay_engine_mode, evaluation_bars)?;
+    for _ in 0..history_loaded {
+        frame_stream
+            .next()
+            .await?
+            .context("replay frame stream ended during warmup")?;
+    }
     while let Some(event) = schedule.next_bar(evaluation_bars) {
         let strategy_evaluation = event.strategy_evaluation_after_bar()?;
         let ReplayVirtualEventKind::BarClose { bar_index } = event.kind else {
@@ -190,9 +193,10 @@ async fn replay_market_worker_inner(
             )
             .await;
         }
-        let frame = frames
-            .get(history_loaded + bar_index)
-            .context("replay frame schedule referenced a missing frame")?;
+        let frame = frame_stream
+            .next()
+            .await?
+            .context("replay frame stream ended before the scheduled bar")?;
         process_replay_bar(
             &broker_tx,
             bar,
@@ -277,6 +281,8 @@ async fn replay_market_worker_inner(
             }
         }
     }
+
+    frame_stream.finish().await?;
 
     let _ = internal_tx.send(InternalEvent::UserSocketStatus(format!(
         "Replay complete for {} ({}) [{}]",

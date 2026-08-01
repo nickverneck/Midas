@@ -19,7 +19,9 @@ use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -234,6 +236,35 @@ pub(crate) async fn run_replay_sweep(
     allow_large: bool,
     override_guardrails: bool,
 ) -> Result<ReplaySweepSummaryDocument> {
+    run_replay_sweep_with_interrupt(
+        config,
+        spec_path,
+        no_resume,
+        allow_large,
+        override_guardrails,
+        Box::pin(tokio::signal::ctrl_c()),
+        None,
+    )
+    .await
+}
+
+type ReplaySweepInterrupt = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
+
+/// Run a sweep with an injectable interrupt source.
+///
+/// The production entry point above uses the process Ctrl-C signal. Keeping
+/// the future injectable makes the lifecycle contract testable with a local
+/// replay fixture, without sending signals to the test process or requiring a
+/// live market connection.
+async fn run_replay_sweep_with_interrupt(
+    config: &AppConfig,
+    spec_path: &Path,
+    no_resume: bool,
+    allow_large: bool,
+    override_guardrails: bool,
+    mut interrupt: ReplaySweepInterrupt,
+    child_started_tx: Option<mpsc::UnboundedSender<()>>,
+) -> Result<ReplaySweepSummaryDocument> {
     let spec = ReplaySweepSpec::load(spec_path)?;
     if config.broker != BrokerKind::Tradovate {
         bail!("headless replay sweeps currently require the Tradovate broker");
@@ -270,6 +301,7 @@ pub(crate) async fn run_replay_sweep(
             let spec = spec.clone();
             let view_path = view_path.clone();
             let cancel_rx = cancel_rx.clone();
+            let child_started_tx = child_started_tx.clone();
             async move {
                 match run_child(
                     &base_config,
@@ -278,6 +310,7 @@ pub(crate) async fn run_replay_sweep(
                     &view_path,
                     no_resume,
                     cancel_rx,
+                    child_started_tx,
                 )
                 .await
                 {
@@ -289,7 +322,6 @@ pub(crate) async fn run_replay_sweep(
         .buffer_unordered(parallelism);
 
     let mut summaries = Vec::with_capacity(plan.children.len());
-    let mut interrupt = Box::pin(tokio::signal::ctrl_c());
     let mut cancelled = false;
     loop {
         tokio::select! {
@@ -433,6 +465,7 @@ async fn run_child(
     view_path: &Path,
     no_resume: bool,
     cancel_rx: watch::Receiver<bool>,
+    child_started_tx: Option<mpsc::UnboundedSender<()>>,
 ) -> Result<ReplaySweepRunSummary> {
     if child.resolved_strategy.kind != crate::strategy::StrategyKind::Native {
         bail!(
@@ -495,6 +528,7 @@ async fn run_child(
         child.clone(),
         view_path.to_path_buf(),
         cancel_rx,
+        child_started_tx,
     )
     .await;
     drop(command_tx);
@@ -515,6 +549,7 @@ async fn drive_child_service(
     child: ReplaySweepChildSpec,
     view_path: PathBuf,
     mut cancel_rx: watch::Receiver<bool>,
+    mut child_started_tx: Option<mpsc::UnboundedSender<()>>,
 ) -> Result<ReplaySweepRunSummary> {
     command_tx
         .send(ServiceCommand::EnterReplayMode {
@@ -559,6 +594,17 @@ async fn drive_child_service(
         let Some(event) = event else { break };
         match event {
             ServiceEvent::Connected { .. } => connected = true,
+            ServiceEvent::Status(message)
+                if message.starts_with("Replay ") && message.contains(" loaded ") =>
+            {
+                // This status is emitted after the replay dataset has been
+                // loaded and the worker has entered its streaming loop. The
+                // test-only hook uses it to interrupt an actually active
+                // child rather than racing the initial command queue.
+                if let Some(child_started_tx) = child_started_tx.take() {
+                    let _ = child_started_tx.send(());
+                }
+            }
             ServiceEvent::ReplayResultSaved {
                 run_id,
                 result_path,
@@ -1125,9 +1171,13 @@ mod tests {
     };
     use crate::config::TradingEnvironment;
     use crate::replay_cache::{
-        ReplayDatasetSessionPreset, ReplayDatasetSourceRef, ReplayDatasetWarmupPolicy,
+        ReplayCacheContract, ReplayCacheInstrument, ReplayCacheLibrary, ReplayCacheRawTickRow,
+        ReplayCacheRawTicksWrite, ReplayCacheTickSpecs, ReplayCacheTimeRange,
+        ReplayDatasetSessionPreset, ReplayDatasetSourceRef, ReplayDatasetView,
+        ReplayDatasetViewStore, ReplayDatasetWarmupPolicy, write_raw_ticks_parquet_cache,
     };
     use crate::strategy::ExecutionStrategyConfig;
+    use chrono::{Duration as ChronoDuration, TimeZone};
     use std::fs::File;
 
     fn child() -> ReplaySweepChildSpec {
@@ -1432,6 +1482,150 @@ mod tests {
         assert_eq!(status.status, "completed");
         assert_eq!(status.active_count, 0);
         assert_eq!(status.pending_count, 1);
+    }
+
+    #[tokio::test]
+    async fn end_to_end_interrupt_writes_cancelled_status_for_active_child() {
+        let nonce = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let cache_root = std::env::temp_dir().join(format!("trader-sweep-e2e-cache-{nonce}"));
+        let output_root = std::env::temp_dir().join(format!("trader-sweep-e2e-output-{nonce}"));
+        fs::create_dir_all(&cache_root).expect("create cache root");
+
+        // Use a local, historical-shaped fixture large enough that the child
+        // remains active while the injected interrupt is delivered. No broker
+        // connection or live market data is involved in this lifecycle test.
+        let base = Utc
+            .with_ymd_and_hms(2026, 7, 23, 0, 0, 0)
+            .single()
+            .expect("fixture timestamp");
+        let ticks = (0..10_000)
+            .map(|index| {
+                let ts = base + ChronoDuration::minutes(index);
+                let price = 100.0 + (index % 32) as f64 * 0.25;
+                ReplayCacheRawTickRow {
+                    timestamp: ts,
+                    ts_ns: ts.timestamp_nanos_opt().expect("fixture timestamp ns"),
+                    tick_id: Some(index as i64 + 1),
+                    price,
+                    size: 1.0,
+                    bid_price: Some(price - 0.25),
+                    bid_size: Some(1.0),
+                    ask_price: Some(price + 0.25),
+                    ask_size: Some(1.0),
+                    chart_id: None,
+                    trade_date: None,
+                    packet_source: None,
+                    packet_base_ts_ms: None,
+                    packet_base_price_ticks: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        write_raw_ticks_parquet_cache(ReplayCacheRawTicksWrite {
+            cache_root: cache_root.clone(),
+            target: None,
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "MES".to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "MESU6".to_string(),
+                id: Some(123),
+                expiration: None,
+            },
+            request_start: base,
+            request_end: base + ChronoDuration::minutes(ticks.len() as i64),
+            download_request: json!({"source": "end-to-end-test"}),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 5.0,
+            },
+            contract_metadata: None,
+            session_template: Some("Globex".to_string()),
+            ticks,
+            warnings: Vec::new(),
+            display_name: Some("end-to-end cancellation fixture".to_string()),
+            tags: None,
+            notes: None,
+        })
+        .expect("write replay fixture");
+
+        let library = ReplayCacheLibrary::scan(cache_root.clone());
+        let dataset = library.datasets.first().expect("fixture dataset");
+        let view = ReplayDatasetView::for_dataset(
+            &cache_root,
+            dataset,
+            "e2e-cancellation-view",
+            ReplayCacheTimeRange::new(base, base + ChronoDuration::minutes(9_999))
+                .expect("fixture evaluation range"),
+            "UTC",
+            ReplayDatasetSessionPreset::FullSource,
+            ReplayDatasetWarmupPolicy::default(),
+        )
+        .expect("fixture dataset view");
+        ReplayDatasetViewStore::new(&cache_root)
+            .save(&view)
+            .expect("save fixture view");
+
+        let mut spec = ReplaySweepSpec::default();
+        spec.sweep_id = "e2e-cancellation".to_string();
+        spec.name = "End-to-end cancellation".to_string();
+        spec.base_dataset_view = view;
+        spec.output_dir = output_root.clone();
+        spec.max_runs = 1;
+        spec.parallelism = 1;
+        let spec_path = cache_root.join("sweep.json");
+        spec.save(&spec_path).expect("save fixture sweep spec");
+
+        let mut config = AppConfig::default();
+        config.broker = BrokerKind::Tradovate;
+        config.replay_cache_dir = cache_root.clone();
+        config.replay_result_dir = output_root.join("child-results");
+
+        let (child_started_tx, mut child_started_rx) = mpsc::unbounded_channel();
+        let interrupt: ReplaySweepInterrupt = Box::pin(async move {
+            child_started_rx.recv().await.ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "child ended")
+            })?;
+            // Give the service task a scheduling turn to consume the replay
+            // commands before cancellation is broadcast.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(())
+        });
+        let error = run_replay_sweep_with_interrupt(
+            &config,
+            &spec_path,
+            false,
+            false,
+            false,
+            interrupt,
+            Some(child_started_tx),
+        )
+        .await
+        .expect_err("interrupt should cancel the sweep");
+        assert!(error.to_string().contains("replay sweep cancelled"));
+
+        let status_path = output_root.join("sweep-status.json");
+        let status: ReplaySweepStatusDocument =
+            serde_json::from_slice(&fs::read(&status_path).expect("read cancelled status"))
+                .expect("parse cancelled status");
+        assert_eq!(status.status, "cancelled");
+        assert!(status.cancellation_requested);
+        assert_eq!(status.run_count, 1);
+        assert_eq!(status.completed_count, 0);
+        assert_eq!(status.failed_count, 0);
+        assert_eq!(status.active_count, 0);
+        assert_eq!(status.pending_count, 1);
+        assert_eq!(status.runs[0].status, "pending");
+        assert!(status.error.is_some());
+        assert!(output_root.join("sweep.json").is_file());
+        assert!(output_root.join("sweep-plan.json").is_file());
+        assert!(!output_root.join("sweep-summary.json").exists());
+
+        let _ = fs::remove_dir_all(cache_root);
+        let _ = fs::remove_dir_all(output_root);
     }
 
     #[test]

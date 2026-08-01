@@ -10,7 +10,13 @@ use super::ticks::ReplayTick;
 #[cfg(feature = "replay")]
 use crate::replay_cache::ReplayCacheResolvedRawTicks;
 #[cfg(feature = "replay")]
+use crate::replay_cache::{ReplayCacheRawTickRow, stream_resolved_raw_ticks};
+#[cfg(feature = "replay")]
 use std::sync::Arc;
+#[cfg(feature = "replay")]
+use tokio::sync::mpsc;
+#[cfg(feature = "replay")]
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReplayState {
@@ -99,6 +105,16 @@ impl ReplayState {
             .transpose()
     }
 
+    pub(super) fn has_execution_tick_data(&self) -> bool {
+        match &self.data {
+            ReplayDataSource::PriceTicks(ticks) | ReplayDataSource::RawTicks(ticks) => {
+                !ticks.is_empty()
+            }
+            ReplayDataSource::CachedRawTicks { .. } => true,
+            ReplayDataSource::CachedServerBars { .. } => false,
+        }
+    }
+
     pub(super) fn bars_for_type(&self, bar_type: BarType) -> Result<Vec<Bar>> {
         match &self.data {
             ReplayDataSource::PriceTicks(ticks) | ReplayDataSource::RawTicks(ticks) => {
@@ -176,14 +192,18 @@ pub(super) struct ReplayBarFrame {
 impl ReplayState {
     pub(super) fn frames_for_type(&self, bar_type: BarType) -> Result<Vec<ReplayBarFrame>> {
         let bars = self.bars_for_type(bar_type)?;
+        self.frames_for_bars(&bars, bar_type)
+    }
+
+    fn frames_for_bars(&self, bars: &[Bar], bar_type: BarType) -> Result<Vec<ReplayBarFrame>> {
         let ticks = self.execution_ticks()?;
-        let groups = group_execution_ticks(&ticks, &bars, bar_type, self.market_specs.tick_size);
-        let dom_groups = group_dom_updates(&self.dom_updates, &bars, bar_type);
+        let groups = group_execution_ticks(&ticks, bars, bar_type, self.market_specs.tick_size);
+        let dom_groups = group_dom_updates(&self.dom_updates, bars, bar_type);
         Ok(bars
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(index, bar)| ReplayBarFrame {
-                bar,
+                bar: bar.clone(),
                 ticks: Arc::from(
                     groups
                         .get(index)
@@ -202,6 +222,49 @@ impl ReplayState {
             .collect())
     }
 
+    /// Build a bounded frame stream for replay workers. Cached raw ticks are
+    /// decoded on a blocking task and delivered through a small channel so the
+    /// worker never holds the complete tick dataset in memory. Other replay
+    /// sources retain the existing buffered path.
+    pub(super) fn frame_stream_for_type(&self, bar_type: BarType) -> Result<ReplayFrameStream> {
+        let bars: Arc<[Bar]> = Arc::from(self.bars_for_type(bar_type)?.into_boxed_slice());
+        let ReplayDataSource::CachedRawTicks {
+            resolved,
+            timestamp_range,
+        } = &self.data
+        else {
+            return Ok(ReplayFrameStream::Buffered {
+                bars: bars.clone(),
+                frames: self.frames_for_bars(&bars, bar_type)?.into_iter(),
+            });
+        };
+
+        let (sender, receiver) = mpsc::channel(REPLAY_FRAME_CHANNEL_CAPACITY);
+        let resolved = resolved.clone();
+        let timestamp_range = timestamp_range.clone();
+        let producer_bars = bars.clone();
+        let dom_updates = self.dom_updates.clone();
+        let tick_size = self.market_specs.tick_size.unwrap_or(0.25).max(0.01);
+        let producer = tokio::task::spawn_blocking(move || {
+            if let Err(error) = stream_cached_raw_tick_frames(
+                resolved,
+                timestamp_range,
+                producer_bars,
+                bar_type,
+                tick_size,
+                dom_updates,
+                &sender,
+            ) {
+                let _ = sender.blocking_send(Err(error.to_string()));
+            }
+        });
+        Ok(ReplayFrameStream::Streaming {
+            bars,
+            receiver,
+            producer,
+        })
+    }
+
     fn execution_ticks(&self) -> Result<Vec<ReplayMarketTick>> {
         match &self.data {
             ReplayDataSource::PriceTicks(ticks) | ReplayDataSource::RawTicks(ticks) => Ok(ticks
@@ -217,8 +280,16 @@ impl ReplayState {
                 })
                 .collect()),
             ReplayDataSource::CachedRawTicks {
-                execution_ticks, ..
-            } => Ok(execution_ticks.to_vec()),
+                resolved,
+                timestamp_range,
+            } => {
+                let mut ticks = Vec::new();
+                stream_resolved_raw_ticks(resolved, timestamp_range.as_ref(), |row| {
+                    ticks.push(replay_market_tick_from_row(&row));
+                    Ok(())
+                })?;
+                Ok(ticks)
+            }
             ReplayDataSource::CachedServerBars { .. } => Ok(Vec::new()),
         }
     }
@@ -336,11 +407,272 @@ pub(super) enum ReplayDataSource {
     CachedRawTicks {
         resolved: ReplayCacheResolvedRawTicks,
         timestamp_range: Option<crate::replay_cache::ReplayCacheTimeRange>,
-        execution_ticks: Arc<[ReplayMarketTick]>,
     },
     CachedServerBars {
         bars: Arc<[Bar]>,
         bar_type: BarType,
         source_label: String,
     },
+}
+
+#[cfg(feature = "replay")]
+const REPLAY_FRAME_CHANNEL_CAPACITY: usize = 4;
+
+#[cfg(feature = "replay")]
+pub(super) enum ReplayFrameStream {
+    Buffered {
+        bars: Arc<[Bar]>,
+        frames: std::vec::IntoIter<ReplayBarFrame>,
+    },
+    Streaming {
+        bars: Arc<[Bar]>,
+        receiver: mpsc::Receiver<Result<ReplayBarFrame, String>>,
+        producer: JoinHandle<()>,
+    },
+}
+
+#[cfg(feature = "replay")]
+impl ReplayFrameStream {
+    pub(super) fn bars(&self) -> &[Bar] {
+        match self {
+            Self::Buffered { bars, .. } | Self::Streaming { bars, .. } => bars,
+        }
+    }
+
+    pub(super) async fn next(&mut self) -> Result<Option<ReplayBarFrame>> {
+        match self {
+            Self::Buffered { frames, .. } => Ok(frames.next()),
+            Self::Streaming { receiver, .. } => match receiver.recv().await {
+                Some(Ok(frame)) => Ok(Some(frame)),
+                Some(Err(error)) => bail!("stream replay frames: {error}"),
+                None => Ok(None),
+            },
+        }
+    }
+
+    pub(super) async fn finish(&mut self) -> Result<()> {
+        match self {
+            Self::Buffered { frames, .. } => {
+                if frames.next().is_some() {
+                    bail!("replay frame stream produced more frames than scheduled bars");
+                }
+                Ok(())
+            }
+            Self::Streaming {
+                bars,
+                receiver,
+                producer,
+            } => {
+                let mut extra = false;
+                while let Some(item) = receiver.recv().await {
+                    match item {
+                        Ok(_) => extra = true,
+                        Err(error) => bail!("stream replay frames: {error}"),
+                    }
+                }
+                producer
+                    .await
+                    .map_err(|error| anyhow::anyhow!("join replay frame producer: {error}"))?;
+                if extra {
+                    bail!("replay frame stream produced more frames than scheduled bars");
+                }
+                let _ = bars;
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "replay")]
+impl Drop for ReplayFrameStream {
+    fn drop(&mut self) {
+        if let Self::Streaming { producer, .. } = self {
+            producer.abort();
+        }
+    }
+}
+
+#[cfg(feature = "replay")]
+fn stream_cached_raw_tick_frames(
+    resolved: ReplayCacheResolvedRawTicks,
+    timestamp_range: Option<crate::replay_cache::ReplayCacheTimeRange>,
+    bars: Arc<[Bar]>,
+    bar_type: BarType,
+    tick_size: f64,
+    dom_updates: Arc<[ReplayMarketDom]>,
+    sender: &mpsc::Sender<Result<ReplayBarFrame, String>>,
+) -> Result<()> {
+    let dom_groups = group_dom_updates(&dom_updates, &bars, bar_type);
+    let mut assembler = RawTickFrameAssembler::new(bars, bar_type, tick_size, dom_groups, sender);
+    stream_resolved_raw_ticks(&resolved, timestamp_range.as_ref(), |row| {
+        assembler.push(&row)
+    })?;
+    assembler.finish()
+}
+
+#[cfg(feature = "replay")]
+fn replay_market_tick_from_row(row: &ReplayCacheRawTickRow) -> ReplayMarketTick {
+    ReplayMarketTick {
+        ts_ns: row.ts_ns,
+        last: row.price,
+        size: Some(row.size),
+        bid_price: row.bid_price,
+        bid_size: row.bid_size,
+        ask_price: row.ask_price,
+        ask_size: row.ask_size,
+    }
+}
+
+#[cfg(feature = "replay")]
+struct RawTickFrameAssembler<'a> {
+    bars: Arc<[Bar]>,
+    bar_type: BarType,
+    tick_size: f64,
+    dom_groups: Vec<Vec<ReplayMarketDom>>,
+    sender: &'a mpsc::Sender<Result<ReplayBarFrame, String>>,
+    next_bar_index: usize,
+    current_ticks: Vec<ReplayMarketTick>,
+    tick_ordinal: usize,
+    cumulative_volume: f64,
+    range_initialized: bool,
+    range_high: f64,
+    range_low: f64,
+    range_index: usize,
+}
+
+#[cfg(feature = "replay")]
+impl<'a> RawTickFrameAssembler<'a> {
+    fn new(
+        bars: Arc<[Bar]>,
+        bar_type: BarType,
+        tick_size: f64,
+        dom_groups: Vec<Vec<ReplayMarketDom>>,
+        sender: &'a mpsc::Sender<Result<ReplayBarFrame, String>>,
+    ) -> Self {
+        Self {
+            bars,
+            bar_type,
+            tick_size,
+            dom_groups,
+            sender,
+            next_bar_index: 0,
+            current_ticks: Vec::new(),
+            tick_ordinal: 0,
+            cumulative_volume: 0.0,
+            range_initialized: false,
+            range_high: 0.0,
+            range_low: 0.0,
+            range_index: 0,
+        }
+    }
+
+    fn push(&mut self, row: &ReplayCacheRawTickRow) -> Result<()> {
+        if self.bars.is_empty() {
+            return Ok(());
+        }
+        let index = self.group_index(row).min(self.bars.len() - 1);
+        if index < self.next_bar_index {
+            bail!("raw-tick frame groups are not monotonic");
+        }
+        if self.next_bar_index < index {
+            self.emit_current()?;
+            while self.next_bar_index < index {
+                self.emit_empty()?;
+            }
+        }
+        self.current_ticks.push(replay_market_tick_from_row(row));
+        Ok(())
+    }
+
+    fn group_index(&mut self, row: &ReplayCacheRawTickRow) -> usize {
+        let index = match self.bar_type.kind() {
+            BarKind::Minute => {
+                let interval_ns = i64::from(self.bar_type.value()) * 60 * 1_000_000_000;
+                let period = row.ts_ns - row.ts_ns.rem_euclid(interval_ns.max(1));
+                self.bars
+                    .partition_point(|bar| bar.ts_ns <= period)
+                    .saturating_sub(1)
+            }
+            BarKind::Second => {
+                let interval_ns = i64::from(self.bar_type.value()) * 1_000_000_000;
+                let period = row.ts_ns - row.ts_ns.rem_euclid(interval_ns.max(1));
+                self.bars
+                    .partition_point(|bar| bar.ts_ns <= period)
+                    .saturating_sub(1)
+            }
+            BarKind::Tick => self.tick_ordinal / self.bar_type.value().max(1) as usize,
+            BarKind::Volume => {
+                let threshold = f64::from(self.bar_type.value().max(1));
+                let index = (self.cumulative_volume / threshold).floor() as usize;
+                self.cumulative_volume += row.size.max(0.0);
+                index
+            }
+            BarKind::Range => {
+                if !self.range_initialized {
+                    self.range_initialized = true;
+                    self.range_high = row.price;
+                    self.range_low = row.price;
+                }
+                self.range_high = self.range_high.max(row.price);
+                self.range_low = self.range_low.min(row.price);
+                let index = self.range_index;
+                let range = self.bar_type.value().max(1) as f64 * self.tick_size;
+                if (self.range_high - self.range_low) + f64::EPSILON >= range
+                    && self.range_index + 1 < self.bars.len()
+                {
+                    self.range_index += 1;
+                    self.range_high = row.price;
+                    self.range_low = row.price;
+                }
+                index
+            }
+        };
+        self.tick_ordinal = self.tick_ordinal.saturating_add(1);
+        index
+    }
+
+    fn emit_current(&mut self) -> Result<()> {
+        if self.next_bar_index >= self.bars.len() {
+            self.current_ticks.clear();
+            return Ok(());
+        }
+        let index = self.next_bar_index;
+        let frame = ReplayBarFrame {
+            bar: self.bars[index].clone(),
+            ticks: Arc::from(std::mem::take(&mut self.current_ticks).into_boxed_slice()),
+            dom_updates: Arc::from(self.dom_groups[index].clone().into_boxed_slice()),
+        };
+        self.sender
+            .blocking_send(Ok(frame))
+            .map_err(|_| anyhow::anyhow!("replay frame consumer closed"))?;
+        self.next_bar_index += 1;
+        Ok(())
+    }
+
+    fn emit_empty(&mut self) -> Result<()> {
+        if self.next_bar_index >= self.bars.len() {
+            return Ok(());
+        }
+        let index = self.next_bar_index;
+        let frame = ReplayBarFrame {
+            bar: self.bars[index].clone(),
+            ticks: Arc::from(Vec::new().into_boxed_slice()),
+            dom_updates: Arc::from(self.dom_groups[index].clone().into_boxed_slice()),
+        };
+        self.sender
+            .blocking_send(Ok(frame))
+            .map_err(|_| anyhow::anyhow!("replay frame consumer closed"))?;
+        self.next_bar_index += 1;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if self.next_bar_index < self.bars.len() {
+            self.emit_current()?;
+            while self.next_bar_index < self.bars.len() {
+                self.emit_empty()?;
+            }
+        }
+        Ok(())
+    }
 }
