@@ -174,15 +174,6 @@ pub(crate) async fn run_replay_sweep(
     if guardrail_report.requires_confirmation && (allow_large || override_guardrails) {
         warnings.push("large replay sweep confirmation accepted at launch".to_string());
     }
-    if spec
-        .output_formats
-        .contains(&ReplaySweepOutputFormat::ParquetRows)
-    {
-        warnings.push(
-            "Parquet sweep summary output is reserved for a later analytics slice; JSON/CSV rows were written."
-                .to_string(),
-        );
-    }
     let fee_scenarios = collect_fee_scenario_summaries(&runs, &mut warnings);
     let document = ReplaySweepSummaryDocument {
         schema_version: REPLAY_SWEEP_SUMMARY_SCHEMA_VERSION,
@@ -686,6 +677,12 @@ fn write_summary_outputs(
             )?;
         }
     }
+    if spec
+        .output_formats
+        .contains(&ReplaySweepOutputFormat::ParquetRows)
+    {
+        super::sweep_parquet::write_sweep_parquet_outputs(output_root, document)?;
+    }
     Ok(())
 }
 
@@ -807,6 +804,7 @@ mod tests {
         ReplayDatasetSessionPreset, ReplayDatasetSourceRef, ReplayDatasetWarmupPolicy,
     };
     use crate::strategy::ExecutionStrategyConfig;
+    use std::fs::File;
 
     fn child() -> ReplaySweepChildSpec {
         let view = ReplayDatasetView {
@@ -879,6 +877,89 @@ mod tests {
         let csv = String::from_utf8(summary_csv(&document)).expect("csv");
         assert!(csv.contains("\"bad, \"\"input\"\"\""));
         assert!(csv.contains("1.25,1,0.25,-2,2,4"));
+    }
+
+    #[test]
+    fn parquet_summary_writes_typed_summary_and_fee_rows() {
+        let output_root = std::env::temp_dir().join(format!(
+            "trader-sweep-parquet-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let document = ReplaySweepSummaryDocument {
+            schema_version: REPLAY_SWEEP_SUMMARY_SCHEMA_VERSION,
+            sweep_id: "parquet-sweep".to_string(),
+            name: "Parquet sweep".to_string(),
+            created_at_utc: Utc::now(),
+            run_count: 1,
+            completed_count: 1,
+            failed_count: 0,
+            skipped_count: 0,
+            warnings: Vec::new(),
+            runs: vec![ReplaySweepRunSummary {
+                run_id: "run-000001".to_string(),
+                run_index: 0,
+                status: "completed".to_string(),
+                skipped: false,
+                result_path: Some(output_root.join("runs/run-000001/result.json")),
+                error: None,
+                gross_pnl: Some(12.0),
+                net_pnl: Some(10.0),
+                fees: Some(2.0),
+                max_drawdown: Some(-3.0),
+                trade_count: Some(4),
+                fill_count: Some(8),
+            }],
+            fee_scenarios: vec![ReplaySweepFeeScenarioSummary {
+                run_id: "run-000001".to_string(),
+                run_index: 0,
+                scenario_name: "broker".to_string(),
+                currency: "USD".to_string(),
+                total_per_contract: 1.0,
+                fees: 2.0,
+                gross_pnl: 12.0,
+                net_pnl: 10.0,
+                ending_equity: 10_010.0,
+                return_on_initial_capital_pct: Some(0.1),
+                max_drawdown: -3.0,
+                max_drawdown_pct: Some(-0.03),
+                profit_factor: Some(2.0),
+            }],
+            resource_estimate: None,
+        };
+        let mut spec = ReplaySweepSpec::default();
+        spec.output_formats = vec![ReplaySweepOutputFormat::ParquetRows];
+        write_summary_outputs(&output_root, &spec, &document).expect("write Parquet summary");
+
+        let summary_path = output_root.join("sweep-summary.parquet");
+        let fee_path = output_root.join("sweep-fee-scenarios.parquet");
+        assert!(summary_path.is_file());
+        assert!(fee_path.is_file());
+        let summary_reader =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(&summary_path).expect("open summary Parquet"),
+            )
+            .expect("build summary Parquet reader")
+            .build()
+            .expect("read summary Parquet");
+        assert_eq!(
+            summary_reader
+                .map(|batch| batch.expect("summary batch").num_rows())
+                .sum::<usize>(),
+            1
+        );
+        let fee_reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(&fee_path).expect("open fee Parquet"),
+        )
+        .expect("build fee Parquet reader")
+        .build()
+        .expect("read fee Parquet");
+        assert_eq!(
+            fee_reader
+                .map(|batch| batch.expect("fee batch").num_rows())
+                .sum::<usize>(),
+            1
+        );
+        let _ = fs::remove_dir_all(output_root);
     }
 
     #[test]

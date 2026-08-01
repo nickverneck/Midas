@@ -24,6 +24,8 @@ mod sweep;
 #[cfg(feature = "replay")]
 mod sweep_analytics;
 #[cfg(feature = "replay")]
+mod sweep_parquet;
+#[cfg(feature = "replay")]
 mod sweep_runner;
 #[cfg(feature = "replay")]
 mod ticks;

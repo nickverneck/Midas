@@ -77,6 +77,20 @@ fn write_batches(
     schema: Arc<Schema>,
     batch: Result<RecordBatch, anyhow::Error>,
 ) -> Result<()> {
+    write_record_batch(file, schema, batch?)
+}
+
+/// Write one typed Arrow batch through the same atomic/compressed writer used
+/// by replay result sidecars. Sweep summaries reuse this to keep one Parquet
+/// encoding policy across single runs and large sweeps.
+pub(super) fn write_parquet_record_batch(path: &Path, batch: RecordBatch) -> Result<()> {
+    write_parquet_atomic(path, |file| {
+        let schema = batch.schema();
+        write_record_batch(file, schema, batch)
+    })
+}
+
+fn write_record_batch(file: File, schema: Arc<Schema>, batch: RecordBatch) -> Result<()> {
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .set_statistics_enabled(EnabledStatistics::Chunk)
@@ -84,12 +98,12 @@ fn write_batches(
         .set_write_batch_size(8_192)
         .build();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
-    writer.write(&batch?)?;
+    writer.write(&batch)?;
     writer.close()?;
     Ok(())
 }
 
-fn write_parquet_atomic<F>(path: &Path, writer: F) -> Result<()>
+pub(super) fn write_parquet_atomic<F>(path: &Path, writer: F) -> Result<()>
 where
     F: FnOnce(File) -> Result<()>,
 {
