@@ -8,8 +8,15 @@ impl App {
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.replay_analytics.focus = match self.replay_analytics.focus {
                         AnalyticsFocus::Runs => AnalyticsFocus::Trades,
-                        AnalyticsFocus::Trades => AnalyticsFocus::Runs,
+                        AnalyticsFocus::Trades => AnalyticsFocus::Signals,
+                        AnalyticsFocus::Signals => AnalyticsFocus::Sweeps,
+                        AnalyticsFocus::Sweeps => AnalyticsFocus::Runs,
                     };
+                    if self.replay_analytics.focus == AnalyticsFocus::Signals {
+                        self.replay_analytics.load_selected_signals();
+                    } else if self.replay_analytics.focus == AnalyticsFocus::Runs {
+                        self.replay_analytics.clear_selected_signals();
+                    }
                     self.replay_analytics.clamp_selection();
                 }
                 KeyCode::Up => match self.replay_analytics.focus {
@@ -17,11 +24,20 @@ impl App {
                         self.replay_analytics.selected_run =
                             self.replay_analytics.selected_run.saturating_sub(1);
                         self.replay_analytics.selected_trade = 0;
+                        self.replay_analytics.selected_signal = 0;
                         self.replay_analytics.selected_fee_scenario = 0;
+                        self.replay_analytics.clear_selected_signals();
                     }
                     AnalyticsFocus::Trades => {
                         self.replay_analytics.selected_trade =
                             self.replay_analytics.selected_trade.saturating_sub(1);
+                    }
+                    AnalyticsFocus::Signals => {
+                        self.replay_analytics.selected_signal =
+                            self.replay_analytics.selected_signal.saturating_sub(1);
+                    }
+                    AnalyticsFocus::Sweeps => {
+                        self.replay_analytics.cycle_sweep_source(-1);
                     }
                 },
                 KeyCode::Down => match self.replay_analytics.focus {
@@ -32,7 +48,9 @@ impl App {
                             self.replay_analytics.selected_run += 1;
                         }
                         self.replay_analytics.selected_trade = 0;
+                        self.replay_analytics.selected_signal = 0;
                         self.replay_analytics.selected_fee_scenario = 0;
+                        self.replay_analytics.clear_selected_signals();
                     }
                     AnalyticsFocus::Trades => {
                         let trade_count = self.replay_analytics.sorted_trades().len();
@@ -40,15 +58,118 @@ impl App {
                             self.replay_analytics.selected_trade += 1;
                         }
                     }
+                    AnalyticsFocus::Signals => {
+                        let signal_count = self.replay_analytics.filtered_signals().len();
+                        if self.replay_analytics.selected_signal + 1 < signal_count {
+                            self.replay_analytics.selected_signal += 1;
+                        }
+                    }
+                    AnalyticsFocus::Sweeps => {
+                        self.replay_analytics.cycle_sweep_source(1);
+                    }
                 },
-                KeyCode::Left => self.replay_analytics.cycle_fee_scenario(-1),
-                KeyCode::Right => self.replay_analytics.cycle_fee_scenario(1),
+                KeyCode::Char('g') | KeyCode::Char('G') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Signals {
+                        self.replay_analytics.cycle_signal_filter();
+                        self.status = format!(
+                            "Analytics signal filter: {}.",
+                            self.replay_analytics.signal_filter.label()
+                        );
+                    }
+                }
+                KeyCode::Left => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_fee_scenario(-1);
+                    } else {
+                        self.replay_analytics.cycle_fee_scenario(-1);
+                    }
+                }
+                KeyCode::Right => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_fee_scenario(1);
+                    } else {
+                        self.replay_analytics.cycle_fee_scenario(1);
+                    }
+                }
+                KeyCode::Char('[') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_source(-1);
+                    }
+                }
+                KeyCode::Char(']') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_source(1);
+                    }
+                }
+                KeyCode::Char('m') | KeyCode::Char('M') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_metric(1);
+                        self.status = format!(
+                            "Sweep ranking metric: {}.",
+                            self.replay_analytics.sweep_metric.label()
+                        );
+                    }
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_fee_scenario(1);
+                        self.status = format!(
+                            "Sweep fee scenario: {}.",
+                            self.replay_analytics
+                                .sweep_fee_scenario
+                                .as_deref()
+                                .unwrap_or("active")
+                        );
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_filter(true, 1);
+                        self.status = format!(
+                            "Sweep drawdown filter: {}.",
+                            self.replay_analytics
+                                .sweep_max_drawdown_pct
+                                .map(|value| format!("{value:.1}%"))
+                                .unwrap_or_else(|| "none".to_string())
+                        );
+                    }
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.cycle_sweep_filter(false, 1);
+                        self.status = format!(
+                            "Sweep minimum closed trades: {}.",
+                            self.replay_analytics.sweep_min_closed_trades
+                        );
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Char('J') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        let count = self
+                            .replay_analytics
+                            .sweep_ranking
+                            .as_ref()
+                            .map(|document| document.rows.len())
+                            .unwrap_or_default();
+                        if self.replay_analytics.selected_sweep_row + 1 < count {
+                            self.replay_analytics.selected_sweep_row += 1;
+                        }
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Char('K') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        self.replay_analytics.selected_sweep_row =
+                            self.replay_analytics.selected_sweep_row.saturating_sub(1);
+                    }
+                }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
-                    self.replay_analytics.cycle_sort();
-                    self.status = format!(
-                        "Analytics trade sort: {}.",
-                        self.analytics_trade_sort_label()
-                    );
+                    if self.replay_analytics.focus == AnalyticsFocus::Trades {
+                        self.replay_analytics.cycle_sort();
+                        self.status = format!(
+                            "Analytics trade sort: {}.",
+                            self.analytics_trade_sort_label()
+                        );
+                    }
                 }
                 KeyCode::Char('c') | KeyCode::Char('C') => {
                     if self.replay_analytics.entries.is_empty() {
@@ -89,6 +210,189 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_signal_filter_label(&self) -> &'static str {
+        self.replay_analytics.signal_filter.label()
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_sweep_items(&self) -> Vec<ListItem<'static>> {
+        if self.replay_analytics.sweep_entries.is_empty() {
+            return vec![ListItem::new(vec![
+                Line::from("No sweep-ranking.json artifacts."),
+                Line::from("Run rank-replay-sweep with --output, then press r."),
+            ])];
+        }
+        self.replay_analytics
+            .sweep_entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let marker = if self.replay_analytics.selected_sweep == index {
+                    ">"
+                } else {
+                    " "
+                };
+                ListItem::new(vec![
+                    Line::from(format!(
+                        "{marker} {} [{}]",
+                        entry.document.sweep_id,
+                        entry.document.metric.label()
+                    )),
+                    Line::from(format!("  {}", entry.document.name)),
+                    Line::from(format!(
+                        "  {} | {} rows",
+                        entry.document.fee_scenario,
+                        entry.document.rows.len()
+                    )),
+                ])
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_sweep_summary_lines(&self) -> Vec<Line<'static>> {
+        let Some(entry) = self.replay_analytics.selected_sweep_entry() else {
+            return vec![
+                Line::from("No saved sweep ranking selected."),
+                Line::from("Create sweep-ranking.json with rank-replay-sweep."),
+            ];
+        };
+        let Some(document) = self.replay_analytics.sweep_ranking.as_ref() else {
+            return vec![Line::from("Sweep ranking is unavailable.")];
+        };
+        let mut lines = vec![
+            Line::from(format!("Sweep: {} ({})", document.sweep_id, document.name)),
+            Line::from(format!(
+                "Source: {}",
+                entry
+                    .path
+                    .parent()
+                    .unwrap_or(entry.path.as_path())
+                    .display()
+            )),
+            Line::from(format!(
+                "Metric: {} | Fee scenario: {}",
+                document.metric.label(),
+                document.fee_scenario
+            )),
+            Line::from(format!(
+                "Candidates: {} completed | {} after filters | {} shown",
+                document.total_completed_candidates,
+                document.filtered_candidates,
+                document.rows.len()
+            )),
+            Line::from(format!(
+                "Filters: min trades {} | max drawdown {}",
+                document.options.min_closed_trades,
+                document
+                    .options
+                    .max_drawdown_pct
+                    .map(|value| format!("{value:.1}%"))
+                    .unwrap_or_else(|| "none".to_string())
+            )),
+            Line::from("m metric | f fee | d drawdown | t trades | [/] sweep"),
+        ];
+        if let Some(error) = self.replay_analytics.sweep_ranking_error.as_deref() {
+            lines.push(Line::from(format!("Re-rank error: {error}")));
+        }
+        if !self.replay_analytics.sweep_warnings.is_empty() {
+            lines.push(Line::from(format!(
+                "Warnings: {} ranking artifact issue(s)",
+                self.replay_analytics.sweep_warnings.len()
+            )));
+        }
+        lines
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_sweep_table_rows(&self) -> Vec<Row<'static>> {
+        let Some(document) = self.replay_analytics.sweep_ranking.as_ref() else {
+            return Vec::new();
+        };
+        document
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let selected = self.replay_analytics.selected_sweep_row == index
+                    && self.replay_analytics.focus == AnalyticsFocus::Sweeps;
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if row.robustness_score.unwrap_or_default() >= 0.0 {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                };
+                Row::new(vec![
+                    Cell::from(row.rank.to_string()),
+                    Cell::from(row.run_id.clone()),
+                    Cell::from(format_sweep_value(row.metric_value)),
+                    Cell::from(format_sweep_value(row.net_pnl)),
+                    Cell::from(format_sweep_value(row.max_drawdown_pct)),
+                    Cell::from(
+                        row.closed_trade_count
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "n/a".to_string()),
+                    ),
+                    Cell::from(row.neighborhood_count.to_string()),
+                    Cell::from(format_sweep_value(row.robustness_score)),
+                ])
+                .style(style)
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_selected_sweep_lines(&self) -> Vec<Line<'static>> {
+        let Some(row) = self.replay_analytics.selected_sweep_row() else {
+            return vec![Line::from("No candidate selected.")];
+        };
+        let parameters = serde_json::to_string(&row.parameter_values).unwrap_or_default();
+        let overrides = serde_json::to_string(&row.overrides).unwrap_or_default();
+        vec![
+            Line::from(format!(
+                "{} | rank {} | {}",
+                row.run_id, row.rank, row.fee_scenario
+            )),
+            Line::from(format!(
+                "Metric {} | robustness {} | neighbors {} (median {})",
+                format_sweep_value(row.metric_value),
+                format_sweep_value(row.robustness_score),
+                row.neighborhood_count,
+                format_sweep_value(row.neighborhood_median_quality)
+            )),
+            Line::from(format!(
+                "Net {} | Gross {} | Fees {} | Return/required {}",
+                format_sweep_value(row.net_pnl),
+                format_sweep_value(row.gross_pnl),
+                format_sweep_value(row.fees),
+                format_sweep_value(row.return_on_required_account_size_pct)
+            )),
+            Line::from(format!(
+                "Drawdown {} ({}) | Required account {} | PF {}",
+                format_sweep_value(row.max_drawdown),
+                format_sweep_value(row.max_drawdown_pct),
+                format_sweep_value(row.required_starting_capital),
+                format_sweep_value(row.profit_factor)
+            )),
+            Line::from(format!(
+                "Trades {} | win {} | avg giveback {} | MFE capture {}",
+                row.closed_trade_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                format_sweep_value(row.win_rate_pct),
+                format_sweep_value(row.average_giveback),
+                format_sweep_value(row.average_mfe_capture_ratio)
+            )),
+            Line::from(format!("Parameters: {parameters}")),
+            Line::from(format!("Overrides: {overrides}")),
+        ]
+    }
+
+    #[cfg(feature = "replay")]
     pub(in crate::app) fn analytics_run_items(&self) -> Vec<ListItem<'static>> {
         if self.replay_analytics.entries.is_empty() {
             return vec![ListItem::new(vec![
@@ -114,10 +418,11 @@ impl App {
                 ListItem::new(vec![
                     Line::from(format!("{marker} {} [{status}]", document.run_id)),
                     Line::from(format!(
-                        "  {} {} | {} trades",
+                        "  {} {} | {} trades | {} signals",
                         document.metadata.contract_name,
                         document.completed_at_utc.format("%Y-%m-%d %H:%M"),
-                        document.summary.trade_count
+                        document.summary.trade_count,
+                        document.metadata.signal_diagnostic_count
                     )),
                     Line::from(format!(
                         "  PnL {} | {}",
@@ -193,6 +498,21 @@ impl App {
                     .first()
                     .map(String::as_str)
                     .unwrap_or("n/a")
+            )),
+            Line::from(format!(
+                "Signals: {} | {} row(s){}",
+                if document.metadata.signal_diagnostics_enabled {
+                    "captured"
+                } else {
+                    "not captured"
+                },
+                document.metadata.signal_diagnostic_count,
+                document
+                    .artifacts
+                    .signals_csv
+                    .as_deref()
+                    .map(|path| format!(" | {path}"))
+                    .unwrap_or_default()
             )),
             Line::from(format!(
                 "Scenario: {} | Net PnL: {} | Fees: {:.2}",
@@ -378,6 +698,138 @@ impl App {
             )),
         ]
     }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_signal_table_rows(&self) -> Vec<Row<'static>> {
+        self.replay_analytics
+            .filtered_signals()
+            .into_iter()
+            .enumerate()
+            .map(|(index, signal)| {
+                let selected = self.replay_analytics.selected_signal == index
+                    && self.replay_analytics.focus == AnalyticsFocus::Signals;
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if signal.order_action.is_some() {
+                    Style::default().fg(Color::Green)
+                } else if !signal.signal.eq_ignore_ascii_case("hold") {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                let position = signal
+                    .target_qty
+                    .map(|target| format!("{}>{target}", signal.effective_position_qty))
+                    .unwrap_or_else(|| signal.effective_position_qty.to_string());
+                Row::new(vec![
+                    Cell::from(
+                        signal
+                            .bar_index
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                    ),
+                    Cell::from(format_signal_timestamp(signal.bar_timestamp_ns)),
+                    Cell::from(format!("{:.4}", signal.bar_close)),
+                    Cell::from(signal.raw_signal.clone()),
+                    Cell::from(signal.effective_signal.clone()),
+                    Cell::from(position),
+                    Cell::from(signal.decision.clone()),
+                    Cell::from(compact_signal_text(&signal.gate_reason, 24)),
+                ])
+                .style(style)
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_selected_signal_lines(&self) -> Vec<Line<'static>> {
+        let Some(signal) = self.replay_analytics.selected_signal() else {
+            return if let Some(error) = self.replay_analytics.signal_load_error.as_deref() {
+                vec![Line::from(format!(
+                    "Signal diagnostics unavailable: {error}"
+                ))]
+            } else if self.replay_analytics.signals.is_empty() {
+                vec![Line::from(
+                    "No signal diagnostics are saved for this result. Enable replay_signal_diagnostics for future runs.",
+                )]
+            } else {
+                vec![Line::from("No signal row matches the current filter.")]
+            };
+        };
+        let indicator_values = format!(
+            "{} prev {:.4}/{:.4} current {:.4}/{:.4}",
+            signal.indicator_name,
+            signal.previous_fast_indicator.unwrap_or(f64::NAN),
+            signal.previous_slow_indicator.unwrap_or(f64::NAN),
+            signal.fast_indicator.unwrap_or(f64::NAN),
+            signal.slow_indicator.unwrap_or(f64::NAN)
+        )
+        .replace("NaN", "n/a");
+        let position = signal
+            .target_qty
+            .map(|target| format!("{} -> {target}", signal.effective_position_qty))
+            .unwrap_or_else(|| signal.effective_position_qty.to_string());
+        vec![
+            Line::from(format!(
+                "Bar {} @ {} | OHLC {:.4}/{:.4}/{:.4}/{:.4}",
+                signal
+                    .bar_index
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                format_signal_timestamp(signal.bar_timestamp_ns),
+                signal.bar_open,
+                signal.bar_high,
+                signal.bar_low,
+                signal.bar_close
+            )),
+            Line::from(format!(
+                "{} | path {} | {} | delay {}",
+                signal.strategy,
+                signal.execution_path,
+                signal.signal_timing,
+                signal.signal_delay_bars
+            )),
+            Line::from(format!(
+                "Indicator: {indicator_values}{}",
+                signal
+                    .auxiliary_name
+                    .as_ref()
+                    .zip(signal.auxiliary_value)
+                    .map(|(name, value)| format!(" | {name} {:.4}", value))
+                    .unwrap_or_default()
+            )),
+            Line::from(format!(
+                "Signal: {} | raw {} | effective {} | position {} (actual {})",
+                signal.signal,
+                signal.raw_signal,
+                signal.effective_signal,
+                position,
+                signal.current_position_qty
+            )),
+            Line::from(format!(
+                "Decision: {} | order {} {} | gate: {}",
+                signal.decision,
+                signal.order_action.as_deref().unwrap_or("n/a"),
+                signal
+                    .order_qty
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "".to_string()),
+                signal.gate_reason
+            )),
+            Line::from(format!(
+                "Hold reason: {} | fingerprint: {}",
+                signal.hold_reason.as_deref().unwrap_or("n/a"),
+                signal
+                    .fingerprint
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string())
+            )),
+            Line::from(format!("Detail: {}", signal.strategy_detail)),
+        ]
+    }
 }
 
 #[cfg(feature = "replay")]
@@ -408,4 +860,35 @@ fn format_excursion_value(pnl: Option<f64>, points: f64) -> String {
 #[cfg(feature = "replay")]
 fn format_points(value: f64) -> String {
     format!("{value:.2}pt")
+}
+
+#[cfg(feature = "replay")]
+fn format_signal_timestamp(timestamp_ns: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(
+        timestamp_ns.div_euclid(1_000_000_000),
+        timestamp_ns.rem_euclid(1_000_000_000) as u32,
+    )
+    .map(|timestamp| timestamp.format("%m-%d %H:%M:%S").to_string())
+    .unwrap_or_else(|| timestamp_ns.to_string())
+}
+
+#[cfg(feature = "replay")]
+fn compact_signal_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut compact = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    compact
+}
+
+#[cfg(feature = "replay")]
+fn format_sweep_value(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "n/a".to_string())
 }

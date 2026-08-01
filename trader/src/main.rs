@@ -28,7 +28,10 @@ use cli::{Cli, Mode};
 use config::AppConfig;
 use engine_cli::{configure_attach_mode, kill_all_engines, kill_engine, list_engines};
 use ipc::run_engine_server;
-use replay_cli::{analyze_replay_margin, download_replay_data, reprice_replay_result};
+use replay_cli::{
+    analyze_replay_margin, download_replay_data, rank_replay_sweep, reprice_replay_result,
+    run_replay_sweep, validate_replay_sweep,
+};
 use tui_runtime::run_tui;
 
 #[tokio::main]
@@ -70,6 +73,16 @@ async fn main() -> Result<()> {
     if let Some(Mode::AnalyzeReplayMargin(args)) = cli.mode.clone() {
         let config = AppConfig::load(cli.config.as_deref())?;
         return analyze_replay_margin(&config, args);
+    }
+    if let Some(Mode::ValidateReplaySweep(args)) = cli.mode.clone() {
+        return validate_replay_sweep(args);
+    }
+    if let Some(Mode::RunReplaySweep(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return run_replay_sweep(&config, args).await;
+    }
+    if let Some(Mode::RankReplaySweep(args)) = cli.mode.clone() {
+        return rank_replay_sweep(args);
     }
     #[cfg(feature = "tradovate")]
     if let Some(Mode::CaptureReplayDom(args)) = cli.mode.clone() {

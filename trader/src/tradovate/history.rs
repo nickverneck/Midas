@@ -46,11 +46,26 @@ pub(super) fn start_engine_run(session: &mut SessionState) -> Result<()> {
         );
     }
     let started_at_utc = Utc::now();
-    let run_id = format!(
-        "{:x}{:x}",
-        started_at_utc.timestamp_millis(),
-        std::process::id()
-    );
+    let run_id = if session.replay_enabled {
+        session
+            .cfg
+            .replay_run_id
+            .clone()
+            .filter(|run_id| !run_id.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "{:x}{:x}",
+                    started_at_utc.timestamp_millis(),
+                    std::process::id()
+                )
+            })
+    } else {
+        format!(
+            "{:x}{:x}",
+            started_at_utc.timestamp_millis(),
+            std::process::id()
+        )
+    };
     let mut run = EngineRunState {
         order_prefix: format!("midas-r{run_id}"),
         run_id,

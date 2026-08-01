@@ -1,4 +1,7 @@
-use crate::cli::{AnalyzeReplayMarginArgs, ReplayDownloadArgs, RepriceReplayResultArgs};
+use crate::cli::{
+    AnalyzeReplayMarginArgs, RankReplaySweepArgs, ReplayDownloadArgs, RepriceReplayResultArgs,
+    RunReplaySweepArgs, ValidateReplaySweepArgs,
+};
 use crate::config::AppConfig;
 #[cfg(feature = "replay")]
 use anyhow::Context;
@@ -111,6 +114,221 @@ pub(crate) fn analyze_replay_margin(
         println!("Result: {}", outcome.result_path.display());
         Ok(())
     }
+}
+
+pub(crate) fn validate_replay_sweep(args: ValidateReplaySweepArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = args;
+        bail!("replay sweep validation requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = args;
+        bail!("replay sweep validation requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let spec = crate::tradovate::ReplaySweepSpec::load(&args.spec)?;
+        let report = spec.guardrail_report(None)?;
+        let plan = spec.plan()?;
+        println!("Replay sweep specification is valid.");
+        println!("Sweep: {} ({})", spec.sweep_id, spec.name);
+        println!("Dataset view: {}", spec.base_dataset_view.id);
+        println!("Runs: {}", plan.children.len());
+        println!("Parallelism: {}", spec.parallelism);
+        println!(
+            "Estimate: input rows {}, memory {}, output {}, runtime {}.",
+            display_estimate_value(report.estimate.estimated_input_rows),
+            display_estimate_bytes(report.estimate.estimated_memory_bytes),
+            display_estimate_bytes(report.estimate.estimated_output_bytes),
+            display_estimate_duration(report.estimate.estimated_runtime_seconds),
+        );
+        for warning in &report.warnings {
+            println!("Warning: {warning}");
+        }
+        for violation in &report.violations {
+            println!("Guardrail: {violation}");
+        }
+        println!(
+            "Output formats: {}",
+            spec.output_formats
+                .iter()
+                .map(|format| format.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if let Some(output) = args.output {
+            plan.save(&output)?;
+            println!("Expanded plan: {}", output.display());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn run_replay_sweep(config: &AppConfig, args: RunReplaySweepArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay sweep execution requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = (config, args);
+        bail!("replay sweep execution requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let spec = crate::tradovate::ReplaySweepSpec::load(&args.spec)?;
+        let report = spec.guardrail_report(Some(&config.replay_cache_dir))?;
+        println!(
+            "Replay sweep launch estimate: {} combinations, {} parallel jobs, input rows {}, memory {}, output {}, runtime {}.",
+            report.estimate.combinations,
+            report.estimate.parallel_jobs,
+            display_estimate_value(report.estimate.estimated_input_rows),
+            display_estimate_bytes(report.estimate.estimated_memory_bytes),
+            display_estimate_bytes(report.estimate.estimated_output_bytes),
+            display_estimate_duration(report.estimate.estimated_runtime_seconds),
+        );
+        for warning in &report.warnings {
+            println!("Warning: {warning}");
+        }
+        for violation in &report.violations {
+            println!("Guardrail: {violation}");
+        }
+        if report.requires_confirmation && !args.allow_large && !args.override_guardrails {
+            println!(
+                "Large sweep confirmation required: pass --allow-large after reviewing the estimate."
+            );
+        }
+        let summary = crate::tradovate::run_replay_sweep(
+            config,
+            &args.spec,
+            args.no_resume,
+            args.allow_large,
+            args.override_guardrails,
+        )
+        .await?;
+        println!(
+            "Replay sweep {} complete: {} completed, {} failed, {} skipped.",
+            summary.sweep_id, summary.completed_count, summary.failed_count, summary.skipped_count
+        );
+        for warning in &summary.warnings {
+            println!("Warning: {warning}");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn rank_replay_sweep(args: RankReplaySweepArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = args;
+        bail!("replay sweep ranking requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = args;
+        bail!("replay sweep ranking requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let metric = crate::tradovate::ReplaySweepRankingMetric::parse(&args.metric)?;
+        let options = crate::tradovate::ReplaySweepRankingOptions {
+            metric,
+            fee_scenario: args.fee_scenario,
+            limit: args.limit,
+            min_closed_trades: args.min_closed_trades,
+            max_drawdown_pct: args.max_drawdown_pct,
+        };
+        let document = crate::tradovate::rank_replay_sweep(
+            &args.summary,
+            args.plan.as_deref(),
+            options,
+            args.output.as_deref(),
+            args.csv.as_deref(),
+        )?;
+        println!(
+            "Replay sweep {} ranked {} candidates with {} ({} rows).",
+            document.sweep_id,
+            document.total_completed_candidates,
+            document.metric.label(),
+            document.rows.len()
+        );
+        for row in &document.rows {
+            println!(
+                "#{:>3} {:<24} metric={} net_pnl={} drawdown_pct={} neighborhood={} robustness={}",
+                row.rank,
+                row.run_id,
+                display_estimate_f64(row.metric_value),
+                display_estimate_f64(row.net_pnl),
+                display_estimate_f64(row.max_drawdown_pct),
+                row.neighborhood_count,
+                display_estimate_f64(row.robustness_score),
+            );
+        }
+        for warning in &document.warnings {
+            println!("Warning: {warning}");
+        }
+        if let Some(output) = args.output {
+            println!("Ranking JSON: {}", output.display());
+        }
+        if let Some(csv) = args.csv {
+            println!("Ranking CSV: {}", csv.display());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn display_estimate_value(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn display_estimate_bytes(value: Option<u64>) -> String {
+    let Some(value) = value else {
+        return "unknown".to_string();
+    };
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut scaled = value as f64;
+    let mut unit = 0;
+    while scaled >= 1024.0 && unit + 1 < UNITS.len() {
+        scaled /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", value, UNITS[unit])
+    } else {
+        format!("{scaled:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn display_estimate_duration(value: Option<u64>) -> String {
+    let Some(seconds) = value else {
+        return "unknown".to_string();
+    };
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn display_estimate_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 #[cfg(all(feature = "replay", feature = "tradovate"))]

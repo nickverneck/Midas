@@ -181,13 +181,15 @@ async fn replay_market_worker_inner(
         if bar.ts_ns != event.market_ts_ns {
             bail!("replay bar schedule timestamp does not match source bar")
         }
-        wait_for_replay_bar(
-            series.closed_bars.last().map(|previous| previous.ts_ns),
-            event.market_ts_ns,
-            cfg.replay_bar_interval_ms,
-            replay_speed_rx,
-        )
-        .await;
+        if !cfg.replay_headless {
+            wait_for_replay_bar(
+                series.closed_bars.last().map(|previous| previous.ts_ns),
+                event.market_ts_ns,
+                cfg.replay_bar_interval_ms,
+                replay_speed_rx,
+            )
+            .await;
+        }
         let frame = frames
             .get(history_loaded + bar_index)
             .context("replay frame schedule referenced a missing frame")?;

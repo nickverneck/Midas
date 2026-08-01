@@ -1,5 +1,7 @@
 #[cfg(feature = "manual-orders")]
 use crate::broker::ManualOrderAction;
+#[cfg(feature = "replay")]
+use crate::broker::ReplaySignalDiagnostic;
 use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, InstrumentSessionWindow, LatencySnapshot,
@@ -24,8 +26,10 @@ use crate::strategy::{
 };
 #[cfg(feature = "replay")]
 use crate::tradovate::replay::{
-    ReplayResultEntry, ReplayResultLibrarySnapshot, ReplayTradeExcursion,
-    load_replay_result_entries,
+    ReplayResultEntry, ReplayResultLibrarySnapshot, ReplaySweepRankingDocument,
+    ReplaySweepRankingEntry, ReplaySweepRankingLibrarySnapshot, ReplaySweepRankingMetric,
+    ReplaySweepRankingOptions, ReplayTradeExcursion, load_replay_result_entries,
+    load_replay_signal_diagnostics, load_replay_sweep_ranking_entries, rank_replay_sweep,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -377,6 +381,8 @@ enum Screen {
 enum AnalyticsFocus {
     Runs,
     Trades,
+    Signals,
+    Sweeps,
 }
 
 #[cfg(feature = "replay")]
@@ -388,6 +394,36 @@ enum AnalyticsTradeSort {
 }
 
 #[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnalyticsSignalFilter {
+    All,
+    Orders,
+    Blocked,
+    SignalsOnly,
+}
+
+#[cfg(feature = "replay")]
+impl AnalyticsSignalFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Orders => "orders",
+            Self::Blocked => "blocked/gated",
+            Self::SignalsOnly => "non-hold signals",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Orders,
+            Self::Orders => Self::Blocked,
+            Self::Blocked => Self::SignalsOnly,
+            Self::SignalsOnly => Self::All,
+        }
+    }
+}
+
+#[cfg(feature = "replay")]
 #[derive(Debug, Clone)]
 struct ReplayAnalyticsState {
     root: PathBuf,
@@ -395,10 +431,24 @@ struct ReplayAnalyticsState {
     warnings: Vec<String>,
     selected_run: usize,
     selected_trade: usize,
+    selected_signal: usize,
     selected_fee_scenario: usize,
     comparison_run: Option<usize>,
     focus: AnalyticsFocus,
     trade_sort: AnalyticsTradeSort,
+    signal_filter: AnalyticsSignalFilter,
+    signals: Vec<ReplaySignalDiagnostic>,
+    signal_load_error: Option<String>,
+    sweep_entries: Vec<ReplaySweepRankingEntry>,
+    sweep_warnings: Vec<String>,
+    selected_sweep: usize,
+    selected_sweep_row: usize,
+    sweep_metric: ReplaySweepRankingMetric,
+    sweep_fee_scenario: Option<String>,
+    sweep_min_closed_trades: usize,
+    sweep_max_drawdown_pct: Option<f64>,
+    sweep_ranking: Option<ReplaySweepRankingDocument>,
+    sweep_ranking_error: Option<String>,
 }
 
 #[cfg(feature = "replay")]
@@ -410,10 +460,24 @@ impl ReplayAnalyticsState {
             warnings: Vec::new(),
             selected_run: 0,
             selected_trade: 0,
+            selected_signal: 0,
             selected_fee_scenario: 0,
             comparison_run: None,
             focus: AnalyticsFocus::Runs,
             trade_sort: AnalyticsTradeSort::TradeId,
+            signal_filter: AnalyticsSignalFilter::All,
+            signals: Vec::new(),
+            signal_load_error: None,
+            sweep_entries: Vec::new(),
+            sweep_warnings: Vec::new(),
+            selected_sweep: 0,
+            selected_sweep_row: 0,
+            sweep_metric: ReplaySweepRankingMetric::Robustness,
+            sweep_fee_scenario: None,
+            sweep_min_closed_trades: 0,
+            sweep_max_drawdown_pct: None,
+            sweep_ranking: None,
+            sweep_ranking_error: None,
         };
         state.refresh();
         state
@@ -425,6 +489,10 @@ impl ReplayAnalyticsState {
             .get(self.selected_run)
             .map(|entry| entry.path.clone());
         let comparison_path = self.comparison_entry().map(|entry| entry.path.clone());
+        let selected_sweep_path = self
+            .sweep_entries
+            .get(self.selected_sweep)
+            .map(|entry| entry.path.clone());
         let ReplayResultLibrarySnapshot { entries, warnings } =
             load_replay_result_entries(&self.root);
         self.entries = entries;
@@ -434,14 +502,100 @@ impl ReplayAnalyticsState {
             .unwrap_or(0);
         self.comparison_run = comparison_path
             .and_then(|path| self.entries.iter().position(|entry| entry.path == path));
+        self.refresh_sweeps(selected_sweep_path);
         self.clamp_selection();
+        if self.focus == AnalyticsFocus::Signals {
+            self.load_selected_signals();
+        } else if self.focus != AnalyticsFocus::Sweeps {
+            self.clear_selected_signals();
+        }
+    }
+
+    fn refresh_sweeps(&mut self, selected_path: Option<PathBuf>) {
+        let mut entries = Vec::new();
+        let mut warnings = Vec::new();
+        let mut roots = vec![self.root.clone(), PathBuf::from(".")];
+        if let Some(parent) = self.root.parent() {
+            roots.push(parent.to_path_buf());
+        }
+        for root in roots {
+            let ReplaySweepRankingLibrarySnapshot {
+                entries: discovered,
+                warnings: discovered_warnings,
+            } = load_replay_sweep_ranking_entries(&root);
+            warnings.extend(discovered_warnings);
+            for entry in discovered {
+                let duplicate = entries.iter().any(|existing: &ReplaySweepRankingEntry| {
+                    same_path(&existing.path, &entry.path)
+                });
+                if !duplicate {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        self.sweep_entries = entries;
+        self.sweep_warnings = warnings;
+        self.selected_sweep = selected_path
+            .and_then(|path| {
+                self.sweep_entries
+                    .iter()
+                    .position(|entry| same_path(&entry.path, &path))
+            })
+            .unwrap_or(0);
+        self.load_selected_sweep(false);
+    }
+
+    fn load_selected_sweep(&mut self, rerank: bool) {
+        let Some(entry) = self.sweep_entries.get(self.selected_sweep).cloned() else {
+            self.sweep_ranking = None;
+            self.sweep_ranking_error = None;
+            self.selected_sweep_row = 0;
+            return;
+        };
+        if !rerank {
+            self.sweep_metric = entry.document.options.metric;
+            self.sweep_fee_scenario = entry
+                .document
+                .options
+                .fee_scenario
+                .clone()
+                .filter(|scenario| !scenario.eq_ignore_ascii_case("active"));
+            self.sweep_min_closed_trades = entry.document.options.min_closed_trades;
+            self.sweep_max_drawdown_pct = entry.document.options.max_drawdown_pct;
+            self.sweep_ranking = Some(entry.document);
+            self.sweep_ranking_error = None;
+            self.clamp_sweep_selection();
+            return;
+        }
+        let summary_path = resolve_sweep_summary_path(&entry);
+        let options = ReplaySweepRankingOptions {
+            metric: self.sweep_metric,
+            fee_scenario: self.sweep_fee_scenario.clone(),
+            limit: 20,
+            min_closed_trades: self.sweep_min_closed_trades,
+            max_drawdown_pct: self.sweep_max_drawdown_pct,
+        };
+        match rank_replay_sweep(&summary_path, None, options, None, None) {
+            Ok(document) => {
+                self.sweep_ranking = Some(document);
+                self.sweep_ranking_error = None;
+            }
+            Err(error) => {
+                self.sweep_ranking = Some(entry.document);
+                self.sweep_ranking_error = Some(error.to_string());
+            }
+        }
+        self.clamp_sweep_selection();
     }
 
     fn clamp_selection(&mut self) {
         if self.entries.is_empty() {
             self.selected_run = 0;
             self.selected_trade = 0;
+            self.selected_signal = 0;
             self.selected_fee_scenario = 0;
+            self.clear_selected_signals();
             return;
         }
         self.selected_run = self.selected_run.min(self.entries.len() - 1);
@@ -452,6 +606,43 @@ impl ReplayAnalyticsState {
             .map(|entry| entry.document.fee_scenarios.len())
             .unwrap_or_default();
         self.selected_fee_scenario = self.selected_fee_scenario.min(fee_count.saturating_sub(1));
+        let signal_count = self.filtered_signals().len();
+        self.selected_signal = self.selected_signal.min(signal_count.saturating_sub(1));
+        self.clamp_sweep_selection();
+    }
+
+    fn clamp_sweep_selection(&mut self) {
+        if self.sweep_entries.is_empty() {
+            self.selected_sweep = 0;
+            self.selected_sweep_row = 0;
+            return;
+        }
+        self.selected_sweep = self.selected_sweep.min(self.sweep_entries.len() - 1);
+        let row_count = self
+            .sweep_ranking
+            .as_ref()
+            .map(|document| document.rows.len())
+            .unwrap_or_default();
+        self.selected_sweep_row = self.selected_sweep_row.min(row_count.saturating_sub(1));
+    }
+
+    fn clear_selected_signals(&mut self) {
+        self.signals.clear();
+        self.signal_load_error = None;
+        self.selected_signal = 0;
+    }
+
+    fn load_selected_signals(&mut self) {
+        self.clear_selected_signals();
+        let loaded = self.selected_entry().map(load_replay_signal_diagnostics);
+        match loaded {
+            Some(Ok(signals)) => self.signals = signals,
+            Some(Err(error)) => self.signal_load_error = Some(error.to_string()),
+            None => {}
+        }
+        self.selected_signal = self
+            .selected_signal
+            .min(self.filtered_signals().len().saturating_sub(1));
     }
 
     fn selected_entry(&self) -> Option<&ReplayResultEntry> {
@@ -485,6 +676,24 @@ impl ReplayAnalyticsState {
         trades
     }
 
+    fn filtered_signals(&self) -> Vec<&ReplaySignalDiagnostic> {
+        self.signals
+            .iter()
+            .filter(|signal| match self.signal_filter {
+                AnalyticsSignalFilter::All => true,
+                AnalyticsSignalFilter::Orders => signal.order_action.is_some(),
+                AnalyticsSignalFilter::Blocked => {
+                    !is_non_blocking_signal_decision(&signal.decision)
+                }
+                AnalyticsSignalFilter::SignalsOnly => !signal.signal.eq_ignore_ascii_case("hold"),
+            })
+            .collect()
+    }
+
+    fn selected_signal(&self) -> Option<&ReplaySignalDiagnostic> {
+        self.filtered_signals().get(self.selected_signal).copied()
+    }
+
     fn selected_fee_scenario(&self) -> Option<&crate::tradovate::replay::ReplayFeeScenario> {
         self.selected_entry()
             .and_then(|entry| entry.document.fee_scenarios.get(self.selected_fee_scenario))
@@ -502,6 +711,11 @@ impl ReplayAnalyticsState {
             AnalyticsTradeSort::LowestCapture => AnalyticsTradeSort::TradeId,
         };
         self.selected_trade = 0;
+    }
+
+    fn cycle_signal_filter(&mut self) {
+        self.signal_filter = self.signal_filter.next();
+        self.selected_signal = 0;
     }
 
     fn cycle_fee_scenario(&mut self, direction: i32) {
@@ -523,6 +737,168 @@ impl ReplayAnalyticsState {
             (self.selected_fee_scenario + 1) % count
         };
     }
+
+    fn selected_sweep_entry(&self) -> Option<&ReplaySweepRankingEntry> {
+        self.sweep_entries.get(self.selected_sweep)
+    }
+
+    fn selected_sweep_row(&self) -> Option<&crate::tradovate::replay::ReplaySweepRankingRow> {
+        self.sweep_ranking
+            .as_ref()
+            .and_then(|document| document.rows.get(self.selected_sweep_row))
+    }
+
+    fn sweep_fee_scenarios(&self) -> Vec<String> {
+        let Some(document) = self.sweep_ranking.as_ref() else {
+            return vec!["active".to_string()];
+        };
+        let mut scenarios = vec!["active".to_string()];
+        let mut add = |name: &str| {
+            if !name.trim().is_empty()
+                && !scenarios
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(name))
+            {
+                scenarios.push(name.to_string());
+            }
+        };
+        add(&document.fee_scenario);
+        for row in &document.rows {
+            add(&row.fee_scenario);
+        }
+        scenarios
+    }
+
+    fn cycle_sweep_fee_scenario(&mut self, direction: i32) {
+        let scenarios = self.sweep_fee_scenarios();
+        if scenarios.is_empty() {
+            self.sweep_fee_scenario = None;
+            return;
+        }
+        let current = self.sweep_fee_scenario.as_deref().unwrap_or("active");
+        let current_index = scenarios
+            .iter()
+            .position(|scenario| scenario.eq_ignore_ascii_case(current))
+            .unwrap_or(0);
+        let next = if direction < 0 {
+            if current_index == 0 {
+                scenarios.len() - 1
+            } else {
+                current_index - 1
+            }
+        } else {
+            (current_index + 1) % scenarios.len()
+        };
+        self.sweep_fee_scenario = (next > 0).then(|| scenarios[next].clone());
+        self.load_selected_sweep(true);
+    }
+
+    fn cycle_sweep_metric(&mut self, direction: i32) {
+        let metrics = ReplaySweepRankingMetric::all();
+        let current = metrics
+            .iter()
+            .position(|metric| *metric == self.sweep_metric)
+            .unwrap_or(0);
+        let next = if direction < 0 {
+            if current == 0 {
+                metrics.len() - 1
+            } else {
+                current - 1
+            }
+        } else {
+            (current + 1) % metrics.len()
+        };
+        self.sweep_metric = metrics[next];
+        self.load_selected_sweep(true);
+    }
+
+    fn cycle_sweep_filter(&mut self, drawdown: bool, direction: i32) {
+        if drawdown {
+            let values = [None, Some(5.0), Some(10.0), Some(20.0), Some(50.0)];
+            let current = values
+                .iter()
+                .position(|value| *value == self.sweep_max_drawdown_pct)
+                .unwrap_or(0);
+            let next = if direction < 0 {
+                if current == 0 {
+                    values.len() - 1
+                } else {
+                    current - 1
+                }
+            } else {
+                (current + 1) % values.len()
+            };
+            self.sweep_max_drawdown_pct = values[next];
+        } else {
+            let values = [0, 1, 5, 10, 20];
+            let current = values
+                .iter()
+                .position(|value| *value == self.sweep_min_closed_trades)
+                .unwrap_or(0);
+            let next = if direction < 0 {
+                if current == 0 {
+                    values.len() - 1
+                } else {
+                    current - 1
+                }
+            } else {
+                (current + 1) % values.len()
+            };
+            self.sweep_min_closed_trades = values[next];
+        }
+        self.load_selected_sweep(true);
+    }
+
+    fn cycle_sweep_source(&mut self, direction: i32) {
+        if self.sweep_entries.is_empty() {
+            return;
+        }
+        self.selected_sweep = if direction < 0 {
+            if self.selected_sweep == 0 {
+                self.sweep_entries.len() - 1
+            } else {
+                self.selected_sweep - 1
+            }
+        } else {
+            (self.selected_sweep + 1) % self.sweep_entries.len()
+        };
+        self.selected_sweep_row = 0;
+        self.load_selected_sweep(false);
+    }
+}
+
+#[cfg(feature = "replay")]
+fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+#[cfg(feature = "replay")]
+fn resolve_sweep_summary_path(entry: &ReplaySweepRankingEntry) -> PathBuf {
+    let source = &entry.document.source_summary;
+    if source.is_absolute() || source.is_file() {
+        return source.clone();
+    }
+    let relative = entry
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(source);
+    if relative.is_file() {
+        relative
+    } else {
+        source.clone()
+    }
+}
+
+#[cfg(feature = "replay")]
+fn is_non_blocking_signal_decision(decision: &str) -> bool {
+    matches!(
+        decision,
+        "dispatching" | "target_already_actual" | "target_already_current" | "dispatch_noop"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

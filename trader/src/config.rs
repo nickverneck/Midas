@@ -154,6 +154,14 @@ pub struct AppConfig {
     pub replay_cache_dir: PathBuf,
     /// Root directory for durable replay result artifacts.
     pub replay_result_dir: PathBuf,
+    /// Optional deterministic run id used by headless replay workers.
+    /// Interactive replay sessions leave this unset and continue to receive
+    /// a timestamp/process-derived id.
+    #[serde(default)]
+    pub replay_run_id: Option<String>,
+    /// Disable wall-clock pacing for headless replay workers.
+    #[serde(default)]
+    pub replay_headless: bool,
     /// Starting account equity used by replay-only account and margin analytics.
     pub replay_initial_capital: f64,
     /// Currency label for replay account and margin analytics.
@@ -213,6 +221,8 @@ impl Default for AppConfig {
             replay_dom_file_path: None,
             replay_cache_dir: default_replay_cache_dir(),
             replay_result_dir: PathBuf::from(".run/replay-results"),
+            replay_run_id: None,
+            replay_headless: false,
             replay_initial_capital: 100_000.0,
             replay_account_currency: "USD".to_string(),
             replay_margin_model: "fixed_per_contract".to_string(),
@@ -432,7 +442,7 @@ impl AppConfig {
         Ok(())
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if !supports_broker(self.broker) {
             bail!(
                 "{} support is not enabled in this build",
@@ -459,6 +469,13 @@ impl AppConfig {
         }
         if self.replay_account_currency.trim().is_empty() {
             bail!("replay_account_currency cannot be empty");
+        }
+        if self
+            .replay_run_id
+            .as_deref()
+            .is_some_and(|run_id| run_id.trim().is_empty())
+        {
+            bail!("replay_run_id cannot be empty when configured");
         }
         if self.replay_margin_model.trim().is_empty() {
             bail!("replay_margin_model cannot be empty");

@@ -144,7 +144,12 @@ fn persist_replay_result(
         error: error.as_deref(),
         signal_diagnostics,
     })?;
-    let status = if error.is_some() {
+    let result_status = if error.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
+    let status_label = if error.is_some() {
         "failed"
     } else {
         "complete"
@@ -165,12 +170,19 @@ fn persist_replay_result(
         _ => String::new(),
     };
     let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Replay {status}; result saved to {} ({} fills, {} trades){}",
+        "Replay {status_label}; result saved to {} ({} fills, {} trades){}",
         outcome.result_path.display(),
         outcome.fill_count,
         outcome.trade_count,
         margin_suffix
     )));
+    let _ = event_tx.send(ServiceEvent::ReplayResultSaved {
+        run_id,
+        result_path: outcome.result_path,
+        status: result_status.to_string(),
+        fill_count: outcome.fill_count,
+        trade_count: outcome.trade_count,
+    });
     Ok(())
 }
 

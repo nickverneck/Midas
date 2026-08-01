@@ -14,6 +14,12 @@ mod results;
 mod risk;
 mod state;
 #[cfg(feature = "replay")]
+mod sweep;
+#[cfg(feature = "replay")]
+mod sweep_analytics;
+#[cfg(feature = "replay")]
+mod sweep_runner;
+#[cfg(feature = "replay")]
 mod ticks;
 #[cfg(feature = "replay")]
 pub(crate) mod virtual_time;
@@ -29,11 +35,26 @@ pub(crate) use load::load_replay_state;
 pub(crate) use results::{
     ReplayFeeScenario, ReplayResultEntry, ReplayResultInput, ReplayResultLibrarySnapshot,
     ReplayResultStatus, ReplayTradeExcursion, analyze_replay_margin, load_replay_result_entries,
-    reprice_replay_result, write_replay_result,
+    load_replay_signal_diagnostics, reprice_replay_result, write_replay_result,
 };
 #[cfg(feature = "replay")]
 pub(crate) use risk::ReplayMarginConfig;
 pub(crate) use state::{ReplayState, replay_accounts, replay_contract, search_replay_contracts};
+#[cfg(feature = "replay")]
+#[allow(unused_imports)]
+pub(crate) use sweep::{
+    ReplaySweepChildSpec, ReplaySweepConstraint, ReplaySweepGuardrailReport, ReplaySweepGuardrails,
+    ReplaySweepOutputFormat, ReplaySweepParameter, ReplaySweepPlan, ReplaySweepResourceEstimate,
+    ReplaySweepSpec,
+};
+#[cfg(feature = "replay")]
+pub(crate) use sweep_analytics::{
+    ReplaySweepRankingDocument, ReplaySweepRankingEntry, ReplaySweepRankingLibrarySnapshot,
+    ReplaySweepRankingMetric, ReplaySweepRankingOptions, ReplaySweepRankingRow,
+    load_replay_sweep_ranking_entries, rank_replay_sweep,
+};
+#[cfg(feature = "replay")]
+pub(crate) use sweep_runner::run_replay_sweep;
 pub(crate) use worker::spawn_replay_market_task;
 
 #[cfg(all(test, feature = "replay"))]

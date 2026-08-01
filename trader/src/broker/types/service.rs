@@ -130,6 +130,15 @@ pub enum ServiceEvent {
     ReplaySpeedUpdated(ReplaySpeed),
     ReplayExecutionLedgerUpdated(ReplayExecutionLedgerSummary),
     ReplayExecutionLedgerSnapshot(ReplayExecutionLedgerSnapshot),
+    /// Emitted after the replay worker has durably written its result
+    /// artifacts. Headless sweep workers use this as the completion barrier.
+    ReplayResultSaved {
+        run_id: String,
+        result_path: PathBuf,
+        status: String,
+        fill_count: usize,
+        trade_count: usize,
+    },
     ReplayDownloadProgress {
         operation_id: ReplayDownloadOperationId,
         phase: ReplayDownloadPhase,

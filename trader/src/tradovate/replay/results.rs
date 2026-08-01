@@ -16,10 +16,12 @@ use std::fmt::Display;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const REPLAY_RESULT_SCHEMA_VERSION: u32 = 3;
 pub(crate) const FEE_NEUTRAL_SCENARIO_NAME: &str = "fee_neutral";
+const SIGNAL_DIAGNOSTICS_CSV_HEADER: &str = "bar_timestamp_ns,bar_open,bar_high,bar_low,bar_close,bar_index,bar_count,strategy,execution_path,signal_timing,signal_delay_bars,signal,raw_signal,effective_signal,raw_buy_signal,raw_sell_signal,effective_buy_signal,effective_sell_signal,current_position_qty,effective_position_qty,target_qty,decision,gate_reason,order_action,order_qty,indicator_name,previous_fast_indicator,previous_slow_indicator,fast_indicator,slow_indicator,auxiliary_name,auxiliary_value,hold_reason,strategy_detail,fingerprint\n";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReplayResultWriteOutcome {
@@ -90,6 +92,11 @@ pub(crate) struct ReplayResultDocument {
     pub(crate) margin_analysis: Option<ReplayMarginAnalysis>,
     #[serde(default)]
     pub(crate) trade_excursions: Option<Vec<ReplayTradeExcursion>>,
+    /// Optional parent-sweep metadata. Keeping this in the typed document
+    /// prevents accounting-only repricing from dropping the metadata that
+    /// makes a completed child safe to resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sweep: Option<Value>,
     /// The fee-neutral ledger is embedded so a result is self-contained even
     /// when the CSV sidecars are moved or inspected independently.
     pub(crate) ledger: ReplayExecutionLedgerSnapshot,
@@ -154,6 +161,210 @@ pub(crate) fn load_replay_result_entries(root: &Path) -> ReplayResultLibrarySnap
             .then_with(|| right.path.cmp(&left.path))
     });
     snapshot
+}
+
+/// Load the optional signal diagnostics sidecar for one saved replay result.
+/// The result index remains cheap because this is intentionally lazy: the
+/// Analytics screen calls it only after a run is selected.
+pub(crate) fn load_replay_signal_diagnostics(
+    entry: &ReplayResultEntry,
+) -> Result<Vec<ReplaySignalDiagnostic>> {
+    let Some(file_name) = entry.document.artifacts.signals_csv.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let directory = entry
+        .path
+        .parent()
+        .context("replay result path has no parent directory")?;
+    let path = directory.join(file_name);
+    let bytes = fs::read(&path)
+        .with_context(|| format!("read replay signal diagnostics {}", path.display()))?;
+    let records = parse_csv_records(&bytes)?;
+    let Some(header) = records.first() else {
+        return Ok(Vec::new());
+    };
+    let expected_header = SIGNAL_DIAGNOSTICS_CSV_HEADER
+        .trim_end_matches('\n')
+        .split(',')
+        .collect::<Vec<_>>();
+    if header.iter().map(String::as_str).collect::<Vec<_>>() != expected_header {
+        anyhow::bail!(
+            "unexpected signal diagnostics CSV header in {}",
+            path.display()
+        );
+    }
+
+    records
+        .iter()
+        .skip(1)
+        .enumerate()
+        .map(|(row_index, fields)| parse_signal_diagnostic_row(fields, row_index + 2))
+        .collect()
+}
+
+fn parse_signal_diagnostic_row(
+    fields: &[String],
+    row_number: usize,
+) -> Result<ReplaySignalDiagnostic> {
+    if fields.len() != 35 {
+        anyhow::bail!(
+            "signal diagnostics row {row_number} has {} fields; expected 35",
+            fields.len()
+        );
+    }
+    let field = |index: usize, name: &str| -> Result<&str> {
+        fields
+            .get(index)
+            .map(String::as_str)
+            .with_context(|| format!("missing signal diagnostics field {name}"))
+    };
+    let required =
+        |index: usize, name: &str| -> Result<String> { Ok(field(index, name)?.to_string()) };
+
+    Ok(ReplaySignalDiagnostic {
+        bar_timestamp_ns: parse_csv_value(fields, 0, "bar_timestamp_ns", row_number)?,
+        bar_open: parse_csv_value(fields, 1, "bar_open", row_number)?,
+        bar_high: parse_csv_value(fields, 2, "bar_high", row_number)?,
+        bar_low: parse_csv_value(fields, 3, "bar_low", row_number)?,
+        bar_close: parse_csv_value(fields, 4, "bar_close", row_number)?,
+        bar_index: parse_csv_optional(fields, 5, "bar_index", row_number)?,
+        bar_count: parse_csv_value(fields, 6, "bar_count", row_number)?,
+        strategy: required(7, "strategy")?,
+        execution_path: required(8, "execution_path")?,
+        signal_timing: required(9, "signal_timing")?,
+        signal_delay_bars: parse_csv_value(fields, 10, "signal_delay_bars", row_number)?,
+        signal: required(11, "signal")?,
+        raw_signal: required(12, "raw_signal")?,
+        effective_signal: required(13, "effective_signal")?,
+        raw_buy_signal: parse_csv_value(fields, 14, "raw_buy_signal", row_number)?,
+        raw_sell_signal: parse_csv_value(fields, 15, "raw_sell_signal", row_number)?,
+        effective_buy_signal: parse_csv_value(fields, 16, "effective_buy_signal", row_number)?,
+        effective_sell_signal: parse_csv_value(fields, 17, "effective_sell_signal", row_number)?,
+        current_position_qty: parse_csv_value(fields, 18, "current_position_qty", row_number)?,
+        effective_position_qty: parse_csv_value(fields, 19, "effective_position_qty", row_number)?,
+        target_qty: parse_csv_optional(fields, 20, "target_qty", row_number)?,
+        decision: required(21, "decision")?,
+        gate_reason: required(22, "gate_reason")?,
+        order_action: parse_csv_optional_string(fields, 23, "order_action")?,
+        order_qty: parse_csv_optional(fields, 24, "order_qty", row_number)?,
+        indicator_name: required(25, "indicator_name")?,
+        previous_fast_indicator: parse_csv_optional(
+            fields,
+            26,
+            "previous_fast_indicator",
+            row_number,
+        )?,
+        previous_slow_indicator: parse_csv_optional(
+            fields,
+            27,
+            "previous_slow_indicator",
+            row_number,
+        )?,
+        fast_indicator: parse_csv_optional(fields, 28, "fast_indicator", row_number)?,
+        slow_indicator: parse_csv_optional(fields, 29, "slow_indicator", row_number)?,
+        auxiliary_name: parse_csv_optional_string(fields, 30, "auxiliary_name")?,
+        auxiliary_value: parse_csv_optional(fields, 31, "auxiliary_value", row_number)?,
+        hold_reason: parse_csv_optional_string(fields, 32, "hold_reason")?,
+        strategy_detail: required(33, "strategy_detail")?,
+        fingerprint: parse_csv_optional(fields, 34, "fingerprint", row_number)?,
+    })
+}
+
+fn parse_csv_value<T>(fields: &[String], index: usize, name: &str, row: usize) -> Result<T>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = fields
+        .get(index)
+        .with_context(|| format!("missing {name} in signal diagnostics row {row}"))?;
+    value
+        .parse::<T>()
+        .map_err(|error| anyhow::anyhow!("invalid {name} in signal diagnostics row {row}: {error}"))
+}
+
+fn parse_csv_optional<T>(
+    fields: &[String],
+    index: usize,
+    name: &str,
+    row: usize,
+) -> Result<Option<T>>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = fields
+        .get(index)
+        .with_context(|| format!("missing {name} in signal diagnostics row {row}"))?;
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value.parse::<T>().map(Some).map_err(|error| {
+            anyhow::anyhow!("invalid {name} in signal diagnostics row {row}: {error}")
+        })
+    }
+}
+
+fn parse_csv_optional_string(
+    fields: &[String],
+    index: usize,
+    name: &str,
+) -> Result<Option<String>> {
+    let value = fields
+        .get(index)
+        .with_context(|| format!("missing {name} in signal diagnostics row"))?;
+    Ok((!value.is_empty()).then(|| value.clone()))
+}
+
+fn parse_csv_records(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
+    let input = String::from_utf8(bytes.to_vec()).context("signal diagnostics CSV is not UTF-8")?;
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        if in_quotes {
+            if character == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(character);
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_quotes = true,
+            ',' => {
+                record.push(std::mem::take(&mut field));
+            }
+            '\n' => {
+                record.push(std::mem::take(&mut field));
+                if !(record.len() == 1 && record[0].is_empty()) {
+                    records.push(std::mem::take(&mut record));
+                } else {
+                    record.clear();
+                }
+            }
+            '\r' => {}
+            other => field.push(other),
+        }
+    }
+
+    if in_quotes {
+        anyhow::bail!("unterminated quoted field in signal diagnostics CSV");
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    Ok(records)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -532,6 +743,7 @@ pub(crate) fn write_replay_result(
         fee_scenarios: vec![fee_scenario],
         margin_analysis: margin_analysis.clone(),
         trade_excursions: trade_excursions.clone(),
+        sweep: None,
         ledger: input.ledger.clone(),
     };
 
@@ -1683,9 +1895,7 @@ fn fills_csv(fills: &[ReplayExecutionFill]) -> Vec<u8> {
 }
 
 fn signals_csv(rows: &[ReplaySignalDiagnostic]) -> Vec<u8> {
-    let mut output = String::from(
-        "bar_timestamp_ns,bar_open,bar_high,bar_low,bar_close,bar_index,bar_count,strategy,execution_path,signal_timing,signal_delay_bars,signal,raw_signal,effective_signal,raw_buy_signal,raw_sell_signal,effective_buy_signal,effective_sell_signal,current_position_qty,effective_position_qty,target_qty,decision,gate_reason,order_action,order_qty,indicator_name,previous_fast_indicator,previous_slow_indicator,fast_indicator,slow_indicator,auxiliary_name,auxiliary_value,hold_reason,strategy_detail,fingerprint\n",
-    );
+    let mut output = String::from(SIGNAL_DIAGNOSTICS_CSV_HEADER);
     for row in rows {
         let fields = [
             row.bar_timestamp_ns.to_string(),
@@ -2257,6 +2467,9 @@ mod tests {
         assert_eq!(library.entries.len(), 1);
         assert!(library.warnings.is_empty());
         assert_eq!(library.entries[0].document.run_id, "test-run");
+        let loaded_signals =
+            load_replay_signal_diagnostics(&library.entries[0]).expect("load signal diagnostics");
+        assert_eq!(loaded_signals, vec![diagnostic.clone()]);
         assert_eq!(document.schema_version, REPLAY_RESULT_SCHEMA_VERSION);
         assert_eq!(document.summary.net_pnl, 5.0);
         assert_eq!(document.metadata.initial_capital, 10_000.0);

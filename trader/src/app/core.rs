@@ -371,6 +371,21 @@ impl App {
             ServiceEvent::ReplayExecutionLedgerSnapshot(snapshot) => {
                 self.replay_execution_ledger = snapshot.summary();
             }
+            ServiceEvent::ReplayResultSaved {
+                run_id,
+                result_path,
+                status,
+                fill_count,
+                trade_count,
+            } => {
+                self.status = format!(
+                    "Replay {status}: {run_id} saved to {} ({} fills, {} trades)",
+                    result_path.display(),
+                    fill_count,
+                    trade_count
+                );
+                self.push_log(self.status.clone());
+            }
             ServiceEvent::ReplayDownloadProgress {
                 operation_id,
                 phase,

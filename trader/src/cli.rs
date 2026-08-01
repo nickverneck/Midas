@@ -136,6 +136,63 @@ pub(crate) struct AnalyzeReplayMarginArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct ValidateReplaySweepArgs {
+    /// JSON sweep specification to validate and expand before execution.
+    #[arg(long)]
+    pub(crate) spec: PathBuf,
+    /// Optional JSON path for the fully expanded, rerunnable child plan.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct RunReplaySweepArgs {
+    /// JSON sweep specification to execute against the cached dataset view.
+    #[arg(long)]
+    pub(crate) spec: PathBuf,
+    /// Re-run child IDs even when a completed result.json already exists.
+    #[arg(long)]
+    pub(crate) no_resume: bool,
+    /// Confirm that a large sweep may start after reviewing its estimate.
+    #[arg(long)]
+    pub(crate) allow_large: bool,
+    /// Explicitly bypass hard resource guardrails for this launch.
+    #[arg(long)]
+    pub(crate) override_guardrails: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct RankReplaySweepArgs {
+    /// Existing sweep-summary.json produced by run-replay-sweep.
+    #[arg(long)]
+    pub(crate) summary: PathBuf,
+    /// Optional sweep-plan.json used to recover parameter values from older results.
+    #[arg(long)]
+    pub(crate) plan: Option<PathBuf>,
+    /// Ranking metric; defaults to robustness rather than raw PnL.
+    #[arg(long, default_value = "robustness")]
+    pub(crate) metric: String,
+    /// Fee scenario name, or `active` (the default) for the saved active scenario.
+    #[arg(long)]
+    pub(crate) fee_scenario: Option<String>,
+    /// Maximum number of rows to print/write.
+    #[arg(long, default_value_t = 20)]
+    pub(crate) limit: usize,
+    /// Exclude candidates with fewer closed trades than this value.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) min_closed_trades: usize,
+    /// Exclude candidates whose drawdown percentage exceeds this value.
+    #[arg(long)]
+    pub(crate) max_drawdown_pct: Option<f64>,
+    /// Optional JSON output path for the ranking document.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+    /// Optional CSV output path for the ranking rows.
+    #[arg(long)]
+    pub(crate) csv: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct CaptureReplayDomArgs {
     /// Exact contract symbol, for example MESU6 or GCZ6.
     #[arg(long)]
@@ -214,6 +271,15 @@ pub(crate) enum Mode {
     /// Analyze required starting capital for a saved replay result.
     #[command(name = "analyze-replay-margin")]
     AnalyzeReplayMargin(AnalyzeReplayMarginArgs),
+    /// Validate and expand a replay parameter sweep without executing it.
+    #[command(name = "validate-replay-sweep")]
+    ValidateReplaySweep(ValidateReplaySweepArgs),
+    /// Execute a replay parameter sweep without starting the TUI.
+    #[command(name = "run-replay-sweep")]
+    RunReplaySweep(RunReplaySweepArgs),
+    /// Rank and inspect completed replay sweep results without replaying data.
+    #[command(name = "rank-replay-sweep")]
+    RankReplaySweep(RankReplaySweepArgs),
     /// Capture historical Level 2 snapshots through a Tradovate Market Replay session.
     #[command(name = "capture-replay-dom")]
     CaptureReplayDom(CaptureReplayDomArgs),
