@@ -89,9 +89,9 @@ use orders::{
 pub use profiler::{SwipeProfileOptions, run_swipe_profile};
 #[cfg(feature = "replay")]
 pub(crate) use replay::{
-    ReplayFeeSchedule, ReplayMarginConfig, ReplaySweepRankingMetric, ReplaySweepRankingOptions,
-    ReplaySweepSpec, analyze_replay_margin, rank_replay_sweep, reprice_replay_result,
-    run_replay_sweep,
+    ReplayBrokerSchedule, ReplayFeeSchedule, ReplayLiquidationConfig, ReplayMarginConfig,
+    ReplaySweepRankingMetric, ReplaySweepRankingOptions, ReplaySweepSpec, analyze_replay_margin,
+    rank_replay_sweep, reprice_replay_result, run_replay_sweep, simulate_replay_liquidation_result,
 };
 
 include!("types.rs");

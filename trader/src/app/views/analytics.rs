@@ -27,6 +27,7 @@ impl App {
                         self.replay_analytics.selected_signal = 0;
                         self.replay_analytics.selected_fee_scenario = 0;
                         self.replay_analytics.clear_selected_signals();
+                        self.replay_analytics.load_selected_equity();
                     }
                     AnalyticsFocus::Trades => {
                         self.replay_analytics.selected_trade =
@@ -51,6 +52,7 @@ impl App {
                         self.replay_analytics.selected_signal = 0;
                         self.replay_analytics.selected_fee_scenario = 0;
                         self.replay_analytics.clear_selected_signals();
+                        self.replay_analytics.load_selected_equity();
                     }
                     AnalyticsFocus::Trades => {
                         let trade_count = self.replay_analytics.sorted_trades().len();
@@ -393,6 +395,104 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
+    pub(in crate::app) fn analytics_selected_run_lines(&self) -> Vec<Line<'static>> {
+        let Some(entry) = self.replay_analytics.selected_entry() else {
+            return vec![Line::from("No saved replay result selected.")];
+        };
+        let document = &entry.document;
+        let strategy =
+            serde_json::to_string(&document.metadata.strategy).unwrap_or_else(|_| "{}".to_string());
+        let strategy = compact_analytics_text(&strategy, 120);
+        let mut lines = vec![
+            Line::from(format!(
+                "{} | {} | {}",
+                document.run_id,
+                document.metadata.contract_name,
+                document.completed_at_utc.format("%Y-%m-%d %H:%M UTC")
+            )),
+            Line::from(format!(
+                "Dataset: {} | window {} -> {}",
+                document
+                    .metadata
+                    .dataset_view
+                    .as_deref()
+                    .unwrap_or("full source"),
+                document
+                    .metadata
+                    .evaluation_start_utc
+                    .map(|value| value.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                document
+                    .metadata
+                    .evaluation_end_utc
+                    .map(|value| value.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "n/a".to_string())
+            )),
+            Line::from(format!(
+                "Bars: {} warmup / {} evaluated | {} {}",
+                document.metadata.warmup_rows,
+                document.metadata.evaluation_rows_processed,
+                document
+                    .metadata
+                    .bar_type
+                    .mode_label(document.metadata.candle_mode),
+                document.metadata.candle_mode.label()
+            )),
+            Line::from(format!(
+                "Fill: {} | signal {} | latency {} {}ms",
+                document.metadata.fill_model.label(),
+                document.metadata.signal_source,
+                document.metadata.latency_model.label(),
+                document.metadata.fixed_latency_ms
+            )),
+            Line::from(format!("Strategy config: {strategy}")),
+        ];
+        if let Some(error) = self.replay_analytics.equity_load_error.as_deref() {
+            lines.push(Line::from(format!("Equity: unavailable ({error})")));
+        } else if let Some(first) = self.replay_analytics.equity.first() {
+            let last = self.replay_analytics.equity.last().unwrap_or(first);
+            lines.push(Line::from(format!(
+                "Equity points: {} | {:.2} -> {:.2} | net {}",
+                self.replay_analytics.equity.len(),
+                first.equity,
+                last.equity,
+                format_signed_money(Some(last.cumulative_net_pnl))
+            )));
+            let hourly = hourly_equity_changes(&self.replay_analytics.equity);
+            if hourly.is_empty() {
+                lines.push(Line::from("Hourly: no intraday checkpoints."));
+            } else {
+                let preview = hourly
+                    .iter()
+                    .take(3)
+                    .map(|(hour, change)| format!("{hour} {change:+.2}"))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                lines.push(Line::from(format!(
+                    "Hourly UTC: {}{}",
+                    preview,
+                    if hourly.len() > 3 { " | …" } else { "" }
+                )));
+            }
+        } else {
+            lines.push(Line::from("Equity: no checkpoints saved."));
+        }
+        if let Some(liquidation) = document.liquidation_analysis.as_ref() {
+            lines.push(Line::from(format!(
+                "Liquidation overlay: {} | {} event(s) | equity {:.2}",
+                if liquidation.triggered {
+                    "triggered"
+                } else {
+                    "not triggered"
+                },
+                liquidation.event_count,
+                liquidation.equity_after
+            )));
+        }
+        lines
+    }
+
+    #[cfg(feature = "replay")]
     pub(in crate::app) fn analytics_run_items(&self) -> Vec<ListItem<'static>> {
         if self.replay_analytics.entries.is_empty() {
             return vec![ListItem::new(vec![
@@ -465,6 +565,9 @@ impl App {
                 document.summary.net_pnl,
                 document.summary.fees,
             ));
+        let scenario_overlay = scenario
+            .map(|scenario| scenario.schedule.name != document.active_fee_scenario)
+            .unwrap_or(false);
         let status = match document.status {
             crate::tradovate::replay::ReplayResultStatus::Completed => "completed",
             crate::tradovate::replay::ReplayResultStatus::Failed => "failed",
@@ -515,8 +618,29 @@ impl App {
                     .unwrap_or_default()
             )),
             Line::from(format!(
-                "Scenario: {} | Net PnL: {} | Fees: {:.2}",
+                "Fee path: {}{}",
+                if document.metadata.path_dependence.fee_path_independent {
+                    "independent"
+                } else {
+                    "rerun required"
+                },
+                if document.metadata.path_dependence.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " | {}",
+                        document.metadata.path_dependence.reasons.join("; ")
+                    )
+                }
+            )),
+            Line::from(format!(
+                "Scenario: {}{} | Net PnL: {} | Fees: {:.2}",
                 scenario_name,
+                if scenario_overlay {
+                    " (accounting overlay)"
+                } else {
+                    ""
+                },
                 format_signed_money(Some(scenario_net)),
                 scenario_fees
             )),
@@ -891,4 +1015,39 @@ fn format_sweep_value(value: Option<f64>) -> String {
         .filter(|value| value.is_finite())
         .map(|value| format!("{value:.4}"))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+#[cfg(feature = "replay")]
+fn compact_analytics_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut compact = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    compact
+}
+
+#[cfg(feature = "replay")]
+fn hourly_equity_changes(
+    points: &[crate::tradovate::replay::ReplayEquityPoint],
+) -> Vec<(String, f64)> {
+    let mut grouped = std::collections::BTreeMap::<String, (f64, f64)>::new();
+    for point in points {
+        let Some(timestamp) = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            point.timestamp_ns.div_euclid(1_000_000_000),
+            point.timestamp_ns.rem_euclid(1_000_000_000) as u32,
+        ) else {
+            continue;
+        };
+        let key = timestamp.format("%m-%d %Hh").to_string();
+        let entry = grouped.entry(key).or_insert((point.equity, point.equity));
+        entry.1 = point.equity;
+    }
+    grouped
+        .into_iter()
+        .map(|(hour, (first, last))| (hour, last - first))
+        .collect()
 }

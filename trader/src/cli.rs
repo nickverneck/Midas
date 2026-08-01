@@ -92,7 +92,10 @@ pub(crate) struct RepriceReplayResultArgs {
     pub(crate) result: PathBuf,
     /// Fee schedule name stored as the active scenario.
     #[arg(long)]
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
+    /// Imported broker schedule JSON. When set, fee components/name come from this file.
+    #[arg(long)]
+    pub(crate) schedule_file: Option<PathBuf>,
     /// Currency label for the fee components.
     #[arg(long, default_value = "USD")]
     pub(crate) currency: String,
@@ -114,10 +117,29 @@ pub(crate) struct RepriceReplayResultArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct ImportReplayBrokerScheduleArgs {
+    /// Replay cache manifest or raw broker metadata JSON.
+    #[arg(long)]
+    pub(crate) metadata: PathBuf,
+    /// Output path for the normalized replay broker schedule JSON.
+    #[arg(long)]
+    pub(crate) output: PathBuf,
+    /// Scenario name stored in the imported fee schedule.
+    #[arg(long)]
+    pub(crate) name: Option<String>,
+    /// Currency label for imported fee components.
+    #[arg(long, default_value = "USD")]
+    pub(crate) currency: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct AnalyzeReplayMarginArgs {
     /// Existing result.json to analyze without replaying market data.
     #[arg(long)]
     pub(crate) result: PathBuf,
+    /// Imported broker schedule JSON. When set, its margin requirement is used.
+    #[arg(long)]
+    pub(crate) schedule_file: Option<PathBuf>,
     /// Margin model label stored in the result metadata.
     #[arg(long, default_value = "fixed_per_contract")]
     pub(crate) model: String,
@@ -126,13 +148,38 @@ pub(crate) struct AnalyzeReplayMarginArgs {
     pub(crate) currency: String,
     /// Margin requirement per open contract.
     #[arg(long)]
-    pub(crate) margin_per_contract: f64,
+    pub(crate) margin_per_contract: Option<f64>,
     /// Fixed safety buffer added above the margin requirement.
     #[arg(long, default_value_t = 0.0)]
     pub(crate) safety_buffer: f64,
     /// Percentage safety buffer applied to the margin requirement.
     #[arg(long, default_value_t = 0.0)]
     pub(crate) safety_buffer_percent: f64,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct SimulateReplayLiquidationArgs {
+    /// Existing completed result.json to analyze without replaying market data.
+    #[arg(long)]
+    pub(crate) result: PathBuf,
+    /// Imported broker schedule JSON. When set, its margin requirement is used.
+    #[arg(long)]
+    pub(crate) schedule_file: Option<PathBuf>,
+    /// Margin requirement per open contract.
+    #[arg(long)]
+    pub(crate) margin_per_contract: Option<f64>,
+    /// Fixed safety buffer above the margin requirement.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) safety_buffer: f64,
+    /// Percentage safety buffer above the margin requirement.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) safety_buffer_percent: f64,
+    /// Slippage in points applied to the simulated liquidation fill.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) slippage_points: f64,
+    /// Optional saved fee scenario to use instead of the active scenario.
+    #[arg(long)]
+    pub(crate) fee_scenario: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -271,6 +318,12 @@ pub(crate) enum Mode {
     /// Analyze required starting capital for a saved replay result.
     #[command(name = "analyze-replay-margin")]
     AnalyzeReplayMargin(AnalyzeReplayMarginArgs),
+    /// Normalize broker fee/margin metadata into a replay schedule JSON.
+    #[command(name = "import-replay-broker-schedule")]
+    ImportReplayBrokerSchedule(ImportReplayBrokerScheduleArgs),
+    /// Simulate optional margin liquidation on a saved replay result.
+    #[command(name = "simulate-replay-liquidation")]
+    SimulateReplayLiquidation(SimulateReplayLiquidationArgs),
     /// Validate and expand a replay parameter sweep without executing it.
     #[command(name = "validate-replay-sweep")]
     ValidateReplaySweep(ValidateReplaySweepArgs),

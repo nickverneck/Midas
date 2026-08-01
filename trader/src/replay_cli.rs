@@ -1,6 +1,7 @@
 use crate::cli::{
-    AnalyzeReplayMarginArgs, RankReplaySweepArgs, ReplayDownloadArgs, RepriceReplayResultArgs,
-    RunReplaySweepArgs, ValidateReplaySweepArgs,
+    AnalyzeReplayMarginArgs, ImportReplayBrokerScheduleArgs, RankReplaySweepArgs,
+    ReplayDownloadArgs, RepriceReplayResultArgs, RunReplaySweepArgs, SimulateReplayLiquidationArgs,
+    ValidateReplaySweepArgs,
 };
 use crate::config::AppConfig;
 #[cfg(feature = "replay")]
@@ -56,14 +57,21 @@ pub(crate) fn reprice_replay_result(
     #[cfg(all(feature = "replay", feature = "tradovate"))]
     {
         let _ = config;
-        let schedule = crate::tradovate::ReplayFeeSchedule {
-            name: args.name,
-            currency: args.currency,
-            commission_per_contract: args.commission_per_contract,
-            exchange_per_contract: args.exchange_per_contract,
-            clearing_per_contract: args.clearing_per_contract,
-            regulatory_per_contract: args.regulatory_per_contract,
-            misc_per_contract: args.misc_per_contract,
+        let schedule = if let Some(path) = args.schedule_file.as_deref() {
+            crate::tradovate::ReplayBrokerSchedule::from_path(path)?.fee
+        } else {
+            let name = args
+                .name
+                .context("--name is required when --schedule-file is not provided")?;
+            crate::tradovate::ReplayFeeSchedule {
+                name,
+                currency: args.currency,
+                commission_per_contract: args.commission_per_contract,
+                exchange_per_contract: args.exchange_per_contract,
+                clearing_per_contract: args.clearing_per_contract,
+                regulatory_per_contract: args.regulatory_per_contract,
+                misc_per_contract: args.misc_per_contract,
+            }
         };
         let outcome = crate::tradovate::reprice_replay_result(&args.result, schedule)?;
         println!("Replay result repriced without replaying market data.");
@@ -71,6 +79,46 @@ pub(crate) fn reprice_replay_result(
         println!("Fees: {:.8}", outcome.fees);
         println!("Net PnL: {:.8}", outcome.net_pnl);
         println!("Result: {}", outcome.result_path.display());
+        Ok(())
+    }
+}
+
+pub(crate) fn import_replay_broker_schedule(args: ImportReplayBrokerScheduleArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = args;
+        bail!("broker schedule import requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = args;
+        bail!("broker schedule import requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let schedule = crate::tradovate::ReplayBrokerSchedule::from_metadata_path(
+            &args.metadata,
+            args.name.as_deref(),
+            &args.currency,
+        )?;
+        schedule.save(&args.output)?;
+        println!("Imported broker schedule: {}", schedule.name);
+        println!("Source: {}", schedule.source);
+        println!(
+            "Fee per contract/side: {:.8}",
+            schedule.fee.total_per_contract()
+        );
+        if let Some(margin) = schedule.margin_per_contract {
+            println!("Margin per contract: {margin:.8}");
+        } else {
+            println!("Margin per contract: unavailable");
+        }
+        for warning in &schedule.warnings {
+            println!("Warning: {warning}");
+        }
+        println!("Schedule: {}", args.output.display());
         Ok(())
     }
 }
@@ -94,12 +142,23 @@ pub(crate) fn analyze_replay_margin(
     #[cfg(all(feature = "replay", feature = "tradovate"))]
     {
         let _ = config;
-        let margin = crate::tradovate::ReplayMarginConfig {
-            model: args.model,
-            currency: args.currency,
-            margin_per_contract: args.margin_per_contract,
-            safety_buffer: args.safety_buffer,
-            safety_buffer_percent: args.safety_buffer_percent,
+        let margin = if let Some(path) = args.schedule_file.as_deref() {
+            let mut margin = crate::tradovate::ReplayBrokerSchedule::from_path(path)?
+                .margin_config()
+                .context("imported broker schedule does not contain a margin requirement")?;
+            margin.safety_buffer = args.safety_buffer;
+            margin.safety_buffer_percent = args.safety_buffer_percent;
+            margin
+        } else {
+            crate::tradovate::ReplayMarginConfig {
+                model: args.model,
+                currency: args.currency,
+                margin_per_contract: args.margin_per_contract.context(
+                    "--margin-per-contract is required when --schedule-file is not provided",
+                )?,
+                safety_buffer: args.safety_buffer,
+                safety_buffer_percent: args.safety_buffer_percent,
+            }
         };
         let outcome = crate::tradovate::analyze_replay_margin(&args.result, margin)?;
         println!("Replay margin analysis saved without replaying market data.");
@@ -111,6 +170,60 @@ pub(crate) fn analyze_replay_margin(
             "Initial capital sufficient: {}",
             outcome.initial_capital_sufficient
         );
+        println!("Result: {}", outcome.result_path.display());
+        Ok(())
+    }
+}
+
+pub(crate) fn simulate_replay_liquidation(
+    config: &AppConfig,
+    args: SimulateReplayLiquidationArgs,
+) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay liquidation simulation requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = (config, args);
+        bail!("replay liquidation simulation requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let _ = config;
+        let margin = if let Some(path) = args.schedule_file.as_deref() {
+            let mut margin = crate::tradovate::ReplayBrokerSchedule::from_path(path)?
+                .margin_config()
+                .context("imported broker schedule does not contain a margin requirement")?;
+            margin.safety_buffer = args.safety_buffer;
+            margin.safety_buffer_percent = args.safety_buffer_percent;
+            margin
+        } else {
+            crate::tradovate::ReplayMarginConfig {
+                margin_per_contract: args.margin_per_contract.context(
+                    "--margin-per-contract is required when --schedule-file is not provided",
+                )?,
+                safety_buffer: args.safety_buffer,
+                safety_buffer_percent: args.safety_buffer_percent,
+                ..crate::tradovate::ReplayMarginConfig::default()
+            }
+        };
+        let liquidation = crate::tradovate::ReplayLiquidationConfig {
+            margin,
+            slippage_points: args.slippage_points,
+        };
+        let outcome = crate::tradovate::simulate_replay_liquidation_result(
+            &args.result,
+            liquidation,
+            args.fee_scenario.as_deref(),
+        )?;
+        println!("Replay liquidation overlay saved without replaying market data.");
+        println!("Triggered: {}", outcome.triggered);
+        println!("Liquidation events: {}", outcome.event_count);
+        println!("Equity after overlay: {:.8}", outcome.equity_after);
         println!("Result: {}", outcome.result_path.display());
         Ok(())
     }

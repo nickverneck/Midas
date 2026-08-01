@@ -1,4 +1,8 @@
 use super::fees::ReplayFeeSchedule;
+use super::liquidation::{
+    ReplayLiquidationAnalysis, ReplayLiquidationConfig, liquidation_csv,
+    simulate_replay_liquidation,
+};
 use super::risk::{ReplayMarginAnalysis, ReplayMarginConfig, compute_margin_analysis};
 use super::state::ReplayState;
 use crate::broker::{
@@ -6,7 +10,7 @@ use crate::broker::{
     ReplayFillPriceSource, ReplaySignalDiagnostic,
 };
 use crate::config::{AppConfig, TradingEnvironment};
-use crate::strategy::ExecutionStrategyConfig;
+use crate::strategy::{ExecutionStrategyConfig, StrategyKind};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -45,6 +49,14 @@ pub(crate) struct ReplayResultEntry {
 pub(crate) struct ReplayResultLibrarySnapshot {
     pub(crate) entries: Vec<ReplayResultEntry>,
     pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReplayEquityPoint {
+    pub(crate) timestamp_ns: i64,
+    pub(crate) equity: f64,
+    pub(crate) cumulative_net_pnl: f64,
+    pub(crate) position_qty: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +104,8 @@ pub(crate) struct ReplayResultDocument {
     pub(crate) margin_analysis: Option<ReplayMarginAnalysis>,
     #[serde(default)]
     pub(crate) trade_excursions: Option<Vec<ReplayTradeExcursion>>,
+    #[serde(default)]
+    pub(crate) liquidation_analysis: Option<ReplayLiquidationAnalysis>,
     /// Optional parent-sweep metadata. Keeping this in the typed document
     /// prevents accounting-only repricing from dropping the metadata that
     /// makes a completed child safe to resume.
@@ -199,6 +213,66 @@ pub(crate) fn load_replay_signal_diagnostics(
         .skip(1)
         .enumerate()
         .map(|(row_index, fields)| parse_signal_diagnostic_row(fields, row_index + 2))
+        .collect()
+}
+
+/// Load the selected run's equity sidecar lazily for chart/hourly analytics.
+/// The JSON index stays inexpensive and older results without an equity file
+/// simply report an unavailable chart.
+pub(crate) fn load_replay_equity(entry: &ReplayResultEntry) -> Result<Vec<ReplayEquityPoint>> {
+    let directory = entry
+        .path
+        .parent()
+        .context("replay result path has no parent directory")?;
+    let path = directory.join(&entry.document.artifacts.equity_csv);
+    let bytes =
+        fs::read(&path).with_context(|| format!("read replay equity {}", path.display()))?;
+    let records = parse_csv_records(&bytes)?;
+    let Some(header) = records.first() else {
+        return Ok(Vec::new());
+    };
+    let expected = [
+        "timestamp_ns",
+        "equity",
+        "initial_capital",
+        "cumulative_gross_realized_pnl",
+        "cumulative_fees",
+        "cumulative_net_pnl",
+        "position_qty",
+        "mark_price",
+        "execution_precision",
+    ];
+    if header.iter().map(String::as_str).collect::<Vec<_>>() != expected {
+        anyhow::bail!("unexpected equity CSV header in {}", path.display());
+    }
+    records
+        .iter()
+        .skip(1)
+        .enumerate()
+        .map(|(row_index, fields)| {
+            if fields.len() != expected.len() {
+                anyhow::bail!(
+                    "equity row {} has {} fields; expected {}",
+                    row_index + 2,
+                    fields.len(),
+                    expected.len()
+                );
+            }
+            Ok(ReplayEquityPoint {
+                timestamp_ns: fields[0].parse().with_context(|| {
+                    format!("invalid equity timestamp at row {}", row_index + 2)
+                })?,
+                equity: fields[1]
+                    .parse()
+                    .with_context(|| format!("invalid equity value at row {}", row_index + 2))?,
+                cumulative_net_pnl: fields[5]
+                    .parse()
+                    .with_context(|| format!("invalid equity net PnL at row {}", row_index + 2))?,
+                position_qty: fields[6]
+                    .parse()
+                    .with_context(|| format!("invalid equity position at row {}", row_index + 2))?,
+            })
+        })
         .collect()
 }
 
@@ -377,6 +451,8 @@ pub(crate) struct ReplayResultMetadata {
     pub(crate) environment: TradingEnvironment,
     pub(crate) run_mode: String,
     pub(crate) strategy: ExecutionStrategyConfig,
+    #[serde(default)]
+    pub(crate) path_dependence: ReplayPathDependence,
     pub(crate) signal_source: String,
     pub(crate) fill_model: crate::broker::ReplayFillModel,
     pub(crate) fill_price_sources: Vec<String>,
@@ -417,6 +493,27 @@ pub(crate) struct ReplayResultMetadata {
     pub(crate) signal_diagnostics_enabled: bool,
     #[serde(default)]
     pub(crate) signal_diagnostic_count: usize,
+}
+
+/// Records whether accounting overlays can be applied without changing the
+/// strategy execution path.  Native fixed-quantity strategies currently meet
+/// that condition; unknown/legacy results fail closed and request a rerun.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct ReplayPathDependence {
+    pub(crate) fee_path_independent: bool,
+    pub(crate) account_state_dependent: bool,
+    pub(crate) reasons: Vec<String>,
+}
+
+impl Default for ReplayPathDependence {
+    fn default() -> Self {
+        Self {
+            fee_path_independent: false,
+            account_state_dependent: true,
+            reasons: vec!["path-dependence metadata was not recorded".to_string()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +572,12 @@ pub(crate) struct ReplayResultArtifacts {
     pub(crate) fills_csv: String,
     pub(crate) equity_csv: String,
     #[serde(default)]
+    pub(crate) trades_parquet: Option<String>,
+    #[serde(default)]
+    pub(crate) fills_parquet: Option<String>,
+    #[serde(default)]
+    pub(crate) equity_parquet: Option<String>,
+    #[serde(default)]
     pub(crate) fee_scenarios_csv: Option<String>,
     #[serde(default)]
     pub(crate) margin_csv: Option<String>,
@@ -482,6 +585,12 @@ pub(crate) struct ReplayResultArtifacts {
     pub(crate) trade_excursions_csv: Option<String>,
     #[serde(default)]
     pub(crate) signals_csv: Option<String>,
+    #[serde(default)]
+    pub(crate) trade_excursions_parquet: Option<String>,
+    #[serde(default)]
+    pub(crate) signals_parquet: Option<String>,
+    #[serde(default)]
+    pub(crate) liquidation_csv: Option<String>,
 }
 
 /// Per-trade opportunity and adverse-path measurements. Prices are always
@@ -563,22 +672,22 @@ impl Default for ReplayFeeScenario {
 }
 
 #[derive(Debug, Clone)]
-struct TradeRow {
-    account_id: i64,
-    contract_id: i64,
-    contract_name: String,
-    side: String,
-    quantity: f64,
-    entry_timestamp_ns: i64,
-    entry_price: f64,
-    exit_timestamp_ns: Option<i64>,
-    exit_price: Option<f64>,
-    gross_realized_pnl: f64,
-    fees: f64,
-    net_realized_pnl: f64,
-    exit_reason: Option<String>,
-    fill_count: usize,
-    execution_precision: String,
+pub(super) struct TradeRow {
+    pub(super) account_id: i64,
+    pub(super) contract_id: i64,
+    pub(super) contract_name: String,
+    pub(super) side: String,
+    pub(super) quantity: f64,
+    pub(super) entry_timestamp_ns: i64,
+    pub(super) entry_price: f64,
+    pub(super) exit_timestamp_ns: Option<i64>,
+    pub(super) exit_price: Option<f64>,
+    pub(super) gross_realized_pnl: f64,
+    pub(super) fees: f64,
+    pub(super) net_realized_pnl: f64,
+    pub(super) exit_reason: Option<String>,
+    pub(super) fill_count: usize,
+    pub(super) execution_precision: String,
 }
 
 #[derive(Debug, Clone)]
@@ -600,15 +709,16 @@ struct OpenTrade {
 }
 
 #[derive(Debug, Clone)]
-struct EquityRow {
-    timestamp_ns: i64,
-    equity: f64,
-    cumulative_gross_realized_pnl: f64,
-    cumulative_fees: f64,
-    cumulative_net_pnl: f64,
-    position_qty: f64,
-    mark_price: Option<f64>,
-    execution_precision: String,
+pub(super) struct EquityRow {
+    pub(super) timestamp_ns: i64,
+    pub(super) initial_capital: f64,
+    pub(super) equity: f64,
+    pub(super) cumulative_gross_realized_pnl: f64,
+    pub(super) cumulative_fees: f64,
+    pub(super) cumulative_net_pnl: f64,
+    pub(super) position_qty: f64,
+    pub(super) mark_price: Option<f64>,
+    pub(super) execution_precision: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -708,6 +818,24 @@ pub(crate) fn write_replay_result(
     if let Some(analysis) = margin_analysis.as_ref() {
         apply_margin_to_summary(&mut summary, analysis);
     }
+    let liquidation_analysis = if input.config.replay_liquidation_enabled {
+        let margin = margin_config
+            .as_ref()
+            .context("replay liquidation simulation requires replay_margin_per_contract")?;
+        Some(simulate_replay_liquidation(
+            &fills,
+            initial_capital,
+            input.started_at_utc,
+            &fee_schedule,
+            &fee_schedule.name,
+            &ReplayLiquidationConfig {
+                margin: margin.clone(),
+                slippage_points: input.config.replay_liquidation_slippage_points,
+            },
+        )?)
+    } else {
+        None
+    };
 
     let directory = input
         .config
@@ -715,6 +843,14 @@ pub(crate) fn write_replay_result(
         .join(safe_path_component(input.run_id));
     fs::create_dir_all(&directory)
         .with_context(|| format!("create replay result directory {}", directory.display()))?;
+    let parquet_artifacts = super::result_parquet::write_replay_parquet_artifacts(
+        &directory,
+        &fills,
+        &trades,
+        &equity,
+        trade_excursions.as_deref(),
+        input.signal_diagnostics,
+    )?;
 
     let document = ReplayResultDocument {
         schema_version: REPLAY_RESULT_SCHEMA_VERSION,
@@ -732,17 +868,26 @@ pub(crate) fn write_replay_result(
             trades_csv: "trades.csv".to_string(),
             fills_csv: "fills.csv".to_string(),
             equity_csv: "equity.csv".to_string(),
+            trades_parquet: parquet_artifacts.trades.clone(),
+            fills_parquet: parquet_artifacts.fills.clone(),
+            equity_parquet: parquet_artifacts.equity.clone(),
             fee_scenarios_csv: Some("fee-scenarios.csv".to_string()),
             margin_csv: margin_analysis.as_ref().map(|_| "margin.csv".to_string()),
             trade_excursions_csv: trade_excursions
                 .as_ref()
                 .map(|_| "trade-excursions.csv".to_string()),
             signals_csv: input.signal_diagnostics.map(|_| "signals.csv".to_string()),
+            trade_excursions_parquet: parquet_artifacts.excursions.clone(),
+            signals_parquet: parquet_artifacts.signals.clone(),
+            liquidation_csv: liquidation_analysis
+                .as_ref()
+                .map(|_| "liquidation.csv".to_string()),
         },
         active_fee_scenario: fee_schedule.name.clone(),
         fee_scenarios: vec![fee_scenario],
         margin_analysis: margin_analysis.clone(),
         trade_excursions: trade_excursions.clone(),
+        liquidation_analysis: liquidation_analysis.clone(),
         sweep: None,
         ledger: input.ledger.clone(),
     };
@@ -779,6 +924,12 @@ pub(crate) fn write_replay_result(
     }
     if let Some(diagnostics) = input.signal_diagnostics {
         write_atomic(&directory.join("signals.csv"), &signals_csv(diagnostics))?;
+    }
+    if let Some(analysis) = liquidation_analysis.as_ref() {
+        write_atomic(
+            &directory.join("liquidation.csv"),
+            &liquidation_csv(analysis),
+        )?;
     }
 
     Ok(ReplayResultWriteOutcome {
@@ -1082,6 +1233,7 @@ fn build_metadata(
         environment: input.config.env,
         run_mode: "single".to_string(),
         strategy: input.strategy.clone(),
+        path_dependence: replay_path_dependence(input.strategy),
         signal_source: input.ledger.signal_source.clone(),
         fill_model: input.ledger.fill_model,
         fill_price_sources: fill_price_sources.into_iter().collect(),
@@ -1141,6 +1293,25 @@ fn build_metadata(
         }),
         signal_diagnostics_enabled: input.signal_diagnostics.is_some(),
         signal_diagnostic_count: input.signal_diagnostics.map_or(0, |rows| rows.len()),
+    }
+}
+
+fn replay_path_dependence(strategy: &ExecutionStrategyConfig) -> ReplayPathDependence {
+    if strategy.kind == StrategyKind::Native {
+        ReplayPathDependence {
+            fee_path_independent: true,
+            account_state_dependent: false,
+            reasons: Vec::new(),
+        }
+    } else {
+        ReplayPathDependence {
+            fee_path_independent: false,
+            account_state_dependent: true,
+            reasons: vec![format!(
+                "{} strategy inputs are not proven independent of fees, equity, or margin",
+                strategy.kind.label()
+            )],
+        }
     }
 }
 
@@ -1355,6 +1526,7 @@ fn build_equity_rows(
     let mut cumulative_fees = 0.0;
     let mut rows = vec![EquityRow {
         timestamp_ns: started_at_utc.timestamp_nanos_opt().unwrap_or_default(),
+        initial_capital,
         equity: initial_capital,
         cumulative_gross_realized_pnl: 0.0,
         cumulative_fees: 0.0,
@@ -1381,6 +1553,7 @@ fn build_equity_rows(
         let position_qty = positions.values().copied().sum();
         rows.push(EquityRow {
             timestamp_ns: fill.fill_timestamp_ns,
+            initial_capital,
             equity: initial_capital + cumulative_net_pnl,
             cumulative_gross_realized_pnl: cumulative,
             cumulative_fees,
@@ -1676,6 +1849,14 @@ pub(crate) struct ReplayMarginAnalysisOutcome {
     pub(crate) initial_capital_sufficient: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayLiquidationSimulationOutcome {
+    pub(crate) result_path: PathBuf,
+    pub(crate) triggered: bool,
+    pub(crate) event_count: usize,
+    pub(crate) equity_after: f64,
+}
+
 /// Apply an accounting-only fee schedule to a completed result.
 ///
 /// The embedded execution ledger is never changed.  The active summary and
@@ -1708,6 +1889,10 @@ pub(crate) fn reprice_replay_result(
                 safety_buffer: analysis.safety_buffer,
                 safety_buffer_percent: analysis.safety_buffer_percent,
             });
+    let existing_liquidation_config = document
+        .liquidation_analysis
+        .as_ref()
+        .map(|analysis| analysis.config.clone());
     let directory = result_path
         .parent()
         .context("replay result path has no parent directory")?;
@@ -1744,6 +1929,19 @@ pub(crate) fn reprice_replay_result(
     document.summary = summary;
     document.artifacts.fee_scenarios_csv = Some("fee-scenarios.csv".to_string());
 
+    let parquet_artifacts = super::result_parquet::write_replay_parquet_artifacts(
+        directory,
+        &fills,
+        &trades,
+        &equity,
+        document.trade_excursions.as_deref(),
+        None,
+    )?;
+    document.artifacts.trades_parquet = parquet_artifacts.trades;
+    document.artifacts.fills_parquet = parquet_artifacts.fills;
+    document.artifacts.equity_parquet = parquet_artifacts.equity;
+    document.artifacts.trade_excursions_parquet = parquet_artifacts.excursions;
+
     if let Some(margin_config) = existing_margin_config {
         let margin_fills = margin_fills_for_result(&document, &fills);
         let margin_analysis = compute_margin_analysis(
@@ -1760,6 +1958,22 @@ pub(crate) fn reprice_replay_result(
         write_atomic(
             &directory.join("margin.csv"),
             &margin_analysis_csv(&margin_analysis),
+        )?;
+    }
+    if let Some(liquidation_config) = existing_liquidation_config {
+        let liquidation_analysis = simulate_replay_liquidation(
+            &fills,
+            initial_capital,
+            document.started_at_utc,
+            &schedule,
+            &schedule.name,
+            &liquidation_config,
+        )?;
+        document.liquidation_analysis = Some(liquidation_analysis.clone());
+        document.artifacts.liquidation_csv = Some("liquidation.csv".to_string());
+        write_atomic(
+            &directory.join("liquidation.csv"),
+            &liquidation_csv(&liquidation_analysis),
         )?;
     }
 
@@ -1858,6 +2072,63 @@ pub(crate) fn analyze_replay_margin(
     })
 }
 
+/// Run the opt-in margin liquidation overlay against a saved result.  This
+/// never changes the embedded execution ledger or starts a replay worker.
+pub(crate) fn simulate_replay_liquidation_result(
+    result_path: &Path,
+    config: ReplayLiquidationConfig,
+    fee_scenario: Option<&str>,
+) -> Result<ReplayLiquidationSimulationOutcome> {
+    config.validate()?;
+    let bytes = fs::read(result_path)
+        .with_context(|| format!("read replay result {}", result_path.display()))?;
+    let mut document: ReplayResultDocument = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse replay result {}", result_path.display()))?;
+    if !matches!(document.status, ReplayResultStatus::Completed) {
+        anyhow::bail!("cannot simulate liquidation for a failed replay result");
+    }
+    let selected_name = fee_scenario.unwrap_or(&document.active_fee_scenario);
+    let fee_schedule = document
+        .fee_scenarios
+        .iter()
+        .find(|scenario| scenario.schedule.name.eq_ignore_ascii_case(selected_name))
+        .map(|scenario| scenario.schedule.clone())
+        .or_else(|| {
+            (selected_name.eq_ignore_ascii_case(FEE_NEUTRAL_SCENARIO_NAME))
+                .then(ReplayFeeSchedule::default)
+        })
+        .with_context(|| format!("fee scenario `{selected_name}` is not present in result"))?;
+    let fills = sorted_fills(&document.ledger);
+    let analysis = simulate_replay_liquidation(
+        &fills,
+        document.metadata.initial_capital,
+        document.started_at_utc,
+        &fee_schedule,
+        &fee_schedule.name,
+        &config,
+    )?;
+    let directory = result_path
+        .parent()
+        .context("replay result path has no parent directory")?;
+    write_atomic(
+        &directory.join("liquidation.csv"),
+        &liquidation_csv(&analysis),
+    )?;
+    document.liquidation_analysis = Some(analysis.clone());
+    document.artifacts.liquidation_csv = Some("liquidation.csv".to_string());
+    document.schema_version = REPLAY_RESULT_SCHEMA_VERSION;
+    write_atomic(
+        result_path,
+        &serde_json::to_vec_pretty(&document).context("serialize replay liquidation result")?,
+    )?;
+    Ok(ReplayLiquidationSimulationOutcome {
+        result_path: result_path.to_path_buf(),
+        triggered: analysis.triggered,
+        event_count: analysis.event_count,
+        equity_after: analysis.equity_after,
+    })
+}
+
 fn fills_csv(fills: &[ReplayExecutionFill]) -> Vec<u8> {
     let mut output = String::from(
         "sequence,lifecycle_sequence,fill_id,order_id,order_strategy_id,protection_order_id,account_id,contract_id,contract_name,side,quantity,price,signal_timestamp_ns,submission_timestamp_ns,exchange_arrival_timestamp_ns,acknowledgement_timestamp_ns,fill_timestamp_ns,fill_price_source,execution_precision,exit_reason,latency_ms,tick_size,value_per_point,gross_realized_pnl_delta\n",
@@ -1939,7 +2210,7 @@ fn signals_csv(rows: &[ReplaySignalDiagnostic]) -> Vec<u8> {
     output.into_bytes()
 }
 
-fn fill_price_source_label(source: ReplayFillPriceSource) -> &'static str {
+pub(super) fn fill_price_source_label(source: ReplayFillPriceSource) -> &'static str {
     match source {
         ReplayFillPriceSource::LegacyReferencePrice => "legacy_reference_price",
         ReplayFillPriceSource::RawBarOpen => "raw_bar_open",
@@ -2376,6 +2647,8 @@ mod tests {
         config.replay_initial_capital = 10_000.0;
         config.replay_margin_per_contract = 1_000.0;
         config.replay_safety_buffer = 100.0;
+        config.replay_liquidation_enabled = true;
+        config.replay_liquidation_slippage_points = 0.25;
         config.replay_post_exit_continuation_bars = 2;
         config.replay_signal_diagnostics = true;
         let mut ledger = ReplayExecutionLedgerSnapshot::default();
@@ -2478,6 +2751,8 @@ mod tests {
         assert_eq!(document.metadata.post_exit_continuation_horizon_bars, 2);
         assert!(document.metadata.signal_diagnostics_enabled);
         assert_eq!(document.metadata.signal_diagnostic_count, 1);
+        assert!(document.metadata.path_dependence.fee_path_independent);
+        assert!(document.liquidation_analysis.is_some());
         assert_eq!(document.summary.required_starting_capital, Some(1_100.0));
         assert_eq!(document.summary.initial_capital_sufficient, Some(true));
         let excursion = document
@@ -2519,8 +2794,13 @@ mod tests {
         assert!(result_dir.join("fills.csv").is_file());
         assert!(result_dir.join("trades.csv").is_file());
         assert!(result_dir.join("equity.csv").is_file());
+        assert!(result_dir.join("trades.parquet").is_file());
+        assert!(result_dir.join("fills.parquet").is_file());
+        assert!(result_dir.join("equity.parquet").is_file());
         assert!(result_dir.join("fee-scenarios.csv").is_file());
         assert!(result_dir.join("signals.csv").is_file());
+        assert!(result_dir.join("signals.parquet").is_file());
+        assert!(result_dir.join("liquidation.csv").is_file());
         let signals_csv = fs::read_to_string(result_dir.join("signals.csv")).expect("read signals");
         assert!(signals_csv.starts_with("bar_timestamp_ns,bar_open,bar_high"));
         assert!(signals_csv.contains("dispatching"));
@@ -2603,6 +2883,8 @@ mod tests {
         config.broker = crate::broker::BrokerKind::Tradovate;
         config.env = TradingEnvironment::Sim;
         config.replay_result_dir = root.clone();
+        config.replay_margin_per_contract = 1_000.0;
+        config.replay_liquidation_enabled = true;
         config.replay_post_exit_continuation_bars = 2;
         let mut ledger = ReplayExecutionLedgerSnapshot::default();
         ledger.schema_version = 3;
@@ -2648,8 +2930,8 @@ mod tests {
         let neutral_document: ReplayResultDocument =
             serde_json::from_slice(&fs::read(&written.result_path).expect("read neutral result"))
                 .expect("parse neutral result");
-        assert!(neutral_document.margin_analysis.is_none());
-        assert_eq!(neutral_document.metadata.margin_model, "not_configured");
+        assert!(neutral_document.margin_analysis.is_some());
+        assert_eq!(neutral_document.metadata.margin_model, "fixed_per_contract");
         assert_eq!(
             neutral_document
                 .trade_excursions
@@ -2727,6 +3009,14 @@ mod tests {
                 .fee_scenario,
             "broker_standard"
         );
+        assert_eq!(
+            document
+                .liquidation_analysis
+                .as_ref()
+                .expect("repriced liquidation analysis")
+                .fee_scenario,
+            "broker_standard"
+        );
         assert!(
             document
                 .summary
@@ -2745,6 +3035,7 @@ mod tests {
         assert!(trades_csv.contains("mfe_points"));
         assert!(trades_csv.contains(",15,"));
         assert!(result_dir.join("trade-excursions.csv").is_file());
+        assert!(result_dir.join("liquidation.csv").is_file());
         fs::remove_dir_all(root).expect("cleanup result directory");
     }
 

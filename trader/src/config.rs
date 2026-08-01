@@ -174,6 +174,13 @@ pub struct AppConfig {
     pub replay_safety_buffer: f64,
     /// Percentage safety buffer applied to replay margin requirements.
     pub replay_safety_buffer_percent: f64,
+    /// Opt-in research overlay that flattens positions after a simulated
+    /// margin/buffer breach. Live sessions never use this field.
+    #[serde(default)]
+    pub replay_liquidation_enabled: bool,
+    /// Slippage in points applied to simulated liquidation fills.
+    #[serde(default)]
+    pub replay_liquidation_slippage_points: f64,
     /// Optional number of selected replay bars to inspect after each exit for
     /// favorable continuation. Zero disables post-exit continuation analytics.
     pub replay_post_exit_continuation_bars: usize,
@@ -229,6 +236,8 @@ impl Default for AppConfig {
             replay_margin_per_contract: 0.0,
             replay_safety_buffer: 0.0,
             replay_safety_buffer_percent: 0.0,
+            replay_liquidation_enabled: false,
+            replay_liquidation_slippage_points: 0.0,
             replay_post_exit_continuation_bars: 0,
             replay_signal_diagnostics: false,
             replay_bar_interval_ms: 5,
@@ -399,6 +408,18 @@ impl AppConfig {
         ])? {
             self.replay_safety_buffer_percent = raw;
         }
+        if let Some(raw) = env_bool_any(&[
+            "TRADER_REPLAY_LIQUIDATION_ENABLED",
+            "MIDAS_TUI_REPLAY_LIQUIDATION_ENABLED",
+        ])? {
+            self.replay_liquidation_enabled = raw;
+        }
+        if let Some(raw) = env_parse_any::<f64>(&[
+            "TRADER_REPLAY_LIQUIDATION_SLIPPAGE_POINTS",
+            "MIDAS_TUI_REPLAY_LIQUIDATION_SLIPPAGE_POINTS",
+        ])? {
+            self.replay_liquidation_slippage_points = raw;
+        }
         if let Some(raw) = env_parse_any::<usize>(&[
             "TRADER_REPLAY_POST_EXIT_CONTINUATION_BARS",
             "MIDAS_TUI_REPLAY_POST_EXIT_CONTINUATION_BARS",
@@ -489,6 +510,11 @@ impl AppConfig {
         if !self.replay_safety_buffer_percent.is_finite() || self.replay_safety_buffer_percent < 0.0
         {
             bail!("replay_safety_buffer_percent must be finite and non-negative");
+        }
+        if !self.replay_liquidation_slippage_points.is_finite()
+            || self.replay_liquidation_slippage_points < 0.0
+        {
+            bail!("replay_liquidation_slippage_points must be finite and non-negative");
         }
         if self.replay_engine_mode == ReplayEngineMode::Deterministic {
             if self.replay_fill_model == ReplayFillModel::LegacyReferencePrice {

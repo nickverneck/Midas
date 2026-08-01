@@ -26,10 +26,11 @@ use crate::strategy::{
 };
 #[cfg(feature = "replay")]
 use crate::tradovate::replay::{
-    ReplayResultEntry, ReplayResultLibrarySnapshot, ReplaySweepRankingDocument,
+    ReplayEquityPoint, ReplayResultEntry, ReplayResultLibrarySnapshot, ReplaySweepRankingDocument,
     ReplaySweepRankingEntry, ReplaySweepRankingLibrarySnapshot, ReplaySweepRankingMetric,
-    ReplaySweepRankingOptions, ReplayTradeExcursion, load_replay_result_entries,
-    load_replay_signal_diagnostics, load_replay_sweep_ranking_entries, rank_replay_sweep,
+    ReplaySweepRankingOptions, ReplayTradeExcursion, load_replay_equity,
+    load_replay_result_entries, load_replay_signal_diagnostics, load_replay_sweep_ranking_entries,
+    rank_replay_sweep,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -439,6 +440,8 @@ struct ReplayAnalyticsState {
     signal_filter: AnalyticsSignalFilter,
     signals: Vec<ReplaySignalDiagnostic>,
     signal_load_error: Option<String>,
+    equity: Vec<ReplayEquityPoint>,
+    equity_load_error: Option<String>,
     sweep_entries: Vec<ReplaySweepRankingEntry>,
     sweep_warnings: Vec<String>,
     selected_sweep: usize,
@@ -468,6 +471,8 @@ impl ReplayAnalyticsState {
             signal_filter: AnalyticsSignalFilter::All,
             signals: Vec::new(),
             signal_load_error: None,
+            equity: Vec::new(),
+            equity_load_error: None,
             sweep_entries: Vec::new(),
             sweep_warnings: Vec::new(),
             selected_sweep: 0,
@@ -509,6 +514,7 @@ impl ReplayAnalyticsState {
         } else if self.focus != AnalyticsFocus::Sweeps {
             self.clear_selected_signals();
         }
+        self.load_selected_equity();
     }
 
     fn refresh_sweeps(&mut self, selected_path: Option<PathBuf>) {
@@ -630,6 +636,17 @@ impl ReplayAnalyticsState {
         self.signals.clear();
         self.signal_load_error = None;
         self.selected_signal = 0;
+    }
+
+    fn load_selected_equity(&mut self) {
+        self.equity.clear();
+        self.equity_load_error = None;
+        if let Some(entry) = self.selected_entry() {
+            match load_replay_equity(entry) {
+                Ok(rows) => self.equity = rows,
+                Err(error) => self.equity_load_error = Some(error.to_string()),
+            }
+        }
     }
 
     fn load_selected_signals(&mut self) {

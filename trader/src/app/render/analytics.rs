@@ -51,6 +51,7 @@ impl App {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(15),
+                    Constraint::Length(8),
                     Constraint::Min(8),
                     Constraint::Length(7),
                 ])
@@ -73,6 +74,15 @@ impl App {
                 )
                 .wrap(Wrap { trim: true });
             frame.render_widget(summary, right[0]);
+
+            if showing_sweeps {
+                let chart = Paragraph::new("Equity chart is available for saved replay runs.")
+                    .block(Block::default().borders(Borders::ALL).title("Equity Curve"))
+                    .wrap(Wrap { trim: true });
+                frame.render_widget(chart, right[1]);
+            } else {
+                self.render_analytics_equity_chart(frame, right[1]);
+            }
 
             let (rows, widths, header, title) = if showing_sweeps {
                 (
@@ -157,12 +167,14 @@ impl App {
                 )
                 .column_spacing(1)
                 .block(Block::default().borders(Borders::ALL).title(title));
-            frame.render_widget(table, right[1]);
+            frame.render_widget(table, right[2]);
 
             let selected_lines = if showing_sweeps {
                 self.analytics_selected_sweep_lines()
             } else if self.replay_analytics.focus == AnalyticsFocus::Signals {
                 self.analytics_selected_signal_lines()
+            } else if self.replay_analytics.focus == AnalyticsFocus::Runs {
+                self.analytics_selected_run_lines()
             } else {
                 self.analytics_selected_trade_lines()
             };
@@ -170,13 +182,15 @@ impl App {
                 "Selected Sweep Candidate"
             } else if self.replay_analytics.focus == AnalyticsFocus::Signals {
                 "Selected Signal Detail"
+            } else if self.replay_analytics.focus == AnalyticsFocus::Runs {
+                "Selected Run Detail"
             } else {
                 "Selected Trade Detail"
             };
             let selected = Paragraph::new(selected_lines)
                 .block(Block::default().borders(Borders::ALL).title(selected_title))
                 .wrap(Wrap { trim: true });
-            frame.render_widget(selected, right[2]);
+            frame.render_widget(selected, right[3]);
         }
         #[cfg(not(feature = "replay"))]
         {
@@ -184,5 +198,67 @@ impl App {
                 .block(Block::default().borders(Borders::ALL).title("Analytics"));
             frame.render_widget(disabled, area);
         }
+    }
+
+    #[cfg(feature = "replay")]
+    fn render_analytics_equity_chart(&self, frame: &mut Frame<'_>, area: Rect) {
+        if self.replay_analytics.equity.is_empty() {
+            let message = self
+                .replay_analytics
+                .equity_load_error
+                .as_deref()
+                .map(|error| format!("Equity unavailable: {error}"))
+                .unwrap_or_else(|| "No equity sidecar saved for this result.".to_string());
+            frame.render_widget(
+                Paragraph::new(message)
+                    .block(Block::default().borders(Borders::ALL).title("Equity Curve"))
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
+        }
+        let data = self
+            .replay_analytics
+            .equity
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (index as f64, point.equity))
+            .collect::<Vec<_>>();
+        let min = data
+            .iter()
+            .map(|(_, value)| *value)
+            .fold(f64::INFINITY, f64::min);
+        let max = data
+            .iter()
+            .map(|(_, value)| *value)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let span = (max - min).abs().max(1.0);
+        let dataset = Dataset::default()
+            .name("equity")
+            .marker(symbols::Marker::Dot)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Green))
+            .data(&data);
+        let chart = Chart::new(vec![dataset])
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "Equity Curve | {} points | {:.2} -> {:.2}",
+                data.len(),
+                data.first().map(|(_, value)| *value).unwrap_or_default(),
+                data.last().map(|(_, value)| *value).unwrap_or_default()
+            )))
+            .x_axis(
+                Axis::default()
+                    .bounds([0.0, data.len().saturating_sub(1).max(1) as f64])
+                    .labels(vec![Line::from("start"), Line::from("end")]),
+            )
+            .y_axis(
+                Axis::default()
+                    .bounds([min - span * 0.05, max + span * 0.05])
+                    .labels(vec![
+                        Line::from(format!("{min:.0}")),
+                        Line::from(format!("{max:.0}")),
+                    ]),
+            );
+        frame.render_widget(chart, area);
     }
 }
