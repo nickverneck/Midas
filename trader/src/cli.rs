@@ -240,6 +240,91 @@ pub(crate) struct RankReplaySweepArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct PlanReplayWalkForwardArgs {
+    /// JSON replay sweep specification to split into chronological phases.
+    #[arg(long)]
+    pub(crate) spec: PathBuf,
+    /// Output path for the persisted walk-forward plan.
+    #[arg(long)]
+    pub(crate) output: PathBuf,
+    /// Fraction of the base evaluation range assigned to training.
+    #[arg(long, default_value_t = 0.70)]
+    pub(crate) train_fraction: f64,
+    /// Fraction of the base evaluation range assigned to validation.
+    #[arg(long, default_value_t = 0.15)]
+    pub(crate) validation_fraction: f64,
+    /// Fraction of the base evaluation range assigned to out-of-sample testing.
+    #[arg(long, default_value_t = 0.15)]
+    pub(crate) test_fraction: f64,
+    /// Maximum number of rolling chronological folds to materialize.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) folds: usize,
+    /// Optional fraction of the base range by which each next fold advances.
+    /// Defaults to the test fraction.
+    #[arg(long)]
+    pub(crate) step_fraction: Option<f64>,
+    /// Gap in seconds inserted between train/validation and validation/test.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) purge_seconds: u64,
+    /// Indicator warmup seconds for generated views. Defaults to the source view policy.
+    #[arg(long)]
+    pub(crate) warmup_seconds: Option<u64>,
+    /// Root directory for generated phase sweep specifications.
+    #[arg(long)]
+    pub(crate) output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct EvaluateReplayWalkForwardArgs {
+    /// Persisted walk-forward plan whose phase sweep artifacts should be evaluated.
+    #[arg(long)]
+    pub(crate) plan: PathBuf,
+    /// Ranking metric used to select a candidate from train/validation results.
+    #[arg(long, default_value = "robustness")]
+    pub(crate) metric: String,
+    /// Saved fee-scenario name, or `active` (the default) for each result's active scenario.
+    #[arg(long)]
+    pub(crate) fee_scenario: Option<String>,
+    /// Selection policy: `train` or `train_then_validation`.
+    #[arg(long, default_value = "train")]
+    pub(crate) selection_policy: String,
+    /// Optional JSON output path for the evaluation document.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+    /// Optional CSV output path for candidate/phase rows.
+    #[arg(long)]
+    pub(crate) csv: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ProfileReplaySweepArgs {
+    /// JSON replay sweep specification to execute as a bounded performance probe.
+    #[arg(long)]
+    pub(crate) spec: PathBuf,
+    /// Run at most this many deterministic prefix combinations.
+    #[arg(long)]
+    pub(crate) sample_runs: Option<usize>,
+    /// Explicit child-output directory. Omit to use a fresh isolated directory.
+    #[arg(long)]
+    pub(crate) output_dir: Option<PathBuf>,
+    /// Reuse completed child artifacts when --output-dir points at an existing tree.
+    #[arg(long)]
+    pub(crate) resume: bool,
+    /// Confirm that a large probe may start after reviewing its estimate.
+    #[arg(long)]
+    pub(crate) allow_large: bool,
+    /// Explicitly bypass hard resource guardrails for this launch.
+    #[arg(long)]
+    pub(crate) override_guardrails: bool,
+    /// Optional JSON output path for the empirical report.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+    /// Optional CSV output path for the empirical child rows.
+    #[arg(long)]
+    pub(crate) csv: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct CaptureReplayDomArgs {
     /// Exact contract symbol, for example MESU6 or GCZ6.
     #[arg(long)]
@@ -333,6 +418,15 @@ pub(crate) enum Mode {
     /// Rank and inspect completed replay sweep results without replaying data.
     #[command(name = "rank-replay-sweep")]
     RankReplaySweep(RankReplaySweepArgs),
+    /// Persist bounded train/validation/test sweep specifications for walk-forward evaluation.
+    #[command(name = "plan-replay-walk-forward")]
+    PlanReplayWalkForward(PlanReplayWalkForwardArgs),
+    /// Evaluate saved walk-forward phase results without replaying market data.
+    #[command(name = "evaluate-replay-walk-forward")]
+    EvaluateReplayWalkForward(EvaluateReplayWalkForwardArgs),
+    /// Run a bounded empirical performance probe for a replay sweep.
+    #[command(name = "profile-replay-sweep")]
+    ProfileReplaySweep(ProfileReplaySweepArgs),
     /// Capture historical Level 2 snapshots through a Tradovate Market Replay session.
     #[command(name = "capture-replay-dom")]
     CaptureReplayDom(CaptureReplayDomArgs),

@@ -1,5 +1,97 @@
 use super::*;
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, Weak};
+
+/// Decoded server bars are immutable after cache validation.  Parallel replay
+/// children can therefore share one allocation while retaining independent
+/// strategy, broker, and ledger state.  Weak values keep this an opportunistic
+/// cache: once the active replay states release their `Arc`, the data is
+/// reclaimable and only a small key remains until the next load.
+const MAX_SHARED_SERVER_BAR_CACHE_ENTRIES: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SharedServerBarsKey {
+    data_path: PathBuf,
+    data_len: u64,
+    modified_ns: Option<u128>,
+    data_hash: Option<String>,
+    bar_type: String,
+    candle_mode: String,
+    range: Option<(i64, i64)>,
+}
+
+static SHARED_SERVER_BARS: OnceLock<Mutex<HashMap<SharedServerBarsKey, Weak<[Bar]>>>> =
+    OnceLock::new();
+
+fn shared_server_bars_cache() -> &'static Mutex<HashMap<SharedServerBarsKey, Weak<[Bar]>>> {
+    SHARED_SERVER_BARS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn shared_server_bars_key(
+    resolved: &ReplayCacheResolvedServerBarsFile,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    timestamp_range: Option<&ReplayCacheTimeRange>,
+) -> Result<SharedServerBarsKey> {
+    let data_path = fs::canonicalize(&resolved.data_path)
+        .with_context(|| format!("canonicalize {}", resolved.data_path.display()))?;
+    let metadata =
+        fs::metadata(&data_path).with_context(|| format!("inspect {}", data_path.display()))?;
+    let modified_ns = metadata.modified().ok().and_then(|modified| {
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_nanos())
+    });
+    let range = timestamp_range.map(|range| range.bounds_ns()).transpose()?;
+    Ok(SharedServerBarsKey {
+        data_path,
+        data_len: metadata.len(),
+        modified_ns,
+        data_hash: resolved
+            .file
+            .data_hash
+            .as_ref()
+            .map(|hash| format!("{}:{}", hash.algorithm, hash.value)),
+        bar_type: format!("{:?}", bar_type),
+        candle_mode: format!("{:?}", candle_mode),
+        range,
+    })
+}
+
+fn load_shared_server_bars(
+    key: SharedServerBarsKey,
+    load: impl FnOnce() -> Result<Vec<Bar>>,
+) -> Result<Arc<[Bar]>> {
+    // Keep the lock across the decode.  This is intentional: a large sweep
+    // starts several children at once, and serializing one cache miss avoids
+    // every child reading and materializing the same file concurrently.
+    let mut cache = shared_server_bars_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.retain(|_, value| value.strong_count() > 0);
+    if let Some(shared) = cache.get(&key).and_then(Weak::upgrade) {
+        return Ok(shared);
+    }
+    let bars = Arc::from(load()?.into_boxed_slice());
+    if cache.len() >= MAX_SHARED_SERVER_BAR_CACHE_ENTRIES {
+        if let Some(stale) = cache
+            .iter()
+            .find(|(_, value)| value.strong_count() == 0)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&stale);
+        } else if let Some(oldest) = cache.keys().next().cloned() {
+            // Evicting a live weak entry is safe; its owners retain the Arc,
+            // and a later load may simply decode that key again.
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, Arc::downgrade(&bars));
+    Ok(bars)
+}
+
 #[allow(dead_code)]
 pub fn write_server_bars_jsonl_cache(
     write: ReplayCacheServerBarsWrite,
@@ -497,6 +589,38 @@ pub fn load_server_bars_cache_file(
     load_server_bars_cache_file_range(dataset, bar_type, candle_mode, requested_coverage, None)
 }
 
+/// Load validated server bars through the process-local immutable sharing
+/// cache.  The returned metadata identifies the exact versioned file and the
+/// `Arc` contains only rows inside `timestamp_range`.
+pub fn load_server_bars_cache_file_range_shared(
+    dataset: &ReplayCacheDataset,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    requested_coverage: Option<&ReplayCacheCoverage>,
+    timestamp_range: Option<&ReplayCacheTimeRange>,
+) -> Result<(ReplayCacheResolvedServerBarsFile, Arc<[Bar]>)> {
+    let resolved = dataset.resolve_server_bars_file(bar_type, candle_mode, requested_coverage)?;
+    let key = shared_server_bars_key(&resolved, bar_type, candle_mode, timestamp_range)?;
+    let bars = load_shared_server_bars(key, || match &resolved.file.format {
+        ReplayCacheFileFormat::Parquet => {
+            read_server_bars_parquet_file_range(&resolved.data_path, timestamp_range)
+                .map(|result| result.0)
+        }
+        ReplayCacheFileFormat::Jsonl => {
+            read_server_bars_jsonl_file(&resolved.data_path).map(|bars| {
+                bars.into_iter()
+                    .filter(|bar| {
+                        timestamp_range_contains(timestamp_range, bar.ts_ns).unwrap_or(false)
+                    })
+                    .collect()
+            })
+        }
+        format => bail!("unsupported server-bar cache format: {format:?}"),
+    })?;
+    validate_loaded_server_bars_metadata(&resolved, &bars, timestamp_range)?;
+    Ok((resolved, bars))
+}
+
 pub fn load_server_bars_cache_file_range(
     dataset: &ReplayCacheDataset,
     bar_type: BarType,
@@ -504,25 +628,20 @@ pub fn load_server_bars_cache_file_range(
     requested_coverage: Option<&ReplayCacheCoverage>,
     timestamp_range: Option<&ReplayCacheTimeRange>,
 ) -> Result<ReplayCacheLoadedServerBars> {
-    let resolved = dataset.resolve_server_bars_file(bar_type, candle_mode, requested_coverage)?;
-    let bars = match resolved.file.format {
-        ReplayCacheFileFormat::Parquet => {
-            read_server_bars_parquet_file_range(&resolved.data_path, timestamp_range)?.0
-        }
-        ReplayCacheFileFormat::Jsonl => read_server_bars_jsonl_file(&resolved.data_path)?
-            .into_iter()
-            .filter(|bar| timestamp_range_contains(timestamp_range, bar.ts_ns).unwrap_or(false))
-            .collect(),
-        format => bail!("unsupported server-bar cache format: {format:?}"),
-    };
-    validate_loaded_server_bars_metadata(&resolved, &bars, timestamp_range)?;
+    let (resolved, shared_bars) = load_server_bars_cache_file_range_shared(
+        dataset,
+        bar_type,
+        candle_mode,
+        requested_coverage,
+        timestamp_range,
+    )?;
     Ok(ReplayCacheLoadedServerBars {
         manifest_path: resolved.manifest_path,
         dataset_dir: resolved.dataset_dir,
         data_path: resolved.data_path,
         manifest: resolved.manifest,
         file: resolved.file,
-        bars,
+        bars: shared_bars.to_vec(),
     })
 }
 

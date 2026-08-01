@@ -88,10 +88,17 @@ use orders::{
 };
 pub use profiler::{SwipeProfileOptions, run_swipe_profile};
 #[cfg(feature = "replay")]
+#[allow(unused_imports)]
 pub(crate) use replay::{
     ReplayBrokerSchedule, ReplayFeeSchedule, ReplayLiquidationConfig, ReplayMarginConfig,
-    ReplaySweepRankingMetric, ReplaySweepRankingOptions, ReplaySweepSpec, analyze_replay_margin,
-    rank_replay_sweep, reprice_replay_result, run_replay_sweep, simulate_replay_liquidation_result,
+    ReplaySweepPerformanceOptions, ReplaySweepPerformanceReport, ReplaySweepRankingMetric,
+    ReplaySweepRankingOptions, ReplaySweepSpec, ReplayWalkForwardEvaluationDocument,
+    ReplayWalkForwardEvaluationOptions, ReplayWalkForwardOptions, ReplayWalkForwardPhase,
+    ReplayWalkForwardSelectionPolicy, ReplayWalkForwardWindow, analyze_replay_margin,
+    evaluate_replay_walk_forward, plan_replay_walk_forward, rank_replay_sweep,
+    replay_sweep_performance_csv, replay_sweep_performance_json, reprice_replay_result,
+    run_replay_sweep, run_replay_sweep_performance, simulate_replay_liquidation_result,
+    write_replay_sweep_performance_report,
 };
 
 include!("types.rs");

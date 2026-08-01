@@ -26,11 +26,17 @@ mod sweep_analytics;
 #[cfg(feature = "replay")]
 mod sweep_parquet;
 #[cfg(feature = "replay")]
+mod sweep_performance;
+#[cfg(feature = "replay")]
 mod sweep_runner;
 #[cfg(feature = "replay")]
 mod ticks;
 #[cfg(feature = "replay")]
 pub(crate) mod virtual_time;
+#[cfg(feature = "replay")]
+mod walk_forward;
+#[cfg(feature = "replay")]
+mod walk_forward_eval;
 mod worker;
 
 #[cfg(feature = "replay")]
@@ -67,7 +73,23 @@ pub(crate) use sweep_analytics::{
     load_replay_sweep_ranking_entries, rank_replay_sweep,
 };
 #[cfg(feature = "replay")]
+pub(crate) use sweep_performance::{
+    ReplaySweepPerformanceOptions, ReplaySweepPerformanceReport, replay_sweep_performance_csv,
+    replay_sweep_performance_json, run_replay_sweep_performance,
+    write_replay_sweep_performance_report,
+};
+#[cfg(feature = "replay")]
 pub(crate) use sweep_runner::run_replay_sweep;
+#[cfg(feature = "replay")]
+pub(crate) use walk_forward::{
+    ReplayWalkForwardOptions, ReplayWalkForwardPhase, ReplayWalkForwardWindow,
+    plan_replay_walk_forward,
+};
+#[cfg(feature = "replay")]
+pub(crate) use walk_forward_eval::{
+    ReplayWalkForwardEvaluationDocument, ReplayWalkForwardEvaluationOptions,
+    ReplayWalkForwardSelectionPolicy, evaluate_replay_walk_forward,
+};
 pub(crate) use worker::spawn_replay_market_task;
 
 #[cfg(all(test, feature = "replay"))]

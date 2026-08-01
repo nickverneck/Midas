@@ -74,6 +74,39 @@ fn server_bar_parquet_file_round_trips_and_is_preferred_over_jsonl() {
     assert_eq!(loaded.file.format, ReplayCacheFileFormat::Parquet);
     assert_eq!(loaded.bars[0].close, 100.5);
 
+    let dataset = library
+        .first_server_bars(BarType::minute(1), CandleMode::Standard, None)
+        .expect("server-bar dataset");
+    let (_, shared_bars_a) = load_server_bars_cache_file_range_shared(
+        dataset,
+        BarType::minute(1),
+        CandleMode::Standard,
+        None,
+        None,
+    )
+    .expect("shared server bars");
+    let (_, shared_bars_b) = load_server_bars_cache_file_range_shared(
+        dataset,
+        BarType::minute(1),
+        CandleMode::Standard,
+        None,
+        None,
+    )
+    .expect("shared server bars second load");
+    assert!(Arc::ptr_eq(&shared_bars_a, &shared_bars_b));
+    let range = ReplayCacheTimeRange::new(dt("2026-07-23T00:00:00Z"), dt("2026-07-23T00:01:00Z"))
+        .expect("range");
+    let (_, ranged_bars) = load_server_bars_cache_file_range_shared(
+        dataset,
+        BarType::minute(1),
+        CandleMode::Standard,
+        None,
+        Some(&range),
+    )
+    .expect("ranged shared server bars");
+    assert!(!Arc::ptr_eq(&shared_bars_a, &ranged_bars));
+    assert_eq!(ranged_bars.len(), 1);
+
     let manifest = ReplayCacheManifest::from_path(&loaded.manifest_path).expect("manifest");
     assert!(
         manifest
@@ -114,6 +147,19 @@ fn server_bar_parquet_file_round_trips_and_is_preferred_over_jsonl() {
         1
     );
     assert_eq!(refreshed_manifest.preferred_row_count_total(), 2);
+    let refreshed_library = ReplayCacheLibrary::scan(root.clone());
+    let refreshed_dataset = refreshed_library
+        .first_server_bars(BarType::minute(1), CandleMode::Standard, None)
+        .expect("refreshed server-bar dataset");
+    let (_, refreshed_bars) = load_server_bars_cache_file_range_shared(
+        refreshed_dataset,
+        BarType::minute(1),
+        CandleMode::Standard,
+        None,
+        None,
+    )
+    .expect("refreshed shared server bars");
+    assert!(!Arc::ptr_eq(&shared_bars_a, &refreshed_bars));
 
     let original_dataset_dir = refreshed.dataset_dir.clone();
     let mut backward_extension = refresh_write;

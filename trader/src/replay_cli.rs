@@ -1,6 +1,7 @@
 use crate::cli::{
-    AnalyzeReplayMarginArgs, ImportReplayBrokerScheduleArgs, RankReplaySweepArgs,
-    ReplayDownloadArgs, RepriceReplayResultArgs, RunReplaySweepArgs, SimulateReplayLiquidationArgs,
+    AnalyzeReplayMarginArgs, EvaluateReplayWalkForwardArgs, ImportReplayBrokerScheduleArgs,
+    PlanReplayWalkForwardArgs, ProfileReplaySweepArgs, RankReplaySweepArgs, ReplayDownloadArgs,
+    RepriceReplayResultArgs, RunReplaySweepArgs, SimulateReplayLiquidationArgs,
     ValidateReplaySweepArgs,
 };
 use crate::config::AppConfig;
@@ -397,6 +398,194 @@ pub(crate) fn rank_replay_sweep(args: RankReplaySweepArgs) -> Result<()> {
         }
         Ok(())
     }
+}
+
+pub(crate) fn plan_replay_walk_forward(args: PlanReplayWalkForwardArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = args;
+        bail!("walk-forward planning requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = args;
+        bail!("walk-forward planning requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let plan = crate::tradovate::plan_replay_walk_forward(
+            &args.spec,
+            crate::tradovate::ReplayWalkForwardOptions {
+                train_fraction: args.train_fraction,
+                validation_fraction: args.validation_fraction,
+                test_fraction: args.test_fraction,
+                folds: args.folds,
+                step_fraction: args.step_fraction,
+                purge_seconds: args.purge_seconds,
+                warmup_seconds: args.warmup_seconds,
+                output_dir: args.output_dir,
+            },
+            &args.output,
+        )?;
+        println!(
+            "Replay walk-forward plan for {}: {} fold(s), {} phase sweep specs.",
+            plan.source_sweep_id,
+            plan.folds.len(),
+            plan.folds
+                .iter()
+                .map(|fold| 2 + usize::from(fold.validation.is_some()))
+                .sum::<usize>()
+        );
+        println!("Plan: {}", args.output.display());
+        for fold in &plan.folds {
+            println!("Fold {}:", fold.fold_index + 1);
+            print_walk_forward_window(&fold.train);
+            if let Some(validation) = fold.validation.as_ref() {
+                print_walk_forward_window(validation);
+            }
+            print_walk_forward_window(&fold.test);
+        }
+        for warning in &plan.warnings {
+            println!("Warning: {warning}");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn evaluate_replay_walk_forward(args: EvaluateReplayWalkForwardArgs) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = args;
+        bail!("walk-forward evaluation requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = args;
+        bail!("walk-forward evaluation requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let metric = crate::tradovate::ReplaySweepRankingMetric::parse(&args.metric)?;
+        let selection_policy = match args.selection_policy.trim().to_ascii_lowercase().as_str() {
+            "train" => crate::tradovate::ReplayWalkForwardSelectionPolicy::Train,
+            "train_then_validation" | "train-validation" | "validation" => {
+                crate::tradovate::ReplayWalkForwardSelectionPolicy::TrainThenValidation
+            }
+            value => bail!(
+                "unsupported walk-forward selection policy {value:?}; use train or train_then_validation"
+            ),
+        };
+        let document = crate::tradovate::evaluate_replay_walk_forward(
+            &args.plan,
+            crate::tradovate::ReplayWalkForwardEvaluationOptions {
+                metric,
+                fee_scenario: args.fee_scenario,
+                selection_policy,
+            },
+            args.output.as_deref(),
+            args.csv.as_deref(),
+        )?;
+        let selected = document
+            .folds
+            .iter()
+            .filter(|fold| fold.selected_parameter_values.is_some())
+            .count();
+        println!(
+            "Replay walk-forward evaluation: {} fold(s), {} selected candidate(s), {} warning(s).",
+            document.folds.len(),
+            selected,
+            document.warnings.len()
+        );
+        if let Some(output) = args.output {
+            println!("Evaluation JSON: {}", output.display());
+        }
+        if let Some(csv) = args.csv {
+            println!("Evaluation CSV: {}", csv.display());
+        }
+        for warning in &document.warnings {
+            println!("Warning: {warning}");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn profile_replay_sweep(
+    config: &AppConfig,
+    args: ProfileReplaySweepArgs,
+) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay sweep performance profiling requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = (config, args);
+        bail!(
+            "replay sweep performance profiling requires the Tradovate replay module in this build"
+        );
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let report = crate::tradovate::run_replay_sweep_performance(
+            config,
+            &args.spec,
+            crate::tradovate::ReplaySweepPerformanceOptions {
+                sample_runs: args.sample_runs,
+                output_dir: args.output_dir,
+                no_resume: !args.resume,
+                allow_large: args.allow_large,
+                override_guardrails: args.override_guardrails,
+            },
+        )
+        .await?;
+        crate::tradovate::write_replay_sweep_performance_report(
+            &report,
+            args.output.as_deref(),
+            args.csv.as_deref(),
+        )?;
+        println!(
+            "Replay sweep performance probe {}: {} completed, {} failed, {} skipped in {} ms.",
+            report.sweep_id,
+            report.observed.completed_count,
+            report.observed.failed_count,
+            report.observed.skipped_count,
+            report.observed.wall_clock_ms
+        );
+        println!("Probe output directory: {}", report.output_dir.display());
+        if let Some(output) = args.output {
+            println!("Performance JSON: {}", output.display());
+        }
+        if let Some(csv) = args.csv {
+            println!("Performance CSV: {}", csv.display());
+        }
+        for warning in &report.warnings {
+            println!("Warning: {warning}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn print_walk_forward_window(window: &crate::tradovate::ReplayWalkForwardWindow) {
+    println!(
+        "  {:<10} {} to {} (warmup from {}) -> {}",
+        match window.phase {
+            crate::tradovate::ReplayWalkForwardPhase::Train => "train",
+            crate::tradovate::ReplayWalkForwardPhase::Validation => "validation",
+            crate::tradovate::ReplayWalkForwardPhase::Test => "test",
+        },
+        window.evaluation_start,
+        window.evaluation_end,
+        window.warmup_start,
+        window.spec_path.display(),
+    );
 }
 
 #[cfg(all(feature = "replay", feature = "tradovate"))]

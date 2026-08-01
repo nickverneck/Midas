@@ -29,8 +29,10 @@ use config::AppConfig;
 use engine_cli::{configure_attach_mode, kill_all_engines, kill_engine, list_engines};
 use ipc::run_engine_server;
 use replay_cli::{
-    analyze_replay_margin, download_replay_data, import_replay_broker_schedule, rank_replay_sweep,
-    reprice_replay_result, run_replay_sweep, simulate_replay_liquidation, validate_replay_sweep,
+    analyze_replay_margin, download_replay_data, evaluate_replay_walk_forward,
+    import_replay_broker_schedule, plan_replay_walk_forward, profile_replay_sweep,
+    rank_replay_sweep, reprice_replay_result, run_replay_sweep, simulate_replay_liquidation,
+    validate_replay_sweep,
 };
 use tui_runtime::run_tui;
 
@@ -90,6 +92,16 @@ async fn main() -> Result<()> {
     }
     if let Some(Mode::RankReplaySweep(args)) = cli.mode.clone() {
         return rank_replay_sweep(args);
+    }
+    if let Some(Mode::PlanReplayWalkForward(args)) = cli.mode.clone() {
+        return plan_replay_walk_forward(args);
+    }
+    if let Some(Mode::EvaluateReplayWalkForward(args)) = cli.mode.clone() {
+        return evaluate_replay_walk_forward(args);
+    }
+    if let Some(Mode::ProfileReplaySweep(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return profile_replay_sweep(&config, args).await;
     }
     #[cfg(feature = "tradovate")]
     if let Some(Mode::CaptureReplayDom(args)) = cli.mode.clone() {

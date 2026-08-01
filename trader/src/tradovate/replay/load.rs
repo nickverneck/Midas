@@ -13,10 +13,12 @@ use super::state::ReplayDataSource;
 use super::ticks::parse_tick_line;
 #[cfg(feature = "replay")]
 use crate::replay_cache::{
-    ReplayCacheLibrary, ReplayCacheLoadedServerBars, ReplayCacheResolvedRawTicks,
+    ReplayCacheLibrary, ReplayCacheResolvedRawTicks, ReplayCacheResolvedServerBarsFile,
 };
 #[cfg(feature = "replay")]
 use anyhow::Context;
+#[cfg(feature = "replay")]
+use std::collections::HashMap;
 #[cfg(feature = "replay")]
 use std::fs::File;
 #[cfg(feature = "replay")]
@@ -25,7 +27,118 @@ use std::path::Path;
 #[cfg(feature = "replay")]
 use std::path::PathBuf;
 #[cfg(feature = "replay")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+#[cfg(feature = "replay")]
+const MAX_SHARED_RAW_TICK_CACHE_ENTRIES: usize = 64;
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SharedRawTickFileKey {
+    data_path: PathBuf,
+    data_len: u64,
+    modified_ns: Option<u128>,
+    data_hash: Option<String>,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SharedRawTicksKey {
+    files: Vec<SharedRawTickFileKey>,
+    range: Option<(i64, i64)>,
+}
+
+#[cfg(feature = "replay")]
+static SHARED_RAW_TICKS: OnceLock<Mutex<HashMap<SharedRawTicksKey, Weak<[ReplayMarketTick]>>>> =
+    OnceLock::new();
+
+#[cfg(feature = "replay")]
+fn shared_raw_ticks_cache() -> &'static Mutex<HashMap<SharedRawTicksKey, Weak<[ReplayMarketTick]>>>
+{
+    SHARED_RAW_TICKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "replay")]
+fn shared_raw_ticks_key(
+    cached: &ReplayCacheResolvedRawTicks,
+    timestamp_range: Option<&crate::replay_cache::ReplayCacheTimeRange>,
+) -> Result<SharedRawTicksKey> {
+    let files = cached
+        .files
+        .iter()
+        .map(|file| {
+            let data_path =
+                std::fs::canonicalize(&file.data_path).unwrap_or_else(|_| file.data_path.clone());
+            let metadata = file
+                .data_file
+                .metadata()
+                .with_context(|| format!("inspect {}", file.data_path.display()))?;
+            let modified_ns = metadata.modified().ok().and_then(|modified| {
+                modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_nanos())
+            });
+            Ok(SharedRawTickFileKey {
+                data_path,
+                data_len: metadata.len(),
+                modified_ns,
+                data_hash: file
+                    .file
+                    .data_hash
+                    .as_ref()
+                    .map(|hash| format!("{}:{}", hash.algorithm, hash.value)),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let range = timestamp_range.map(|range| range.bounds_ns()).transpose()?;
+    Ok(SharedRawTicksKey { files, range })
+}
+
+#[cfg(feature = "replay")]
+fn load_shared_raw_ticks(
+    key: SharedRawTicksKey,
+    cached: &ReplayCacheResolvedRawTicks,
+    timestamp_range: Option<&crate::replay_cache::ReplayCacheTimeRange>,
+) -> Result<Arc<[ReplayMarketTick]>> {
+    let mut cache = shared_raw_ticks_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.retain(|_, value| value.strong_count() > 0);
+    if let Some(shared) = cache.get(&key).and_then(Weak::upgrade) {
+        return Ok(shared);
+    }
+
+    // Hold the lock across the decode so parallel sweep children do not each
+    // materialize the same raw-tick stream on a cache miss.
+    let mut execution_ticks = Vec::new();
+    crate::replay_cache::stream_resolved_raw_ticks(cached, timestamp_range, |row| {
+        execution_ticks.push(ReplayMarketTick {
+            ts_ns: row.ts_ns,
+            last: row.price,
+            size: Some(row.size),
+            bid_price: row.bid_price,
+            bid_size: row.bid_size,
+            ask_price: row.ask_price,
+            ask_size: row.ask_size,
+        });
+        Ok(())
+    })?;
+    let shared = Arc::from(execution_ticks.into_boxed_slice());
+    if cache.len() >= MAX_SHARED_RAW_TICK_CACHE_ENTRIES {
+        if let Some(stale) = cache
+            .iter()
+            .find(|(_, value)| value.strong_count() == 0)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&stale);
+        } else if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, Arc::downgrade(&shared));
+    Ok(shared)
+}
 
 pub(crate) async fn load_replay_state(
     cfg: &AppConfig,
@@ -102,14 +215,25 @@ pub(super) fn load_replay_state_blocking(
             .is_some()
         {
             return attach_dom_updates(
-                replay_state_from_cached_server_bars(
-                    resolved.load_server_bars(bar_type, candle_mode)?,
-                    bar_type,
-                    candle_mode,
-                    Some(resolved.evaluation_range),
-                    Some(replay_window),
-                    cfg.replay_initial_capital,
-                )?,
+                {
+                    let (resolved_file, bars) =
+                        crate::replay_cache::load_server_bars_cache_file_range_shared(
+                            &resolved.dataset,
+                            bar_type,
+                            candle_mode,
+                            Some(&resolved.requested_coverage()),
+                            Some(&resolved.load_range),
+                        )?;
+                    replay_state_from_shared_server_bars(
+                        resolved_file,
+                        bars,
+                        bar_type,
+                        candle_mode,
+                        Some(resolved.evaluation_range),
+                        Some(replay_window),
+                        cfg.replay_initial_capital,
+                    )?
+                },
                 &dom_updates,
             );
         }
@@ -155,19 +279,25 @@ pub(super) fn load_replay_state_blocking(
             .is_some()
         {
             return attach_dom_updates(
-                replay_state_from_cached_server_bars(
-                    crate::replay_cache::load_server_bars_cache_file(
-                        dataset,
+                {
+                    let (resolved_file, bars) =
+                        crate::replay_cache::load_server_bars_cache_file_range_shared(
+                            dataset,
+                            bar_type,
+                            candle_mode,
+                            None,
+                            None,
+                        )?;
+                    replay_state_from_shared_server_bars(
+                        resolved_file,
+                        bars,
                         bar_type,
                         candle_mode,
                         None,
-                    )?,
-                    bar_type,
-                    candle_mode,
-                    None,
-                    None,
-                    cfg.replay_initial_capital,
-                )?,
+                        None,
+                        cfg.replay_initial_capital,
+                    )?
+                },
                 &dom_updates,
             );
         }
@@ -191,16 +321,27 @@ pub(super) fn load_replay_state_blocking(
             bar_type.mode_label(candle_mode)
         );
     }
-    if let Some(cached) = library.load_first_server_bars(bar_type, candle_mode, None)? {
+    if let Some(dataset) = library.first_server_bars(bar_type, candle_mode, None) {
         return attach_dom_updates(
-            replay_state_from_cached_server_bars(
-                cached,
-                bar_type,
-                candle_mode,
-                None,
-                None,
-                cfg.replay_initial_capital,
-            )?,
+            {
+                let (resolved_file, bars) =
+                    crate::replay_cache::load_server_bars_cache_file_range_shared(
+                        dataset,
+                        bar_type,
+                        candle_mode,
+                        None,
+                        None,
+                    )?;
+                replay_state_from_shared_server_bars(
+                    resolved_file,
+                    bars,
+                    bar_type,
+                    candle_mode,
+                    None,
+                    None,
+                    cfg.replay_initial_capital,
+                )?
+            },
             &dom_updates,
         );
     }
@@ -302,19 +443,8 @@ pub(super) fn replay_state_from_cached_raw_ticks(
         .contract
         .id
         .unwrap_or_else(|| replay_contract_id(&cached.manifest_path));
-    let mut execution_ticks = Vec::new();
-    crate::replay_cache::stream_resolved_raw_ticks(&cached, timestamp_range.as_ref(), |row| {
-        execution_ticks.push(ReplayMarketTick {
-            ts_ns: row.ts_ns,
-            last: row.price,
-            size: Some(row.size),
-            bid_price: row.bid_price,
-            bid_size: row.bid_size,
-            ask_price: row.ask_price,
-            ask_size: row.ask_size,
-        });
-        Ok(())
-    })?;
+    let shared_key = shared_raw_ticks_key(&cached, timestamp_range.as_ref())?;
+    let execution_ticks = load_shared_raw_ticks(shared_key, &cached, timestamp_range.as_ref())?;
     Ok(ReplayState {
         evaluation_range,
         replay_window,
@@ -339,14 +469,15 @@ pub(super) fn replay_state_from_cached_raw_ticks(
         data: ReplayDataSource::CachedRawTicks {
             resolved: cached,
             timestamp_range,
-            execution_ticks: Arc::from(execution_ticks.into_boxed_slice()),
+            execution_ticks,
         },
     })
 }
 
 #[cfg(feature = "replay")]
-fn replay_state_from_cached_server_bars(
-    cached: ReplayCacheLoadedServerBars,
+fn replay_state_from_shared_server_bars(
+    cached: ReplayCacheResolvedServerBarsFile,
+    bars: Arc<[Bar]>,
     requested_bar_type: BarType,
     requested_candle_mode: CandleMode,
     evaluation_range: Option<crate::replay_cache::ReplayCacheTimeRange>,
@@ -376,7 +507,6 @@ fn replay_state_from_cached_server_bars(
         }
         _ => InstrumentSessionProfile::FuturesGlobex,
     };
-    let bars = cached.bars;
     if bars.is_empty() {
         bail!(
             "cached replay dataset {} contained no bars",
@@ -407,7 +537,7 @@ fn replay_state_from_cached_server_bars(
         },
         dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::CachedServerBars {
-            bars: Arc::from(bars.into_boxed_slice()),
+            bars,
             bar_type: data_bar_type,
             source_label,
         },
