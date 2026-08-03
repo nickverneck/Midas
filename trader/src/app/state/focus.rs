@@ -12,9 +12,6 @@ impl App {
             Focus::Password,
             Focus::Connect,
         ];
-        if self.replay_affordance_visible() {
-            order.push(Focus::ReplayMode);
-        }
         match self.selected_broker {
             BrokerKind::Ironbeam => {
                 order.insert(7, Focus::ApiKey);

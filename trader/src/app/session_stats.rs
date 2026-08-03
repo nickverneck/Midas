@@ -603,7 +603,7 @@ impl App {
     }
 
     fn record_session_stats(&mut self, snapshots: &[AccountSnapshot]) {
-        if !self.session_stats.enabled {
+        if !self.session_stats.enabled || self.replay_navigation_active() {
             return;
         }
 

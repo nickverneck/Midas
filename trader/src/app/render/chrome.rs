@@ -2,6 +2,7 @@ use super::*;
 
 impl App {
     pub(in crate::app) fn header_help_text(&self) -> String {
+        let replay_mode = self.replay_navigation_active();
         let stats_hint = self
             .session_stats_affordance_visible()
             .then_some("F6 stats");
@@ -19,8 +20,8 @@ impl App {
                     "Enter attach".to_string()
                 },
                 "r refresh".to_string(),
-                if self.replay_affordance_visible() {
-                    "Replay after attach".to_string()
+                if self.replay_build_available() {
+                    "Create opens Broker/Replay modal".to_string()
                 } else {
                     String::new()
                 },
@@ -43,15 +44,8 @@ impl App {
                     "F2 selection".to_string(),
                     "Up/Down focus".to_string(),
                     "Left/Right toggle env/auth/logs".to_string(),
-                    if self.replay_affordance_visible() {
-                        "Enter connect/open replay".to_string()
-                    } else {
-                        "Enter connect".to_string()
-                    },
+                    "Enter connect".to_string(),
                 ];
-                if self.replay_affordance_visible() {
-                    items.push("F7 replay".to_string());
-                }
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -68,9 +62,6 @@ impl App {
                     "F3 strategy".to_string(),
                     "F4 dashboard".to_string(),
                 ];
-                if self.replay_affordance_visible() {
-                    items.push("F7 replay".to_string());
-                }
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -86,8 +77,6 @@ impl App {
             }
             Screen::Replay => {
                 let mut items = vec![
-                    "F1 login".to_string(),
-                    "F2 selection".to_string(),
                     "Tab focus".to_string(),
                     "Left/Right bar type/candles".to_string(),
                     "Enter start replay".to_string(),
@@ -96,21 +85,22 @@ impl App {
                     items.push(hint.to_string());
                 }
                 items.extend([
-                    "Esc login".to_string(),
+                    "Esc engine picker".to_string(),
                     "F5/Ctrl+S save logs".to_string(),
                     "q quit".to_string(),
                 ]);
                 items
             }
             Screen::Strategy => {
-                let mut items = vec![
-                    "F1 login".to_string(),
-                    "F2 selection".to_string(),
-                    "F4 dashboard".to_string(),
-                ];
-                if self.replay_affordance_visible() {
-                    items.push("F7 replay".to_string());
-                }
+                let mut items = if replay_mode {
+                    vec!["F4 dashboard".to_string()]
+                } else {
+                    vec![
+                        "F1 login".to_string(),
+                        "F2 selection".to_string(),
+                        "F4 dashboard".to_string(),
+                    ]
+                };
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -122,14 +112,15 @@ impl App {
                 items
             }
             Screen::Dashboard => {
-                let mut items = vec![
-                    "F1 login".to_string(),
-                    "F2 selection".to_string(),
-                    "F3 strategy".to_string(),
-                ];
-                if self.replay_affordance_visible() {
-                    items.push("F7 replay".to_string());
-                }
+                let mut items = if replay_mode {
+                    vec!["F3 strategy".to_string()]
+                } else {
+                    vec![
+                        "F1 login".to_string(),
+                        "F2 selection".to_string(),
+                        "F3 strategy".to_string(),
+                    ]
+                };
                 if let Some(hint) = stats_hint {
                     items.push(hint.to_string());
                 }
@@ -154,11 +145,6 @@ impl App {
                 "F2 selection".to_string(),
                 "F3 strategy".to_string(),
                 "F4 dashboard".to_string(),
-                if self.replay_affordance_visible() {
-                    "F7 replay".to_string()
-                } else {
-                    String::new()
-                },
                 "Up/Down account".to_string(),
                 "Enter re-sync".to_string(),
                 "f fees".to_string(),
@@ -190,18 +176,22 @@ impl App {
     }
 
     pub(in crate::app) fn header_tab_titles(&self) -> Vec<&'static str> {
-        let mut titles = vec!["Engine", "Broker", "Login"];
-        if self.replay_affordance_visible() {
-            titles.push("Replay");
+        if self.replay_navigation_active() {
+            vec!["Engine", "Replay", "Strategy", "Dashboard", "Analytics"]
+        } else {
+            let mut titles = vec![
+                "Engine",
+                "Broker",
+                "Login",
+                "Selection",
+                "Strategy",
+                "Dashboard",
+            ];
+            if self.session_stats_affordance_visible() {
+                titles.push("Stats");
+            }
+            titles
         }
-        titles.extend(["Selection", "Strategy", "Dashboard"]);
-        if self.analytics_affordance_visible() {
-            titles.push("Analytics");
-        }
-        if self.session_stats_affordance_visible() {
-            titles.push("Stats");
-        }
-        titles
     }
 
     fn header_selected_tab(&self) -> usize {

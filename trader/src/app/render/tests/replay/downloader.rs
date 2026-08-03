@@ -450,6 +450,7 @@ fn replay_downloader_terminal_events_restore_normal_navigation_and_workflows() {
         let mut config = AppConfig::default();
         config.replay_cache_dir = cache_root.clone();
         let mut app = App::new(config);
+        app.session_mode = EngineCreateMode::Replay;
         let (cmd_tx, _cmd_rx) = unbounded_channel();
         app.screen = Screen::Replay;
         app.open_new_replay_downloader();
@@ -481,7 +482,7 @@ fn replay_downloader_terminal_events_restore_normal_navigation_and_workflows() {
 
         assert_eq!(app.replay_downloader.active_operation_id, None);
         app.handle_key(key(KeyCode::F(1)), &cmd_tx);
-        assert_eq!(app.screen, Screen::Login);
+        assert_eq!(app.screen, Screen::Replay);
         app.handle_key(key(KeyCode::F(7)), &cmd_tx);
         assert_eq!(app.screen, Screen::Replay);
         assert_eq!(app.replay_view, ReplayView::Library);

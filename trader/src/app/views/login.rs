@@ -78,12 +78,8 @@ impl App {
             "[Enter] Connect / Refresh Session".to_string(),
             self.focus == Focus::Connect,
         ));
-        if self.replay_affordance_visible() {
-            lines.push(styled_line(
-                "[Enter] Open Replay Mode (local file, skips login)".to_string(),
-                self.focus == Focus::ReplayMode,
-            ));
-        }
+        // Replay has its own engine-creation workflow and never shares the
+        // broker login form.
         lines
     }
 
@@ -105,12 +101,6 @@ impl App {
             Line::from("Use Left/Right on Env, Auth Mode, or Log Mode."),
             Line::from("Paste a token directly into Token Override when needed."),
         ];
-
-        if self.replay_affordance_visible() {
-            lines.push(Line::from(
-                "Replay Mode uses its own screen for local-file bar and candle selection.",
-            ));
-        }
 
         if self.selected_broker == BrokerKind::Ironbeam {
             lines.push(Line::from(

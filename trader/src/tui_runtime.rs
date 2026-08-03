@@ -100,7 +100,7 @@ pub(crate) async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> 
                         if let Some(action) = app.take_engine_selection_action() {
                             match action {
                                 app::EngineSelectionAction::Attach { .. }
-                                | app::EngineSelectionAction::CreateNew => {
+                                | app::EngineSelectionAction::CreateNew { .. } => {
                                     match connect_selected_engine(
                                         cli,
                                         action,

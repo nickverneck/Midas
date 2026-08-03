@@ -2,7 +2,7 @@ use super::super::support::*;
 
 #[cfg(feature = "replay")]
 #[test]
-fn login_replay_shortcut_opens_replay_screen_without_starting() {
+fn broker_login_does_not_expose_replay_shortcut() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
     enable_tradovate_controls(&mut app);
@@ -12,16 +12,16 @@ fn login_replay_shortcut_opens_replay_screen_without_starting() {
 
     app.handle_key(key(KeyCode::Char('r')), &cmd_tx);
 
-    assert_eq!(app.screen, Screen::Replay);
-    assert_eq!(app.focus, Focus::BarTypeToggle);
+    assert_eq!(app.screen, Screen::Login);
+    assert_eq!(app.focus, Focus::Env);
     assert_eq!(app.bar_type, BarType::tick(25));
     assert!(cmd_rx.try_recv().is_err());
-    assert!(app.header_tab_titles().contains(&"Replay"));
+    assert!(!app.header_tab_titles().contains(&"Replay"));
 }
 
 #[cfg(feature = "replay")]
 #[test]
-fn login_replay_focus_opens_replay_screen_without_starting() {
+fn broker_login_replay_focus_is_inert() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
     enable_tradovate_controls(&mut app);
@@ -31,8 +31,8 @@ fn login_replay_focus_opens_replay_screen_without_starting() {
 
     app.handle_login_key(key(KeyCode::Enter), &cmd_tx);
 
-    assert_eq!(app.screen, Screen::Replay);
-    assert_eq!(app.focus, Focus::BarTypeToggle);
+    assert_eq!(app.screen, Screen::Login);
+    assert_eq!(app.focus, Focus::ReplayMode);
     assert_eq!(app.bar_type, BarType::second(5));
     assert!(cmd_rx.try_recv().is_err());
 }

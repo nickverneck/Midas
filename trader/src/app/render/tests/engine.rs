@@ -20,8 +20,8 @@ fn engine_screen_f7_explains_replay_requires_engine_session() {
     app.handle_key(key(KeyCode::F(7)), &cmd_tx);
 
     assert_eq!(app.screen, Screen::EngineSelect);
-    assert!(app.status.contains("Attach or create an engine first"));
-    assert!(app.header_help_text().contains("Replay after attach"));
+    assert!(app.status.contains("create-engine modal"));
+    assert!(app.header_help_text().contains("Broker/Replay modal"));
     assert!(cmd_rx.try_recv().is_err());
 }
 
@@ -40,6 +40,93 @@ fn entering_engine_session_uses_old_broker_start_flow() {
         assert_eq!(app.focus, Focus::Env);
         assert!(!app.awaiting_broker_selection());
     }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn creating_replay_engine_uses_replay_only_navigation() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+
+    app.enter_engine_session_for_key_with_mode(
+        EngineKey::from_socket_path(PathBuf::from("/tmp/trader-replay-engine.sock").as_path()),
+        PathBuf::from("/tmp/trader-replay-engine.sock"),
+        EngineCreateMode::Replay,
+    );
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.focus, Focus::ReplayDataset);
+    assert_eq!(
+        app.header_tab_titles(),
+        vec!["Engine", "Replay", "Strategy", "Dashboard", "Analytics"]
+    );
+    assert!(!app.session_stats_affordance_visible());
+    assert!(!app.header_help_text().contains("F1 login"));
+    assert!(!app.header_help_text().contains("F2 selection"));
+
+    app.handle_key(key(KeyCode::F(1)), &cmd_tx);
+    app.handle_key(key(KeyCode::F(2)), &cmd_tx);
+    app.handle_key(key(KeyCode::F(6)), &cmd_tx);
+    assert_eq!(app.screen, Screen::Replay);
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn reentering_observed_replay_engine_restores_replay_navigation() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    // The engine overview observer learns the session kind from ReplayState
+    // before the user selects the existing engine.
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::Connected {
+            broker: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            user_name: Some("Replay".to_string()),
+            auth_mode: AuthMode::TokenFile,
+            session_kind: SessionKind::Replay,
+            capabilities: BrokerCapabilities::default(),
+        },
+        false,
+        &cmd_tx,
+    );
+
+    app.enter_engine_session_for_key_with_mode(
+        key.clone(),
+        PathBuf::from("/tmp/trader-engine-10.sock"),
+        EngineCreateMode::Replay,
+    );
+    app.leave_active_engine_session("Returned to engine overview.");
+
+    app.enter_engine_session_for_key(key, PathBuf::from("/tmp/trader-engine-10.sock"));
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.focus, Focus::ReplayDataset);
+    assert_eq!(app.session_mode, EngineCreateMode::Replay);
+    assert_eq!(app.session_kind, SessionKind::Replay);
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_disconnect_does_not_fall_back_to_broker_login() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let socket = PathBuf::from("/tmp/trader-replay-disconnect.sock");
+    app.enter_engine_session_for_key_with_mode(
+        EngineKey::from_socket_path(socket.as_path()),
+        socket,
+        EngineCreateMode::Replay,
+    );
+
+    app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.focus, Focus::ReplayDataset);
+    assert!(!app.header_tab_titles().contains(&"Login"));
+    assert!(!app.header_tab_titles().contains(&"Stats"));
 }
 
 #[test]
@@ -82,8 +169,9 @@ fn engine_picker_navigation_wraps_through_create_option() {
     assert_eq!(app.selected_engine, 2);
 }
 
+#[cfg(not(feature = "replay"))]
 #[test]
-fn engine_picker_enter_on_create_emits_create_action() {
+fn engine_picker_enter_on_create_emits_broker_create_action_without_replay() {
     let mut app = App::new(AppConfig::default());
     app.set_running_engines(vec![running_engine(10, true)]);
     app.selected_engine = app.running_engines.len();
@@ -92,8 +180,56 @@ fn engine_picker_enter_on_create_emits_create_action() {
 
     assert_eq!(
         app.take_engine_selection_action(),
-        Some(EngineSelectionAction::CreateNew)
+        Some(EngineSelectionAction::CreateNew {
+            mode: EngineCreateMode::Broker,
+        })
     );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn engine_picker_create_opens_mode_modal_before_spawning() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.selected_engine = app.running_engines.len();
+
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert_eq!(
+        app.pending_engine_create_mode,
+        Some(EngineCreateMode::Broker)
+    );
+    assert!(app.take_engine_selection_action().is_none());
+
+    app.handle_engine_select_key(key(KeyCode::Right));
+    assert_eq!(
+        app.pending_engine_create_mode,
+        Some(EngineCreateMode::Replay)
+    );
+    app.handle_engine_select_key(key(KeyCode::Enter));
+
+    assert!(app.pending_engine_create_mode.is_none());
+    assert_eq!(
+        app.take_engine_selection_action(),
+        Some(EngineSelectionAction::CreateNew {
+            mode: EngineCreateMode::Replay,
+        })
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn engine_picker_mode_modal_escape_does_not_spawn() {
+    let mut app = App::new(AppConfig::default());
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.selected_engine = app.running_engines.len();
+
+    app.handle_engine_select_key(key(KeyCode::Enter));
+    app.handle_engine_select_key(key(KeyCode::Esc));
+
+    assert!(app.pending_engine_create_mode.is_none());
+    assert!(app.take_engine_selection_action().is_none());
+    assert!(app.status.contains("canceled"));
 }
 
 #[test]

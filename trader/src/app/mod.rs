@@ -67,6 +67,7 @@ pub struct App {
     selected_engine: usize,
     engine_creation_enabled: bool,
     pending_engine_lifecycle_confirmation: Option<EngineLifecycleConfirmation>,
+    pending_engine_create_mode: Option<EngineCreateMode>,
     pending_engine_selection_action: Option<EngineSelectionAction>,
     engine_socket_path: Option<PathBuf>,
     active_engine_key: Option<EngineKey>,
@@ -92,6 +93,13 @@ pub struct App {
     strategy_runtime: StrategyRuntimeState,
     strategy_numeric_input: Option<NumericInputState>,
     latency: LatencySnapshot,
+    /// The navigation mode chosen when this engine session was created.
+    ///
+    /// This is deliberately separate from `session_kind`: a replay session can
+    /// be waiting for its first dataset before the broker service reports a
+    /// connected replay session, and a disconnected replay session should not
+    /// fall back into the broker login/account workflow.
+    session_mode: EngineCreateMode,
     session_kind: SessionKind,
     replay_speed: ReplaySpeed,
     replay_execution_ledger: ReplayExecutionLedgerSummary,
@@ -924,7 +932,9 @@ pub(crate) enum EngineSelectionAction {
         engine_key: EngineKey,
         socket_path: PathBuf,
     },
-    CreateNew,
+    CreateNew {
+        mode: EngineCreateMode,
+    },
     Refresh,
     Kill {
         id: u32,
@@ -932,6 +942,32 @@ pub(crate) enum EngineSelectionAction {
     CloseAndKill {
         id: u32,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineCreateMode {
+    Broker,
+    Replay,
+}
+
+impl EngineCreateMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Broker => "Broker",
+            Self::Replay => "Replay",
+        }
+    }
+
+    pub(crate) fn summary(self) -> &'static str {
+        match self {
+            Self::Broker => {
+                "Live broker connection, accounts, selection, strategy, dashboard, and stats."
+            }
+            Self::Replay => {
+                "Local replay data, strategy, dashboard, and analytics; no broker login or account stats."
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

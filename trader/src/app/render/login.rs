@@ -46,7 +46,7 @@ impl App {
             }
             Focus::ReplayMode => {
                 if key.code == KeyCode::Enter {
-                    if !self.replay_affordance_visible() {
+                    if !self.replay_navigation_active() {
                         return;
                     }
                     self.screen = Screen::Replay;

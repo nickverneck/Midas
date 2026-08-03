@@ -1,8 +1,16 @@
 use super::super::*;
 
 impl App {
-    pub(in crate::app) fn broker_supports_replay(&self) -> bool {
-        self.selected_broker == BrokerKind::Tradovate && cfg!(feature = "replay")
+    pub(in crate::app) fn replay_build_available(&self) -> bool {
+        cfg!(feature = "replay")
+            && self
+                .available_brokers
+                .iter()
+                .any(|broker| *broker == BrokerKind::Tradovate)
+    }
+
+    pub(in crate::app) fn replay_navigation_active(&self) -> bool {
+        self.replay_build_available() && self.session_mode == EngineCreateMode::Replay
     }
 
     pub(in crate::app) fn broker_supports_bar_type_selection(&self) -> bool {
@@ -14,19 +22,21 @@ impl App {
     }
 
     pub(in crate::app) fn replay_affordance_visible(&self) -> bool {
-        self.broker_supports_replay()
+        self.replay_build_available()
     }
 
     pub(in crate::app) fn analytics_affordance_visible(&self) -> bool {
-        self.broker_supports_replay()
+        self.replay_navigation_active()
     }
 
     pub(in crate::app) fn session_stats_affordance_visible(&self) -> bool {
-        self.session_stats.enabled
+        self.session_stats.enabled && !self.replay_navigation_active()
     }
 
     pub(in crate::app) fn manual_order_affordance_visible(&self) -> bool {
-        cfg!(feature = "manual-orders") && self.capabilities.manual_orders
+        cfg!(feature = "manual-orders")
+            && !self.replay_navigation_active()
+            && self.capabilities.manual_orders
     }
 
     pub(in crate::app) fn automated_strategy_affordance_visible(&self) -> bool {

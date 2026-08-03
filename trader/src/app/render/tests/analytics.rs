@@ -11,6 +11,7 @@ mod replay_analytics_tests {
     fn f8_opens_saved_analytics_without_an_active_engine() {
         let mut app = App::new(AppConfig::default());
         enable_tradovate_controls(&mut app);
+        app.session_mode = EngineCreateMode::Replay;
         let (tx, _rx) = unbounded_channel();
 
         app.handle_key(key(KeyCode::F(8)), &tx);

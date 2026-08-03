@@ -1,6 +1,23 @@
 use super::super::*;
 
 impl App {
+    /// Select the navigation workflow for an already-running engine.
+    ///
+    /// Existing engines report their session kind through the replay-state
+    /// observer.  Reusing that observation prevents a replay engine from
+    /// briefly (or permanently, when no live broker is available) entering
+    /// the broker login workflow on re-entry.  An engine without an observed
+    /// session kind remains compatible with the original live/broker flow.
+    pub(crate) fn engine_create_mode_for_key(&self, key: &EngineKey) -> EngineCreateMode {
+        self.engine_summaries
+            .iter()
+            .find(|summary| &summary.key == key)
+            .and_then(EngineSummary::session_kind)
+            .filter(|session_kind| *session_kind == SessionKind::Replay)
+            .map(|_| EngineCreateMode::Replay)
+            .unwrap_or(EngineCreateMode::Broker)
+    }
+
     pub(in crate::app) fn active_engine_summary(&self) -> Option<&EngineSummary> {
         let active_key = self.active_engine_key.as_ref()?;
         self.engine_summaries

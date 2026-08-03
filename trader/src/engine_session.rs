@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EngineEntryMode {
     AttachExisting,
-    CreateNew,
+    CreateNew { mode: app::EngineCreateMode },
 }
 
 fn should_autoconnect_engine_session(
@@ -22,7 +22,14 @@ fn should_autoconnect_engine_session(
     awaiting_broker_selection: bool,
     mode: EngineEntryMode,
 ) -> bool {
-    config.autoconnect && mode == EngineEntryMode::CreateNew && !awaiting_broker_selection
+    config.autoconnect
+        && matches!(
+            mode,
+            EngineEntryMode::CreateNew {
+                mode: app::EngineCreateMode::Broker
+            }
+        )
+        && !awaiting_broker_selection
 }
 
 pub(crate) async fn connect_or_spawn_engine(cli: &Cli) -> Result<EngineSession> {
@@ -56,7 +63,7 @@ pub(crate) async fn connect_selected_engine(
             }
             Ok((engine_key, socket_path, EngineEntryMode::AttachExisting))
         }
-        app::EngineSelectionAction::CreateNew => {
+        app::EngineSelectionAction::CreateNew { mode } => {
             if cli.no_spawn_engine {
                 bail!("engine creation is disabled by --no-spawn-engine");
             }
@@ -71,7 +78,7 @@ pub(crate) async fn connect_selected_engine(
                 session,
                 engine_event_tx,
             );
-            Ok((engine_key, socket_path, EngineEntryMode::CreateNew))
+            Ok((engine_key, socket_path, EngineEntryMode::CreateNew { mode }))
         }
         app::EngineSelectionAction::Refresh
         | app::EngineSelectionAction::Kill { .. }
@@ -188,7 +195,11 @@ pub(crate) fn enter_engine_session(
     mode: EngineEntryMode,
 ) {
     *active_engine_key = Some(engine_key.clone());
-    app.enter_engine_session_for_key(engine_key.clone(), socket_path);
+    let ui_mode = match mode {
+        EngineEntryMode::AttachExisting => app.engine_create_mode_for_key(&engine_key),
+        EngineEntryMode::CreateNew { mode } => mode,
+    };
+    app.enter_engine_session_for_key_with_mode(engine_key.clone(), socket_path, ui_mode);
     if let Some(session) = engine_sessions.get(&engine_key) {
         let _ = session.cmd_tx.send(ServiceCommand::ReplayState);
     }
@@ -294,7 +305,9 @@ mod tests {
         assert!(should_autoconnect_engine_session(
             &config,
             false,
-            EngineEntryMode::CreateNew
+            EngineEntryMode::CreateNew {
+                mode: app::EngineCreateMode::Broker,
+            }
         ));
     }
 
@@ -307,7 +320,9 @@ mod tests {
         assert!(!should_autoconnect_engine_session(
             &config,
             true,
-            EngineEntryMode::CreateNew
+            EngineEntryMode::CreateNew {
+                mode: app::EngineCreateMode::Broker,
+            }
         ));
     }
 

@@ -2,6 +2,10 @@ use super::*;
 
 impl App {
     pub(in crate::app) fn handle_engine_select_key(&mut self, key: KeyEvent) {
+        if self.pending_engine_create_mode.is_some() {
+            self.handle_engine_create_mode_key(key);
+            return;
+        }
         if self.pending_engine_lifecycle_confirmation.is_some() {
             self.handle_engine_lifecycle_confirmation_key(key);
             return;
@@ -56,9 +60,14 @@ impl App {
                 if self.engine_create_affordance_visible()
                     && self.selected_engine == self.engine_summaries.len()
                 {
-                    self.pending_engine_selection_action = Some(EngineSelectionAction::CreateNew);
-                    self.status = "Creating a new engine...".to_string();
-                    self.push_log(self.status.clone());
+                    if self.replay_build_available() {
+                        self.pending_engine_create_mode = Some(EngineCreateMode::Broker);
+                        self.status =
+                            "Choose whether the new engine is a broker or replay session."
+                                .to_string();
+                    } else {
+                        self.start_engine_creation(EngineCreateMode::Broker);
+                    }
                     return;
                 }
 
@@ -95,6 +104,50 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_engine_create_mode_key(&mut self, key: KeyEvent) {
+        let Some(selected_mode) = self.pending_engine_create_mode else {
+            return;
+        };
+        let next_mode = match key.code {
+            KeyCode::Up | KeyCode::Left => Some(match selected_mode {
+                EngineCreateMode::Broker => EngineCreateMode::Replay,
+                EngineCreateMode::Replay => EngineCreateMode::Broker,
+            }),
+            KeyCode::Down | KeyCode::Right | KeyCode::Tab => Some(match selected_mode {
+                EngineCreateMode::Broker => EngineCreateMode::Replay,
+                EngineCreateMode::Replay => EngineCreateMode::Broker,
+            }),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.pending_engine_create_mode = None;
+                self.start_engine_creation(selected_mode);
+                return;
+            }
+            KeyCode::Esc => {
+                self.pending_engine_create_mode = None;
+                self.status = "Engine creation canceled.".to_string();
+                self.push_log(self.status.clone());
+                return;
+            }
+            _ => None,
+        };
+        if let Some(mode) = next_mode {
+            // The modal is only opened when replay is compiled in, so both
+            // choices are valid here. Keeping the guard makes this handler
+            // safe if state is restored from an older session.
+            if mode == EngineCreateMode::Replay && !self.replay_build_available() {
+                return;
+            }
+            self.pending_engine_create_mode = Some(mode);
+            self.status = format!("{} engine selected.", mode.label());
+        }
+    }
+
+    fn start_engine_creation(&mut self, mode: EngineCreateMode) {
+        self.pending_engine_selection_action = Some(EngineSelectionAction::CreateNew { mode });
+        self.status = format!("Creating a {} engine...", mode.label().to_ascii_lowercase());
+        self.push_log(self.status.clone());
     }
 
     fn handle_engine_lifecycle_confirmation_key(&mut self, key: KeyEvent) {
@@ -384,7 +437,13 @@ impl App {
             Line::from(
                 "Live/connected rows attach. Stale/closed rows remain for observation context.",
             ),
-            Line::from("Replay uses an engine session too; attach or create an engine before F7."),
+            if self.replay_build_available() {
+                Line::from(
+                    "The create row opens a Broker/Replay workflow modal; replay skips login and account stats.",
+                )
+            } else {
+                Line::from("Replay workflow is unavailable in this build.")
+            },
             self.engine_lifecycle_help_line(),
             Line::from("Destructive actions always open a confirmation prompt before running."),
         ];
@@ -403,6 +462,7 @@ impl App {
         frame.render_widget(help, layout[2]);
 
         self.render_engine_lifecycle_confirmation(frame, area);
+        self.render_engine_create_mode_modal(frame, area);
     }
 
     fn engine_lifecycle_help_line(&self) -> Line<'static> {
@@ -466,11 +526,72 @@ impl App {
             popup,
         );
     }
+
+    fn render_engine_create_mode_modal(&self, frame: &mut Frame<'_>, area: Rect) {
+        let Some(selected_mode) = self.pending_engine_create_mode else {
+            return;
+        };
+
+        let popup = centered_engine_mode_popup(area);
+        let broker_style = if selected_mode == EngineCreateMode::Broker {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let replay_style = if selected_mode == EngineCreateMode::Replay {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let lines = vec![
+            Line::from("Choose the workflow for the new engine:"),
+            Line::from(""),
+            Line::from(vec![Span::styled("  Broker", broker_style)]),
+            Line::from(format!("  {}", EngineCreateMode::Broker.summary())),
+            Line::from(vec![Span::styled("  Replay", replay_style)]),
+            Line::from(format!("  {}", EngineCreateMode::Replay.summary())),
+            Line::from(""),
+            Line::from(format!("Selected: {}", selected_mode.label())),
+            Line::from("Left/Right or Up/Down switches. Enter continues. Esc cancels."),
+        ];
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Create Engine")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
+                .wrap(Wrap { trim: true }),
+            popup,
+        );
+    }
 }
 
 fn centered_engine_popup(area: Rect) -> Rect {
     let width = area.width.saturating_mul(3).saturating_div(4).max(50);
     let height = 17;
+    let width = width.min(area.width.saturating_sub(2).max(1));
+    let height = height.min(area.height.saturating_sub(2).max(1));
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn centered_engine_mode_popup(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(4).saturating_div(5).max(64);
+    let height = 12;
     let width = width.min(area.width.saturating_sub(2).max(1));
     let height = height.min(area.height.saturating_sub(2).max(1));
     Rect {

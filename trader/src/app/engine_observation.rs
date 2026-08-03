@@ -266,6 +266,18 @@ impl EngineSummary {
         }
     }
 
+    /// Returns the session kind reported by the engine's replay-state
+    /// snapshot, when the observer has received one.  Engine selection uses
+    /// this to restore the correct navigation workflow when an existing
+    /// replay engine is opened again.
+    pub(crate) fn session_kind(&self) -> Option<SessionKind> {
+        self.session_kind
+    }
+
+    pub(crate) fn set_session_kind(&mut self, session_kind: SessionKind) {
+        self.session_kind = Some(session_kind);
+    }
+
     pub(crate) fn account_label(&self) -> String {
         if let Some(name) = &self.selected_account_name {
             return name.clone();

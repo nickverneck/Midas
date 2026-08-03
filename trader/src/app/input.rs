@@ -35,7 +35,7 @@ impl App {
         if self.screen == Screen::EngineSelect {
             if key.code == KeyCode::F(7) && self.replay_affordance_visible() {
                 self.status =
-                    "Attach or create an engine first, then press F7 for Replay.".to_string();
+                    "Choose Replay from the create-engine modal.".to_string();
                 self.push_log(self.status.clone());
                 return;
             }
@@ -54,25 +54,24 @@ impl App {
             && !self.is_text_focus()
             && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
         {
-            if !self.replay_affordance_visible() {
-                return;
-            }
-            self.screen = Screen::Replay;
-            #[cfg(feature = "replay")]
-            {
-                self.replay_view = ReplayView::Library;
-            }
-            self.focus = Focus::BarTypeToggle;
+            // Replay is selected at engine creation; the broker login screen
+            // intentionally has no shortcut into it.
             return;
         }
 
         match key.code {
             KeyCode::F(1) => {
+                if self.replay_navigation_active() {
+                    return;
+                }
                 self.screen = Screen::Login;
                 self.focus = Focus::Env;
                 return;
             }
             KeyCode::F(2) => {
+                if self.replay_navigation_active() {
+                    return;
+                }
                 self.screen = Screen::Selection;
                 self.focus = Focus::AccountList;
                 return;
@@ -96,7 +95,7 @@ impl App {
                 return;
             }
             KeyCode::F(7) => {
-                if !self.replay_affordance_visible() {
+                if !self.replay_navigation_active() {
                     return;
                 }
                 self.screen = Screen::Replay;
@@ -159,8 +158,9 @@ impl App {
                     return;
                 }
                 if self.screen == Screen::Replay {
-                    self.screen = Screen::Login;
-                    self.focus = Focus::Env;
+                    self.screen = Screen::EngineSelect;
+                    self.focus = Focus::EngineList;
+                    self.status = "Replay workflow closed; select an engine to continue.".to_string();
                 } else if self.screen == Screen::Analytics {
                     self.screen = self.analytics_return_screen;
                 } else if self.screen == Screen::Login && self.available_brokers.len() > 1 {

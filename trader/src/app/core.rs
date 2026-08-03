@@ -31,6 +31,7 @@ impl App {
             selected_engine: 0,
             engine_creation_enabled: true,
             pending_engine_lifecycle_confirmation: None,
+            pending_engine_create_mode: None,
             pending_engine_selection_action: None,
             engine_socket_path: None,
             active_engine_key: None,
@@ -56,6 +57,7 @@ impl App {
             strategy_runtime: StrategyRuntimeState::default(),
             strategy_numeric_input: None,
             latency: LatencySnapshot::default(),
+            session_mode: EngineCreateMode::Broker,
             session_kind: SessionKind::Live,
             replay_speed: ReplaySpeed::default(),
             replay_execution_ledger: ReplayExecutionLedgerSummary::default(),
@@ -144,10 +146,38 @@ impl App {
     }
 
     pub fn enter_engine_session_for_key(&mut self, engine_key: EngineKey, socket_path: PathBuf) {
+        let mode = self.engine_create_mode_for_key(&engine_key);
+        self.enter_engine_session_for_key_with_mode(
+            engine_key,
+            socket_path,
+            mode,
+        );
+    }
+
+    pub fn enter_engine_session_for_key_with_mode(
+        &mut self,
+        engine_key: EngineKey,
+        socket_path: PathBuf,
+        mode: EngineCreateMode,
+    ) {
         self.observe_live_engine_socket(socket_path.clone());
+        let active_key = engine_key.clone();
         self.active_engine_key = Some(engine_key);
         self.engine_socket_path = Some(socket_path.clone());
-        self.move_to_initial_broker_screen();
+        if let Some(summary) = self
+            .engine_summaries
+            .iter_mut()
+            .find(|summary| summary.key == active_key)
+        {
+            summary.set_session_kind(match mode {
+                EngineCreateMode::Broker => SessionKind::Live,
+                EngineCreateMode::Replay => SessionKind::Replay,
+            });
+        }
+        match mode {
+            EngineCreateMode::Broker => self.move_to_initial_broker_screen(),
+            EngineCreateMode::Replay => self.move_to_replay_screen(),
+        }
         self.push_log(format!(
             "Attached to engine socket {}.",
             socket_path.display()
@@ -160,7 +190,9 @@ impl App {
         self.engine_socket_path = None;
         self.screen = Screen::EngineSelect;
         self.focus = Focus::EngineList;
+        self.pending_engine_create_mode = None;
         self.capabilities = BrokerCapabilities::default();
+        self.session_mode = EngineCreateMode::Broker;
         self.session_kind = SessionKind::Live;
         self.accounts.clear();
         self.account_snapshots.clear();
@@ -189,6 +221,7 @@ impl App {
     }
 
     fn move_to_initial_broker_screen(&mut self) {
+        self.session_mode = EngineCreateMode::Broker;
         if self.available_brokers.len() > 1 {
             self.screen = Screen::BrokerSelect;
             self.focus = Focus::BrokerList;
@@ -201,6 +234,27 @@ impl App {
             self.focus = Focus::Env;
             self.status = format!("Login for {}", self.selected_broker.label());
         }
+    }
+
+    #[cfg(feature = "replay")]
+    fn move_to_replay_screen(&mut self) {
+        // Replay is currently backed by Tradovate's local replay service.  Do
+        // not carry a broker choice from the live workflow into this mode.
+        self.selected_broker = BrokerKind::Tradovate;
+        self.session_mode = EngineCreateMode::Replay;
+        self.session_kind = SessionKind::Replay;
+        self.screen = Screen::Replay;
+        self.focus = Focus::ReplayDataset;
+        self.replay_view = ReplayView::Library;
+        self.status = "Replay engine ready; select a cached dataset.".to_string();
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn move_to_replay_screen(&mut self) {
+        // This branch is unreachable from the picker because the replay mode
+        // option is only offered by replay-enabled builds. Keep a safe live
+        // fallback for callers/tests compiled without that feature.
+        self.move_to_initial_broker_screen();
     }
 
     pub fn awaiting_broker_selection(&self) -> bool {
@@ -263,6 +317,11 @@ impl App {
                 self.form.env = env;
                 self.form.auth_mode = auth_mode;
                 self.session_kind = session_kind;
+                self.session_mode = if session_kind == SessionKind::Replay {
+                    EngineCreateMode::Replay
+                } else {
+                    EngineCreateMode::Broker
+                };
                 self.replay_speed = ReplaySpeed::default();
                 self.replay_execution_ledger = ReplayExecutionLedgerSummary::default();
                 if session_kind == SessionKind::Replay {
@@ -284,9 +343,24 @@ impl App {
                 self.push_log(self.status.clone());
             }
             ServiceEvent::Disconnected => {
+                let replay_mode = self.session_mode == EngineCreateMode::Replay;
                 if self.engine_socket_path.is_none() {
                     self.screen = Screen::EngineSelect;
                     self.focus = Focus::EngineList;
+                    self.session_mode = EngineCreateMode::Broker;
+                    self.session_kind = SessionKind::Live;
+                } else if replay_mode {
+                    #[cfg(feature = "replay")]
+                    {
+                        self.screen = Screen::Replay;
+                        self.focus = Focus::ReplayDataset;
+                        self.replay_view = ReplayView::Library;
+                    }
+                    #[cfg(not(feature = "replay"))]
+                    {
+                        self.screen = Screen::EngineSelect;
+                        self.focus = Focus::EngineList;
+                    }
                 } else if self.available_brokers.len() > 1 {
                     self.screen = Screen::BrokerSelect;
                     self.focus = Focus::BrokerList;
@@ -295,7 +369,12 @@ impl App {
                     self.focus = Focus::Env;
                 }
                 self.capabilities = BrokerCapabilities::default();
-                self.session_kind = SessionKind::Live;
+                if !replay_mode {
+                    self.session_mode = EngineCreateMode::Broker;
+                    self.session_kind = SessionKind::Live;
+                } else {
+                    self.session_kind = SessionKind::Replay;
+                }
                 self.accounts.clear();
                 self.account_snapshots.clear();
                 self.engine_history = None;
