@@ -103,7 +103,10 @@ impl App {
                 {
                     self.replay_view = ReplayView::Library;
                 }
-                self.focus = Focus::BarTypeToggle;
+                #[cfg(feature = "replay")]
+                {
+                    self.focus = Focus::ReplayInstrumentQuery;
+                }
                 return;
             }
             KeyCode::F(8) => {
@@ -138,11 +141,7 @@ impl App {
                         return;
                     }
                     self.replay_view = ReplayView::Library;
-                    self.focus = if self.replay_cache_library.datasets.is_empty() {
-                        Focus::ReplayMode
-                    } else {
-                        Focus::ReplayDataset
-                    };
+                    self.focus = Focus::ReplayInstrumentQuery;
                     return;
                 }
                 #[cfg(feature = "replay")]
@@ -153,8 +152,14 @@ impl App {
                             "Edit cancelled; no view changes were saved.".to_string();
                     } else {
                         self.replay_view = ReplayView::Library;
-                        self.focus = Focus::ReplayDataset;
+                        self.focus = Focus::ReplayInstrumentQuery;
                     }
+                    return;
+                }
+                #[cfg(feature = "replay")]
+                if self.screen == Screen::Replay && self.replay_view == ReplayView::Setup {
+                    self.open_replay_library();
+                    self.status = "Replay setup closed; select a cached dataset.".to_string();
                     return;
                 }
                 if self.screen == Screen::Replay {

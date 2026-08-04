@@ -243,34 +243,78 @@ pub fn transform_bars_for_candle_mode(bars: &[Bar], candle_mode: CandleMode) -> 
     }
 }
 
-fn heikin_ashi_bars(bars: &[Bar]) -> Vec<Bar> {
-    let mut transformed = Vec::with_capacity(bars.len());
-    let mut previous_open = None::<f64>;
-    let mut previous_close = None::<f64>;
+/// Incremental state for deriving Heikin Ashi candles.
+///
+/// Heikin Ashi opens are recursive: the current open depends on the previous
+/// transformed open/close.  Keeping those two values means a new source bar
+/// can be transformed in constant time instead of rebuilding the complete
+/// history on every market update.  The state is intentionally independent of
+/// replay/live plumbing so callers can use it for either stream.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeikinAshiState {
+    previous_open: Option<f64>,
+    previous_close: Option<f64>,
+}
 
-    for bar in bars {
+impl HeikinAshiState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Transform one raw OHLC bar and advance the recursive state.
+    pub fn push(&mut self, bar: &Bar) -> Bar {
         let ha_close = (bar.open + bar.high + bar.low + bar.close) / 4.0;
-        let ha_open = match (previous_open, previous_close) {
+        let ha_open = match (self.previous_open, self.previous_close) {
             (Some(open), Some(close)) => (open + close) / 2.0,
             _ => (bar.open + bar.close) / 2.0,
         };
-        let ha_high = bar.high.max(ha_open).max(ha_close);
-        let ha_low = bar.low.min(ha_open).min(ha_close);
-
-        transformed.push(Bar {
+        let transformed = Bar {
             ts_ns: bar.ts_ns,
             open: ha_open,
-            high: ha_high,
-            low: ha_low,
+            high: bar.high.max(ha_open).max(ha_close),
+            low: bar.low.min(ha_open).min(ha_close),
             close: ha_close,
             volume: bar.volume,
-        });
-
-        previous_open = Some(ha_open);
-        previous_close = Some(ha_close);
+        };
+        self.previous_open = Some(transformed.open);
+        self.previous_close = Some(transformed.close);
+        transformed
     }
 
-    transformed
+    /// Transform a forming source bar without mutating state.
+    pub fn forming(&self, bar: &Bar) -> Bar {
+        let mut next = self.clone();
+        next.push(bar)
+    }
+
+    /// Rebuild the state from a source slice and return transformed bars.
+    /// This is used only after a correction/out-of-order insertion; the
+    /// normal append path should call [`Self::push`].
+    pub fn transform_all(&mut self, bars: &[Bar]) -> Vec<Bar> {
+        self.reset();
+        let mut transformed = Vec::with_capacity(bars.len());
+        for bar in bars {
+            transformed.push(self.push(bar));
+        }
+        transformed
+    }
+
+    pub fn previous_open(&self) -> Option<f64> {
+        self.previous_open
+    }
+
+    pub fn previous_close(&self) -> Option<f64> {
+        self.previous_close
+    }
+}
+
+fn heikin_ashi_bars(bars: &[Bar]) -> Vec<Bar> {
+    let mut state = HeikinAshiState::new();
+    state.transform_all(bars)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -373,6 +417,51 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn incremental_heikin_ashi_matches_batch_transform() {
+        let bars = (0..64)
+            .map(|idx| Bar {
+                ts_ns: idx + 1,
+                open: 100.0 + idx as f64 * 0.25,
+                high: 101.5 + idx as f64 * 0.2,
+                low: 98.5 + idx as f64 * 0.15,
+                close: 100.5 + (idx as f64 * 0.31).sin(),
+                volume: Some(idx as f64),
+            })
+            .collect::<Vec<_>>();
+        let expected = transform_bars_for_candle_mode(&bars, CandleMode::HeikinAshi);
+        let mut state = HeikinAshiState::new();
+        let actual = bars.iter().map(|bar| state.push(bar)).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn heikin_ashi_forming_bar_does_not_advance_state() {
+        let first = Bar {
+            ts_ns: 1,
+            open: 10.0,
+            high: 12.0,
+            low: 8.0,
+            close: 11.0,
+            volume: None,
+        };
+        let forming = Bar {
+            ts_ns: 2,
+            open: 11.0,
+            high: 13.0,
+            low: 10.0,
+            close: 12.0,
+            volume: None,
+        };
+        let mut state = HeikinAshiState::new();
+        let _ = state.push(&first);
+        let before = state.clone();
+        let derived = state.forming(&forming);
+        assert_eq!(state, before);
+        let mut expected_state = before;
+        assert_eq!(derived, expected_state.push(&forming));
     }
 
     #[test]

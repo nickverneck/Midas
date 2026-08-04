@@ -176,17 +176,21 @@ pub(crate) fn maybe_run_execution_strategy(
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
         let latest_fingerprint = latest_strategy_bar_fingerprint(session);
         if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
-            if session.execution_config.native_strategy != NativeStrategyKind::HmaCross
-                || session.execution_runtime.last_closed_bar_fingerprint == latest_fingerprint
-            {
-                let reason =
-                    if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
-                        "closed-bar fingerprint unchanged"
-                    } else {
-                        "closed-bar timing waiting for next bar"
-                    };
+            // A correction is actionable only when both sides have a known
+            // fingerprint and the value changed.  Older sessions/tests may
+            // have an anchored timestamp without the new fingerprint; treat
+            // that as the normal same-bar gate so signal-delay timing remains
+            // unchanged instead of evaluating the bar a second time.
+            let corrected = matches!(
+                (
+                    session.execution_runtime.last_closed_bar_fingerprint,
+                    latest_fingerprint,
+                ),
+                (Some(previous), Some(latest)) if previous != latest
+            );
+            if !corrected {
                 let gate_detail = format!(
-                    "strategy gate | {} | {reason} | last_bar_ts {} | fingerprint {:?} | actual_qty {} | {}",
+                    "strategy gate | {} | closed-bar fingerprint unchanged | last_bar_ts {} | fingerprint {:?} | actual_qty {} | {}",
                     active_native_slug(session),
                     last_strategy_ts,
                     latest_fingerprint,
@@ -242,7 +246,79 @@ pub(crate) fn maybe_run_execution_strategy(
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
-    let (signal_bar, signal, summary, debug_summary) = {
+    let (signal_bar, signal, summary, debug_summary) = if session.replay_enabled
+        && session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming
+        && session.execution_config.native_strategy == NativeStrategyKind::EmaCross
+    {
+        // The streaming EMA evaluator only needs the immutable bar slice and
+        // its recursive runtime. Temporarily moving that runtime out lets us
+        // borrow the market bars directly instead of cloning the 4,096-bar
+        // signal window on every replay update. The runtime is restored before
+        // any order/protection work observes it.
+        let config = session.execution_config.native_ema.clone();
+        let source_update_sequence = session.execution_runtime.market_update_sequence;
+        let market_update = session.execution_runtime.market_update_kind;
+        let mut ema_runtime = std::mem::take(&mut session.execution_runtime.ema_execution);
+        let result = {
+            let bars = signal_evaluation_bars(session);
+            if bars.is_empty() {
+                bail!("latest strategy bar disappeared during strategy evaluation");
+            }
+            let current_side = side_from_signed_qty(current_qty);
+            if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
+                let signal_bar = bars
+                    .last()
+                    .cloned()
+                    .context("latest strategy bar disappeared during strategy evaluation")?;
+                let evaluation = config.evaluate_streaming_with_market_update(
+                    &mut ema_runtime,
+                    bars,
+                    current_side,
+                    source_update_sequence,
+                    market_update,
+                );
+                (
+                    signal_bar,
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            } else {
+                // Preserve the legacy closed-bar behavior when several bars
+                // arrived while an order/protection/session gate was active:
+                // evaluate each newly eligible bar and retain the latest
+                // actionable signal. The common one-bar case remains O(1).
+                let start_idx = previous_strategy_ts
+                    .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
+                    .unwrap_or_else(|| bars.len().saturating_sub(1));
+                let mut latest = None;
+                for idx in start_idx..bars.len() {
+                    let signal_bar = bars[idx].clone();
+                    let evaluation = config.evaluate_streaming_with_market_update(
+                        &mut ema_runtime,
+                        &bars[..=idx],
+                        current_side,
+                        (idx + 1 == bars.len())
+                            .then_some(source_update_sequence)
+                            .flatten(),
+                        market_update,
+                    );
+                    let candidate = (
+                        signal_bar,
+                        evaluation.signal,
+                        evaluation.summary(),
+                        evaluation.debug_summary(),
+                    );
+                    if candidate.1 != StrategySignal::Hold || latest.is_none() {
+                        latest = Some(candidate);
+                    }
+                }
+                latest.context("latest strategy bar disappeared during strategy evaluation")?
+            }
+        };
+        session.execution_runtime.ema_execution = ema_runtime;
+        result
+    } else {
         let bars = signal_evaluation_bars(session).to_vec();
         if bars.is_empty() {
             bail!("latest strategy bar disappeared during strategy evaluation");

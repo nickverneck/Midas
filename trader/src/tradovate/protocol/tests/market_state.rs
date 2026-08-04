@@ -367,6 +367,8 @@ fn apply_market_update_keeps_bars_incremental() {
         history_loaded: 1,
         live_bars: 0,
         replay_window: None,
+        history_update: MarketHistoryUpdate::Snapshot,
+        history_sequence: 1,
         status: "initial".to_string(),
         bars: MarketBarsUpdate::Snapshot {
             closed_bars: vec![closed_bar.clone()],
@@ -388,6 +390,8 @@ fn apply_market_update_keeps_bars_incremental() {
         history_loaded: 2,
         live_bars: 1,
         replay_window: None,
+        history_update: MarketHistoryUpdate::Append,
+        history_sequence: 2,
         status: "realtime".to_string(),
         bars: MarketBarsUpdate::Closed {
             closed_bar: forming_bar.clone(),
@@ -464,6 +468,8 @@ fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
         history_loaded: 2,
         live_bars: 1,
         replay_window: None,
+        history_update: MarketHistoryUpdate::Append,
+        history_sequence: 3,
         status: "realtime".to_string(),
         bars: MarketBarsUpdate::Closed {
             closed_bar: bar(3),
@@ -510,6 +516,8 @@ fn replay_window_progress_survives_market_update_and_display_trimming() {
         history_loaded: 1,
         live_bars: 1,
         replay_window: Some(window.clone()),
+        history_update: MarketHistoryUpdate::Snapshot,
+        history_sequence: 4,
         status: "evaluation 1/60".to_string(),
         bars: MarketBarsUpdate::Snapshot {
             closed_bars: vec![bar],

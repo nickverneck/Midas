@@ -8,6 +8,19 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+/// Describes how the retained market-bar history changed in one market
+/// update. Strategy evaluators use this hint to keep the normal append path
+/// constant-time while still rebuilding after a snapshot or correction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketHistoryUpdate {
+    #[default]
+    Snapshot,
+    Append,
+    Correction,
+    Unchanged,
+}
+
 #[cfg(feature = "replay")]
 static NEXT_REPLAY_DOWNLOAD_OPERATION_ID: OnceLock<AtomicU64> = OnceLock::new();
 
@@ -26,6 +39,46 @@ impl ReplayEngineMode {
         match self {
             Self::Legacy => "Legacy compatibility",
             Self::Deterministic => "Deterministic virtual time",
+        }
+    }
+}
+
+/// Selects how native strategy indicators are evaluated during replay.
+///
+/// `Legacy` retains the original batch calculation for compatibility and
+/// result baselines. `Streaming` carries recursive indicator state between
+/// bars, reducing EMA/Heikin-Ashi work from a full-history rebuild per bar to
+/// constant-time updates after the initial warmup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayEvaluatorMode {
+    #[default]
+    Legacy,
+    Streaming,
+}
+
+impl ReplayEvaluatorMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Legacy => "Legacy batch indicators",
+            Self::Streaming => "Streaming indicators",
+        }
+    }
+
+    pub fn config_label(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Streaming => "streaming",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "legacy" | "batch" | "legacy_batch" => Ok(Self::Legacy),
+            "streaming" | "incremental" => Ok(Self::Streaming),
+            other => Err(format!(
+                "unknown replay evaluator mode `{other}`; choose legacy or streaming"
+            )),
         }
     }
 }

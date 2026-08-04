@@ -1,5 +1,17 @@
 impl App {
     pub fn new(config: AppConfig) -> Self {
+        #[cfg(feature = "replay")]
+        let mut config = config;
+        #[cfg(feature = "replay")]
+        let replay_cache_root_was_resolved = {
+            let configured_cache_root = config.replay_cache_dir.clone();
+            let resolved_cache_root = replay_cache_root_for_app(&configured_cache_root);
+            let changed = resolved_cache_root != configured_cache_root;
+            if changed {
+                config.replay_cache_dir = resolved_cache_root;
+            }
+            changed
+        };
         let session_stats_enabled = config.session_stats_enabled;
         let candle_mode = config.candle_mode;
         let available_brokers = compiled_brokers().to_vec();
@@ -64,6 +76,10 @@ impl App {
             #[cfg(feature = "replay")]
             replay_dataset_index: None,
             #[cfg(feature = "replay")]
+            replay_dataset_bar_type: None,
+            #[cfg(feature = "replay")]
+            replay_instrument_query: String::new(),
+            #[cfg(feature = "replay")]
             replay_dataset_view_path: None,
             #[cfg(feature = "replay")]
             replay_view: ReplayView::Library,
@@ -100,6 +116,13 @@ impl App {
             }
             .to_string(),
         );
+        #[cfg(feature = "replay")]
+        if replay_cache_root_was_resolved {
+            app.push_log(format!(
+                "Replay cache root resolved to {}.",
+                app.base_config.replay_cache_dir.display()
+            ));
+        }
         app.push_log(
             if app.session_stats.enabled {
                 "Session stats tracking enabled: F6 opens balance-delta stats and F5/Ctrl+S includes them in saved logs."
@@ -244,8 +267,15 @@ impl App {
         self.session_mode = EngineCreateMode::Replay;
         self.session_kind = SessionKind::Replay;
         self.screen = Screen::Replay;
-        self.focus = Focus::ReplayDataset;
+        self.focus = Focus::ReplayInstrumentQuery;
         self.replay_view = ReplayView::Library;
+        self.replay_instrument_query.clear();
+        if let Some((index, bar_type)) = self.replay_dataset_options().first().copied() {
+            self.select_replay_dataset_option(index, bar_type);
+        } else {
+            self.replay_dataset_index = None;
+            self.replay_dataset_bar_type = None;
+        }
         self.status = "Replay engine ready; select a cached dataset.".to_string();
     }
 
@@ -353,7 +383,7 @@ impl App {
                     #[cfg(feature = "replay")]
                     {
                         self.screen = Screen::Replay;
-                        self.focus = Focus::ReplayDataset;
+                        self.focus = Focus::ReplayInstrumentQuery;
                         self.replay_view = ReplayView::Library;
                     }
                     #[cfg(not(feature = "replay"))]
@@ -574,14 +604,21 @@ impl App {
                     if !self.replay_downloader.accepts(operation_id) {
                         return;
                     }
+                    let downloaded_bar_type = self.replay_downloader.bar_type;
                     self.replay_downloader.invalidate_operation();
                     self.base_config.replay_cache_dir = cache_root.clone();
                     self.replay_cache_library = ReplayCacheLibrary::scan(&cache_root);
-                    self.replay_dataset_index = self
+                    if let Some(index) = self
                         .replay_cache_library
                         .datasets
                         .iter()
-                        .position(|dataset| dataset.manifest_path == manifest_path);
+                        .position(|dataset| dataset.manifest_path == manifest_path)
+                    {
+                        self.select_replay_dataset_option(index, Some(downloaded_bar_type));
+                    } else {
+                        self.replay_dataset_index = None;
+                        self.replay_dataset_bar_type = None;
+                    }
                     self.replay_dataset_view_path = None;
                     self.replay_downloader.phase = ReplayDownloadPhase::Complete;
                     self.replay_downloader.phase_message =
@@ -662,4 +699,28 @@ impl App {
             self.leave_active_engine_session(message);
         }
     }
+}
+
+#[cfg(feature = "replay")]
+fn replay_cache_root_for_app(configured: &std::path::Path) -> std::path::PathBuf {
+    // Keep explicit cache paths authoritative. The fallback is only for the
+    // built-in per-user default, so a configured deployment path is never
+    // silently replaced by a repository-local cache.
+    if cfg!(test)
+        || std::env::var_os("TRADER_DATA_CACHE_DIR").is_some()
+        || !configured.ends_with(".local/share/trader/replay-cache")
+    {
+        return configured.to_path_buf();
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(".run/replay-cache"));
+    }
+    candidates.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".run/replay-cache"));
+
+    candidates
+        .into_iter()
+        .find(|candidate| !crate::replay_cache::ReplayCacheLibrary::scan(candidate).datasets.is_empty())
+        .unwrap_or_else(|| configured.to_path_buf())
 }

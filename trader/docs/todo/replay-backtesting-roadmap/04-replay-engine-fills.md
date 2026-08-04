@@ -116,6 +116,27 @@ cargo run -- capture-live-dom \
   --output .run/live-captures/GCZ6.dom.jsonl
 ```
 
+The browser-session capture path is also available for offline HAR exports:
+
+```bash
+cargo run --features replay -- import-browser-har \
+  --input har \
+  --cache-dir .run/replay-cache \
+  --overwrite
+```
+
+`import-browser-har` discovers contract IDs, product tick specifications, and
+all subscribed instruments from the HAR, then writes one instrument/contract
+dataset containing raw-tick Parquet rows and a normalized `dom_stream.jsonl`
+sidecar. The HAR itself is never copied into the cache. Browser
+`md/subscribequote` `last/ls` messages are explicitly labeled as sampled
+provider updates: they have no provider sequence and are not guaranteed to
+represent every execution. Use the existing `download-replay-data
+--source-kind raw-ticks` path when complete historical tick tape is required.
+The DOM sidecar is visible widget depth (10 or 30 levels in the captured
+session), not the complete exchange book; configure
+`replay_dom_file_path` to use it for DOM-assisted replay.
+
 RBT-030, RBT-031, and RBT-032 Levels 0/0b/1/2 are now implemented for deterministic replay. RBT-033 is implemented for the documented coarse-bar policy, tick sequence path, and optional DOM top-of-book path. Historical and standalone live DOM capture are now available through explicit CLI commands:
 
 - In the coarse bar model, acknowledgement and fill occur together when the first eligible raw bar is processed.

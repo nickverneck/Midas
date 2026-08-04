@@ -49,10 +49,26 @@ pub(crate) fn snapshot_active_execution_strategy(
             }
         }
         NativeStrategyKind::EmaCross => {
-            let evaluation = session
-                .execution_config
-                .native_ema
-                .evaluate(bars, current_side);
+            let config = session.execution_config.native_ema.clone();
+            let evaluation = if session.replay_enabled
+                && session.cfg.replay_evaluator_mode
+                    == crate::broker::ReplayEvaluatorMode::Streaming
+            {
+                // Diagnostics must not re-enter the legacy O(N²) evaluator.
+                // Clone the already-advanced indicator state so a snapshot of
+                // the current bar is O(1); historical corrections naturally
+                // fall back to the streaming state's linear rebuild.
+                let mut runtime = session.execution_runtime.ema_execution.clone();
+                config.evaluate_streaming_with_market_update(
+                    &mut runtime,
+                    bars,
+                    current_side,
+                    session.execution_runtime.market_update_sequence,
+                    session.execution_runtime.market_update_kind,
+                )
+            } else {
+                config.evaluate(bars, current_side)
+            };
             StrategyEvaluationSnapshot {
                 indicator_name: "EMA",
                 previous_fast_indicator: evaluation.previous_fast_ema,
@@ -224,10 +240,19 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                 )
             }
             NativeStrategyKind::EmaCross => {
-                let evaluation = session
-                    .execution_config
-                    .native_ema
-                    .evaluate(bars, current_side);
+                let config = session.execution_config.native_ema.clone();
+                let evaluation = if session.replay_enabled
+                    && session.cfg.replay_evaluator_mode
+                        == crate::broker::ReplayEvaluatorMode::Streaming
+                {
+                    config.evaluate_streaming(
+                        &mut session.execution_runtime.ema_execution,
+                        bars,
+                        current_side,
+                    )
+                } else {
+                    config.evaluate(bars, current_side)
+                };
                 (
                     evaluation.signal,
                     evaluation.summary(),
@@ -272,10 +297,19 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                 )
             }
             NativeStrategyKind::EmaCross => {
-                let evaluation = session
-                    .execution_config
-                    .native_ema
-                    .evaluate(window, current_side);
+                let config = session.execution_config.native_ema.clone();
+                let evaluation = if session.replay_enabled
+                    && session.cfg.replay_evaluator_mode
+                        == crate::broker::ReplayEvaluatorMode::Streaming
+                {
+                    config.evaluate_streaming(
+                        &mut session.execution_runtime.ema_execution,
+                        window,
+                        current_side,
+                    )
+                } else {
+                    config.evaluate(window, current_side)
+                };
                 (
                     evaluation.signal,
                     evaluation.summary(),

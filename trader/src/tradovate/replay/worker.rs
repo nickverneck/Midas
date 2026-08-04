@@ -116,6 +116,9 @@ async fn replay_market_worker_inner(
     for bar in &bars[..history_loaded] {
         series.push_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT);
     }
+    // Warmup history seeds the evaluator but is not emitted as a market
+    // update when a dataset view has an explicit evaluation start.
+    series.mark_closed_revision_published();
 
     let initial_status = replay_window.as_ref().map_or_else(
         || {

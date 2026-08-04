@@ -4,6 +4,7 @@ use super::*;
 mod bars;
 #[cfg(feature = "replay")]
 mod broker_schedule;
+mod candle_accel;
 #[cfg(feature = "replay")]
 mod fees;
 #[cfg(feature = "replay")]
@@ -41,6 +42,10 @@ mod worker;
 
 #[cfg(feature = "replay")]
 pub(crate) use broker_schedule::ReplayBrokerSchedule;
+pub(crate) use candle_accel::{
+    ReplayAcceleration, ReplayAccelerationDevice, ReplayAccelerationStatus, ReplayEmaBatchResult,
+    ReplayEmaLastPair, ema_last_batch, probe_acceleration,
+};
 #[cfg(feature = "replay")]
 pub(crate) use fees::ReplayFeeSchedule;
 pub(crate) use ledger::ReplayExecutionLedgerState;
@@ -62,9 +67,9 @@ pub(crate) use state::{ReplayState, replay_accounts, replay_contract, search_rep
 #[cfg(feature = "replay")]
 #[allow(unused_imports)]
 pub(crate) use sweep::{
-    ReplaySweepChildSpec, ReplaySweepConstraint, ReplaySweepGuardrailReport, ReplaySweepGuardrails,
-    ReplaySweepOutputFormat, ReplaySweepParameter, ReplaySweepPlan, ReplaySweepResourceEstimate,
-    ReplaySweepSpec,
+    ReplaySweepChildSpec, ReplaySweepConstraint, ReplaySweepExecutionMode,
+    ReplaySweepGuardrailReport, ReplaySweepGuardrails, ReplaySweepOutputFormat,
+    ReplaySweepParameter, ReplaySweepPlan, ReplaySweepResourceEstimate, ReplaySweepSpec,
 };
 #[cfg(feature = "replay")]
 pub(crate) use sweep_analytics::{
@@ -79,7 +84,7 @@ pub(crate) use sweep_performance::{
     write_replay_sweep_performance_report,
 };
 #[cfg(feature = "replay")]
-pub(crate) use sweep_runner::run_replay_sweep;
+pub(crate) use sweep_runner::{run_replay_sweep, run_replay_sweep_with_mode};
 #[cfg(feature = "replay")]
 pub(crate) use walk_forward::{
     ReplayWalkForwardOptions, ReplayWalkForwardPhase, ReplayWalkForwardWindow,

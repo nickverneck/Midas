@@ -1,4 +1,4 @@
-use crate::broker::Bar;
+use crate::broker::{Bar, MarketHistoryUpdate};
 use crate::strategies::{PositionSide, StrategySignal};
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +90,62 @@ impl EmaCrossEvaluation {
 #[derive(Debug, Clone, Default)]
 pub struct EmaCrossExecutionState {
     pub position: Option<EmaManagedPosition>,
+    indicator: EmaCrossIndicatorState,
+}
+
+/// Recursive EMA state used by the replay streaming evaluator.
+///
+/// The legacy evaluator intentionally remains available on
+/// [`EmaCrossConfig::evaluate`] for compatibility.  This state is kept next
+/// to the execution state so a replay engine can advance indicators in lock
+/// step with the ordered bars it is already processing.
+#[derive(Debug, Clone, Default)]
+struct EmaCrossIndicatorState {
+    fast_length: usize,
+    slow_length: usize,
+    first_bar: Option<Bar>,
+    last_bar: Option<Bar>,
+    window_len: usize,
+    previous_fast_ema: Option<f64>,
+    previous_slow_ema: Option<f64>,
+    fast_ema: Option<f64>,
+    slow_ema: Option<f64>,
+    fast_recurrence: Option<f64>,
+    slow_recurrence: Option<f64>,
+    fast_weighted_tail: Option<f64>,
+    slow_weighted_tail: Option<f64>,
+    /// Rolling digest of the retained bar window.  The digest lets the
+    /// streaming path distinguish a genuine append/slide from an older-bar
+    /// correction without ever trusting an unchanged latest bar by itself.
+    history_fingerprint: Option<u64>,
+    history_leading_power: u64,
+    source_update_sequence: Option<u64>,
+}
+
+const HISTORY_HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const HISTORY_HASH_BASE: u64 = 0x100000001b3;
+
+fn bar_fingerprint(bar: &Bar) -> u64 {
+    let mut hash = HISTORY_HASH_OFFSET;
+    for value in [
+        bar.ts_ns as u64,
+        bar.open.to_bits(),
+        bar.high.to_bits(),
+        bar.low.to_bits(),
+        bar.close.to_bits(),
+        bar.volume.map(f64::to_bits).unwrap_or(0),
+    ] {
+        hash ^= value;
+        hash = hash.wrapping_mul(HISTORY_HASH_BASE);
+    }
+    hash
+}
+
+fn bars_fingerprint(bars: &[Bar]) -> u64 {
+    bars.iter().fold(0, |hash, bar| {
+        hash.wrapping_mul(HISTORY_HASH_BASE)
+            .wrapping_add(bar_fingerprint(bar))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +156,163 @@ pub struct EmaManagedPosition {
     pub best_price: f64,
     pub current_stop_price: Option<f64>,
     pub trailing_active: bool,
+}
+
+impl EmaCrossIndicatorState {
+    fn reset(&mut self, fast_length: usize, slow_length: usize) {
+        self.fast_length = fast_length;
+        self.slow_length = slow_length;
+        self.first_bar = None;
+        self.last_bar = None;
+        self.window_len = 0;
+        self.previous_fast_ema = None;
+        self.previous_slow_ema = None;
+        self.fast_ema = None;
+        self.slow_ema = None;
+        self.fast_recurrence = None;
+        self.slow_recurrence = None;
+        self.fast_weighted_tail = None;
+        self.slow_weighted_tail = None;
+        self.history_fingerprint = None;
+        self.history_leading_power = 1;
+        self.source_update_sequence = None;
+    }
+
+    fn rebuild(&mut self, bars: &[Bar]) {
+        let fast_length = self.fast_length;
+        let slow_length = self.slow_length;
+        self.reset(fast_length, slow_length);
+        for bar in bars {
+            self.push(bar);
+        }
+    }
+
+    fn push(&mut self, bar: &Bar) {
+        if self.first_bar.is_none() {
+            self.first_bar = Some(bar.clone());
+        }
+        self.previous_fast_ema = self.fast_ema;
+        self.previous_slow_ema = self.slow_ema;
+        let previous_window_len = self.window_len;
+        let (fast_recurrence, fast_output) =
+            next_ema(self.fast_recurrence, bar.close, self.fast_length.max(1));
+        let (slow_recurrence, slow_output) =
+            next_ema(self.slow_recurrence, bar.close, self.slow_length.max(1));
+        self.fast_recurrence = Some(fast_recurrence);
+        self.slow_recurrence = Some(slow_recurrence);
+        self.fast_ema = fast_output;
+        self.slow_ema = slow_output;
+        if bar.close.is_finite() {
+            if previous_window_len == 0 {
+                self.fast_weighted_tail = Some(0.0);
+                self.slow_weighted_tail = Some(0.0);
+            } else {
+                self.fast_weighted_tail = self.fast_weighted_tail.map(|tail| {
+                    let alpha = 2.0 / (self.fast_length.max(1) as f64 + 1.0);
+                    (1.0 - alpha) * tail + alpha * bar.close
+                });
+                self.slow_weighted_tail = self.slow_weighted_tail.map(|tail| {
+                    let alpha = 2.0 / (self.slow_length.max(1) as f64 + 1.0);
+                    (1.0 - alpha) * tail + alpha * bar.close
+                });
+            }
+        } else {
+            self.fast_weighted_tail = None;
+            self.slow_weighted_tail = None;
+        }
+        self.window_len = self.window_len.saturating_add(1);
+        self.last_bar = Some(bar.clone());
+        self.history_fingerprint = Some(match self.history_fingerprint {
+            Some(history) => history
+                .wrapping_mul(HISTORY_HASH_BASE)
+                .wrapping_add(bar_fingerprint(bar)),
+            None => bar_fingerprint(bar),
+        });
+        if self.window_len > 1 {
+            self.history_leading_power = self.history_leading_power.wrapping_mul(HISTORY_HASH_BASE);
+        }
+    }
+
+    /// Slide a fixed-size finite window by one bar and append the new close.
+    /// The weighted-tail accumulators let this preserve the legacy
+    /// first-value EMA seed without replaying the whole retained window.
+    fn slide_and_push(&mut self, new_first: &Bar, latest: &Bar) -> bool {
+        if self.window_len <= 1
+            || !new_first.close.is_finite()
+            || !latest.close.is_finite()
+            || self.first_bar.is_none()
+        {
+            return false;
+        }
+        let n = self.window_len;
+        let transform = |tail: Option<f64>, period: usize| {
+            let Some(tail) = tail.filter(|value| value.is_finite()) else {
+                return None;
+            };
+            let alpha = 2.0 / (period.max(1) as f64 + 1.0);
+            let retain = 1.0 - alpha;
+            let removed = alpha * retain.powi((n.saturating_sub(2)) as i32) * new_first.close;
+            let after_drop = tail - removed;
+            let previous = retain.powi((n.saturating_sub(2)) as i32) * new_first.close + after_drop;
+            let next_tail = retain * after_drop + alpha * latest.close;
+            let next = retain.powi((n.saturating_sub(1)) as i32) * new_first.close + next_tail;
+            Some((previous, next, next_tail))
+        };
+        let Some((previous_fast, fast, fast_tail)) =
+            transform(self.fast_weighted_tail, self.fast_length)
+        else {
+            return false;
+        };
+        let Some((previous_slow, slow, slow_tail)) =
+            transform(self.slow_weighted_tail, self.slow_length)
+        else {
+            return false;
+        };
+        if !previous_fast.is_finite()
+            || !fast.is_finite()
+            || !previous_slow.is_finite()
+            || !slow.is_finite()
+        {
+            return false;
+        }
+        self.previous_fast_ema = Some(previous_fast);
+        self.previous_slow_ema = Some(previous_slow);
+        self.fast_ema = Some(fast);
+        self.slow_ema = Some(slow);
+        self.fast_recurrence = Some(fast);
+        self.slow_recurrence = Some(slow);
+        self.fast_weighted_tail = Some(fast_tail);
+        self.slow_weighted_tail = Some(slow_tail);
+        if let (Some(history), Some(old_first)) =
+            (self.history_fingerprint, self.first_bar.as_ref())
+        {
+            self.history_fingerprint = Some(
+                history
+                    .wrapping_sub(
+                        bar_fingerprint(old_first).wrapping_mul(self.history_leading_power),
+                    )
+                    .wrapping_mul(HISTORY_HASH_BASE)
+                    .wrapping_add(bar_fingerprint(latest)),
+            );
+        } else {
+            return false;
+        }
+        self.first_bar = Some(new_first.clone());
+        self.last_bar = Some(latest.clone());
+        true
+    }
+}
+
+fn next_ema(previous: Option<f64>, value: f64, period: usize) -> (f64, Option<f64>) {
+    let alpha = 2.0 / (period as f64 + 1.0);
+    match previous {
+        Some(previous) if value.is_finite() => {
+            let next = alpha * value + (1.0 - alpha) * previous;
+            (next, next.is_finite().then_some(next))
+        }
+        Some(previous) => (previous, None),
+        None => (value, value.is_finite().then_some(value)),
+    }
 }
 
 impl EmaCrossConfig {
@@ -222,6 +435,241 @@ impl EmaCrossConfig {
             slow_ema: Some(curr_slow),
             bars_len: bars.len(),
             warmup_bars: self.warmup_bars(),
+            current_side,
+            inverted: self.inverted,
+            raw_buy_signal,
+            raw_sell_signal,
+            effective_buy_signal: buy_signal,
+            effective_sell_signal: sell_signal,
+            hold_reason,
+        }
+    }
+
+    /// Evaluate the latest bar using recursive indicator state.
+    ///
+    /// The first call seeds the state from the supplied history (one linear
+    /// pass). The replay path uses [`Self::evaluate_streaming_with_market_update`]
+    /// with a publisher sequence/hint, making verified appends constant-time.
+    /// This hint-free convenience method defensively computes a retained-window
+    /// digest on each call so callers that do not own the bar publisher still
+    /// detect older-bar corrections. Corrections, out-of-order bars, and
+    /// configuration changes fall back to a linear rebuild so the observable
+    /// signal remains equivalent to the legacy batch evaluator.
+    pub fn evaluate_streaming(
+        &self,
+        runtime: &mut EmaCrossExecutionState,
+        bars: &[Bar],
+        current_side: Option<PositionSide>,
+    ) -> EmaCrossEvaluation {
+        self.evaluate_streaming_with_market_update(
+            runtime,
+            bars,
+            current_side,
+            None,
+            MarketHistoryUpdate::Snapshot,
+        )
+    }
+
+    /// Evaluate with a market-update hint supplied by the retained bar
+    /// publisher. A sequence number lets repeated broker/account callbacks
+    /// reuse the already-advanced state; append/correction hints avoid
+    /// rescanning the full window on the normal replay path. Callers without
+    /// a trustworthy hint should use [`Self::evaluate_streaming`], which
+    /// validates a bounded digest instead.
+    pub fn evaluate_streaming_with_market_update(
+        &self,
+        runtime: &mut EmaCrossExecutionState,
+        bars: &[Bar],
+        current_side: Option<PositionSide>,
+        source_update_sequence: Option<u64>,
+        market_update: MarketHistoryUpdate,
+    ) -> EmaCrossEvaluation {
+        if bars.is_empty() {
+            runtime.indicator.reset(self.fast_length, self.slow_length);
+            return EmaCrossEvaluation {
+                signal: StrategySignal::Hold,
+                latest_close: None,
+                previous_fast_ema: None,
+                previous_slow_ema: None,
+                fast_ema: None,
+                slow_ema: None,
+                bars_len: 0,
+                warmup_bars: self.warmup_bars(),
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("no_bars"),
+            };
+        }
+
+        let state = &mut runtime.indicator;
+        if source_update_sequence.is_none() {
+            state.source_update_sequence = None;
+        }
+        let hinted_update_already_applied = source_update_sequence
+            .is_some_and(|sequence| state.source_update_sequence == Some(sequence));
+        let config_changed = state.fast_length != self.fast_length
+            || state.slow_length != self.slow_length
+            || state.last_bar.is_none();
+        if !hinted_update_already_applied
+            && (config_changed
+                || (source_update_sequence.is_some()
+                    && matches!(
+                        market_update,
+                        MarketHistoryUpdate::Snapshot | MarketHistoryUpdate::Correction
+                    )))
+        {
+            state.reset(self.fast_length, self.slow_length);
+            state.rebuild(bars);
+        } else if !hinted_update_already_applied {
+            let latest = bars.last().expect("bars is not empty");
+            let same_latest = state.last_bar.as_ref() == Some(latest);
+            let incoming_fingerprint = source_update_sequence
+                .is_none()
+                .then(|| bars_fingerprint(bars));
+            let history_matches = incoming_fingerprint
+                .is_none_or(|fingerprint| state.history_fingerprint == Some(fingerprint));
+            let appended = bars.len() >= 2
+                && (bars.len() == state.window_len
+                    || bars.len() == state.window_len.saturating_add(1))
+                && state.last_bar.as_ref() == bars.get(bars.len() - 2)
+                && latest.ts_ns
+                    > state
+                        .last_bar
+                        .as_ref()
+                        .map(|bar| bar.ts_ns)
+                        .unwrap_or(i64::MIN);
+            if same_latest && !history_matches {
+                state.rebuild(bars);
+            } else if !same_latest && appended {
+                let first_changed = state.first_bar.as_ref() != bars.first();
+                let expected_fingerprint = if source_update_sequence.is_none() {
+                    if first_changed {
+                        state.history_fingerprint.zip(state.first_bar.as_ref()).map(
+                            |(history, old_first)| {
+                                history
+                                    .wrapping_sub(
+                                        bar_fingerprint(old_first)
+                                            .wrapping_mul(state.history_leading_power),
+                                    )
+                                    .wrapping_mul(HISTORY_HASH_BASE)
+                                    .wrapping_add(bar_fingerprint(latest))
+                            },
+                        )
+                    } else {
+                        state.history_fingerprint.map(|history| {
+                            history
+                                .wrapping_mul(HISTORY_HASH_BASE)
+                                .wrapping_add(bar_fingerprint(latest))
+                        })
+                    }
+                } else {
+                    None
+                };
+                if expected_fingerprint
+                    .is_some_and(|expected| Some(expected) != incoming_fingerprint)
+                {
+                    state.rebuild(bars);
+                } else if first_changed {
+                    let Some(first) = bars.first() else {
+                        state.rebuild(bars);
+                        return self.evaluate_streaming(runtime, bars, current_side);
+                    };
+                    if !state.slide_and_push(first, latest) {
+                        state.rebuild(bars);
+                    }
+                } else {
+                    state.push(latest);
+                }
+            } else if !same_latest {
+                state.rebuild(bars);
+            }
+        }
+        if let Some(sequence) = source_update_sequence {
+            state.source_update_sequence = Some(sequence);
+        }
+
+        let Some(last_bar) = bars.last() else {
+            unreachable!("bars is not empty");
+        };
+        let warmup_bars = self.warmup_bars();
+        if bars.len() < warmup_bars {
+            return EmaCrossEvaluation {
+                signal: StrategySignal::Hold,
+                latest_close: Some(last_bar.close),
+                previous_fast_ema: None,
+                previous_slow_ema: None,
+                fast_ema: None,
+                slow_ema: None,
+                bars_len: bars.len(),
+                warmup_bars,
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("warming_up"),
+            };
+        }
+
+        let prev_fast = state.previous_fast_ema.filter(|value| value.is_finite());
+        let prev_slow = state.previous_slow_ema.filter(|value| value.is_finite());
+        let curr_fast = state.fast_ema.filter(|value| value.is_finite());
+        let curr_slow = state.slow_ema.filter(|value| value.is_finite());
+        let (Some(prev_fast), Some(prev_slow), Some(curr_fast), Some(curr_slow)) =
+            (prev_fast, prev_slow, curr_fast, curr_slow)
+        else {
+            return EmaCrossEvaluation {
+                signal: StrategySignal::Hold,
+                latest_close: Some(last_bar.close),
+                previous_fast_ema: prev_fast,
+                previous_slow_ema: prev_slow,
+                fast_ema: curr_fast,
+                slow_ema: curr_slow,
+                bars_len: bars.len(),
+                warmup_bars,
+                current_side,
+                inverted: self.inverted,
+                raw_buy_signal: false,
+                raw_sell_signal: false,
+                effective_buy_signal: false,
+                effective_sell_signal: false,
+                hold_reason: Some("non_finite_indicator"),
+            };
+        };
+
+        let raw_buy_signal = prev_fast <= prev_slow && curr_fast > curr_slow;
+        let raw_sell_signal = prev_fast >= prev_slow && curr_fast < curr_slow;
+        let mut buy_signal = raw_buy_signal;
+        let mut sell_signal = raw_sell_signal;
+        if self.inverted {
+            std::mem::swap(&mut buy_signal, &mut sell_signal);
+        }
+        let signal = resolve_signal(buy_signal, sell_signal, current_side);
+        let hold_reason = if signal != StrategySignal::Hold {
+            None
+        } else if buy_signal && current_side == Some(PositionSide::Long) {
+            Some("buy_cross_already_long")
+        } else if sell_signal && current_side == Some(PositionSide::Short) {
+            Some("sell_cross_already_short")
+        } else if !buy_signal && !sell_signal {
+            Some("no_effective_cross")
+        } else {
+            Some("hold")
+        };
+        EmaCrossEvaluation {
+            signal,
+            latest_close: Some(last_bar.close),
+            previous_fast_ema: Some(prev_fast),
+            previous_slow_ema: Some(prev_slow),
+            fast_ema: Some(curr_fast),
+            slow_ema: Some(curr_slow),
+            bars_len: bars.len(),
+            warmup_bars,
             current_side,
             inverted: self.inverted,
             raw_buy_signal,
@@ -480,6 +928,206 @@ mod tests {
 
         let evaluation = config.evaluate(&bars, None);
         assert_eq!(evaluation.signal, StrategySignal::EnterLong);
+    }
+
+    #[test]
+    fn streaming_ema_matches_batch_values_and_signals() {
+        let config = EmaCrossConfig {
+            fast_length: 3,
+            slow_length: 7,
+            inverted: false,
+            ..EmaCrossConfig::default()
+        };
+        let bars = (0..48)
+            .map(|idx| {
+                let close = 100.0 + (idx as f64 * 0.37).sin() * 4.0 + idx as f64 * 0.03;
+                bar(idx + 1, close)
+            })
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+
+        for end in 1..=bars.len() {
+            let window = &bars[..end];
+            let legacy = config.evaluate(window, None);
+            let streaming = config.evaluate_streaming(&mut runtime, window, None);
+            assert_eq!(streaming.signal, legacy.signal, "bar {end}");
+            assert_eq!(streaming.raw_buy_signal, legacy.raw_buy_signal, "bar {end}");
+            assert_eq!(
+                streaming.raw_sell_signal, legacy.raw_sell_signal,
+                "bar {end}"
+            );
+            assert_eq!(
+                streaming.previous_fast_ema, legacy.previous_fast_ema,
+                "bar {end}"
+            );
+            assert_eq!(
+                streaming.previous_slow_ema, legacy.previous_slow_ema,
+                "bar {end}"
+            );
+            assert_eq!(streaming.fast_ema, legacy.fast_ema, "bar {end}");
+            assert_eq!(streaming.slow_ema, legacy.slow_ema, "bar {end}");
+        }
+    }
+
+    #[test]
+    fn hinted_append_path_matches_batch_without_window_scan() {
+        let config = EmaCrossConfig {
+            fast_length: 3,
+            slow_length: 7,
+            ..EmaCrossConfig::default()
+        };
+        let bars = (0..256)
+            .map(|idx| bar(idx + 1, 100.0 + (idx as f64 * 0.21).sin() * 5.0))
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+        let seed = &bars[..32];
+        let _ = config.evaluate_streaming_with_market_update(
+            &mut runtime,
+            seed,
+            None,
+            Some(1),
+            MarketHistoryUpdate::Snapshot,
+        );
+        for end in 33..=bars.len() {
+            let window = &bars[..end];
+            let expected = config.evaluate(window, None);
+            let actual = config.evaluate_streaming_with_market_update(
+                &mut runtime,
+                window,
+                None,
+                Some(end as u64),
+                MarketHistoryUpdate::Append,
+            );
+            assert_eq!(actual.signal, expected.signal, "bar {end}");
+            assert_eq!(actual.previous_fast_ema, expected.previous_fast_ema);
+            assert_eq!(actual.previous_slow_ema, expected.previous_slow_ema);
+            assert_eq!(actual.fast_ema, expected.fast_ema);
+            assert_eq!(actual.slow_ema, expected.slow_ema);
+        }
+    }
+
+    #[test]
+    fn streaming_ema_rebuilds_after_a_bar_correction() {
+        let config = EmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            ..EmaCrossConfig::default()
+        };
+        let mut bars = (0..12)
+            .map(|idx| bar(idx + 1, 20.0 + idx as f64))
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+        let _ = config.evaluate_streaming(&mut runtime, &bars, None);
+
+        // A revised latest bar is common for live/forming streams. It is
+        // detected by the cached bar fingerprint and triggers a rebuild.
+        bars[11].close += 3.0;
+        let expected = config.evaluate(&bars, None);
+        let actual = config.evaluate_streaming(&mut runtime, &bars, None);
+        assert_eq!(actual.signal, expected.signal);
+        assert_eq!(actual.previous_fast_ema, expected.previous_fast_ema);
+        assert_eq!(actual.previous_slow_ema, expected.previous_slow_ema);
+        assert_eq!(actual.fast_ema, expected.fast_ema);
+        assert_eq!(actual.slow_ema, expected.slow_ema);
+    }
+
+    #[test]
+    fn streaming_ema_rebuilds_after_an_interior_bar_correction() {
+        let config = EmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            ..EmaCrossConfig::default()
+        };
+        let mut bars = (0..24)
+            .map(|idx| bar(idx + 1, 20.0 + (idx as f64 * 0.7).sin() * 3.0))
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+        let _ = config.evaluate_streaming(&mut runtime, &bars, None);
+
+        // Keep the latest timestamp/value unchanged while revising a retained
+        // historical bar. The digest must invalidate the incremental state.
+        bars[7].close += 4.0;
+        let expected = config.evaluate(&bars, None);
+        let actual = config.evaluate_streaming(&mut runtime, &bars, None);
+        assert_eq!(actual.signal, expected.signal);
+        assert_eq!(actual.raw_buy_signal, expected.raw_buy_signal);
+        assert_eq!(actual.raw_sell_signal, expected.raw_sell_signal);
+        assert_eq!(actual.previous_fast_ema, expected.previous_fast_ema);
+        assert_eq!(actual.previous_slow_ema, expected.previous_slow_ema);
+        assert_eq!(actual.fast_ema, expected.fast_ema);
+        assert_eq!(actual.slow_ema, expected.slow_ema);
+    }
+
+    #[test]
+    fn streaming_ema_matches_batch_when_the_history_window_slides() {
+        let config = EmaCrossConfig {
+            fast_length: 3,
+            slow_length: 9,
+            ..EmaCrossConfig::default()
+        };
+        let bars = (0..512)
+            .map(|idx| {
+                let close = 100.0 + (idx as f64 * 0.17).sin() * 3.0 + idx as f64 * 0.01;
+                bar(idx + 1, close)
+            })
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+        let window_len = 64;
+        for end in window_len..=bars.len() {
+            let window = &bars[end - window_len..end];
+            let expected = config.evaluate(window, None);
+            let actual = config.evaluate_streaming(&mut runtime, window, None);
+            assert_eq!(actual.signal, expected.signal, "window ending at {end}");
+            assert_eq!(actual.raw_buy_signal, expected.raw_buy_signal);
+            assert_eq!(actual.raw_sell_signal, expected.raw_sell_signal);
+            for (actual, expected) in [
+                (actual.previous_fast_ema, expected.previous_fast_ema),
+                (actual.previous_slow_ema, expected.previous_slow_ema),
+                (actual.fast_ema, expected.fast_ema),
+                (actual.slow_ema, expected.slow_ema),
+            ] {
+                match (actual, expected) {
+                    (Some(actual), Some(expected)) => {
+                        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}")
+                    }
+                    (None, None) => {}
+                    _ => panic!("streaming/batch EMA presence mismatch"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_ema_sliding_window_preserves_crosses_on_volatile_values() {
+        let config = EmaCrossConfig {
+            fast_length: 10,
+            slow_length: 30,
+            ..EmaCrossConfig::default()
+        };
+        let mut seed = 0x1234_5678_u64;
+        let bars = (0..12_000)
+            .map(|idx| {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let normalized = ((seed >> 11) as f64) / ((1_u64 << 53) as f64);
+                bar(idx + 1, 7_500.0 + (normalized - 0.5) * 250.0)
+            })
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+        let window_len = 4_096;
+        for end in window_len..=bars.len() {
+            let window = &bars[end - window_len..end];
+            let expected = config.evaluate(window, None);
+            let actual = config.evaluate_streaming(&mut runtime, window, None);
+            assert_eq!(actual.signal, expected.signal, "window ending at {end}");
+            assert_eq!(
+                actual.raw_buy_signal, expected.raw_buy_signal,
+                "window ending at {end}"
+            );
+            assert_eq!(
+                actual.raw_sell_signal, expected.raw_sell_signal,
+                "window ending at {end}"
+            );
+        }
     }
 
     #[test]

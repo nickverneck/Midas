@@ -1,6 +1,6 @@
 use crate::broker::{
-    BrokerKind, CandleMode, ReplayBarProtectionPolicy, ReplayEngineMode, ReplayFillModel,
-    ReplayLatencyConfig, ReplayLatencyModel, default_broker, supports_broker,
+    BrokerKind, CandleMode, ReplayBarProtectionPolicy, ReplayEngineMode, ReplayEvaluatorMode,
+    ReplayFillModel, ReplayLatencyConfig, ReplayLatencyModel, default_broker, supports_broker,
 };
 use anyhow::{Context, Result, bail};
 use dotenvy::dotenv;
@@ -190,6 +190,11 @@ pub struct AppConfig {
     pub replay_signal_diagnostics: bool,
     pub replay_bar_interval_ms: u64,
     pub replay_engine_mode: ReplayEngineMode,
+    /// Indicator evaluation implementation used by replay strategy loops.
+    /// Legacy remains the compatibility default; streaming is opt-in until
+    /// result parity is established for every native strategy.
+    #[serde(default)]
+    pub replay_evaluator_mode: ReplayEvaluatorMode,
     pub replay_fill_model: ReplayFillModel,
     pub replay_latency_model: ReplayLatencyModel,
     pub replay_fixed_latency_ms: u64,
@@ -242,6 +247,7 @@ impl Default for AppConfig {
             replay_signal_diagnostics: false,
             replay_bar_interval_ms: 5,
             replay_engine_mode: ReplayEngineMode::default(),
+            replay_evaluator_mode: ReplayEvaluatorMode::default(),
             replay_fill_model: ReplayFillModel::RawBarOpen,
             replay_latency_model: ReplayLatencyModel::Fixed,
             replay_fixed_latency_ms: 0,
@@ -441,6 +447,9 @@ impl AppConfig {
         if let Some(raw) = env_string_any(&["TRADER_REPLAY_ENGINE_MODE"]) {
             self.replay_engine_mode = parse_replay_engine_mode(&raw)?;
         }
+        if let Some(raw) = env_string_any(&["TRADER_REPLAY_EVALUATOR_MODE"]) {
+            self.replay_evaluator_mode = parse_replay_evaluator_mode(&raw)?;
+        }
         if let Some(raw) = env_string_any(&["TRADER_REPLAY_FILL_MODEL"]) {
             self.replay_fill_model = parse_replay_fill_model(&raw)?;
         }
@@ -573,6 +582,14 @@ fn parse_replay_engine_mode(raw: &str) -> Result<ReplayEngineMode> {
             Ok(ReplayEngineMode::Deterministic)
         }
         other => bail!("invalid replay engine mode `{other}`; expected legacy or deterministic"),
+    }
+}
+
+fn parse_replay_evaluator_mode(raw: &str) -> Result<ReplayEvaluatorMode> {
+    match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "legacy" | "batch" | "legacy_batch" => Ok(ReplayEvaluatorMode::Legacy),
+        "streaming" | "incremental" => Ok(ReplayEvaluatorMode::Streaming),
+        other => bail!("invalid replay evaluator mode `{other}`; expected legacy or streaming"),
     }
 }
 
@@ -806,6 +823,16 @@ mod tests {
         let config: AppConfig = toml::from_str("").expect("default config");
 
         assert_eq!(config.replay_engine_mode, ReplayEngineMode::Legacy);
+        assert_eq!(config.replay_evaluator_mode, ReplayEvaluatorMode::Legacy);
+    }
+
+    #[test]
+    fn replay_evaluator_can_opt_into_streaming_indicators() {
+        let config: AppConfig =
+            toml::from_str("replay_evaluator_mode = \"streaming\"").expect("config");
+
+        assert_eq!(config.replay_evaluator_mode, ReplayEvaluatorMode::Streaming);
+        assert!(config.validate().is_ok());
     }
 
     #[test]

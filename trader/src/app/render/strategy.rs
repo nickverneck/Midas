@@ -402,7 +402,8 @@ impl App {
             | Focus::CandleModeToggle
             | Focus::ContractList => {}
             #[cfg(feature = "replay")]
-            Focus::ReplayDataset
+            Focus::ReplayInstrumentQuery
+            | Focus::ReplayDataset
             | Focus::ReplayInitialCapital
             | Focus::ReplayMarginPerContract
             | Focus::ReplaySafetyBuffer

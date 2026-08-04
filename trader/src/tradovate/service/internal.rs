@@ -523,7 +523,11 @@ fn handle_market_update(
     let broker_tx = state.broker_tx.clone();
     let (display_snapshot, closed_bar_advanced, engine_history) = {
         let session = state.session.as_mut().expect("checked session above");
+        let history_sequence = update.history_sequence;
+        let history_update = update.history_update;
         let closed_bar_advanced = apply_market_update(&mut session.market, update);
+        session.execution_runtime.market_update_sequence = Some(history_sequence);
+        session.execution_runtime.market_update_kind = history_update;
         match session.execution_config.native_execution_path {
             NativeExecutionPath::Guarded => {
                 maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
@@ -542,7 +546,15 @@ fn handle_market_update(
             session.engine_run.as_ref().map(|run| run.history.clone()),
         )
     };
-    if closed_bar_advanced {
+    // Headless sweeps do not have a TUI consumer. Cloning the capped market
+    // history and spawning an account-snapshot task for every bar would add a
+    // second O(history-window) pass to the replay hot path without changing
+    // fills or strategy decisions. Interactive replay keeps the refresh.
+    let headless_replay = state
+        .session
+        .as_ref()
+        .is_some_and(|session| session.replay_enabled && session.cfg.replay_headless);
+    if closed_bar_advanced && !headless_replay {
         request_snapshot_refresh(state, &internal_tx);
     }
     let _ = market_tx.send(display_snapshot);

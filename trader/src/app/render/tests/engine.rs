@@ -55,7 +55,7 @@ fn creating_replay_engine_uses_replay_only_navigation() {
     );
 
     assert_eq!(app.screen, Screen::Replay);
-    assert_eq!(app.focus, Focus::ReplayDataset);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
     assert_eq!(
         app.header_tab_titles(),
         vec!["Engine", "Replay", "Strategy", "Dashboard", "Analytics"]
@@ -104,7 +104,7 @@ fn reentering_observed_replay_engine_restores_replay_navigation() {
     app.enter_engine_session_for_key(key, PathBuf::from("/tmp/trader-engine-10.sock"));
 
     assert_eq!(app.screen, Screen::Replay);
-    assert_eq!(app.focus, Focus::ReplayDataset);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
     assert_eq!(app.session_mode, EngineCreateMode::Replay);
     assert_eq!(app.session_kind, SessionKind::Replay);
 }
@@ -124,7 +124,7 @@ fn replay_disconnect_does_not_fall_back_to_broker_login() {
     app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
 
     assert_eq!(app.screen, Screen::Replay);
-    assert_eq!(app.focus, Focus::ReplayDataset);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
     assert!(!app.header_tab_titles().contains(&"Login"));
     assert!(!app.header_tab_titles().contains(&"Stats"));
 }

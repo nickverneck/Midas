@@ -1,6 +1,52 @@
 use super::*;
 
 impl App {
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn open_replay_setup(&mut self) {
+        if let Some(bar_type) = self.replay_dataset_bar_type {
+            self.bar_type = bar_type;
+            self.candle_mode = self.bar_type.effective_candle_mode(self.candle_mode);
+        }
+        self.replay_view = ReplayView::Setup;
+        self.focus = Focus::BarTypeToggle;
+        self.clear_strategy_numeric_input();
+        self.status = "Replay setup: configure the market and run settings.".to_string();
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn open_replay_library(&mut self) {
+        self.replay_view = ReplayView::Library;
+        self.sync_replay_dataset_filter();
+        self.focus = if self.replay_filtered_dataset_indices().is_empty() {
+            Focus::ReplayInstrumentQuery
+        } else {
+            Focus::ReplayDataset
+        };
+        self.clear_strategy_numeric_input();
+    }
+
+    #[cfg(feature = "replay")]
+    fn navigate_replay_setup(&mut self, key: KeyCode) -> bool {
+        if self.replay_view != ReplayView::Setup {
+            return false;
+        }
+        match key {
+            KeyCode::Up => {
+                if self.focus == Focus::BarTypeToggle {
+                    self.open_replay_library();
+                } else {
+                    self.focus = self.prev_replay_focus();
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Enter => {
+                self.focus = self.next_replay_focus();
+                true
+            }
+            _ => false,
+        }
+    }
+
     #[cfg(not(feature = "replay"))]
     fn open_replay_dataset_views(&mut self) {
         self.status = "Saved dataset views require a replay-enabled build.".to_string();
@@ -30,11 +76,25 @@ impl App {
         match key.code {
             KeyCode::BackTab => {
                 self.clear_strategy_numeric_input();
+                #[cfg(feature = "replay")]
+                if self.replay_view == ReplayView::Setup && self.focus == Focus::BarTypeToggle {
+                    self.open_replay_library();
+                    return;
+                }
                 self.focus = self.prev_replay_focus();
                 return;
             }
             KeyCode::Tab => {
                 self.clear_strategy_numeric_input();
+                #[cfg(feature = "replay")]
+                if self.replay_view == ReplayView::Library
+                    && (self.focus == Focus::ReplayDataset
+                        || (self.focus == Focus::ReplayInstrumentQuery
+                            && self.replay_filtered_dataset_indices().is_empty()))
+                {
+                    self.open_replay_setup();
+                    return;
+                }
                 self.focus = self.next_replay_focus();
                 return;
             }
@@ -51,10 +111,18 @@ impl App {
                     return;
                 }
                 KeyCode::Up => {
+                    #[cfg(feature = "replay")]
+                    if self.navigate_replay_setup(KeyCode::Up) {
+                        return;
+                    }
                     self.focus = self.prev_replay_focus();
                     return;
                 }
                 KeyCode::Down | KeyCode::Enter => {
+                    #[cfg(feature = "replay")]
+                    if self.navigate_replay_setup(key.code) {
+                        return;
+                    }
                     self.focus = self.next_replay_focus();
                     return;
                 }
@@ -63,10 +131,18 @@ impl App {
             Focus::BarValue => {
                 match key.code {
                     KeyCode::Up => {
+                        #[cfg(feature = "replay")]
+                        if self.navigate_replay_setup(KeyCode::Up) {
+                            return;
+                        }
                         self.focus = self.prev_replay_focus();
                         return;
                     }
                     KeyCode::Down | KeyCode::Enter => {
+                        #[cfg(feature = "replay")]
+                        if self.navigate_replay_setup(key.code) {
+                            return;
+                        }
                         self.focus = self.next_replay_focus();
                         return;
                     }
@@ -99,10 +175,18 @@ impl App {
                     return;
                 }
                 KeyCode::Up => {
+                    #[cfg(feature = "replay")]
+                    if self.navigate_replay_setup(KeyCode::Up) {
+                        return;
+                    }
                     self.focus = self.prev_replay_focus();
                     return;
                 }
                 KeyCode::Down | KeyCode::Enter => {
+                    #[cfg(feature = "replay")]
+                    if self.navigate_replay_setup(key.code) {
+                        return;
+                    }
                     self.focus = self.next_replay_focus();
                     return;
                 }
@@ -110,6 +194,9 @@ impl App {
             },
             #[cfg(feature = "replay")]
             Focus::ReplayInitialCapital => {
+                if self.navigate_replay_setup(key.code) {
+                    return;
+                }
                 let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::ReplayInitialCapital,
@@ -121,6 +208,9 @@ impl App {
             }
             #[cfg(feature = "replay")]
             Focus::ReplayMarginPerContract => {
+                if self.navigate_replay_setup(key.code) {
+                    return;
+                }
                 let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::ReplayMarginPerContract,
@@ -132,6 +222,9 @@ impl App {
             }
             #[cfg(feature = "replay")]
             Focus::ReplaySafetyBuffer => {
+                if self.navigate_replay_setup(key.code) {
+                    return;
+                }
                 let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::ReplaySafetyBuffer,
@@ -143,6 +236,9 @@ impl App {
             }
             #[cfg(feature = "replay")]
             Focus::ReplaySafetyBufferPercent => {
+                if self.navigate_replay_setup(key.code) {
+                    return;
+                }
                 let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,
                     Focus::ReplaySafetyBufferPercent,
@@ -151,6 +247,37 @@ impl App {
                     0.0,
                     1.0,
                 );
+            }
+            #[cfg(feature = "replay")]
+            Focus::ReplayInstrumentQuery => {
+                match key.code {
+                    KeyCode::Up => {
+                        self.focus = self.prev_replay_focus();
+                        return;
+                    }
+                    KeyCode::Down | KeyCode::Enter => {
+                        let options = self.replay_dataset_options();
+                        if options.is_empty() {
+                            if key.code == KeyCode::Enter {
+                                self.open_new_replay_downloader();
+                            }
+                        } else {
+                            let selected =
+                                self.replay_selected_option_position(&options).unwrap_or(0);
+                            let (index, bar_type) = options[selected];
+                            self.select_replay_dataset_option(index, bar_type);
+                            self.focus = Focus::ReplayDataset;
+                        }
+                        return;
+                    }
+                    KeyCode::Right => {
+                        self.focus = Focus::ReplayDataset;
+                        return;
+                    }
+                    _ => {}
+                }
+                edit_string(&mut self.replay_instrument_query, key);
+                self.sync_replay_dataset_filter();
             }
             #[cfg(feature = "replay")]
             Focus::ReplayDataset => {
@@ -166,7 +293,8 @@ impl App {
                     self.open_selected_replay_downloader();
                     return;
                 }
-                let count = self.replay_cache_library.datasets.len();
+                let options = self.replay_dataset_options();
+                let count = options.len();
                 if count == 0 {
                     if key.code == KeyCode::Enter {
                         self.open_new_replay_downloader();
@@ -179,23 +307,44 @@ impl App {
                 }
                 match key.code {
                     KeyCode::Up | KeyCode::Down => {
-                        let current = self.replay_dataset_index.unwrap_or(0);
-                        let next = if key.code == KeyCode::Up {
+                        if count == 1 && self.replay_dataset_index.is_some() {
+                            if key.code == KeyCode::Down {
+                                if let Some((index, bar_type)) = options.first().copied() {
+                                    self.select_replay_dataset_option(index, bar_type);
+                                }
+                                self.open_replay_setup();
+                            } else {
+                                self.focus = Focus::ReplayInstrumentQuery;
+                            }
+                            return;
+                        }
+                        let current = self.replay_selected_option_position(&options).unwrap_or(0);
+                        let next_position = if key.code == KeyCode::Up {
                             current.checked_sub(1).unwrap_or(count - 1)
                         } else {
                             (current + 1) % count
                         };
-                        self.replay_dataset_index = Some(next);
-                        self.replay_dataset_view_path = None;
+                        if let Some((index, bar_type)) = options.get(next_position).copied() {
+                            self.select_replay_dataset_option(index, bar_type);
+                        }
                         return;
                     }
                     KeyCode::Char('a') => {
                         self.replay_dataset_index = None;
+                        self.replay_dataset_bar_type = None;
                         self.replay_dataset_view_path = None;
                         return;
                     }
-                    KeyCode::Enter => {
-                        self.focus = self.next_replay_focus();
+                    KeyCode::Left => {
+                        self.focus = Focus::ReplayInstrumentQuery;
+                        return;
+                    }
+                    KeyCode::Right | KeyCode::Enter => {
+                        let selected = self.replay_selected_option_position(&options).unwrap_or(0);
+                        if let Some((index, bar_type)) = options.get(selected).copied() {
+                            self.select_replay_dataset_option(index, bar_type);
+                        }
+                        self.open_replay_setup();
                         return;
                     }
                     _ => {}

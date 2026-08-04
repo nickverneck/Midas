@@ -4,9 +4,9 @@ use crate::broker::{
     AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistoryFill, EngineHistorySnapshot, ExecutionProbeManagedProtection,
     ExecutionProbeOrder, ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow,
-    LatencySnapshot, ManualOrderAction, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed,
-    ReplayWindowSnapshot, ServiceCommand, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide,
-    infer_session_profile,
+    LatencySnapshot, ManualOrderAction, MarketHistoryUpdate, MarketSnapshot,
+    ReplayDownloadOperationId, ReplaySpeed, ReplayWindowSnapshot, ServiceCommand, ServiceEvent,
+    SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
 };
 use crate::broker::{ReplayDomLevel, ReplayMarketDom};
 #[cfg(any(feature = "replay", test))]
@@ -51,6 +51,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 #[cfg(feature = "replay")]
+mod browser_har;
+#[cfg(feature = "replay")]
 mod download;
 mod execution;
 mod gateway;
@@ -63,6 +65,8 @@ mod service;
 
 use self::protocol::*;
 pub use self::service::service_loop;
+#[cfg(feature = "replay")]
+pub use browser_har::{BrowserHarImportOptions, import_browser_har};
 #[cfg(feature = "replay")]
 pub use download::{
     TradovateChunkedRawTickCacheRequest, TradovateChunkedRawTickPhase,
@@ -90,14 +94,16 @@ pub use profiler::{SwipeProfileOptions, run_swipe_profile};
 #[cfg(feature = "replay")]
 #[allow(unused_imports)]
 pub(crate) use replay::{
-    ReplayBrokerSchedule, ReplayFeeSchedule, ReplayLiquidationConfig, ReplayMarginConfig,
-    ReplaySweepPerformanceOptions, ReplaySweepPerformanceReport, ReplaySweepRankingMetric,
-    ReplaySweepRankingOptions, ReplaySweepSpec, ReplayWalkForwardEvaluationDocument,
-    ReplayWalkForwardEvaluationOptions, ReplayWalkForwardOptions, ReplayWalkForwardPhase,
-    ReplayWalkForwardSelectionPolicy, ReplayWalkForwardWindow, analyze_replay_margin,
-    evaluate_replay_walk_forward, plan_replay_walk_forward, rank_replay_sweep,
-    replay_sweep_performance_csv, replay_sweep_performance_json, reprice_replay_result,
-    run_replay_sweep, run_replay_sweep_performance, simulate_replay_liquidation_result,
+    ReplayAcceleration, ReplayAccelerationDevice, ReplayAccelerationStatus, ReplayBrokerSchedule,
+    ReplayEmaBatchResult, ReplayEmaLastPair, ReplayFeeSchedule, ReplayLiquidationConfig,
+    ReplayMarginConfig, ReplaySweepExecutionMode, ReplaySweepPerformanceOptions,
+    ReplaySweepPerformanceReport, ReplaySweepRankingMetric, ReplaySweepRankingOptions,
+    ReplaySweepSpec, ReplayWalkForwardEvaluationDocument, ReplayWalkForwardEvaluationOptions,
+    ReplayWalkForwardOptions, ReplayWalkForwardPhase, ReplayWalkForwardSelectionPolicy,
+    ReplayWalkForwardWindow, analyze_replay_margin, ema_last_batch, evaluate_replay_walk_forward,
+    plan_replay_walk_forward, probe_acceleration, rank_replay_sweep, replay_sweep_performance_csv,
+    replay_sweep_performance_json, reprice_replay_result, run_replay_sweep,
+    run_replay_sweep_performance, run_replay_sweep_with_mode, simulate_replay_liquidation_result,
     write_replay_sweep_performance_report,
 };
 

@@ -9,3 +9,6 @@ docs/todo/replay-backtesting-roadmap/*
 !docs/todo/replay-backtesting-roadmap/03-session-range-selection.md
 !docs/todo/replay-backtesting-roadmap/04-replay-engine-fills.md
 .run/
+# Browser HAR exports can contain bearer tokens and session cookies.
+har
+*.har

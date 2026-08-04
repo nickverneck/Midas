@@ -6,6 +6,7 @@ fn replay_run_lines_label_disabled_start_states() {
     let mut missing_config = AppConfig::default();
     missing_config.replay_file_path =
         std::env::temp_dir().join("trader-replay-disabled-missing.Last.txt");
+    missing_config.replay_cache_dir = replay_cache_test_root("disabled-missing-cache");
     let missing_app = App::new(missing_config);
 
     let missing_lines = rendered_text(missing_app.replay_run_control_lines());
@@ -18,6 +19,7 @@ fn replay_run_lines_label_disabled_start_states() {
     let path = replay_test_file("disabled-volume");
     let mut config = AppConfig::default();
     config.replay_file_path = path;
+    config.replay_cache_dir = replay_cache_test_root("disabled-volume-cache");
     let mut volume_app = App::new(config);
     volume_app.bar_type = BarType::volume(6500);
 
@@ -28,11 +30,9 @@ fn replay_run_lines_label_disabled_start_states() {
             .any(|line| line == "[Enter] Start Replay (volume unavailable)")
     );
     let market_lines = rendered_text(volume_app.replay_market_control_lines());
-    assert!(
-        market_lines
-            .iter()
-            .any(|line| line == "Volume needs per-trade size; this Last file only has price.")
-    );
+    assert!(market_lines.iter().any(
+        |line| line == "Readiness: Volume needs per-trade size; this Last file only has price."
+    ));
 }
 
 #[cfg(feature = "replay")]

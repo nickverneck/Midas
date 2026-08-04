@@ -117,6 +117,12 @@ pub(crate) fn strategy_bar_debug_position(
 ) -> (Option<String>, Option<String>) {
     let bars = signal_evaluation_bars(session);
     let bar_count = Some(bars.len().to_string());
+    // Guarded replay emits a decision row for every current bar. Avoid
+    // rescanning the capped history (up to 4,096 bars) in that hot path; the
+    // fallback below still supports diagnostics that point at an older bar.
+    if signal_bar_ts.is_some_and(|ts| bars.last().is_some_and(|bar| bar.ts_ns == ts)) {
+        return (bar_count.clone(), bar_count);
+    }
     let bar_index = signal_bar_ts.and_then(|ts| {
         bars.iter()
             .position(|bar| bar.ts_ns == ts)

@@ -126,7 +126,7 @@ impl App {
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 self.replay_dataset_view_path = None;
                 self.replay_view = ReplayView::Library;
-                self.focus = Focus::ReplayDataset;
+                self.focus = Focus::ReplayInstrumentQuery;
                 self.status = "Replay will use the selected dataset's full coverage.".to_string();
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
@@ -141,7 +141,7 @@ impl App {
                 self.replay_dataset_view_path = Some(resolved.view_path.clone());
                 self.status = format!("Selected replay dataset view `{}`.", resolved.view.id);
                 self.replay_view = ReplayView::Library;
-                self.focus = Focus::ReplayDataset;
+                self.focus = Focus::ReplayInstrumentQuery;
             }
             _ => {}
         }

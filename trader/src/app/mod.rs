@@ -105,6 +105,13 @@ pub struct App {
     replay_execution_ledger: ReplayExecutionLedgerSummary,
     #[cfg(feature = "replay")]
     replay_dataset_index: Option<usize>,
+    /// Selected exact server-bar shape within the cached manifest. A single
+    /// manifest can contain several shapes, so its index alone is not enough
+    /// to identify the replay source chosen in the picker.
+    #[cfg(feature = "replay")]
+    replay_dataset_bar_type: Option<BarType>,
+    #[cfg(feature = "replay")]
+    replay_instrument_query: String,
     #[cfg(feature = "replay")]
     replay_dataset_view_path: Option<PathBuf>,
     #[cfg(feature = "replay")]
@@ -192,6 +199,8 @@ enum Focus {
     BarValue,
     CandleModeToggle,
     #[cfg(feature = "replay")]
+    ReplayInstrumentQuery,
+    #[cfg(feature = "replay")]
     ReplayDataset,
     #[cfg(feature = "replay")]
     ReplayInitialCapital,
@@ -254,6 +263,7 @@ enum Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayView {
     Library,
+    Setup,
     Downloader,
     DatasetViews,
 }

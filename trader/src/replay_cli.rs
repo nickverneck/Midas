@@ -1,8 +1,8 @@
 use crate::cli::{
     AnalyzeReplayMarginArgs, EvaluateReplayWalkForwardArgs, ImportReplayBrokerScheduleArgs,
-    PlanReplayWalkForwardArgs, ProfileReplaySweepArgs, RankReplaySweepArgs, ReplayDownloadArgs,
-    RepriceReplayResultArgs, RunReplaySweepArgs, SimulateReplayLiquidationArgs,
-    ValidateReplaySweepArgs,
+    PlanReplayWalkForwardArgs, ProbeReplayAccelerationArgs, ProfileReplaySweepArgs,
+    RankReplaySweepArgs, ReplayDownloadArgs, RepriceReplayResultArgs, RunReplaySweepArgs,
+    SimulateReplayLiquidationArgs, ValidateReplaySweepArgs,
 };
 use crate::config::AppConfig;
 #[cfg(feature = "replay")]
@@ -10,6 +10,99 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 #[cfg(feature = "replay")]
 use std::path::PathBuf;
+
+pub(crate) fn probe_replay_acceleration(
+    config: &AppConfig,
+    args: ProbeReplayAccelerationArgs,
+) -> Result<()> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (config, args);
+        bail!("replay acceleration probing requires `--features replay`");
+    }
+
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
+    {
+        let _ = (config, args);
+        bail!("replay acceleration probing requires the Tradovate replay module in this build");
+    }
+
+    #[cfg(all(feature = "replay", feature = "tradovate"))]
+    {
+        let _ = config;
+        let requested = args
+            .acceleration
+            .parse::<crate::tradovate::ReplayAcceleration>()
+            .map_err(anyhow::Error::msg)?;
+        let status = crate::tradovate::probe_acceleration(requested);
+        if matches!(
+            requested,
+            crate::tradovate::ReplayAcceleration::CandleCuda
+                | crate::tradovate::ReplayAcceleration::CandleMetal
+        ) && (!status.device_available
+            || status.selected == crate::tradovate::ReplayAccelerationDevice::Cpu)
+        {
+            bail!("{} requested but unavailable: {}", requested, status.reason);
+        }
+        println!("Requested backend: {}", status.requested);
+        println!("Selected backend: {}", status.selected.label());
+        println!("Candle compiled: {}", status.candle_compiled);
+        println!("Accelerator available: {}", status.device_available);
+        println!("Indicator values exact: {}", status.exact);
+        println!("Status: {}", status.reason);
+        println!(
+            "Scope: indicator pre-computation only; replay fills, protection, and account transitions remain ordered on CPU."
+        );
+
+        let mut values = args.values;
+        if let Some(path) = args.values_file {
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
+            values.extend(parse_acceleration_values(&contents)?);
+        }
+        if values.is_empty() {
+            values = (0..64).map(|index| 100.0 + index as f64).collect();
+            println!(
+                "Input: generated 64-row smoke-test series (pass --values-file for real data)"
+            );
+        } else {
+            println!("Input: {} close values", values.len());
+        }
+        let result = crate::tradovate::ema_last_batch(&values, &args.periods, requested)?;
+        println!("EMA backend: {}", result.backend.label());
+        println!("EMA exact: {}", result.exact);
+        println!("EMA note: {}", result.note);
+        for value in result.values {
+            println!(
+                "EMA period {}: previous={} current={}",
+                value.period,
+                value
+                    .previous
+                    .map(|number| format!("{number:.12}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                value
+                    .current
+                    .map(|number| format!("{number:.12}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn parse_acceleration_values(contents: &str) -> Result<Vec<f64>> {
+    contents
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|token| !token.trim().is_empty())
+        .map(|token| {
+            token
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| anyhow::anyhow!("invalid close value `{token}`: {error}"))
+        })
+        .collect()
+}
 
 pub(crate) async fn download_replay_data(
     config: &AppConfig,
@@ -253,6 +346,7 @@ pub(crate) fn validate_replay_sweep(args: ValidateReplaySweepArgs) -> Result<()>
         println!("Dataset view: {}", spec.base_dataset_view.id);
         println!("Runs: {}", plan.children.len());
         println!("Parallelism: {}", spec.parallelism);
+        println!("Execution mode: {}", spec.execution_mode.label());
         println!(
             "Estimate: input rows {}, memory {}, output {}, runtime {}.",
             display_estimate_value(report.estimate.estimated_input_rows),
@@ -298,6 +392,17 @@ pub(crate) async fn run_replay_sweep(config: &AppConfig, args: RunReplaySweepArg
     #[cfg(all(feature = "replay", feature = "tradovate"))]
     {
         let spec = crate::tradovate::ReplaySweepSpec::load(&args.spec)?;
+        let execution_mode = args
+            .execution_mode
+            .as_deref()
+            .map(crate::tradovate::ReplaySweepExecutionMode::parse)
+            .transpose()?;
+        let evaluator_mode = args
+            .evaluator_mode
+            .as_deref()
+            .map(crate::broker::ReplayEvaluatorMode::parse)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!(error))?;
         let report = spec.guardrail_report(Some(&config.replay_cache_dir))?;
         println!(
             "Replay sweep launch estimate: {} combinations, {} parallel jobs, input rows {}, memory {}, output {}, runtime {}.",
@@ -307,6 +412,14 @@ pub(crate) async fn run_replay_sweep(config: &AppConfig, args: RunReplaySweepArg
             display_estimate_bytes(report.estimate.estimated_memory_bytes),
             display_estimate_bytes(report.estimate.estimated_output_bytes),
             display_estimate_duration(report.estimate.estimated_runtime_seconds),
+        );
+        println!(
+            "Execution mode: {}",
+            execution_mode.unwrap_or(spec.execution_mode).label()
+        );
+        println!(
+            "Evaluator mode: {}",
+            evaluator_mode.unwrap_or(spec.evaluator_mode).config_label()
         );
         for warning in &report.warnings {
             println!("Warning: {warning}");
@@ -319,12 +432,14 @@ pub(crate) async fn run_replay_sweep(config: &AppConfig, args: RunReplaySweepArg
                 "Large sweep confirmation required: pass --allow-large after reviewing the estimate."
             );
         }
-        let summary = crate::tradovate::run_replay_sweep(
+        let summary = crate::tradovate::run_replay_sweep_with_mode(
             config,
             &args.spec,
             args.no_resume,
             args.allow_large,
             args.override_guardrails,
+            execution_mode,
+            evaluator_mode,
         )
         .await?;
         println!(

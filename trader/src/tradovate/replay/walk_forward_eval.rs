@@ -917,6 +917,12 @@ fn sweep_mismatches(sweep: &Value, child: &ReplaySweepChildSpec) -> Vec<String> 
     check_value(sweep, "bar_type", &child.bar_type, &mut mismatches);
     check_value(sweep, "candle_mode", &child.candle_mode, &mut mismatches);
     check_value(sweep, "engine_mode", &child.engine_mode, &mut mismatches);
+    check_value(
+        sweep,
+        "evaluator_mode",
+        &child.evaluator_mode,
+        &mut mismatches,
+    );
     check_value(sweep, "fill_model", &child.fill_model, &mut mismatches);
     check_value(sweep, "latency", &child.latency, &mut mismatches);
     check_value(

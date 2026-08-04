@@ -3,117 +3,440 @@ use crate::broker::{ReplayEngineMode, ReplayFillModel};
 use std::path::{Path, PathBuf};
 
 impl App {
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_filtered_dataset_indices(&self) -> Vec<usize> {
+        let query = self.replay_instrument_query.trim().to_ascii_lowercase();
+        self.replay_cache_library
+            .datasets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, dataset)| {
+                if query.is_empty() {
+                    return Some(index);
+                }
+                let manifest = &dataset.manifest;
+                let instrument = manifest.instrument.symbol.to_ascii_lowercase();
+                let contract = manifest.contract.symbol.to_ascii_lowercase();
+                let name = manifest.display_name.to_ascii_lowercase();
+                let instrument_name = manifest
+                    .instrument
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                (instrument.contains(&query)
+                    || contract.contains(&query)
+                    || name.contains(&query)
+                    || instrument_name.contains(&query))
+                .then_some(index)
+            })
+            .collect()
+    }
+
+    /// Return one picker option per exact cached server-bar shape.  A cache
+    /// manifest is intentionally shared by several shapes, but the user must
+    /// still be able to select `500 Vol` independently from `1000 Vol`.
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_dataset_options(&self) -> Vec<(usize, Option<BarType>)> {
+        let query = self.replay_instrument_query.trim().to_ascii_lowercase();
+        let mut options = Vec::new();
+        for (index, dataset) in self.replay_cache_library.datasets.iter().enumerate() {
+            let manifest = &dataset.manifest;
+            let instrument = manifest.instrument.symbol.to_ascii_lowercase();
+            let contract = manifest.contract.symbol.to_ascii_lowercase();
+            let name = manifest.display_name.to_ascii_lowercase();
+            let instrument_name = manifest
+                .instrument
+                .name
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !query.is_empty()
+                && !(instrument.contains(&query)
+                    || contract.contains(&query)
+                    || name.contains(&query)
+                    || instrument_name.contains(&query))
+            {
+                continue;
+            }
+
+            if manifest.available_bar_shapes.is_empty() {
+                // Raw-tick-only datasets have no fixed provider bar shape;
+                // retain one option so they remain selectable.
+                options.push((index, None));
+            } else {
+                options.extend(
+                    manifest
+                        .available_bar_shapes
+                        .iter()
+                        .copied()
+                        .map(|bar_type| (index, Some(bar_type))),
+                );
+            }
+        }
+        options
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn select_replay_dataset_option(
+        &mut self,
+        dataset_index: usize,
+        bar_type: Option<BarType>,
+    ) {
+        self.replay_dataset_index = Some(dataset_index);
+        self.replay_dataset_bar_type = bar_type;
+        self.replay_dataset_view_path = None;
+        if let Some(bar_type) = bar_type {
+            self.bar_type = bar_type;
+            self.candle_mode = self.bar_type.effective_candle_mode(self.candle_mode);
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_selected_option_is(
+        &self,
+        dataset_index: usize,
+        bar_type: Option<BarType>,
+    ) -> bool {
+        self.replay_dataset_index == Some(dataset_index) && self.replay_dataset_bar_type == bar_type
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_selected_option_position(
+        &self,
+        options: &[(usize, Option<BarType>)],
+    ) -> Option<usize> {
+        options
+            .iter()
+            .position(|(index, bar_type)| self.replay_selected_option_is(*index, *bar_type))
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_selected_choice_label(&self) -> String {
+        let Some(dataset) = self.replay_selected_dataset() else {
+            return "none".to_string();
+        };
+        self.replay_dataset_bar_type
+            .map(|bar_type| {
+                format!(
+                    "{} / {}",
+                    dataset.manifest.contract.symbol,
+                    bar_type.label()
+                )
+            })
+            .unwrap_or_else(|| dataset.manifest.display_name.clone())
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn sync_replay_dataset_filter(&mut self) {
+        let options = self.replay_dataset_options();
+        if let Some((index, bar_type)) = options
+            .iter()
+            .copied()
+            .find(|(index, bar_type)| self.replay_selected_option_is(*index, *bar_type))
+        {
+            self.select_replay_dataset_option(index, bar_type);
+        } else if let Some((index, bar_type)) = options.first().copied() {
+            self.select_replay_dataset_option(index, bar_type);
+        } else {
+            self.replay_dataset_index = None;
+            self.replay_dataset_bar_type = None;
+            self.replay_dataset_view_path = None;
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_dataset_row_line(
+        &self,
+        position: usize,
+        index: usize,
+        selected_bar_type: Option<BarType>,
+    ) -> Line<'static> {
+        let dataset = &self.replay_cache_library.datasets[index];
+        let manifest = &dataset.manifest;
+        let selected = self.replay_selected_option_is(index, selected_bar_type);
+        let marker = if selected { ">" } else { " " };
+        let coverage = if manifest.coverage.start.date_naive() == manifest.coverage.end.date_naive()
+        {
+            manifest.coverage.start.format("%Y-%m-%d").to_string()
+        } else {
+            format!(
+                "{}..{}",
+                manifest.coverage.start.format("%m-%d"),
+                manifest.coverage.end.format("%m-%d")
+            )
+        };
+        let row = match (manifest.available_bar_shapes.len() > 1, selected_bar_type) {
+            (true, Some(bar_type)) => format!(
+                "{marker} [{position}] {} | {} | {} | {coverage} | {} rows",
+                manifest.contract.symbol,
+                bar_type.label(),
+                manifest.source_kind.label(),
+                manifest
+                    .files
+                    .iter()
+                    .find(|file| file.market_shape.bar_type == Some(bar_type))
+                    .map(|file| file.row_count)
+                    .unwrap_or_else(|| manifest.preferred_row_count_total()),
+            ),
+            _ => format!(
+                "{marker} [{position}] {} | {} | {coverage} | {} rows",
+                manifest.contract.symbol,
+                manifest.source_kind.label(),
+                manifest.preferred_row_count_total(),
+            ),
+        };
+        if selected && self.focus == Focus::ReplayDataset {
+            Line::from(Span::styled(
+                row,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else if selected {
+            Line::from(Span::styled(
+                row,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::styled(row, Style::default().fg(Color::White)))
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_dataset_compact_row_line(
+        &self,
+        position: usize,
+        index: usize,
+        selected_bar_type: Option<BarType>,
+    ) -> Line<'static> {
+        let dataset = &self.replay_cache_library.datasets[index];
+        let manifest = &dataset.manifest;
+        let selected = self.replay_selected_option_is(index, selected_bar_type);
+        let marker = if selected { ">" } else { " " };
+        let source = match manifest.source_kind {
+            crate::replay_cache::ReplayCacheSourceKind::ServerBars => "bars",
+            crate::replay_cache::ReplayCacheSourceKind::RawTicks => "raw",
+            crate::replay_cache::ReplayCacheSourceKind::Mixed => "mixed",
+            crate::replay_cache::ReplayCacheSourceKind::DerivedBars => "derived",
+            crate::replay_cache::ReplayCacheSourceKind::DomStream => "L2",
+            crate::replay_cache::ReplayCacheSourceKind::LocalText => "text",
+        };
+        let coverage = manifest.coverage.start.format("%m-%d");
+        let row = match (manifest.available_bar_shapes.len() > 1, selected_bar_type) {
+            (true, Some(bar_type)) => format!(
+                "{marker} [{position}] {} | {} | {source} | {coverage} | {}",
+                manifest.contract.symbol,
+                bar_type.label(),
+                manifest
+                    .files
+                    .iter()
+                    .find(|file| file.market_shape.bar_type == Some(bar_type))
+                    .map(|file| file.row_count)
+                    .unwrap_or_else(|| manifest.preferred_row_count_total()),
+            ),
+            _ => format!(
+                "{marker} [{position}] {} | {source} | {coverage} | {}",
+                manifest.contract.symbol,
+                manifest.preferred_row_count_total(),
+            ),
+        };
+        if selected && self.focus == Focus::ReplayDataset {
+            Line::from(Span::styled(
+                row,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else if selected {
+            Line::from(Span::styled(
+                row,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::styled(row, Style::default().fg(Color::White)))
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_dataset_metadata_lines(&self) -> Vec<Line<'static>> {
+        let Some(dataset) = self.replay_selected_dataset() else {
+            let configured_path = &self.base_config.replay_file_path;
+            return vec![
+                Line::from("No cached contract selected."),
+                Line::from("Select a cached row to inspect its metadata."),
+                Line::from(""),
+                replay_metadata_line(
+                    "Local fallback",
+                    if self.local_replay_dataset_available() {
+                        "ready"
+                    } else {
+                        "missing"
+                    },
+                ),
+                replay_metadata_line("File", display_path_name(configured_path)),
+                Line::from("Enter on an empty search opens contract download."),
+            ];
+        };
+
+        let manifest = &dataset.manifest;
+        let raw_ticks =
+            manifest.has_source_kind(crate::replay_cache::ReplayCacheSourceKind::RawTicks);
+        let shapes = if raw_ticks && manifest.available_bar_shapes.is_empty() {
+            "derived from raw ticks (time, tick-count, range)".to_string()
+        } else {
+            manifest.available_shapes_label()
+        };
+        let modes = if raw_ticks && manifest.available_chart_modes.is_empty() {
+            "derived OHLC / Heikin Ashi".to_string()
+        } else {
+            manifest.available_chart_modes_label()
+        };
+        let mut lines = vec![
+            replay_metadata_line("Instrument", manifest.instrument.symbol.clone()),
+            replay_metadata_line("Contract", manifest.contract.symbol.clone()),
+            replay_metadata_line(
+                "Description",
+                manifest
+                    .instrument
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| manifest.display_name.clone()),
+            ),
+            replay_metadata_line("Dataset", manifest.display_name.clone()),
+            replay_metadata_line(
+                "Selected shape",
+                self.replay_dataset_bar_type
+                    .map(|bar_type| bar_type.label())
+                    .unwrap_or_else(|| "raw ticks".to_string()),
+            ),
+            replay_metadata_line(
+                "Provider",
+                format!("{} / {}", manifest.provider.label(), manifest.env.label()),
+            ),
+            replay_metadata_line("Coverage", manifest.coverage.label()),
+            replay_metadata_line("Source", manifest.source_kind.label()),
+            replay_metadata_line("Rows", manifest.preferred_row_count_total().to_string()),
+            replay_metadata_line("Granular", if raw_ticks { "yes" } else { "no" }),
+            replay_metadata_line("Shapes", shapes),
+            replay_metadata_line("Modes", modes),
+            replay_metadata_line("Badges", manifest.badges_label()),
+            replay_metadata_line("Manifest", dataset.manifest_path.display().to_string()),
+        ];
+        if !manifest.tags.is_empty() {
+            lines.push(replay_metadata_line("Tags", manifest.tags.join(", ")));
+        }
+        if let Some(notes) = manifest.notes.as_deref() {
+            lines.push(replay_metadata_line("Notes", notes.to_string()));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Enter/Right: replay setup"));
+        lines.push(Line::from("Select row, then D: extend | V: saved views"));
+        lines
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn replay_dataset_metadata_compact_lines(&self) -> Vec<Line<'static>> {
+        let Some(dataset) = self.replay_selected_dataset() else {
+            return self.replay_dataset_metadata_lines();
+        };
+        let manifest = &dataset.manifest;
+        let raw_ticks =
+            manifest.has_source_kind(crate::replay_cache::ReplayCacheSourceKind::RawTicks);
+        vec![
+            replay_metadata_line("Contract", manifest.contract.symbol.clone()),
+            replay_metadata_line("Source", manifest.source_kind.label()),
+            replay_metadata_line(
+                "Selected shape",
+                self.replay_dataset_bar_type
+                    .map(|bar_type| bar_type.label())
+                    .unwrap_or_else(|| "raw ticks".to_string()),
+            ),
+            replay_metadata_line("Coverage", manifest.coverage.label()),
+            replay_metadata_line("Rows", manifest.preferred_row_count_total().to_string()),
+            replay_metadata_line("Granular", if raw_ticks { "yes" } else { "no" }),
+            replay_metadata_line(
+                "Shapes",
+                if raw_ticks && manifest.available_bar_shapes.is_empty() {
+                    "derived from raw ticks (time, tick-count, range)".to_string()
+                } else {
+                    manifest.available_shapes_label()
+                },
+            ),
+            Line::from("Enter/Right: replay setup"),
+            Line::from("Select row, then D/V for dataset actions"),
+        ]
+    }
+
+    #[cfg(not(feature = "replay"))]
+    pub(in crate::app) fn replay_dataset_metadata_lines(&self) -> Vec<Line<'static>> {
+        vec![Line::from("Replay cache support is disabled.")]
+    }
+
+    #[cfg(not(feature = "replay"))]
+    pub(in crate::app) fn replay_dataset_metadata_compact_lines(&self) -> Vec<Line<'static>> {
+        vec![Line::from("Replay cache support is disabled.")]
+    }
+
     pub(in crate::app) fn replay_dataset_library_compact_lines(&self) -> Vec<Line<'static>> {
         #[cfg(feature = "replay")]
         {
-            let mut lines = vec![Line::from("Owned Cached Datasets")];
-            if self.replay_cache_library.datasets.is_empty() {
+            let mut lines = vec![Line::from("Cached Contracts")];
+            lines.push(Line::from(format!(
+                "Search: {}{}",
+                if self.replay_instrument_query.is_empty() {
+                    "<all>".to_string()
+                } else {
+                    self.replay_instrument_query.clone()
+                },
+                if self.focus == Focus::ReplayInstrumentQuery {
+                    " *"
+                } else {
+                    ""
+                }
+            )));
+            let indices = self.replay_filtered_dataset_indices();
+            let options = self.replay_dataset_options();
+            if options.is_empty() {
                 lines.extend([
-                    Line::from("Count: 0"),
-                    Line::from("No cached datasets found."),
-                    Line::from("Press N or Enter to add a dataset."),
-                    Line::from(format!(
-                        "Local fallback: {}",
-                        if self.local_replay_dataset_available() {
-                            "ready"
-                        } else {
-                            "missing"
-                        }
-                    )),
+                    Line::from("No cached contract matches."),
+                    Line::from("Enter: search/download | Tab: run setup"),
                 ]);
                 return lines;
             }
 
             lines.push(Line::from(format!(
-                "Count: {} | Selected: {}",
-                self.replay_cache_library.datasets.len(),
-                self.replay_dataset_index
-                    .map(|index| (index + 1).to_string())
-                    .unwrap_or_else(|| "auto".to_string())
+                "{} cached | selected {}",
+                indices.len(),
+                self.replay_selected_choice_label()
             )));
-            lines.push(Line::from("Up/Dn | V views | N new | D ext | A auto"));
+            lines.push(Line::from("Up/Down select shape | Enter/Right setup"));
 
-            const VISIBLE_DATASETS: usize = 4;
-            let visible_start = self
-                .replay_dataset_index
-                .unwrap_or(0)
+            const VISIBLE_DATASETS: usize = 8;
+            let selected_position = self.replay_selected_option_position(&options).unwrap_or(0);
+            let visible_start = selected_position
                 .saturating_sub(VISIBLE_DATASETS - 1)
-                .min(
-                    self.replay_cache_library
-                        .datasets
-                        .len()
-                        .saturating_sub(VISIBLE_DATASETS),
-                );
-            for (index, dataset) in self
-                .replay_cache_library
-                .datasets
+                .min(options.len().saturating_sub(VISIBLE_DATASETS));
+            for (position, (index, bar_type)) in options
                 .iter()
+                .copied()
                 .enumerate()
                 .skip(visible_start)
                 .take(VISIBLE_DATASETS)
             {
-                let manifest = &dataset.manifest;
-                let marker = if self.replay_dataset_index == Some(index) {
-                    ">"
-                } else {
-                    " "
-                };
-                let first_shape = manifest
-                    .available_bar_shapes
-                    .first()
-                    .map(|bar_type| bar_type.label())
-                    .unwrap_or_else(|| "derived".to_string());
-                let extra_shapes = manifest.available_bar_shapes.len().saturating_sub(1);
-                let shape_label = if extra_shapes == 0 {
-                    first_shape
-                } else {
-                    format!("{first_shape} +{extra_shapes}")
-                };
-                let has_standard = manifest
-                    .available_chart_modes
-                    .contains(&CandleMode::Standard);
-                let has_heikin = manifest
-                    .available_chart_modes
-                    .contains(&CandleMode::HeikinAshi);
-                let mode_label = match (has_standard, has_heikin) {
-                    (true, true) => "OHLC/HA",
-                    (false, true) => "HA",
-                    _ => "OHLC",
-                };
-                lines.extend([
-                    Line::from(format!(
-                        "{marker} [{}] {} | {}",
-                        index + 1,
-                        manifest.contract.symbol,
-                        manifest.source_kind.label()
-                    )),
-                    Line::from(format!(
-                        "  {} {}-{} UTC",
-                        manifest.coverage.start.format("%Y-%m-%d"),
-                        manifest.coverage.start.format("%H:%M"),
-                        manifest.coverage.end.format("%H:%M")
-                    )),
-                    Line::from(format!(
-                        "  {shape_label} | {mode_label} | {} rows | raw {}",
-                        manifest.preferred_row_count_total(),
-                        if manifest
-                            .has_source_kind(crate::replay_cache::ReplayCacheSourceKind::RawTicks,)
-                        {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                    )),
-                ]);
+                lines.push(self.replay_dataset_compact_row_line(position + 1, index, bar_type));
             }
-            lines.push(Line::from(format!(
-                "Local fallback: {}",
-                if self.local_replay_dataset_available() {
-                    "ready"
-                } else {
-                    "missing"
-                }
-            )));
+            lines.push(Line::from(if self.focus == Focus::ReplayDataset {
+                "N download | D extend | V views"
+            } else {
+                "Select row: N/D/V actions"
+            }));
             lines
         }
 
@@ -125,291 +448,246 @@ impl App {
 
     pub(in crate::app) fn replay_market_control_compact_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            styled_line(
-                format!("Bar Type: {}", self.bar_type.kind().label()),
+            replay_edit_line(
+                "Bar Type",
+                format!("{} (Left/Right)", self.bar_type.kind().label()),
                 self.focus == Focus::BarTypeToggle,
             ),
-            styled_line(
-                format!("{}: {}", self.replay_value_label(), self.bar_value_text()),
+            replay_edit_line(
+                self.replay_value_label(),
+                format!("{} (digits)", self.bar_value_text()),
                 self.focus == Focus::BarValue,
             ),
         ];
         if self.candle_mode_controls_visible() {
-            lines.push(styled_line(
-                format!("Candles: {}", self.candle_mode.label()),
+            lines.push(replay_edit_line(
+                "Candles",
+                format!("{} (Left/Right)", self.candle_mode.label()),
                 self.focus == Focus::CandleModeToggle,
             ));
         }
-        lines.push(Line::from(format!(
-            "Selection: {}",
-            self.bar_type.mode_label(self.effective_candle_mode())
-        )));
-        lines.push(Line::from(format!(
-            "Data: {}",
+        lines.push(replay_metadata_line(
+            "Selection",
+            self.bar_type.mode_label(self.effective_candle_mode()),
+        ));
+        lines.push(replay_metadata_line(
+            "Data",
             if self.replay_dataset_available() {
                 "ready"
             } else {
                 "missing"
-            }
-        )));
+            },
+        ));
         lines
     }
 
     pub(in crate::app) fn replay_run_control_compact_lines(&self) -> Vec<Line<'static>> {
         vec![
-            styled_line(
-                self.replay_start_action_label(),
+            replay_action_line(
+                self.replay_start_action_compact_label(),
                 self.focus == Focus::ReplayMode,
             ),
-            styled_line(
-                format!(
-                    "Initial capital ({}): {}",
-                    self.base_config.replay_account_currency,
-                    self.replay_initial_capital_text()
-                ),
+            replay_edit_line(
+                format!("Capital ({})", self.base_config.replay_account_currency,),
+                self.replay_initial_capital_text(),
                 self.replay_initial_capital_focused(),
             ),
-            styled_line(
-                format!(
-                    "Margin/contract: {}",
-                    self.replay_margin_per_contract_text()
-                ),
+            replay_edit_line(
+                "Margin",
+                self.replay_margin_per_contract_text(),
                 self.replay_margin_per_contract_focused(),
             ),
-            styled_line(
-                format!("Safety buffer: {}", self.replay_safety_buffer_text()),
+            replay_edit_line(
+                "Safety",
+                self.replay_safety_buffer_text(),
                 self.replay_safety_buffer_focused(),
             ),
-            styled_line(
-                format!(
-                    "Safety buffer %: {}",
-                    self.replay_safety_buffer_percent_text()
-                ),
+            replay_edit_line(
+                "Safety buffer %",
+                self.replay_safety_buffer_percent_text(),
                 self.replay_safety_buffer_percent_focused(),
             ),
-            Line::from(format!(
-                "Bar: {}",
+            replay_metadata_line(
+                "Bar",
                 if self.replay_selected_bar_supported() {
                     "supported"
                 } else {
                     "unsupported"
-                }
-            )),
-            Line::from("V views | N new | D extend"),
-            Line::from("No live streams in Replay."),
+                },
+            ),
+            replay_hint_line("Up/Down | digits | Enter"),
         ]
     }
 
     pub(in crate::app) fn replay_dataset_library_lines(&self) -> Vec<Line<'static>> {
-        let configured_path = &self.base_config.replay_file_path;
-        let resolved = replay_dataset_file_metadata(configured_path);
-        let mut lines = self.replay_cache_library_lines();
-        lines.extend([
-            Line::from(""),
-            Line::from("Configured Local Replay File"),
-            Line::from(format!(
-                "Configured file: {}",
-                display_path_name(configured_path)
-            )),
-            Line::from(format!("Configured path: {}", configured_path.display())),
-        ]);
-
-        match resolved {
-            Some((path, bytes)) => {
-                lines.extend([
-                    Line::from("Status: ready"),
-                    Line::from(format!("Resolved file: {}", display_path_name(&path))),
-                    Line::from(format!("Resolved path: {}", path.display())),
-                    Line::from(format!(
-                        "Inferred contract: {}",
-                        infer_replay_contract(&path)
-                    )),
-                    Line::from(format!("Size: {}", format_bytes(bytes))),
-                    Line::from("Raw data: price-only ticks from local Last text file"),
-                    Line::from("Available bars: seconds, minutes, tick-count, range"),
-                    Line::from("Unavailable: volume needs per-trade size"),
-                ]);
-            }
-            None => {
-                lines.extend([
-                    Line::from("Status: missing local file"),
-                    Line::from("No replay dataset is available for the configured path."),
-                    Line::from(
-                        "Set replay_file_path or TRADER_REPLAY_FILE_PATH to a local tick file.",
-                    ),
-                    Line::from("Available after load: seconds, minutes, tick-count, range"),
-                    Line::from("Unavailable: volume needs per-trade size"),
-                ]);
-            }
-        }
-
-        lines
+        self.replay_cache_library_lines()
     }
 
     pub(in crate::app) fn replay_market_control_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            styled_line(
-                format!("Bar Type: {}", self.bar_type.kind().label()),
+            replay_edit_line(
+                "Bar Type",
+                format!("{} (Left/Right)", self.bar_type.kind().label()),
                 self.focus == Focus::BarTypeToggle,
             ),
-            styled_line(
-                format!("{}: {}", self.replay_value_label(), self.bar_value_text()),
+            replay_edit_line(
+                self.replay_value_label(),
+                format!("{} (digits)", self.bar_value_text()),
                 self.focus == Focus::BarValue,
             ),
         ];
 
         if self.candle_mode_controls_visible() {
-            lines.push(styled_line(
-                format!("Candles: {}", self.candle_mode.label()),
+            lines.push(replay_edit_line(
+                "Candles",
+                format!("{} (Left/Right)", self.candle_mode.label()),
                 self.focus == Focus::CandleModeToggle,
             ));
         }
 
         if !self.replay_selected_bar_supported() {
-            lines.push(Line::from(
+            lines.push(replay_metadata_line(
+                "Readiness",
                 "Volume needs per-trade size; this Last file only has price.",
             ));
         } else if self.replay_cache_can_serve_selected_bar() {
-            lines.push(Line::from(
-                "Cached server bars provide this exact bar selection.",
+            lines.push(replay_metadata_line(
+                "Readiness",
+                self.replay_selected_source_readiness(),
             ));
         }
         if self.bar_type.kind() == BarKind::Tick {
-            lines.push(Line::from(
+            lines.push(replay_hint_line(
                 "Replay tick-count is local; live Tick Count needs Tradovate validation with a valid token.",
             ));
         }
 
         lines.extend([
-            Line::from("Type digits to edit value; Left/Right changes bar type/candles."),
-            Line::from(format!(
-                "Effective chart: {}",
-                self.bar_type.mode_label(self.effective_candle_mode())
-            )),
-            Line::from(format!(
-                "Replay interval: {}ms between derived bars at 1x",
-                self.base_config.replay_bar_interval_ms
-            )),
+            replay_metadata_line(
+                "Effective chart",
+                self.bar_type.mode_label(self.effective_candle_mode()),
+            ),
+            replay_metadata_line(
+                "Interval",
+                format!(
+                    "{}ms between derived bars at 1x",
+                    self.base_config.replay_bar_interval_ms
+                ),
+            ),
+            replay_hint_line("Up/Down navigates | Tab/Shift-Tab also moves focus"),
         ]);
         lines
     }
 
     pub(in crate::app) fn replay_run_control_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        lines.push(styled_line(
+        lines.push(replay_action_line(
             self.replay_start_action_label(),
             self.focus == Focus::ReplayMode,
         ));
         lines.extend([
-            styled_line(
+            replay_edit_line(
                 format!(
-                    "Initial capital ({}): {}",
-                    self.base_config.replay_account_currency,
-                    self.replay_initial_capital_text()
+                    "Initial capital ({})",
+                    self.base_config.replay_account_currency
                 ),
+                self.replay_initial_capital_text(),
                 self.replay_initial_capital_focused(),
             ),
-            styled_line(
-                format!(
-                    "Margin/contract: {}",
-                    self.replay_margin_per_contract_text()
-                ),
+            replay_edit_line(
+                "Margin/contract",
+                self.replay_margin_per_contract_text(),
                 self.replay_margin_per_contract_focused(),
             ),
-            styled_line(
-                format!("Safety buffer: {}", self.replay_safety_buffer_text()),
+            replay_edit_line(
+                "Safety buffer",
+                self.replay_safety_buffer_text(),
                 self.replay_safety_buffer_focused(),
             ),
-            styled_line(
-                format!(
-                    "Safety buffer %: {}",
-                    self.replay_safety_buffer_percent_text()
-                ),
+            replay_edit_line(
+                "Safety buffer %",
+                self.replay_safety_buffer_percent_text(),
                 self.replay_safety_buffer_percent_focused(),
             ),
-            Line::from(format!(
-                "Margin model: {} | analysis {}",
-                self.base_config.replay_margin_model,
-                if self.base_config.replay_margin_per_contract > 0.0 {
-                    "enabled"
-                } else {
-                    "disabled (set margin/contract > 0)"
-                }
-            )),
-        ]);
-        lines.push(Line::from(format!(
-            "Replay source: {}",
-            if self.replay_cache_can_serve_selected_bar() {
-                "matching cached server bars"
-            } else if self.local_replay_dataset_available() {
-                "ready"
-            } else {
-                "missing"
-            }
-        )));
-        lines.push(Line::from(format!(
-            "Replay engine: {}",
-            self.base_config.replay_engine_mode.label()
-        )));
-        lines.push(Line::from(format!(
-            "Fill model: {}",
-            match self.base_config.replay_engine_mode {
-                ReplayEngineMode::Legacy => ReplayFillModel::LegacyReferencePrice.label(),
-                ReplayEngineMode::Deterministic => self.base_config.replay_fill_model.label(),
-            }
-        )));
-        lines.push(Line::from(match self.base_config.replay_engine_mode {
-            ReplayEngineMode::Legacy => "Latency model: ignored in Legacy".to_string(),
-            ReplayEngineMode::Deterministic => {
-                let detail = match self.base_config.replay_latency_model {
-                    ReplayLatencyModel::Fixed => {
-                        format!("{}ms", self.base_config.replay_fixed_latency_ms)
-                    }
-                    ReplayLatencyModel::SeededObserved => format!(
-                        "{} samples, seed {}",
-                        self.base_config.replay_observed_latency_ms.len(),
-                        self.base_config.replay_latency_seed
-                    ),
-                    _ => format!(
-                        "{} samples",
-                        self.base_config.replay_observed_latency_ms.len()
-                    ),
-                };
+            replay_metadata_line(
+                "Margin model",
                 format!(
-                    "Latency model: {} ({detail})",
-                    self.base_config.replay_latency_model.label()
-                )
-            }
-        }));
-        lines.push(Line::from(format!(
-            "Bar protection: {}",
-            self.base_config.replay_bar_protection_policy.label()
-        )));
+                    "{} | analysis {}",
+                    self.base_config.replay_margin_model,
+                    if self.base_config.replay_margin_per_contract > 0.0 {
+                        "enabled"
+                    } else {
+                        "disabled (set margin/contract > 0)"
+                    }
+                ),
+            ),
+        ]);
+        lines.push(replay_metadata_line(
+            "Replay source",
+            self.replay_selected_source_readiness(),
+        ));
+        lines.push(replay_metadata_line(
+            "Replay engine",
+            self.base_config.replay_engine_mode.label(),
+        ));
+        lines.push(replay_metadata_line(
+            "Fill model",
+            match self.base_config.replay_engine_mode {
+                ReplayEngineMode::Legacy => {
+                    ReplayFillModel::LegacyReferencePrice.label().to_string()
+                }
+                ReplayEngineMode::Deterministic => {
+                    self.base_config.replay_fill_model.label().to_string()
+                }
+            },
+        ));
+        lines.push(replay_metadata_line(
+            "Latency model",
+            match self.base_config.replay_engine_mode {
+                ReplayEngineMode::Legacy => "ignored in Legacy".to_string(),
+                ReplayEngineMode::Deterministic => {
+                    let detail = match self.base_config.replay_latency_model {
+                        ReplayLatencyModel::Fixed => {
+                            format!("{}ms", self.base_config.replay_fixed_latency_ms)
+                        }
+                        ReplayLatencyModel::SeededObserved => format!(
+                            "{} samples, seed {}",
+                            self.base_config.replay_observed_latency_ms.len(),
+                            self.base_config.replay_latency_seed
+                        ),
+                        _ => format!(
+                            "{} samples",
+                            self.base_config.replay_observed_latency_ms.len()
+                        ),
+                    };
+                    format!(
+                        "{} ({detail})",
+                        self.base_config.replay_latency_model.label()
+                    )
+                }
+            },
+        ));
+        lines.push(replay_metadata_line(
+            "Bar protection",
+            self.base_config.replay_bar_protection_policy.label(),
+        ));
         #[cfg(feature = "replay")]
-        lines.push(Line::from(format!(
-            "Dataset window: {}",
-            self.replay_selected_view_label()
-        )));
-        lines.push(Line::from(format!(
-            "Bar selection: {}",
+        lines.push(replay_metadata_line(
+            "Dataset window",
+            self.replay_selected_view_label(),
+        ));
+        lines.push(replay_metadata_line(
+            "Bar selection",
             if self.replay_selected_bar_supported() {
                 "supported"
             } else {
-                "unsupported for local file"
-            }
-        )));
-        lines.push(Line::from(
-            "Enter uses cached server bars first, then cached raw-tick Parquet, otherwise the local text file.",
+                "unsupported for selected source"
+            },
         ));
-        lines.push(Line::from(
-            "Replay skips broker login and does not start live streams.",
+        lines.push(replay_hint_line(
+            "Up/Down navigates | digits edit | Enter starts",
         ));
-        lines.push(Line::from(
-            "V manages saved ranges; N downloads a new dataset; D extends the selected dataset.",
-        ));
-        lines.push(Line::from(
-            "Headless automation remains available through `trader download-replay-data`.",
-        ));
+        lines.push(replay_hint_line("Esc returns to cached contracts"));
         lines
     }
 
@@ -435,6 +713,37 @@ impl App {
 
     pub(in crate::app) fn replay_cache_can_serve_selected_bar(&self) -> bool {
         self.replay_selected_cache_can_serve_bar()
+    }
+
+    #[cfg(feature = "replay")]
+    fn replay_selected_source_readiness(&self) -> String {
+        let Some(dataset) = self.replay_selected_dataset() else {
+            return if self.local_replay_dataset_available() {
+                "local text-file replay"
+            } else {
+                "missing replay data"
+            }
+            .to_string();
+        };
+        if dataset
+            .server_bars_file_for(self.bar_type, self.effective_candle_mode(), None)
+            .is_some()
+        {
+            "exact cached server bars".to_string()
+        } else if dataset.raw_ticks_parquet_file_for(None).is_some() {
+            "bars derived from cached raw ticks".to_string()
+        } else {
+            "selected cache does not support this bar".to_string()
+        }
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn replay_selected_source_readiness(&self) -> String {
+        if self.local_replay_dataset_available() {
+            "local text-file replay".to_string()
+        } else {
+            "missing replay data".to_string()
+        }
     }
 
     #[cfg(feature = "replay")]
@@ -500,9 +809,35 @@ impl App {
         } else if !self.replay_selected_bar_supported() {
             "[Enter] Start Replay (volume unavailable)".to_string()
         } else if self.replay_cache_can_serve_selected_bar() {
-            "[Enter] Start Cached Replay".to_string()
+            if self
+                .replay_selected_source_readiness()
+                .contains("raw ticks")
+            {
+                "[Enter] Start Replay (derive from raw ticks)".to_string()
+            } else {
+                "[Enter] Start Replay (cached server bars)".to_string()
+            }
         } else {
             "[Enter] Start Local Replay".to_string()
+        }
+    }
+
+    fn replay_start_action_compact_label(&self) -> String {
+        if !self.replay_dataset_available() {
+            "Enter: replay (missing)".to_string()
+        } else if !self.replay_selected_bar_supported() {
+            "Enter: replay (unsupported)".to_string()
+        } else if self.replay_cache_can_serve_selected_bar() {
+            if self
+                .replay_selected_source_readiness()
+                .contains("raw ticks")
+            {
+                "Enter: replay (raw ticks)".to_string()
+            } else {
+                "Enter: replay (cached bars)".to_string()
+            }
+        } else {
+            "Enter: local replay".to_string()
         }
     }
 
@@ -613,18 +948,34 @@ impl App {
     #[cfg(feature = "replay")]
     fn replay_cache_library_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from("Owned Cached Datasets"),
+            Line::from("Cached Instruments / Contracts"),
             Line::from(format!(
                 "Cache root: {}",
                 self.base_config.replay_cache_dir.display()
             )),
+            styled_line(
+                format!(
+                    "Search instruments: {}",
+                    if self.replay_instrument_query.is_empty() {
+                        "<all>"
+                    } else {
+                        &self.replay_instrument_query
+                    }
+                ),
+                self.focus == Focus::ReplayInstrumentQuery,
+            ),
         ];
 
-        if self.replay_cache_library.datasets.is_empty() {
+        let indices = self.replay_filtered_dataset_indices();
+        if indices.is_empty() {
             lines.extend([
-                Line::from("Status: no manifest.json datasets found"),
+                Line::from(if self.replay_cache_library.datasets.is_empty() {
+                    "Status: no manifest.json datasets found"
+                } else {
+                    "Status: no cached contract matches the search"
+                }),
                 Line::from(
-                    "Press N or Enter to search contracts and download the first owned dataset.",
+                    "Enter searches/downloads when empty; Tab reviews run setup.",
                 ),
                 Line::from(
                     "The Replay downloader uses read-only REST and market-data history without user or order streams.",
@@ -640,85 +991,48 @@ impl App {
         }
 
         let selected = self.replay_selected_dataset();
+        let options = self.replay_dataset_options();
+        let selection_hint = if options.len() == indices.len() {
+            "Up/Down selects a cached contract; Enter/Right opens replay setup."
+        } else {
+            "Up/Down selects a cached contract shape; Enter/Right opens replay setup."
+        };
         lines.push(Line::from(format!(
-            "Status: {} manifest(s), selected dataset {}",
-            self.replay_cache_library.datasets.len(),
-            selected.map_or("none", |dataset| dataset.manifest.display_name.as_str())
+            "Status: {} cached contract(s), selected {}",
+            indices.len(),
+            if selected.is_some() {
+                self.replay_selected_choice_label()
+            } else {
+                "none".to_string()
+            }
         )));
-        lines.push(Line::from(
-            "Up/Down browses; Enter uses the selected cache; N adds data; D extends selected coverage; A uses automatic resolution.",
-        ));
-        lines.push(Line::from(
-            "V creates, edits, saves, and selects reusable dataset views.",
-        ));
+        lines.push(Line::from(selection_hint));
+        lines.push(Line::from(if self.focus == Focus::ReplayDataset {
+            "N downloads from the list; D extends; V manages saved ranges."
+        } else {
+            "Select a row first; N/D/V manage the selected dataset."
+        }));
 
         const VISIBLE_DATASETS: usize = 8;
-        let visible_start = self
-            .replay_dataset_index
-            .map(|index| index.saturating_sub(VISIBLE_DATASETS - 1))
-            .unwrap_or(0)
-            .min(
-                self.replay_cache_library
-                    .datasets
-                    .len()
-                    .saturating_sub(VISIBLE_DATASETS),
-            );
-        let visible_end =
-            (visible_start + VISIBLE_DATASETS).min(self.replay_cache_library.datasets.len());
+        let selected_position = self.replay_selected_option_position(&options).unwrap_or(0);
+        let visible_start = selected_position
+            .saturating_sub(VISIBLE_DATASETS - 1)
+            .min(options.len().saturating_sub(VISIBLE_DATASETS));
+        let visible_end = (visible_start + VISIBLE_DATASETS).min(options.len());
         lines.push(Line::from(format!(
-            "Showing datasets {}-{} of {}",
+            "Showing cached shapes {}-{} of {}",
             visible_start + 1,
             visible_end,
-            self.replay_cache_library.datasets.len()
+            options.len()
         )));
-        for (index, dataset) in self
-            .replay_cache_library
-            .datasets
+        for (position, (index, bar_type)) in options
             .iter()
+            .copied()
             .enumerate()
             .skip(visible_start)
             .take(VISIBLE_DATASETS)
         {
-            let manifest = &dataset.manifest;
-            let marker = if self.replay_dataset_index == Some(index) {
-                ">"
-            } else {
-                " "
-            };
-            lines.extend([
-                Line::from(format!(
-                    "{} Dataset [{}]: {}",
-                    marker,
-                    index + 1,
-                    manifest.display_name
-                )),
-                Line::from(format!(
-                    "  {} {} {} | {} | {}",
-                    manifest.provider.label(),
-                    manifest.env.label(),
-                    manifest.contract.symbol,
-                    manifest.coverage.label(),
-                    manifest.source_kind.label()
-                )),
-                Line::from(format!(
-                    "  Badges: {} | Replay Rows: {} | Granular: {}",
-                    manifest.badges_label(),
-                    manifest.preferred_row_count_total(),
-                    if manifest
-                        .has_source_kind(crate::replay_cache::ReplayCacheSourceKind::RawTicks,)
-                    {
-                        "yes"
-                    } else {
-                        "no"
-                    }
-                )),
-                Line::from(format!(
-                    "  Shapes: {} | Modes: {}",
-                    manifest.available_shapes_label(),
-                    manifest.available_chart_modes_label()
-                )),
-                Line::from(format!("  Manifest: {}", dataset.manifest_path.display())),
-            ]);
+            lines.push(self.replay_dataset_row_line(position + 1, index, bar_type));
         }
         for warning in self.replay_cache_library.warnings.iter().take(2) {
             lines.push(Line::from(format!("Warning: {warning}")));
@@ -764,28 +1078,57 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-fn infer_replay_contract(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Replay")
-        .trim_end_matches(".Last")
-        .to_string()
+fn replay_metadata_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{}: ", label.into()),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(value.into(), Style::default().fg(Color::White)),
+    ])
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let bytes = bytes as f64;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes / GB)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes / MB)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes / KB)
+fn replay_edit_line(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    focused: bool,
+) -> Line<'static> {
+    let value_style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
-        format!("{bytes:.0} B")
-    }
+        Style::default().fg(Color::Cyan)
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{}: ", label.into()),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(value.into(), value_style),
+    ])
+}
+
+fn replay_action_line(text: impl Into<String>, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    };
+    Line::from(Span::styled(text.into(), style))
+}
+
+fn replay_hint_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
 fn display_path_name(path: &Path) -> String {

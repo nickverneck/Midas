@@ -162,9 +162,18 @@ impl App {
             return order;
         }
 
+        #[cfg(feature = "replay")]
+        if self.replay_view == ReplayView::Library {
+            return vec![Focus::ReplayInstrumentQuery, Focus::ReplayDataset];
+        }
+
         let mut order = vec![Focus::BarTypeToggle, Focus::BarValue];
         if self.candle_mode_controls_visible() {
             order.push(Focus::CandleModeToggle);
+        }
+        #[cfg(feature = "replay")]
+        if self.replay_view != ReplayView::Setup {
+            order.splice(0..0, [Focus::ReplayInstrumentQuery, Focus::ReplayDataset]);
         }
         #[cfg(feature = "replay")]
         order.extend([
@@ -172,7 +181,6 @@ impl App {
             Focus::ReplayMarginPerContract,
             Focus::ReplaySafetyBuffer,
             Focus::ReplaySafetyBufferPercent,
-            Focus::ReplayDataset,
         ]);
         order.push(Focus::ReplayMode);
         order
@@ -295,6 +303,8 @@ impl App {
                 | Focus::ReplayDownloadCacheRoot
         );
         #[cfg(feature = "replay")]
+        let replay_instrument_focus = matches!(self.focus, Focus::ReplayInstrumentQuery);
+        #[cfg(feature = "replay")]
         let replay_setup_numeric_focus = matches!(
             self.focus,
             Focus::ReplayInitialCapital
@@ -315,10 +325,16 @@ impl App {
         #[cfg(not(feature = "replay"))]
         let replay_download_focus = false;
         #[cfg(not(feature = "replay"))]
+        let replay_instrument_focus = false;
+        #[cfg(not(feature = "replay"))]
         let replay_setup_numeric_focus = false;
         #[cfg(not(feature = "replay"))]
         let replay_view_focus = false;
-        standard_focus || replay_download_focus || replay_setup_numeric_focus || replay_view_focus
+        standard_focus
+            || replay_download_focus
+            || replay_instrument_focus
+            || replay_setup_numeric_focus
+            || replay_view_focus
     }
 
     pub(in crate::app) fn is_free_text_focus(&self) -> bool {
@@ -348,6 +364,8 @@ impl App {
                 | Focus::ReplayDownloadCacheRoot
         );
         #[cfg(feature = "replay")]
+        let replay_instrument_focus = matches!(self.focus, Focus::ReplayInstrumentQuery);
+        #[cfg(feature = "replay")]
         let replay_view_focus = matches!(
             self.focus,
             Focus::ReplayViewId
@@ -360,7 +378,9 @@ impl App {
         #[cfg(not(feature = "replay"))]
         let replay_download_focus = false;
         #[cfg(not(feature = "replay"))]
+        let replay_instrument_focus = false;
+        #[cfg(not(feature = "replay"))]
         let replay_view_focus = false;
-        standard_focus || replay_download_focus || replay_view_focus
+        standard_focus || replay_download_focus || replay_instrument_focus || replay_view_focus
     }
 }

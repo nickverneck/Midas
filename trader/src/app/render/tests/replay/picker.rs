@@ -131,45 +131,98 @@ fn replay_setup_edits_capital_and_margin_controls() {
 
 #[cfg(feature = "replay")]
 #[test]
+fn replay_setup_is_dedicated_and_arrow_navigation_reaches_every_run_field() {
+    let cache_root = replay_cache_test_root("setup-navigation");
+    write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    config.replay_file_path = std::env::temp_dir().join("trader-replay-setup-missing.Last.txt");
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.replay_dataset_index = Some(0);
+    app.focus = Focus::ReplayDataset;
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Setup);
+    assert_eq!(app.focus, Focus::BarTypeToggle);
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::BarValue);
+    if app.candle_mode_controls_visible() {
+        app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+        assert_eq!(app.focus, Focus::CandleModeToggle);
+    }
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplayInitialCapital);
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplayMarginPerContract);
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplaySafetyBuffer);
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplaySafetyBufferPercent);
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplayMode);
+
+    app.focus = Focus::ReplayMarginPerContract;
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(app.base_config.replay_margin_per_contract, 100.0);
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplaySafetyBuffer);
+
+    app.handle_key(key(KeyCode::Esc), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Library);
+    assert_eq!(app.focus, Focus::ReplayDataset);
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_empty_library_tab_enters_setup_and_escape_returns_to_search() {
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = replay_cache_test_root("empty-library");
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayInstrumentQuery;
+
+    app.handle_replay_key(key(KeyCode::Tab), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Setup);
+    assert_eq!(app.focus, Focus::BarTypeToggle);
+
+    app.handle_key(key(KeyCode::Esc), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Library);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn replay_dataset_lines_expose_ready_and_missing_metadata() {
     let path = replay_test_file("metadata");
     let mut config = AppConfig::default();
     config.replay_file_path = path;
     let app = App::new(config);
 
-    let ready = rendered_text(app.replay_dataset_library_lines());
+    let ready = rendered_text(app.replay_dataset_metadata_lines());
+    assert!(ready.iter().any(|line| line == "Local fallback: ready"));
     assert!(
         ready
             .iter()
-            .any(|line| line == "Configured Local Replay File")
+            .any(|line| line.starts_with("File: trader-replay-metadata"))
     );
     assert!(
         ready
             .iter()
-            .any(|line| line.starts_with("Configured file: trader-replay-metadata"))
-    );
-    assert!(ready.iter().any(|line| line == "Status: ready"));
-    assert!(
-        ready
-            .iter()
-            .any(|line| line.starts_with("Inferred contract: trader-replay-metadata"))
-    );
-    assert!(
-        ready
-            .iter()
-            .any(|line| line == "Available bars: seconds, minutes, tick-count, range")
+            .any(|line| line.contains("Enter on an empty search"))
     );
 
     let mut missing_config = AppConfig::default();
     missing_config.replay_file_path =
         std::env::temp_dir().join("trader-replay-missing-file.Last.txt");
     let missing_app = App::new(missing_config);
-    let missing = rendered_text(missing_app.replay_dataset_library_lines());
-    assert!(
-        missing
-            .iter()
-            .any(|line| line == "Status: missing local file")
-    );
+    let missing = rendered_text(missing_app.replay_dataset_metadata_lines());
+    assert!(missing.iter().any(|line| line == "Local fallback: missing"));
 }
 
 #[cfg(feature = "replay")]
@@ -189,34 +242,36 @@ fn replay_dataset_lines_show_owned_cache_manifests_first() {
 
     assert_eq!(
         lines.first().map(String::as_str),
-        Some("Owned Cached Datasets")
+        Some("Cached Instruments / Contracts")
     );
     assert!(
         lines
             .iter()
-            .any(|line| line == "Status: 1 manifest(s), selected dataset none")
+            .any(|line| line == "Status: 1 cached contract(s), selected none")
     );
-    assert!(lines.iter().any(|line| line
-        == "Up/Down browses; Enter uses the selected cache; N adds data; D extends selected coverage; A uses automatic resolution."));
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "  Dataset [1]: MESU6 RTH 1m Heikin")
+        lines.iter().any(
+            |line| line == "Up/Down selects a cached contract; Enter/Right opens replay setup."
+        )
     );
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Shapes: 1 Min | Modes: OHLC, Heikin Ashi"))
+            .any(|line| line == "  [1] MESU6 | server bars | 2026-07-23 | 1 rows")
+    );
+
+    app.replay_dataset_index = Some(0);
+    let metadata = rendered_text(app.replay_dataset_metadata_lines());
+    assert!(metadata.iter().any(|line| line == "Shapes: 1 Min"));
+    assert!(
+        metadata
+            .iter()
+            .any(|line| line == "Modes: OHLC, Heikin Ashi")
     );
     assert!(
-        lines
+        metadata
             .iter()
-            .any(|line| line == &format!("  Manifest: {}", manifest_path.display()))
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "Configured Local Replay File")
+            .any(|line| line == &format!("Manifest: {}", manifest_path.display()))
     );
 }
 
@@ -334,7 +389,8 @@ fn replay_dataset_picker_selects_manifest_for_startup() {
     app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
     assert_eq!(app.replay_dataset_index, Some(0));
     app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
-    assert_eq!(app.focus, Focus::ReplayMode);
+    assert_eq!(app.focus, Focus::BarTypeToggle);
+    app.focus = Focus::ReplayMode;
     app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
 
     match cmd_rx.try_recv().expect("expected replay start command") {
@@ -344,6 +400,96 @@ fn replay_dataset_picker_selects_manifest_for_startup() {
         } => assert_eq!(replay_dataset_manifest, Some(manifest_path)),
         _ => panic!("expected enter-replay command"),
     }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_picker_selects_exact_volume_shape_and_preserves_heikin_ashi() {
+    let cache_root = replay_cache_test_root("volume-shape-picker");
+    let manifest_path = write_replay_cache_manifest(&cache_root);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read shape manifest"))
+            .expect("parse shape manifest");
+    let base_file = manifest["files"][0].clone();
+    let shapes = [
+        ("volume", 500_u32),
+        ("volume", 1000_u32),
+        ("volume", 5500_u32),
+    ];
+    let files = manifest["files"].as_array_mut().expect("manifest files");
+    for (kind, value) in shapes {
+        let mut file = base_file.clone();
+        file["relative_path"] = json!(format!("server-bars/{value}volume.jsonl"));
+        file["market_shape"]["bar_type"] = json!({"kind": kind, "value": value});
+        file["row_count"] = json!(value as u64);
+        files.push(file);
+    }
+    manifest["available_bar_shapes"] = json!([
+        {"kind": "minute", "value": 1},
+        {"kind": "volume", "value": 500},
+        {"kind": "volume", "value": 1000},
+        {"kind": "volume", "value": 5500}
+    ]);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize shape manifest"),
+    )
+    .expect("write shape manifest");
+
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayDataset;
+    app.replay_dataset_index = Some(0);
+    app.candle_mode = CandleMode::HeikinAshi;
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::volume(500));
+    assert_eq!(app.replay_dataset_bar_type, Some(BarType::volume(500)));
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::volume(1000));
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.bar_type, BarType::volume(5500));
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Setup);
+    assert_eq!(app.bar_type, BarType::volume(5500));
+    assert!(app.candle_mode_controls_visible());
+    assert_eq!(app.effective_candle_mode(), CandleMode::HeikinAshi);
+
+    let lines = rendered_text(app.replay_dataset_library_lines());
+    assert!(lines.iter().any(|line| line.contains("500 Vol")));
+    assert!(lines.iter().any(|line| line.contains("1000 Vol")));
+    assert!(lines.iter().any(|line| line.contains("5500 Vol")));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn replay_instrument_search_filters_cached_contracts_and_leaves_list_focus() {
+    let cache_root = replay_cache_test_root("instrument-search");
+    write_replay_cache_manifest(&cache_root);
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.screen = Screen::Replay;
+    app.focus = Focus::ReplayInstrumentQuery;
+
+    app.handle_replay_key(key(KeyCode::Char('M')), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Char('E')), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Char('S')), &cmd_tx);
+    assert_eq!(app.replay_instrument_query, "MES");
+    assert_eq!(app.replay_filtered_dataset_indices().len(), 1);
+    assert_eq!(app.replay_dataset_index, Some(0));
+
+    app.handle_replay_key(key(KeyCode::Down), &cmd_tx);
+    assert_eq!(app.focus, Focus::ReplayDataset);
+    app.handle_replay_key(key(KeyCode::Tab), &cmd_tx);
+    assert_eq!(app.focus, Focus::BarTypeToggle);
 }
 
 #[cfg(feature = "replay")]

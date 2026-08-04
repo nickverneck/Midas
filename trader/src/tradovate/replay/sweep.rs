@@ -29,6 +29,49 @@ use std::path::Path;
 pub(crate) const REPLAY_SWEEP_SPEC_SCHEMA_VERSION: u32 = 1;
 pub(crate) const REPLAY_SWEEP_PLAN_SCHEMA_VERSION: u32 = 1;
 
+/// Selects how sweep candidates are scheduled.
+///
+/// `isolated_services` is the historical runner: every candidate owns an
+/// isolated replay service and therefore has independent execution state.
+/// `batch_cpu` keeps that same isolation/determinism contract while sharing
+/// immutable dataset preparation and scheduling candidates through the CPU
+/// worker pool.  It deliberately does not split a single candidate into
+/// chronological windows; fills, protection, and account state remain ordered
+/// within each candidate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReplaySweepExecutionMode {
+    IsolatedServices,
+    BatchCpu,
+}
+
+impl Default for ReplaySweepExecutionMode {
+    fn default() -> Self {
+        Self::IsolatedServices
+    }
+}
+
+impl ReplaySweepExecutionMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::IsolatedServices => "isolated_services",
+            Self::BatchCpu => "batch_cpu",
+        }
+    }
+
+    pub(crate) fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "isolated_services" | "isolated" | "legacy" | "service" | "services" => {
+                Ok(Self::IsolatedServices)
+            }
+            "batch_cpu" | "batch-cpu" | "batch" | "cpu" => Ok(Self::BatchCpu),
+            _ => bail!(
+                "unknown replay sweep execution mode `{raw}`; choose isolated_services or batch_cpu"
+            ),
+        }
+    }
+}
+
 /// A deliberately conservative cap for the materialized validation plan.
 /// Resource guardrails are applied before a runner materializes this many
 /// children, but this remains a final safety net for validation and plans
@@ -242,6 +285,11 @@ pub(crate) struct ReplaySweepSpec {
     pub(crate) parameters: Vec<ReplaySweepParameter>,
     pub(crate) constraints: Vec<ReplaySweepConstraint>,
     pub(crate) engine_mode: ReplayEngineMode,
+    /// Indicator implementation used by each child. Batch CPU mode defaults
+    /// to streaming at launch time, while this persisted value keeps legacy
+    /// compatibility explicit for isolated runs and parity baselines.
+    #[serde(default)]
+    pub(crate) evaluator_mode: crate::broker::ReplayEvaluatorMode,
     pub(crate) fill_model: ReplayFillModel,
     pub(crate) latency: ReplayLatencyConfig,
     pub(crate) bar_protection_policy: ReplayBarProtectionPolicy,
@@ -251,6 +299,10 @@ pub(crate) struct ReplaySweepSpec {
     pub(crate) margin: Option<ReplayMarginConfig>,
     pub(crate) max_runs: usize,
     pub(crate) parallelism: usize,
+    /// Candidate scheduling mode. This does not change the ordered execution
+    /// semantics of an individual candidate.
+    #[serde(default)]
+    pub(crate) execution_mode: ReplaySweepExecutionMode,
     #[serde(default)]
     pub(crate) guardrails: ReplaySweepGuardrails,
     pub(crate) output_dir: std::path::PathBuf,
@@ -286,6 +338,7 @@ impl Default for ReplaySweepSpec {
             parameters: Vec::new(),
             constraints: Vec::new(),
             engine_mode: ReplayEngineMode::Deterministic,
+            evaluator_mode: crate::broker::ReplayEvaluatorMode::default(),
             fill_model: ReplayFillModel::RawBarOpen,
             latency: ReplayLatencyConfig::default(),
             bar_protection_policy: ReplayBarProtectionPolicy::default(),
@@ -295,6 +348,7 @@ impl Default for ReplaySweepSpec {
             margin: None,
             max_runs: 1,
             parallelism: 1,
+            execution_mode: ReplaySweepExecutionMode::default(),
             guardrails: ReplaySweepGuardrails::default(),
             output_dir: std::path::PathBuf::from("runs"),
             output_formats: default_output_formats(),
@@ -316,6 +370,8 @@ pub(crate) struct ReplaySweepChildSpec {
     pub(crate) bar_type: BarType,
     pub(crate) candle_mode: CandleMode,
     pub(crate) engine_mode: ReplayEngineMode,
+    #[serde(default)]
+    pub(crate) evaluator_mode: crate::broker::ReplayEvaluatorMode,
     pub(crate) fill_model: ReplayFillModel,
     pub(crate) latency: ReplayLatencyConfig,
     pub(crate) bar_protection_policy: ReplayBarProtectionPolicy,
@@ -670,6 +726,7 @@ impl ReplaySweepSpec {
                 bar_type: self.bar_type,
                 candle_mode: self.candle_mode,
                 engine_mode: self.engine_mode,
+                evaluator_mode: self.evaluator_mode,
                 fill_model: self.fill_model,
                 latency: self.latency.clone(),
                 bar_protection_policy: self.bar_protection_policy,
@@ -1200,6 +1257,7 @@ mod tests {
             bar_type: BarType::minute(1),
             candle_mode: CandleMode::Standard,
             engine_mode: ReplayEngineMode::Deterministic,
+            evaluator_mode: crate::broker::ReplayEvaluatorMode::Legacy,
             fill_model: ReplayFillModel::RawBarOpen,
             latency: ReplayLatencyConfig::default(),
             bar_protection_policy: ReplayBarProtectionPolicy::Conservative,
@@ -1216,6 +1274,7 @@ mod tests {
             }),
             max_runs: 4,
             parallelism: 2,
+            execution_mode: ReplaySweepExecutionMode::BatchCpu,
             guardrails: ReplaySweepGuardrails::default(),
             output_dir: "runs/ema-mes".into(),
             output_formats: vec![
@@ -1228,6 +1287,7 @@ mod tests {
     #[test]
     fn expands_cartesian_grid_with_exact_values_and_differing_overrides() {
         let plan = sample_spec().plan().expect("valid plan");
+        assert_eq!(plan.spec.execution_mode, ReplaySweepExecutionMode::BatchCpu);
         assert_eq!(plan.children.len(), 4);
         assert_eq!(plan.children[0].run_id, "ema-mes-000001");
         assert_eq!(
@@ -1257,6 +1317,22 @@ mod tests {
                 .margin_per_contract,
             1_500.0
         );
+    }
+
+    #[test]
+    fn execution_mode_parses_stable_cli_aliases() {
+        assert_eq!(
+            ReplaySweepExecutionMode::parse("batch-cpu").expect("batch mode"),
+            ReplaySweepExecutionMode::BatchCpu
+        );
+        assert_eq!(
+            ReplaySweepExecutionMode::parse("legacy").expect("legacy alias"),
+            ReplaySweepExecutionMode::IsolatedServices
+        );
+        assert!(ReplaySweepExecutionMode::parse("gpu").is_err());
+        let encoded =
+            serde_json::to_string(&ReplaySweepExecutionMode::BatchCpu).expect("serialize mode");
+        assert_eq!(encoded, "\"batch_cpu\"");
     }
 
     #[test]

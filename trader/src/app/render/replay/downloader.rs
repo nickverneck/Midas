@@ -75,13 +75,16 @@ impl App {
             [source] => Some(*source),
             _ => None,
         };
-        if let Some(bar_type) = manifest.files.iter().find_map(|file| {
-            (file.source_kind == ReplayCacheSourceKind::ServerBars)
-                .then_some(file.market_shape.bar_type)
-                .flatten()
-        }) {
-            downloader.bar_type = bar_type;
-        }
+        downloader.bar_type = self
+            .replay_dataset_bar_type
+            .or_else(|| {
+                manifest.files.iter().find_map(|file| {
+                    (file.source_kind == ReplayCacheSourceKind::ServerBars)
+                        .then_some(file.market_shape.bar_type)
+                        .flatten()
+                })
+            })
+            .unwrap_or_default();
         downloader.display_name = manifest.display_name;
         downloader.tags = manifest.tags.join(", ");
         if let Some(suggestion) = manifest

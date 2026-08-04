@@ -185,6 +185,8 @@ struct ExecutionRuntimeState {
     pending_target_qty: Option<i32>,
     pending_reversal_entry: Option<PendingNativeReversalEntry>,
     last_summary: String,
+    market_update_sequence: Option<u64>,
+    market_update_kind: MarketHistoryUpdate,
     hma_execution: HmaAngleExecutionState,
     ema_execution: EmaCrossExecutionState,
     hma_cross_execution: HmaCrossExecutionState,
@@ -205,6 +207,8 @@ impl ExecutionRuntimeState {
 
     fn reset_execution(&mut self) {
         self.pending_reversal_entry = None;
+        self.market_update_sequence = None;
+        self.market_update_kind = MarketHistoryUpdate::Snapshot;
         self.last_dispatched_signal_bar_ts = None;
         self.last_dispatched_entry_signal = None;
         self.hma_execution = HmaAngleExecutionState::default();

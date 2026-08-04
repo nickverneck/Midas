@@ -206,6 +206,28 @@ pub(crate) struct RunReplaySweepArgs {
     /// Explicitly bypass hard resource guardrails for this launch.
     #[arg(long)]
     pub(crate) override_guardrails: bool,
+    /// Override the persisted candidate scheduler for this launch (`isolated_services` or `batch_cpu`).
+    #[arg(long, value_name = "MODE")]
+    pub(crate) execution_mode: Option<String>,
+    /// Override indicator evaluation for this launch (`legacy` or `streaming`).
+    #[arg(long, value_name = "MODE")]
+    pub(crate) evaluator_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ProbeReplayAccelerationArgs {
+    /// Requested indicator backend: cpu, auto/candle, candle_cuda, or candle_metal.
+    #[arg(long, default_value = "auto")]
+    pub(crate) acceleration: String,
+    /// EMA periods to evaluate in one batch.
+    #[arg(long, value_delimiter = ',', default_values_t = [10_usize, 30])]
+    pub(crate) periods: Vec<usize>,
+    /// Optional close values. Comma-separated values are accepted for a quick smoke test.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) values: Vec<f64>,
+    /// Optional text file containing close values separated by whitespace or commas.
+    #[arg(long)]
+    pub(crate) values_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -365,6 +387,25 @@ pub(crate) struct CaptureLiveDomArgs {
     pub(crate) overwrite: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ImportBrowserHarArgs {
+    /// HAR file exported from the NinjaTrader/Tradovate browser session.
+    #[arg(long)]
+    pub(crate) input: PathBuf,
+    /// Optional replay-cache root. Defaults to the configured replay cache directory.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Import only these exact contract symbols. Repeat or comma-separate the option.
+    #[arg(long = "contract", value_delimiter = ',')]
+    pub(crate) contracts: Vec<String>,
+    /// Capture environment: auto, sim, or live. `auto` infers it from the market WebSocket URL.
+    #[arg(long, default_value = "auto")]
+    pub(crate) environment: String,
+    /// Replace an existing dataset with the same provider/environment/contract/date.
+    #[arg(long)]
+    pub(crate) overwrite: bool,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum Mode {
     /// Run the background engine server.
@@ -415,6 +456,9 @@ pub(crate) enum Mode {
     /// Execute a replay parameter sweep without starting the TUI.
     #[command(name = "run-replay-sweep")]
     RunReplaySweep(RunReplaySweepArgs),
+    /// Probe the optional CPU/Candle replay indicator accelerator.
+    #[command(name = "probe-replay-acceleration")]
+    ProbeReplayAcceleration(ProbeReplayAccelerationArgs),
     /// Rank and inspect completed replay sweep results without replaying data.
     #[command(name = "rank-replay-sweep")]
     RankReplaySweep(RankReplaySweepArgs),
@@ -433,4 +477,7 @@ pub(crate) enum Mode {
     /// Capture live Level 2 snapshots in a separate, opt-in process.
     #[command(name = "capture-live-dom")]
     CaptureLiveDom(CaptureLiveDomArgs),
+    /// Import a NinjaTrader/Tradovate browser market-data HAR into replay cache.
+    #[command(name = "import-browser-har")]
+    ImportBrowserHar(ImportBrowserHarArgs),
 }

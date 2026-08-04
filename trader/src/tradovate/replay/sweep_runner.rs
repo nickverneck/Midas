@@ -7,10 +7,12 @@
 //! implement a second fill or strategy engine.
 
 use super::sweep::{
-    ReplaySweepChildSpec, ReplaySweepGuardrailReport, ReplaySweepOutputFormat,
-    ReplaySweepResourceEstimate, ReplaySweepSpec,
+    ReplaySweepChildSpec, ReplaySweepExecutionMode, ReplaySweepGuardrailReport,
+    ReplaySweepOutputFormat, ReplaySweepResourceEstimate, ReplaySweepSpec,
 };
-use crate::broker::{BrokerKind, MarketSnapshot, ReplaySpeed, ServiceCommand, ServiceEvent};
+use crate::broker::{
+    BrokerKind, MarketSnapshot, ReplayEvaluatorMode, ReplaySpeed, ServiceCommand, ServiceEvent,
+};
 use crate::config::AppConfig;
 use crate::replay_cache::{ReplayDatasetView, ReplayDatasetViewStore};
 use anyhow::{Context, Result, bail};
@@ -22,6 +24,7 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -236,12 +239,38 @@ pub(crate) async fn run_replay_sweep(
     allow_large: bool,
     override_guardrails: bool,
 ) -> Result<ReplaySweepSummaryDocument> {
+    run_replay_sweep_with_mode(
+        config,
+        spec_path,
+        no_resume,
+        allow_large,
+        override_guardrails,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Run a sweep, optionally overriding the scheduling mode from the persisted
+/// spec for this invocation. The override is intentionally not written back
+/// to the spec, so a one-off benchmark cannot silently change future reruns.
+pub(crate) async fn run_replay_sweep_with_mode(
+    config: &AppConfig,
+    spec_path: &Path,
+    no_resume: bool,
+    allow_large: bool,
+    override_guardrails: bool,
+    execution_mode_override: Option<ReplaySweepExecutionMode>,
+    evaluator_mode_override: Option<ReplayEvaluatorMode>,
+) -> Result<ReplaySweepSummaryDocument> {
     run_replay_sweep_with_interrupt(
         config,
         spec_path,
         no_resume,
         allow_large,
         override_guardrails,
+        execution_mode_override,
+        evaluator_mode_override,
         Box::pin(tokio::signal::ctrl_c()),
         None,
     )
@@ -262,15 +291,26 @@ async fn run_replay_sweep_with_interrupt(
     no_resume: bool,
     allow_large: bool,
     override_guardrails: bool,
+    execution_mode_override: Option<ReplaySweepExecutionMode>,
+    evaluator_mode_override: Option<ReplayEvaluatorMode>,
     mut interrupt: ReplaySweepInterrupt,
     child_started_tx: Option<mpsc::UnboundedSender<()>>,
 ) -> Result<ReplaySweepSummaryDocument> {
-    let spec = ReplaySweepSpec::load(spec_path)?;
+    let mut spec = ReplaySweepSpec::load(spec_path)?;
     if config.broker != BrokerKind::Tradovate {
         bail!("headless replay sweeps currently require the Tradovate broker");
     }
     let guardrail_report = spec.guardrail_report(Some(&config.replay_cache_dir))?;
     enforce_guardrails(&guardrail_report, allow_large, override_guardrails)?;
+    let execution_mode = execution_mode_override.unwrap_or(spec.execution_mode);
+    let evaluator_mode = evaluator_mode_override.unwrap_or_else(|| {
+        if execution_mode == ReplaySweepExecutionMode::BatchCpu {
+            ReplayEvaluatorMode::Streaming
+        } else {
+            spec.evaluator_mode
+        }
+    });
+    spec.evaluator_mode = evaluator_mode;
     let plan = spec.plan()?;
     let output_root = spec.output_dir.clone();
     fs::create_dir_all(&output_root)
@@ -284,8 +324,24 @@ async fn run_replay_sweep_with_interrupt(
     spec.save(&output_root.join("sweep.json"))?;
     plan.save(&output_root.join("sweep-plan.json"))?;
     let view_path = ensure_dataset_view_file(&config.replay_cache_dir, &spec.base_dataset_view)?;
+    let base_config = config.clone();
 
     let parallelism = spec.parallelism.max(1).min(plan.children.len().max(1));
+    // Batch mode computes the immutable dataset fingerprint once before
+    // spawning candidates. The fingerprint is part of every result's resume
+    // identity, but repeatedly scanning the same manifest and stat'ing every
+    // source file used to add avoidable serial work for large grids.
+    let shared_dataset_fingerprint = if execution_mode == ReplaySweepExecutionMode::BatchCpu {
+        Some(Arc::new(replay_dataset_fingerprint(
+            &base_config.replay_cache_dir,
+            &view_path,
+            plan.children
+                .first()
+                .context("replay sweep plan contains no children")?,
+        )?))
+    } else {
+        None
+    };
     let mut status = ReplaySweepStatusDocument::running(&spec, &plan.children, parallelism);
     write_sweep_status(&output_root, &status)?;
 
@@ -294,7 +350,6 @@ async fn run_replay_sweep_with_interrupt(
     // those futures before returning, so service tasks get their normal
     // shutdown path instead of being detached on Ctrl-C.
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let base_config = config.clone();
     let mut child_stream = stream::iter(plan.children.clone())
         .map(|child| {
             let base_config = base_config.clone();
@@ -302,6 +357,7 @@ async fn run_replay_sweep_with_interrupt(
             let view_path = view_path.clone();
             let cancel_rx = cancel_rx.clone();
             let child_started_tx = child_started_tx.clone();
+            let dataset_fingerprint = shared_dataset_fingerprint.clone();
             async move {
                 match run_child(
                     &base_config,
@@ -311,6 +367,7 @@ async fn run_replay_sweep_with_interrupt(
                     no_resume,
                     cancel_rx,
                     child_started_tx,
+                    dataset_fingerprint,
                 )
                 .await
                 {
@@ -466,6 +523,7 @@ async fn run_child(
     no_resume: bool,
     cancel_rx: watch::Receiver<bool>,
     child_started_tx: Option<mpsc::UnboundedSender<()>>,
+    shared_dataset_fingerprint: Option<Arc<Value>>,
 ) -> Result<ReplaySweepRunSummary> {
     if child.resolved_strategy.kind != crate::strategy::StrategyKind::Native {
         bail!(
@@ -477,8 +535,10 @@ async fn run_child(
 
     let runs_root = spec.output_dir.join("runs");
     let expected_result_path = runs_root.join(&child.run_id).join("result.json");
-    let dataset_fingerprint =
-        replay_dataset_fingerprint(&base_config.replay_cache_dir, view_path, &child)?;
+    let dataset_fingerprint = shared_dataset_fingerprint.map_or_else(
+        || replay_dataset_fingerprint(&base_config.replay_cache_dir, view_path, &child),
+        |fingerprint| Ok((*fingerprint).clone()),
+    )?;
     if !no_resume
         && completed_result_matches(&expected_result_path, &child, spec, &dataset_fingerprint)?
     {
@@ -493,6 +553,7 @@ async fn run_child(
     cfg.replay_result_dir = runs_root;
     cfg.replay_run_id = Some(child.run_id.clone());
     cfg.replay_headless = true;
+    cfg.replay_evaluator_mode = child.evaluator_mode;
     cfg.replay_initial_capital = child.initial_capital;
     cfg.replay_account_currency = child.primary_fee_schedule.currency.clone();
     cfg.replay_engine_mode = child.engine_mode;
@@ -683,6 +744,15 @@ fn completed_result_matches(
             && sweep.get("bar_type") == Some(&json!(child.bar_type))
             && sweep.get("candle_mode") == Some(&json!(child.candle_mode))
             && sweep.get("engine_mode") == Some(&json!(child.engine_mode))
+            // Results written before evaluator selection was persisted are
+            // legacy evaluations.  Keep those artifacts resumable for the
+            // default legacy child, while a streaming child still requires
+            // an explicit streaming marker for parity safety.
+            && sweep
+                .get("evaluator_mode")
+                .cloned()
+                .unwrap_or_else(|| json!(ReplayEvaluatorMode::Legacy))
+                == json!(child.evaluator_mode)
             && sweep.get("fill_model") == Some(&json!(child.fill_model))
             && sweep.get("latency") == Some(&json!(child.latency))
             && sweep.get("bar_protection_policy") == Some(&json!(child.bar_protection_policy))
@@ -996,6 +1066,7 @@ fn patch_result_with_sweep_metadata(
         "bar_type": child.bar_type,
         "candle_mode": child.candle_mode,
         "engine_mode": child.engine_mode,
+        "evaluator_mode": child.evaluator_mode,
         "fill_model": child.fill_model,
         "latency": child.latency,
         "bar_protection_policy": child.bar_protection_policy,
@@ -1208,6 +1279,7 @@ mod tests {
             bar_type: BarType::minute(1),
             candle_mode: CandleMode::Standard,
             engine_mode: ReplayEngineMode::Deterministic,
+            evaluator_mode: crate::broker::ReplayEvaluatorMode::Legacy,
             fill_model: ReplayFillModel::RawBarOpen,
             latency: ReplayLatencyConfig::default(),
             bar_protection_policy: crate::broker::ReplayBarProtectionPolicy::Conservative,
@@ -1600,6 +1672,8 @@ mod tests {
             false,
             false,
             false,
+            None,
+            None,
             interrupt,
             Some(child_started_tx),
         )

@@ -8,6 +8,18 @@ default = ["tradovate", "ironbeam"]
 tradovate = []
 ironbeam = []
 replay = ["dep:arrow-array", "dep:arrow-schema", "dep:bytes", "dep:parquet"]
+# Optional accelerator support for replay indicator pre-computation.  These
+# features are deliberately opt-in: Candle pulls a sizeable dependency graph
+# and CUDA additionally needs a compatible system CUDA installation.  The
+# plain `candle` feature enables the portable Candle runtime (CPU fallback),
+# while the backend features opt into the corresponding device kernels.
+candle = ["replay", "dep:candle-core"]
+candle-cuda = ["candle", "candle-core/cuda"]
+# Metal kernels are enabled only by the target-specific dependency section
+# below. Keeping this feature target-neutral lets Linux builds report Metal as
+# unavailable; `--all-features` still requires the host CUDA toolkit because
+# Candle's CUDA backend runs its `nvcc` build script.
+candle-metal = ["candle"]
 manual-orders = []
 
 [profile.release]
@@ -21,6 +33,7 @@ arrow-array = { version = "55", optional = true }
 arrow-schema = { version = "55", optional = true }
 base64 = "0.22"
 bytes = { version = "1", optional = true }
+candle-core = { version = "0.10.2", optional = true, default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 clap = { version = "4.5", features = ["derive"] }
@@ -42,3 +55,8 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies.candle-core]
+version = "0.10.2"
+optional = true
+features = ["metal"]

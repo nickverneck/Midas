@@ -1,10 +1,21 @@
 use super::*;
-use crate::broker::transform_bars_for_candle_mode;
+use crate::broker::{HeikinAshiState, MarketHistoryUpdate, transform_bars_for_candle_mode};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MARKET_UPDATE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LiveSeries {
     pub(crate) closed_bars: Vec<Bar>,
     pub(crate) forming_bar: Option<Bar>,
+    /// Cached transformed candles.  The raw series remains the source of
+    /// truth for fills; this cache prevents rebuilding the entire Heikin Ashi
+    /// history for every incoming bar.
+    heikin_ashi_closed_bars: Vec<Bar>,
+    heikin_ashi_state: HeikinAshiState,
+    closed_revision: Cell<u64>,
+    published_closed_revision: Cell<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +29,8 @@ pub(crate) struct MarketUpdate {
     pub(crate) history_loaded: usize,
     pub(crate) live_bars: usize,
     pub(crate) replay_window: Option<ReplayWindowSnapshot>,
+    pub(crate) history_update: MarketHistoryUpdate,
+    pub(crate) history_sequence: u64,
     pub(crate) status: String,
     pub(crate) bars: MarketBarsUpdate,
 }
@@ -42,22 +55,66 @@ impl LiveSeries {
         Self {
             closed_bars: Vec::new(),
             forming_bar: None,
+            heikin_ashi_closed_bars: Vec::new(),
+            heikin_ashi_state: HeikinAshiState::new(),
+            closed_revision: Cell::new(0),
+            published_closed_revision: Cell::new(0),
         }
     }
 
     pub(crate) fn push_closed_bar(&mut self, bar: &Bar) {
-        match self
+        let insertion = self
             .closed_bars
-            .binary_search_by_key(&bar.ts_ns, |current| current.ts_ns)
-        {
-            Ok(index) => self.closed_bars[index] = bar.clone(),
-            Err(index) => self.closed_bars.insert(index, bar.clone()),
+            .binary_search_by_key(&bar.ts_ns, |current| current.ts_ns);
+        match insertion {
+            Ok(index) => {
+                self.closed_bars[index] = bar.clone();
+                // A correction can affect every subsequent HA open, so
+                // rebuild only on this uncommon non-append path.
+                self.heikin_ashi_closed_bars =
+                    self.heikin_ashi_state.transform_all(&self.closed_bars);
+            }
+            Err(index) if index == self.closed_bars.len() => {
+                self.closed_bars.push(bar.clone());
+                self.heikin_ashi_closed_bars
+                    .push(self.heikin_ashi_state.push(bar));
+            }
+            Err(index) => {
+                self.closed_bars.insert(index, bar.clone());
+                self.heikin_ashi_closed_bars =
+                    self.heikin_ashi_state.transform_all(&self.closed_bars);
+            }
         }
+        self.closed_revision
+            .set(self.closed_revision.get().saturating_add(1));
     }
 
     pub(crate) fn push_closed_bar_capped(&mut self, bar: &Bar, max_closed_bars: usize) {
         self.push_closed_bar(bar);
-        trim_recent_bars(&mut self.closed_bars, max_closed_bars);
+        if max_closed_bars == 0 {
+            self.closed_bars.clear();
+            self.heikin_ashi_closed_bars.clear();
+            self.heikin_ashi_state.reset();
+            return;
+        }
+        if self.closed_bars.len() > max_closed_bars {
+            let overflow = self.closed_bars.len() - max_closed_bars;
+            self.closed_bars.drain(0..overflow);
+            self.heikin_ashi_closed_bars.drain(0..overflow);
+        }
+    }
+
+    pub(crate) fn mark_closed_revision_published(&self) {
+        self.published_closed_revision
+            .set(self.closed_revision.get());
+    }
+
+    fn heikin_ashi_closed_bars(&self) -> &[Bar] {
+        &self.heikin_ashi_closed_bars
+    }
+
+    fn heikin_ashi_forming_bar(&self, bar: &Bar) -> Bar {
+        self.heikin_ashi_state.forming(bar)
     }
 }
 
@@ -67,14 +124,6 @@ fn market_last_closed_ts(market: &MarketSnapshot) -> Option<i64> {
         .checked_sub(1)
         .and_then(|idx| market.bars.get(idx))
         .map(|bar| bar.ts_ns)
-}
-
-fn trim_recent_bars(bars: &mut Vec<Bar>, limit: usize) {
-    if bars.len() <= limit {
-        return;
-    }
-    let overflow = bars.len() - limit;
-    bars.drain(0..overflow);
 }
 
 fn trim_market_closed_bars(market: &mut MarketSnapshot, limit: usize) {
@@ -155,6 +204,11 @@ pub(crate) fn build_market_update(
                 closed_bar,
                 forming_bar: series.forming_bar.clone(),
             })
+    } else if series.closed_revision.get() != series.published_closed_revision.get() {
+        Some(MarketBarsUpdate::Snapshot {
+            closed_bars: series.closed_bars.clone(),
+            forming_bar: series.forming_bar.clone(),
+        })
     } else if series.forming_bar != before_forming {
         series
             .forming_bar
@@ -165,6 +219,26 @@ pub(crate) fn build_market_update(
     }?;
     let bars = transform_market_bars_update(bars, candle_mode, series);
 
+    let revision_delta = series
+        .closed_revision
+        .get()
+        .saturating_sub(series.published_closed_revision.get());
+    let history_update = match &bars {
+        MarketBarsUpdate::Snapshot { .. } => MarketHistoryUpdate::Snapshot,
+        MarketBarsUpdate::Forming { .. } => MarketHistoryUpdate::Unchanged,
+        MarketBarsUpdate::Closed { closed_bar, .. } => {
+            if revision_delta == 1
+                && before_last_closed
+                    .as_ref()
+                    .is_none_or(|previous| closed_bar.ts_ns > previous.ts_ns)
+            {
+                MarketHistoryUpdate::Append
+            } else {
+                MarketHistoryUpdate::Correction
+            }
+        }
+    };
+    series.mark_closed_revision_published();
     Some(MarketUpdate {
         contract_id: contract.id,
         contract_name: contract.name.clone(),
@@ -175,6 +249,8 @@ pub(crate) fn build_market_update(
         history_loaded,
         live_bars,
         replay_window: None,
+        history_update,
+        history_sequence: NEXT_MARKET_UPDATE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         status,
         bars,
     })
@@ -189,14 +265,18 @@ fn transform_market_bars_update(
         CandleMode::Standard => update,
         CandleMode::HeikinAshi => {
             let transformed_closed =
-                transform_bars_for_candle_mode(&series.closed_bars, candle_mode);
-            let transformed_forming = series.forming_bar.as_ref().and_then(|forming_bar| {
-                let mut full_series = series.closed_bars.clone();
-                full_series.push(forming_bar.clone());
-                transform_bars_for_candle_mode(&full_series, candle_mode)
-                    .pop()
-                    .filter(|bar| bar.ts_ns == forming_bar.ts_ns)
-            });
+                if series.heikin_ashi_closed_bars().len() == series.closed_bars.len() {
+                    series.heikin_ashi_closed_bars().to_vec()
+                } else {
+                    // Defensive fallback for a future LiveSeries constructor or
+                    // an out-of-band mutation. The normal append path uses the
+                    // cached state above.
+                    transform_bars_for_candle_mode(&series.closed_bars, candle_mode)
+                };
+            let transformed_forming = series
+                .forming_bar
+                .as_ref()
+                .map(|forming_bar| series.heikin_ashi_forming_bar(forming_bar));
 
             match update {
                 MarketBarsUpdate::Snapshot { .. } => MarketBarsUpdate::Snapshot {

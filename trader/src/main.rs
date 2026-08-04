@@ -30,9 +30,9 @@ use engine_cli::{configure_attach_mode, kill_all_engines, kill_engine, list_engi
 use ipc::run_engine_server;
 use replay_cli::{
     analyze_replay_margin, download_replay_data, evaluate_replay_walk_forward,
-    import_replay_broker_schedule, plan_replay_walk_forward, profile_replay_sweep,
-    rank_replay_sweep, reprice_replay_result, run_replay_sweep, simulate_replay_liquidation,
-    validate_replay_sweep,
+    import_replay_broker_schedule, plan_replay_walk_forward, probe_replay_acceleration,
+    profile_replay_sweep, rank_replay_sweep, reprice_replay_result, run_replay_sweep,
+    simulate_replay_liquidation, validate_replay_sweep,
 };
 use tui_runtime::run_tui;
 
@@ -90,6 +90,10 @@ async fn main() -> Result<()> {
         let config = AppConfig::load(cli.config.as_deref())?;
         return run_replay_sweep(&config, args).await;
     }
+    if let Some(Mode::ProbeReplayAcceleration(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return probe_replay_acceleration(&config, args);
+    }
     if let Some(Mode::RankReplaySweep(args)) = cli.mode.clone() {
         return rank_replay_sweep(args);
     }
@@ -141,6 +145,24 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "tradovate"))]
     if matches!(cli.mode, Some(Mode::CaptureLiveDom(_))) {
         anyhow::bail!("live DOM capture requires the Tradovate feature");
+    }
+    #[cfg(all(feature = "tradovate", feature = "replay"))]
+    if let Some(Mode::ImportBrowserHar(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return tradovate::import_browser_har(
+            &config,
+            tradovate::BrowserHarImportOptions {
+                input: args.input,
+                cache_dir: args.cache_dir,
+                contracts: args.contracts,
+                environment: args.environment,
+                overwrite: args.overwrite,
+            },
+        );
+    }
+    #[cfg(not(all(feature = "tradovate", feature = "replay")))]
+    if matches!(cli.mode, Some(Mode::ImportBrowserHar(_))) {
+        anyhow::bail!("browser HAR import requires the Tradovate and replay features");
     }
     if matches!(cli.mode, Some(Mode::Engine)) {
         return run_engine_server(&cli.engine_socket).await;
