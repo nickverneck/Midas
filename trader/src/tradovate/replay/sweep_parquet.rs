@@ -46,6 +46,8 @@ fn summary_schema() -> Arc<Schema> {
         Field::new("max_drawdown", DataType::Float64, true),
         Field::new("trade_count", DataType::Int64, true),
         Field::new("fill_count", DataType::Int64, true),
+        Field::new("execution_backend", DataType::Utf8, true),
+        Field::new("fallback_reason", DataType::Utf8, true),
     ]))
 }
 
@@ -101,6 +103,16 @@ fn summary_record_batch(rows: &[ReplaySweepRunSummary]) -> Result<RecordBatch> {
         Arc::new(Int64Array::from(
             rows.iter()
                 .map(|row| row.fill_count.map(|value| value as i64))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.execution_backend.clone())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.fallback_reason.clone())
                 .collect::<Vec<_>>(),
         )),
     ];

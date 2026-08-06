@@ -45,16 +45,52 @@ pub(crate) async fn load_replay_state(
 
     #[cfg(feature = "replay")]
     {
+        load_replay_state_with_shared_frames(
+            cfg,
+            bar_type,
+            candle_mode,
+            selected_manifest_path,
+            selected_view_path,
+            None,
+        )
+        .await
+    }
+}
+
+pub(crate) async fn load_replay_state_with_shared_frames(
+    cfg: &AppConfig,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    selected_manifest_path: Option<&Path>,
+    selected_view_path: Option<&Path>,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
+) -> Result<ReplayState> {
+    #[cfg(not(feature = "replay"))]
+    {
+        let _ = (
+            cfg,
+            bar_type,
+            candle_mode,
+            selected_manifest_path,
+            selected_view_path,
+            shared_frames,
+        );
+        bail!("replay mode is not enabled in this build; rebuild with `--features replay`");
+    }
+
+    #[cfg(feature = "replay")]
+    {
         let cfg = cfg.clone();
         let selected_manifest_path = selected_manifest_path.map(Path::to_path_buf);
         let selected_view_path = selected_view_path.map(Path::to_path_buf);
         tokio::task::spawn_blocking(move || {
-            load_replay_state_blocking(
+            load_replay_state_blocking_with_shared_frames(
                 &cfg,
                 bar_type,
                 candle_mode,
                 selected_manifest_path.as_deref(),
                 selected_view_path.as_deref(),
+                shared_frames,
             )
         })
         .await
@@ -70,6 +106,34 @@ pub(super) fn load_replay_state_blocking(
     selected_manifest_path: Option<&Path>,
     selected_view_path: Option<&Path>,
 ) -> Result<ReplayState> {
+    load_replay_state_blocking_with_shared_frames(
+        cfg,
+        bar_type,
+        candle_mode,
+        selected_manifest_path,
+        selected_view_path,
+        None,
+    )
+}
+
+#[cfg(feature = "replay")]
+pub(super) fn load_replay_state_blocking_with_shared_frames(
+    cfg: &AppConfig,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    selected_manifest_path: Option<&Path>,
+    selected_view_path: Option<&Path>,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
+) -> Result<ReplayState> {
+    if let Some(shared) = shared_frames.as_ref()
+        && !shared.matches(bar_type, candle_mode)
+    {
+        bail!(
+            "shared replay frames are for {}, not {}",
+            shared.bar_type.mode_label(shared.candle_mode),
+            bar_type.mode_label(candle_mode)
+        );
+    }
     let library = ReplayCacheLibrary::scan(&cfg.replay_cache_dir);
     let dom_updates = if cfg.replay_fill_model == ReplayFillModel::Dom {
         load_replay_dom_updates(cfg.replay_dom_file_path.as_deref())?
@@ -99,25 +163,40 @@ pub(super) fn load_replay_state_blocking(
             .is_some()
         {
             return attach_dom_updates(
-                {
-                    let (resolved_file, bars) =
-                        crate::replay_cache::load_server_bars_cache_file_range_shared(
-                            &resolved.dataset,
+                attach_shared_frames(
+                    {
+                        let (resolved_file, bars) = if let Some(shared) = shared_frames.as_ref() {
+                            (
+                                resolved.dataset.resolve_server_bars_file(
+                                    bar_type,
+                                    candle_mode,
+                                    Some(&resolved.requested_coverage()),
+                                )?,
+                                shared.bars.clone(),
+                            )
+                        } else {
+                            crate::replay_cache::load_server_bars_cache_file_range_shared(
+                                &resolved.dataset,
+                                bar_type,
+                                candle_mode,
+                                Some(&resolved.requested_coverage()),
+                                Some(&resolved.load_range),
+                            )?
+                        };
+                        replay_state_from_shared_server_bars(
+                            resolved_file,
+                            bars,
                             bar_type,
                             candle_mode,
-                            Some(&resolved.requested_coverage()),
-                            Some(&resolved.load_range),
-                        )?;
-                    replay_state_from_shared_server_bars(
-                        resolved_file,
-                        bars,
-                        bar_type,
-                        candle_mode,
-                        Some(resolved.evaluation_range),
-                        Some(replay_window),
-                        cfg.replay_initial_capital,
-                    )?
-                },
+                            Some(resolved.evaluation_range),
+                            Some(replay_window),
+                            cfg.replay_initial_capital,
+                        )?
+                    },
+                    shared_frames.clone(),
+                    bar_type,
+                    candle_mode,
+                )?,
                 &dom_updates,
             );
         }
@@ -132,12 +211,17 @@ pub(super) fn load_replay_state_blocking(
                 .resolve_raw_ticks_parquet_files(Some(&coverage))
                 .context("load raw-tick replay dataset view")?;
             return attach_dom_updates(
-                replay_state_from_cached_raw_ticks(
-                    cached,
-                    Some(resolved.load_range),
-                    Some(resolved.evaluation_range),
-                    Some(replay_window),
-                    cfg.replay_initial_capital,
+                attach_shared_frames(
+                    replay_state_from_cached_raw_ticks(
+                        cached,
+                        Some(resolved.load_range),
+                        Some(resolved.evaluation_range),
+                        Some(replay_window),
+                        cfg.replay_initial_capital,
+                    )?,
+                    shared_frames.clone(),
+                    bar_type,
+                    candle_mode,
                 )?,
                 &dom_updates,
             );
@@ -163,25 +247,36 @@ pub(super) fn load_replay_state_blocking(
             .is_some()
         {
             return attach_dom_updates(
-                {
-                    let (resolved_file, bars) =
-                        crate::replay_cache::load_server_bars_cache_file_range_shared(
-                            dataset,
+                attach_shared_frames(
+                    {
+                        let (resolved_file, bars) = if let Some(shared) = shared_frames.as_ref() {
+                            (
+                                dataset.resolve_server_bars_file(bar_type, candle_mode, None)?,
+                                shared.bars.clone(),
+                            )
+                        } else {
+                            crate::replay_cache::load_server_bars_cache_file_range_shared(
+                                dataset,
+                                bar_type,
+                                candle_mode,
+                                None,
+                                None,
+                            )?
+                        };
+                        replay_state_from_shared_server_bars(
+                            resolved_file,
+                            bars,
                             bar_type,
                             candle_mode,
                             None,
                             None,
-                        )?;
-                    replay_state_from_shared_server_bars(
-                        resolved_file,
-                        bars,
-                        bar_type,
-                        candle_mode,
-                        None,
-                        None,
-                        cfg.replay_initial_capital,
-                    )?
-                },
+                            cfg.replay_initial_capital,
+                        )?
+                    },
+                    shared_frames.clone(),
+                    bar_type,
+                    candle_mode,
+                )?,
                 &dom_updates,
             );
         }
@@ -190,12 +285,17 @@ pub(super) fn load_replay_state_blocking(
                 .resolve_raw_ticks_parquet_files(None)
                 .context("load selected raw-tick replay dataset")?;
             return attach_dom_updates(
-                replay_state_from_cached_raw_ticks(
-                    cached,
-                    None,
-                    None,
-                    None,
-                    cfg.replay_initial_capital,
+                attach_shared_frames(
+                    replay_state_from_cached_raw_ticks(
+                        cached,
+                        None,
+                        None,
+                        None,
+                        cfg.replay_initial_capital,
+                    )?,
+                    shared_frames.clone(),
+                    bar_type,
+                    candle_mode,
                 )?,
                 &dom_updates,
             );
@@ -207,43 +307,67 @@ pub(super) fn load_replay_state_blocking(
     }
     if let Some(dataset) = library.first_server_bars(bar_type, candle_mode, None) {
         return attach_dom_updates(
-            {
-                let (resolved_file, bars) =
-                    crate::replay_cache::load_server_bars_cache_file_range_shared(
-                        dataset,
+            attach_shared_frames(
+                {
+                    let (resolved_file, bars) = if let Some(shared) = shared_frames.as_ref() {
+                        (
+                            dataset.resolve_server_bars_file(bar_type, candle_mode, None)?,
+                            shared.bars.clone(),
+                        )
+                    } else {
+                        crate::replay_cache::load_server_bars_cache_file_range_shared(
+                            dataset,
+                            bar_type,
+                            candle_mode,
+                            None,
+                            None,
+                        )?
+                    };
+                    replay_state_from_shared_server_bars(
+                        resolved_file,
+                        bars,
                         bar_type,
                         candle_mode,
                         None,
                         None,
-                    )?;
-                replay_state_from_shared_server_bars(
-                    resolved_file,
-                    bars,
-                    bar_type,
-                    candle_mode,
-                    None,
-                    None,
-                    cfg.replay_initial_capital,
-                )?
-            },
+                        cfg.replay_initial_capital,
+                    )?
+                },
+                shared_frames.clone(),
+                bar_type,
+                candle_mode,
+            )?,
             &dom_updates,
         );
     }
     if let Some(cached) = library.resolve_unique_raw_ticks_parquet_files(None)? {
         return attach_dom_updates(
-            replay_state_from_cached_raw_ticks(
-                cached,
-                None,
-                None,
-                None,
-                cfg.replay_initial_capital,
+            attach_shared_frames(
+                replay_state_from_cached_raw_ticks(
+                    cached,
+                    None,
+                    None,
+                    None,
+                    cfg.replay_initial_capital,
+                )?,
+                shared_frames.clone(),
+                bar_type,
+                candle_mode,
             )?,
             &dom_updates,
         );
     }
 
     attach_dom_updates(
-        load_local_tick_replay_state_blocking(&cfg.replay_file_path, cfg.replay_initial_capital)?,
+        attach_shared_frames(
+            load_local_tick_replay_state_blocking(
+                &cfg.replay_file_path,
+                cfg.replay_initial_capital,
+            )?,
+            shared_frames,
+            bar_type,
+            candle_mode,
+        )?,
         &dom_updates,
     )
 }
@@ -306,6 +430,7 @@ fn load_local_tick_replay_state_blocking(path: &Path, initial_capital: f64) -> R
         },
         dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::PriceTicks(Arc::from(ticks.into_boxed_slice())),
+        shared_frames: None,
     })
 }
 
@@ -352,6 +477,7 @@ pub(super) fn replay_state_from_cached_raw_ticks(
             resolved: cached,
             timestamp_range,
         },
+        shared_frames: None,
     })
 }
 
@@ -422,6 +548,7 @@ fn replay_state_from_shared_server_bars(
             bar_type: data_bar_type,
             source_label,
         },
+        shared_frames: None,
     })
 }
 
@@ -432,6 +559,19 @@ fn attach_dom_updates(
 ) -> Result<ReplayState> {
     state.dom_updates = Arc::from(dom_updates.to_vec().into_boxed_slice());
     Ok(state)
+}
+
+#[cfg(feature = "replay")]
+fn attach_shared_frames(
+    state: ReplayState,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+) -> Result<ReplayState> {
+    match shared_frames {
+        Some(shared) => state.with_shared_frames(shared, bar_type, candle_mode),
+        None => Ok(state),
+    }
 }
 
 #[cfg(feature = "replay")]

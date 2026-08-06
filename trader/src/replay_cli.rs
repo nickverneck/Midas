@@ -8,8 +8,72 @@ use crate::config::AppConfig;
 #[cfg(feature = "replay")]
 use anyhow::Context;
 use anyhow::{Result, bail};
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+use serde::Deserialize;
 #[cfg(feature = "replay")]
 use std::path::PathBuf;
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+use std::time::{Duration, Instant};
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ReplaySweepProgress {
+    status: String,
+    run_count: usize,
+    completed_count: usize,
+    failed_count: usize,
+    skipped_count: usize,
+    active_count: usize,
+    pending_count: usize,
+    #[serde(default)]
+    last_completed_run_id: Option<String>,
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+impl ReplaySweepProgress {
+    fn done_count(&self) -> usize {
+        self.completed_count + self.failed_count
+    }
+
+    fn display_key(&self) -> (String, usize, usize, usize, usize, usize, usize) {
+        (
+            self.status.clone(),
+            self.run_count,
+            self.completed_count,
+            self.failed_count,
+            self.skipped_count,
+            self.active_count,
+            self.pending_count,
+        )
+    }
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn read_replay_sweep_progress(path: &std::path::Path) -> Option<ReplaySweepProgress> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+fn print_replay_sweep_progress(progress: &ReplaySweepProgress, elapsed: Duration) {
+    let last = progress
+        .last_completed_run_id
+        .as_deref()
+        .map(|run_id| format!(" | last {run_id}"))
+        .unwrap_or_default();
+    println!(
+        "Replay sweep progress: {}/{} done | completed {} | failed {} | skipped {} | active {} | pending {} | elapsed {}{:}",
+        progress.done_count(),
+        progress.run_count,
+        progress.completed_count,
+        progress.failed_count,
+        progress.skipped_count,
+        progress.active_count,
+        progress.pending_count,
+        display_estimate_duration(Some(elapsed.as_secs())),
+        last,
+    );
+}
 
 pub(crate) fn probe_replay_acceleration(
     config: &AppConfig,
@@ -432,7 +496,14 @@ pub(crate) async fn run_replay_sweep(config: &AppConfig, args: RunReplaySweepArg
                 "Large sweep confirmation required: pass --allow-large after reviewing the estimate."
             );
         }
-        let summary = crate::tradovate::run_replay_sweep_with_mode(
+        let status_path = spec.output_dir.join("sweep-status.json");
+        let progress_total = report.estimate.combinations;
+        println!(
+            "Replay sweep progress: 0/{progress_total} done | preparing replay frames; status: {}",
+            status_path.display()
+        );
+        let started = Instant::now();
+        let sweep_future = crate::tradovate::run_replay_sweep_with_mode(
             config,
             &args.spec,
             args.no_resume,
@@ -440,8 +511,23 @@ pub(crate) async fn run_replay_sweep(config: &AppConfig, args: RunReplaySweepArg
             args.override_guardrails,
             execution_mode,
             evaluator_mode,
-        )
-        .await?;
+        );
+        tokio::pin!(sweep_future);
+        let mut last_progress_key = None;
+        let summary = loop {
+            tokio::select! {
+                result = &mut sweep_future => break result?,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if let Some(progress) = read_replay_sweep_progress(&status_path) {
+                        let key = progress.display_key();
+                        if last_progress_key.as_ref() != Some(&key) {
+                            print_replay_sweep_progress(&progress, started.elapsed());
+                            last_progress_key = Some(key);
+                        }
+                    }
+                }
+            }
+        };
         println!(
             "Replay sweep {} complete: {} completed, {} failed, {} skipped.",
             summary.sweep_id, summary.completed_count, summary.failed_count, summary.skipped_count

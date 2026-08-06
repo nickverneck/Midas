@@ -12,10 +12,11 @@ pub(crate) use account_sync::*;
 #[allow(unused_imports)]
 pub(crate) use broker_path::{
     MARKET_ORDER_POSITION_SYNC_GRACE_MS, ORDER_STRATEGY_HYDRATION_GRACE_MS,
-    ORDER_STRATEGY_POSITION_SYNC_GRACE_MS, clear_stale_pending_target,
-    effective_market_position_qty, pending_target_has_live_broker_path,
-    selected_contract_has_live_broker_path, should_wait_for_automated_position_sync,
-    strategy_has_live_broker_path, tracker_within_broker_path_grace,
+    ORDER_STRATEGY_POSITION_SYNC_GRACE_MS, ReplayProtectedExitSettlement,
+    clear_stale_pending_target, effective_market_position_qty, pending_target_has_live_broker_path,
+    selected_contract_has_live_broker_path, settle_replay_protected_exit,
+    should_wait_for_automated_position_sync, strategy_has_live_broker_path,
+    tracker_within_broker_path_grace,
 };
 use broker_path::{
     emit_pending_target_gate_debug, flat_broker_path_should_wait, force_reevaluate_pending_window,

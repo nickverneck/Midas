@@ -6,12 +6,19 @@
 //! session.  The runner only coordinates services and output; it does not
 //! implement a second fill or strategy engine.
 
+use super::ReplayState;
+use super::load::load_replay_state_blocking;
+use super::prepared_sweep::{
+    PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, run_prepared_ema_candidate,
+};
+use super::results::{ReplayResultInput, write_replay_result};
 use super::sweep::{
     ReplaySweepChildSpec, ReplaySweepExecutionMode, ReplaySweepGuardrailReport,
     ReplaySweepOutputFormat, ReplaySweepResourceEstimate, ReplaySweepSpec,
 };
 use crate::broker::{
-    BrokerKind, MarketSnapshot, ReplayEvaluatorMode, ReplaySpeed, ServiceCommand, ServiceEvent,
+    BrokerKind, MarketSnapshot, ReplayEvaluatorMode, ReplayFrameSet, ReplaySpeed, ServiceCommand,
+    ServiceEvent,
 };
 use crate::config::AppConfig;
 use crate::replay_cache::{ReplayDatasetView, ReplayDatasetViewStore};
@@ -49,6 +56,10 @@ pub(crate) struct ReplaySweepRunSummary {
     pub(crate) max_drawdown: Option<f64>,
     pub(crate) trade_count: Option<usize>,
     pub(crate) fill_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback_reason: Option<String>,
 }
 
 impl ReplaySweepRunSummary {
@@ -66,6 +77,8 @@ impl ReplaySweepRunSummary {
             max_drawdown: None,
             trade_count: None,
             fill_count: None,
+            execution_backend: None,
+            fallback_reason: None,
         }
     }
 
@@ -83,6 +96,8 @@ impl ReplaySweepRunSummary {
             max_drawdown: None,
             trade_count: None,
             fill_count: None,
+            execution_backend: None,
+            fallback_reason: None,
         }
     }
 }
@@ -252,8 +267,9 @@ pub(crate) async fn run_replay_sweep(
 }
 
 /// Run a sweep, optionally overriding the scheduling mode from the persisted
-/// spec for this invocation. The override is intentionally not written back
-/// to the spec, so a one-off benchmark cannot silently change future reruns.
+/// spec for this invocation. The effective mode is persisted in the canonical
+/// sweep copy and each child result so a resumed run cannot silently mix
+/// backends.
 pub(crate) async fn run_replay_sweep_with_mode(
     config: &AppConfig,
     spec_path: &Path,
@@ -304,13 +320,19 @@ async fn run_replay_sweep_with_interrupt(
     enforce_guardrails(&guardrail_report, allow_large, override_guardrails)?;
     let execution_mode = execution_mode_override.unwrap_or(spec.execution_mode);
     let evaluator_mode = evaluator_mode_override.unwrap_or_else(|| {
-        if execution_mode == ReplaySweepExecutionMode::BatchCpu {
+        if matches!(
+            execution_mode,
+            ReplaySweepExecutionMode::BatchCpu | ReplaySweepExecutionMode::PreparedCpu
+        ) {
             ReplayEvaluatorMode::Streaming
         } else {
             spec.evaluator_mode
         }
     });
     spec.evaluator_mode = evaluator_mode;
+    // Persist the effective launch mode so the canonical sweep copy and its
+    // child metadata describe the backend that was actually requested.
+    spec.execution_mode = execution_mode;
     let plan = spec.plan()?;
     let output_root = spec.output_dir.clone();
     fs::create_dir_all(&output_root)
@@ -331,7 +353,10 @@ async fn run_replay_sweep_with_interrupt(
     // spawning candidates. The fingerprint is part of every result's resume
     // identity, but repeatedly scanning the same manifest and stat'ing every
     // source file used to add avoidable serial work for large grids.
-    let shared_dataset_fingerprint = if execution_mode == ReplaySweepExecutionMode::BatchCpu {
+    let shared_dataset_fingerprint = if matches!(
+        execution_mode,
+        ReplaySweepExecutionMode::BatchCpu | ReplaySweepExecutionMode::PreparedCpu
+    ) {
         Some(Arc::new(replay_dataset_fingerprint(
             &base_config.replay_cache_dir,
             &view_path,
@@ -339,6 +364,37 @@ async fn run_replay_sweep_with_interrupt(
                 .first()
                 .context("replay sweep plan contains no children")?,
         )?))
+    } else {
+        None
+    };
+    let shared_frames = if matches!(
+        execution_mode,
+        ReplaySweepExecutionMode::BatchCpu | ReplaySweepExecutionMode::PreparedCpu
+    ) {
+        Some(
+            prepare_shared_replay_frames(
+                &base_config,
+                plan.children
+                    .first()
+                    .context("replay sweep plan contains no children")?,
+                &view_path,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let prepared_inputs = if execution_mode == ReplaySweepExecutionMode::PreparedCpu {
+        prepare_prepared_ema_inputs(
+            &base_config,
+            plan.children
+                .first()
+                .context("replay sweep plan contains no children")?,
+            &view_path,
+            shared_frames.clone(),
+            &plan.children,
+        )
+        .await?
     } else {
         None
     };
@@ -358,6 +414,8 @@ async fn run_replay_sweep_with_interrupt(
             let cancel_rx = cancel_rx.clone();
             let child_started_tx = child_started_tx.clone();
             let dataset_fingerprint = shared_dataset_fingerprint.clone();
+            let shared_frames = shared_frames.clone();
+            let prepared_inputs = prepared_inputs.clone();
             async move {
                 match run_child(
                     &base_config,
@@ -368,6 +426,8 @@ async fn run_replay_sweep_with_interrupt(
                     cancel_rx,
                     child_started_tx,
                     dataset_fingerprint,
+                    shared_frames,
+                    prepared_inputs,
                 )
                 .await
                 {
@@ -400,8 +460,16 @@ async fn run_replay_sweep_with_interrupt(
                     // Do not classify cancellation-generated errors as
                     // failed runs. Their futures are only being drained for
                     // service cleanup; the next invocation should treat
-                    // those child ids as pending and rerun them.
-                    while child_stream.next().await.is_some() {}
+                    // those child ids as pending and rerun them. A child that
+                    // crossed the durable ReplayResultSaved barrier while
+                    // cancellation was propagating is still safe to record,
+                    // so the status document does not lag its artifacts.
+                    while let Some(summary) = child_stream.next().await {
+                        if summary.status == "completed" {
+                            status.record(summary, parallelism);
+                            let _ = write_sweep_status(&output_root, &status);
+                        }
+                    }
                 }).await;
                 status.cancellation_requested = true;
                 status.error = signal_error.or_else(|| {
@@ -416,8 +484,8 @@ async fn run_replay_sweep_with_interrupt(
 
     if cancelled {
         bail!(
-            "replay sweep cancelled after {} of {} children; completed child artifacts are safe to resume",
-            summaries.len(),
+            "replay sweep cancelled with {} of {} children durably completed; those artifacts are safe to resume",
+            status.completed_count,
             plan.children.len()
         );
     }
@@ -515,44 +583,12 @@ fn ensure_dataset_view_file(cache_root: &Path, view: &ReplayDatasetView) -> Resu
     store.save(view)
 }
 
-async fn run_child(
-    base_config: &AppConfig,
-    spec: &ReplaySweepSpec,
-    child: ReplaySweepChildSpec,
-    view_path: &Path,
-    no_resume: bool,
-    cancel_rx: watch::Receiver<bool>,
-    child_started_tx: Option<mpsc::UnboundedSender<()>>,
-    shared_dataset_fingerprint: Option<Arc<Value>>,
-) -> Result<ReplaySweepRunSummary> {
-    if child.resolved_strategy.kind != crate::strategy::StrategyKind::Native {
-        bail!(
-            "child {} uses {:?}; headless replay currently supports native strategies only",
-            child.run_id,
-            child.resolved_strategy.kind
-        );
-    }
-
-    let runs_root = spec.output_dir.join("runs");
-    let expected_result_path = runs_root.join(&child.run_id).join("result.json");
-    let dataset_fingerprint = shared_dataset_fingerprint.map_or_else(
-        || replay_dataset_fingerprint(&base_config.replay_cache_dir, view_path, &child),
-        |fingerprint| Ok((*fingerprint).clone()),
-    )?;
-    if !no_resume
-        && completed_result_matches(&expected_result_path, &child, spec, &dataset_fingerprint)?
-    {
-        return Ok(summary_from_result(&child, expected_result_path, true)?);
-    }
-
+fn replay_child_config(base_config: &AppConfig, child: &ReplaySweepChildSpec) -> Result<AppConfig> {
     let mut cfg = base_config.clone();
     cfg.broker = BrokerKind::Tradovate;
-    cfg.env = spec.base_dataset_view.source.env;
+    cfg.env = child.base_dataset_view.source.env;
     cfg.candle_mode = child.candle_mode;
     cfg.order_qty = child.resolved_strategy.order_qty;
-    cfg.replay_result_dir = runs_root;
-    cfg.replay_run_id = Some(child.run_id.clone());
-    cfg.replay_headless = true;
     cfg.replay_evaluator_mode = child.evaluator_mode;
     cfg.replay_initial_capital = child.initial_capital;
     cfg.replay_account_currency = child.primary_fee_schedule.currency.clone();
@@ -575,6 +611,207 @@ async fn run_child(
         cfg.replay_safety_buffer_percent = 0.0;
     }
     cfg.validate()?;
+    Ok(cfg)
+}
+
+async fn prepare_shared_replay_frames(
+    base_config: &AppConfig,
+    child: &ReplaySweepChildSpec,
+    view_path: &Path,
+) -> Result<Arc<ReplayFrameSet>> {
+    let cfg = replay_child_config(base_config, child)?;
+    let view_path = view_path.to_path_buf();
+    let bar_type = child.bar_type;
+    let candle_mode = child.candle_mode;
+    tokio::task::spawn_blocking(move || {
+        let replay =
+            load_replay_state_blocking(&cfg, bar_type, candle_mode, None, Some(&view_path))?;
+        replay.shared_frame_set_for_type(bar_type, candle_mode)
+    })
+    .await
+    .context("join shared replay frame preparation")?
+}
+
+async fn prepare_prepared_ema_inputs(
+    base_config: &AppConfig,
+    child: &ReplaySweepChildSpec,
+    view_path: &Path,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
+    children: &[ReplaySweepChildSpec],
+) -> Result<Option<Arc<PreparedEmaSweepInputs>>> {
+    let Some(shared_frames) = shared_frames else {
+        return Ok(None);
+    };
+    if !children.iter().any(|child| {
+        child.resolved_strategy.kind == crate::strategy::StrategyKind::Native
+            && child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::EmaCross
+    }) {
+        return Ok(None);
+    }
+    let cfg = replay_child_config(base_config, child)?;
+    let view_path = view_path.to_path_buf();
+    let bar_type = child.bar_type;
+    let candle_mode = child.candle_mode;
+    let shared_frames_for_load = shared_frames.clone();
+    let replay = tokio::task::spawn_blocking(move || {
+        let replay =
+            load_replay_state_blocking(&cfg, bar_type, candle_mode, None, Some(&view_path))?;
+        replay.with_shared_frames(shared_frames_for_load, bar_type, candle_mode)
+    })
+    .await
+    .context("join prepared replay input preparation")??;
+    let inputs = prepare_ema_sweep_inputs(Arc::new(replay), shared_frames, children)?;
+    Ok(Some(Arc::new(inputs)))
+}
+
+fn write_prepared_result(
+    config: &AppConfig,
+    replay: &ReplayState,
+    child: &ReplaySweepChildSpec,
+    signal_bars: &[crate::broker::Bar],
+    run: PreparedSweepRun,
+) -> Result<PathBuf> {
+    let mut replay_for_result = replay.clone();
+    if let Some(window) = replay_for_result.replay_window.as_mut() {
+        window.warmup_rows = run.history_loaded;
+        window.evaluation_rows_total = run.evaluation_rows_total;
+        window.evaluation_rows_processed = run.evaluation_rows_processed;
+    }
+    let market = MarketSnapshot {
+        contract_id: Some(replay_for_result.contract.id),
+        contract_name: Some(replay_for_result.contract.name.clone()),
+        candle_mode: child.candle_mode,
+        // Keep the same market history available to result analytics as the
+        // service-backed path.  In particular, trade-excursion artifacts need
+        // the bar path even though the prepared kernel does not need to send
+        // market updates through a service.
+        bars: signal_bars.to_vec(),
+        trade_markers: Vec::new(),
+        session_profile: replay_for_result.market_session_profile(),
+        value_per_point: replay_for_result.market_value_per_point(),
+        tick_size: replay_for_result.market_tick_size(),
+        history_loaded: run.history_loaded,
+        live_bars: run.evaluation_rows_processed,
+        replay_window: replay_for_result.replay_window.clone(),
+        status: "Prepared replay complete".to_string(),
+    };
+    let outcome = write_replay_result(ReplayResultInput {
+        config,
+        replay: &replay_for_result,
+        market: &market,
+        ledger: &run.ledger,
+        strategy: &child.resolved_strategy,
+        bar_type: child.bar_type,
+        candle_mode: child.candle_mode,
+        run_id: &child.run_id,
+        started_at_utc: Utc::now(),
+        completed_at_utc: Utc::now(),
+        error: None,
+        signal_diagnostics: config
+            .replay_signal_diagnostics
+            .then_some(run.diagnostics.as_slice()),
+    })?;
+    Ok(outcome.result_path)
+}
+
+async fn run_child(
+    base_config: &AppConfig,
+    spec: &ReplaySweepSpec,
+    child: ReplaySweepChildSpec,
+    view_path: &Path,
+    no_resume: bool,
+    cancel_rx: watch::Receiver<bool>,
+    child_started_tx: Option<mpsc::UnboundedSender<()>>,
+    shared_dataset_fingerprint: Option<Arc<Value>>,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
+    prepared_inputs: Option<Arc<PreparedEmaSweepInputs>>,
+) -> Result<ReplaySweepRunSummary> {
+    if child.resolved_strategy.kind != crate::strategy::StrategyKind::Native {
+        bail!(
+            "child {} uses {:?}; headless replay currently supports native strategies only",
+            child.run_id,
+            child.resolved_strategy.kind
+        );
+    }
+
+    let runs_root = spec.output_dir.join("runs");
+    let expected_result_path = runs_root.join(&child.run_id).join("result.json");
+    let dataset_fingerprint = shared_dataset_fingerprint.map_or_else(
+        || replay_dataset_fingerprint(&base_config.replay_cache_dir, view_path, &child),
+        |fingerprint| Ok((*fingerprint).clone()),
+    )?;
+    if !no_resume
+        && completed_result_matches(&expected_result_path, &child, spec, &dataset_fingerprint)?
+    {
+        return Ok(summary_from_result(&child, expected_result_path, true)?);
+    }
+
+    let mut cfg = replay_child_config(base_config, &child)?;
+    cfg.replay_result_dir = runs_root;
+    cfg.replay_run_id = Some(child.run_id.clone());
+    cfg.replay_headless = true;
+
+    let mut prepared_fallback_reason = None;
+    if let Some(prepared_inputs) = prepared_inputs.as_ref() {
+        match prepared_inputs.supports(&prepared_inputs.replay, &cfg, &child) {
+            Ok(()) => {
+                let inputs = prepared_inputs.clone();
+                let signal_bars = inputs.signal_bars.clone();
+                let replay = inputs.replay.clone();
+                let run_cfg = cfg.clone();
+                let run_child = child.clone();
+                let worker_cfg = run_cfg.clone();
+                let worker_replay = replay.clone();
+                let worker_child = run_child.clone();
+                let prepared_result = tokio::task::spawn_blocking(move || {
+                    run_prepared_ema_candidate(&inputs, &worker_replay, &worker_cfg, &worker_child)
+                })
+                .await
+                .context("join prepared EMA candidate")?;
+                match prepared_result {
+                    Ok(prepared) => {
+                        let result_path = write_prepared_result(
+                            &run_cfg,
+                            &replay,
+                            &run_child,
+                            &signal_bars,
+                            prepared,
+                        )?;
+                        let mut summary = summary_from_result(&child, result_path, false)?;
+                        summary.execution_backend = Some("prepared_cpu".to_string());
+                        apply_fee_scenarios(&summary, &child)?;
+                        patch_result_with_sweep_metadata(
+                            &summary,
+                            &child,
+                            spec,
+                            dataset_fingerprint,
+                        )?;
+                        return summary_from_result(
+                            &child,
+                            summary.result_path.clone().unwrap(),
+                            false,
+                        );
+                    }
+                    Err(error) => {
+                        let reason = format!("prepared kernel failed: {error}");
+                        eprintln!(
+                            "prepared sweep child {} falling back to reference simulator: {}",
+                            child.run_id, reason
+                        );
+                        prepared_fallback_reason = Some(reason);
+                    }
+                }
+            }
+            Err(reason) => {
+                eprintln!(
+                    "prepared sweep child {} falling back to reference simulator: {}",
+                    child.run_id, reason
+                );
+                prepared_fallback_reason = Some(reason);
+            }
+        }
+    }
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -590,12 +827,30 @@ async fn run_child(
         view_path.to_path_buf(),
         cancel_rx,
         child_started_tx,
+        shared_frames,
     )
     .await;
     drop(command_tx);
     shutdown_service_task(service_task).await;
     let mut summary = result?;
     if summary.status == "completed" {
+        summary.execution_backend = Some(
+            if prepared_fallback_reason.is_some() {
+                match spec.execution_mode {
+                    ReplaySweepExecutionMode::PreparedCpu => "prepared_cpu_reference",
+                    ReplaySweepExecutionMode::BatchCpu => "batch_cpu_reference",
+                    ReplaySweepExecutionMode::IsolatedServices => "isolated_services",
+                }
+            } else {
+                match spec.execution_mode {
+                    ReplaySweepExecutionMode::IsolatedServices => "isolated_services",
+                    ReplaySweepExecutionMode::BatchCpu => "batch_cpu_reference",
+                    ReplaySweepExecutionMode::PreparedCpu => "prepared_cpu_reference",
+                }
+            }
+            .to_string(),
+        );
+        summary.fallback_reason = prepared_fallback_reason;
         apply_fee_scenarios(&summary, &child)?;
         patch_result_with_sweep_metadata(&summary, &child, spec, dataset_fingerprint)?;
         summary = summary_from_result(&child, summary.result_path.clone().unwrap(), false)?;
@@ -611,15 +866,27 @@ async fn drive_child_service(
     view_path: PathBuf,
     mut cancel_rx: watch::Receiver<bool>,
     mut child_started_tx: Option<mpsc::UnboundedSender<()>>,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
 ) -> Result<ReplaySweepRunSummary> {
-    command_tx
-        .send(ServiceCommand::EnterReplayMode {
+    let enter_replay = match shared_frames {
+        Some(replay_shared_frames) => ServiceCommand::EnterReplayModeWithSharedFrames {
             config,
             bar_type: child.bar_type,
             candle_mode: child.candle_mode,
             replay_dataset_manifest: None,
             replay_dataset_view: Some(view_path),
-        })
+            replay_shared_frames: Some(replay_shared_frames),
+        },
+        None => ServiceCommand::EnterReplayMode {
+            config,
+            bar_type: child.bar_type,
+            candle_mode: child.candle_mode,
+            replay_dataset_manifest: None,
+            replay_dataset_view: Some(view_path),
+        },
+    };
+    command_tx
+        .send(enter_replay)
         .map_err(|_| anyhow::anyhow!("headless replay service is unavailable"))?;
 
     // Queue setup immediately behind EnterReplayMode. The backend handles
@@ -884,6 +1151,7 @@ fn summary_from_result(
         .and_then(Value::as_str)
         .map(ToString::to_string);
     let summary = value.get("summary");
+    let metadata = value.get("metadata");
     Ok(ReplaySweepRunSummary {
         run_id: child.run_id.clone(),
         run_index: child.run_index,
@@ -911,6 +1179,14 @@ fn summary_from_result(
             .and_then(|value| value.get("fill_count"))
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok()),
+        execution_backend: metadata
+            .and_then(|value| value.get("execution_backend"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        fallback_reason: metadata
+            .and_then(|value| value.get("fallback_reason"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
     })
 }
 
@@ -1054,6 +1330,18 @@ fn patch_result_with_sweep_metadata(
             "run_mode".to_string(),
             Value::String("sweep_child".to_string()),
         );
+        if let Some(backend) = summary.execution_backend.as_deref() {
+            metadata.insert(
+                "execution_backend".to_string(),
+                Value::String(backend.to_string()),
+            );
+        }
+        if let Some(reason) = summary.fallback_reason.as_deref() {
+            metadata.insert(
+                "fallback_reason".to_string(),
+                Value::String(reason.to_string()),
+            );
+        }
     }
     document["sweep"] = json!({
         "parent_sweep_id": spec.sweep_id,
@@ -1125,7 +1413,7 @@ fn write_summary_outputs(
 
 fn summary_csv(document: &ReplaySweepSummaryDocument) -> Vec<u8> {
     let mut output = String::from(
-        "run_id,run_index,status,skipped,result_path,error,gross_pnl,net_pnl,fees,max_drawdown,trade_count,fill_count\n",
+        "run_id,run_index,status,skipped,result_path,error,gross_pnl,net_pnl,fees,max_drawdown,trade_count,fill_count,execution_backend,fallback_reason\n",
     );
     for run in &document.runs {
         let fields = [
@@ -1148,6 +1436,8 @@ fn summary_csv(document: &ReplaySweepSummaryDocument) -> Vec<u8> {
             run.fill_count
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
+            run.execution_backend.clone().unwrap_or_default(),
+            run.fallback_reason.clone().unwrap_or_default(),
         ];
         output.push_str(
             &fields
@@ -1305,6 +1595,8 @@ mod tests {
             max_drawdown: Some(-2.0),
             trade_count: Some(2),
             fill_count: Some(4),
+            execution_backend: None,
+            fallback_reason: None,
         };
         let document = ReplaySweepSummaryDocument {
             schema_version: REPLAY_SWEEP_SUMMARY_SCHEMA_VERSION,
@@ -1354,6 +1646,8 @@ mod tests {
                 max_drawdown: Some(-3.0),
                 trade_count: Some(4),
                 fill_count: Some(8),
+                execution_backend: None,
+                fallback_reason: None,
             }],
             fee_scenarios: vec![ReplaySweepFeeScenarioSummary {
                 run_id: "run-000001".to_string(),
@@ -1743,6 +2037,8 @@ mod tests {
             max_drawdown: Some(-2.0),
             trade_count: Some(1),
             fill_count: Some(2),
+            execution_backend: None,
+            fallback_reason: None,
         };
         let mut warnings = Vec::new();
         let rows = collect_fee_scenario_summaries(&[run], &mut warnings);

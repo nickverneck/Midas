@@ -102,6 +102,7 @@ fn replay_state_derives_requested_local_file_bar_types() {
             ]
             .into_boxed_slice(),
         )),
+        shared_frames: None,
     };
 
     assert_eq!(state.bars_for_type(BarType::second(2)).unwrap().len(), 2);
@@ -159,6 +160,7 @@ fn raw_tick_replay_derives_volume_bars_and_preserves_trade_volume() {
             ]
             .into_boxed_slice(),
         )),
+        shared_frames: None,
     };
 
     let bars = state.bars_for_type(BarType::volume(100)).unwrap();
@@ -290,6 +292,7 @@ async fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
         },
         dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
         data: ReplayDataSource::RawTicks(Arc::from(memory_ticks.into_boxed_slice())),
+        shared_frames: None,
     };
 
     for bar_type in [
@@ -445,6 +448,50 @@ async fn cached_raw_tick_replay_stream_survives_cache_refresh() {
         assert_eq!(streamed.ticks.as_ref(), buffered.ticks.as_ref());
         assert_eq!(streamed.dom_updates.as_ref(), buffered.dom_updates.as_ref());
     }
+
+    let shared = state
+        .shared_frame_set_for_type(BarType::minute(1), CandleMode::Standard)
+        .expect("prepare shared immutable frames");
+    assert_eq!(shared.frames.as_ref(), frames.as_slice());
+    assert!(
+        state
+            .clone()
+            .with_shared_frames(shared.clone(), BarType::second(1), CandleMode::Standard)
+            .is_err()
+    );
+    let attached = state
+        .clone()
+        .with_shared_frames(shared.clone(), BarType::minute(1), CandleMode::Standard)
+        .expect("attach shared immutable frames");
+    let second_attached = state
+        .with_shared_frames(shared.clone(), BarType::minute(1), CandleMode::Standard)
+        .expect("attach shared immutable frames to second candidate");
+    assert!(Arc::ptr_eq(
+        attached
+            .shared_frames
+            .as_ref()
+            .expect("first shared frames"),
+        second_attached
+            .shared_frames
+            .as_ref()
+            .expect("second shared frames")
+    ));
+    let reused_frames = attached
+        .frames_for_type(BarType::minute(1))
+        .expect("reuse shared immutable frames");
+    assert_eq!(reused_frames.as_slice(), shared.frames.as_ref());
+    let mut shared_stream = attached
+        .frame_stream_for_type(BarType::minute(1))
+        .expect("create shared frame stream");
+    let mut shared_frames = Vec::new();
+    while let Some(frame) = shared_stream.next().await.expect("read shared frame") {
+        shared_frames.push(frame);
+    }
+    shared_stream
+        .finish()
+        .await
+        .expect("finish shared frame stream");
+    assert_eq!(shared_frames.as_slice(), shared.frames.as_ref());
 }
 
 #[test]
@@ -490,6 +537,7 @@ fn replay_state_keeps_duplicate_timestamp_derived_bars_distinct() {
             ]
             .into_boxed_slice(),
         )),
+        shared_frames: None,
     };
 
     let tick_bars = state.bars_for_type(BarType::tick(1)).unwrap();
@@ -547,6 +595,7 @@ fn cached_server_bar_state_serves_only_cached_bar_shape() {
                 .into_boxed_slice(),
             ),
         },
+        shared_frames: None,
     };
 
     assert_eq!(state.bars_for_type(BarType::volume(6500)).unwrap().len(), 1);

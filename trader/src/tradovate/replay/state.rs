@@ -34,6 +34,8 @@ pub(crate) struct ReplayState {
     pub(super) dom_updates: Arc<[ReplayMarketDom]>,
     #[cfg(feature = "replay")]
     pub(super) data: ReplayDataSource,
+    #[cfg(feature = "replay")]
+    pub(super) shared_frames: Option<Arc<ReplayFrameSet>>,
 }
 
 pub(crate) fn replay_accounts(state: &ReplayState) -> Vec<AccountInfo> {
@@ -99,6 +101,22 @@ pub(crate) fn search_replay_contracts(
 
 #[cfg(feature = "replay")]
 impl ReplayState {
+    pub(super) fn is_cached_server_bars(&self) -> bool {
+        matches!(self.data, ReplayDataSource::CachedServerBars { .. })
+    }
+
+    pub(super) fn market_tick_size(&self) -> Option<f64> {
+        self.market_specs.tick_size
+    }
+
+    pub(super) fn market_value_per_point(&self) -> Option<f64> {
+        self.market_specs.value_per_point
+    }
+
+    pub(super) fn market_session_profile(&self) -> Option<InstrumentSessionProfile> {
+        self.market_specs.session_profile
+    }
+
     pub(super) fn evaluation_start_ns(&self) -> Result<Option<i64>> {
         self.evaluation_range
             .map(|range| range.bounds_ns().map(|(start, _)| start))
@@ -181,18 +199,53 @@ impl ReplayState {
 }
 
 #[cfg(feature = "replay")]
-#[derive(Debug, Clone)]
-pub(super) struct ReplayBarFrame {
-    pub(super) bar: Bar,
-    pub(super) ticks: Arc<[ReplayMarketTick]>,
-    pub(super) dom_updates: Arc<[ReplayMarketDom]>,
-}
-
-#[cfg(feature = "replay")]
 impl ReplayState {
+    pub(super) fn with_shared_frames(
+        mut self,
+        shared_frames: Arc<ReplayFrameSet>,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+    ) -> Result<Self> {
+        if !shared_frames.matches(bar_type, candle_mode) {
+            bail!(
+                "shared replay frames are for {}, not {}",
+                shared_frames.bar_type.mode_label(shared_frames.candle_mode),
+                bar_type.mode_label(candle_mode)
+            );
+        }
+        self.shared_frames = Some(shared_frames);
+        Ok(self)
+    }
+
     pub(super) fn frames_for_type(&self, bar_type: BarType) -> Result<Vec<ReplayBarFrame>> {
+        if let Some(shared) = self.shared_frames.as_ref() {
+            if shared.bar_type != bar_type {
+                bail!(
+                    "shared replay frames are for {}, not {}",
+                    shared.bar_type.mode_label(shared.candle_mode),
+                    bar_type.label()
+                );
+            }
+            return Ok(shared.frames.iter().cloned().collect());
+        }
         let bars = self.bars_for_type(bar_type)?;
         self.frames_for_bars(&bars, bar_type)
+    }
+
+    pub(super) fn shared_frame_set_for_type(
+        &self,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+    ) -> Result<Arc<ReplayFrameSet>> {
+        let bars: Arc<[Bar]> = Arc::from(self.bars_for_type(bar_type)?.into_boxed_slice());
+        let frames: Arc<[ReplayBarFrame]> =
+            Arc::from(self.frames_for_bars(&bars, bar_type)?.into_boxed_slice());
+        Ok(Arc::new(ReplayFrameSet {
+            bar_type,
+            candle_mode,
+            bars,
+            frames,
+        }))
     }
 
     fn frames_for_bars(&self, bars: &[Bar], bar_type: BarType) -> Result<Vec<ReplayBarFrame>> {
@@ -227,6 +280,24 @@ impl ReplayState {
     /// worker never holds the complete tick dataset in memory. Other replay
     /// sources retain the existing buffered path.
     pub(super) fn frame_stream_for_type(&self, bar_type: BarType) -> Result<ReplayFrameStream> {
+        if let Some(shared) = self.shared_frames.as_ref() {
+            if shared.bar_type != bar_type {
+                bail!(
+                    "shared replay frames are for {}, not {}",
+                    shared.bar_type.mode_label(shared.candle_mode),
+                    bar_type.label()
+                );
+            }
+            return Ok(ReplayFrameStream::Buffered {
+                bars: shared.bars.clone(),
+                frames: shared
+                    .frames
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            });
+        }
         let bars: Arc<[Bar]> = Arc::from(self.bars_for_type(bar_type)?.into_boxed_slice());
         let ReplayDataSource::CachedRawTicks {
             resolved,

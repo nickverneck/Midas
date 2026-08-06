@@ -233,6 +233,22 @@ fn handle_user_entities(
             emit_debug_logs_from_latency_delta(event_tx, session, previous_latency, state.latency);
             session.user_store.apply(envelope.clone());
         }
+        if let Some(settlement) = settle_replay_protected_exit(session, &entities) {
+            let summary = format!(
+                "Replay protected exit settled: {} for strategy {} on contract {}.",
+                settlement.reason, settlement.order_strategy_id, settlement.contract_id,
+            );
+            session.execution_runtime.last_summary = summary.clone();
+            let _ = event_tx.send(ServiceEvent::Status(summary));
+            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
+                "replay protected exit settlement | reason {} | strategy {} | account {} | contract {} | lifecycle tracker and pending target released",
+                settlement.reason,
+                settlement.order_strategy_id,
+                settlement.account_id,
+                settlement.contract_id,
+            )));
+            emit_execution_state(event_tx, session);
+        }
         let broker_rejections = collect_new_broker_rejections(session);
         for envelope in &entities {
             if envelope.deleted || !envelope.entity_type.eq_ignore_ascii_case("fill") {

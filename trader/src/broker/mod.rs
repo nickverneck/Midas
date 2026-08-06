@@ -108,6 +108,8 @@ fn command_broker(cmd: &ServiceCommand) -> Option<BrokerKind> {
     match cmd {
         ServiceCommand::Connect(cfg) => Some(cfg.broker),
         ServiceCommand::EnterReplayMode { config, .. } => Some(config.broker),
+        #[cfg(feature = "replay")]
+        ServiceCommand::EnterReplayModeWithSharedFrames { config, .. } => Some(config.broker),
         _ => None,
     }
 }

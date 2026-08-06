@@ -23,6 +23,124 @@ pub(crate) const ORDER_STRATEGY_HYDRATION_GRACE_MS: u128 = 1_500;
 pub(crate) const MARKET_ORDER_POSITION_SYNC_GRACE_MS: u128 = 3_000;
 pub(crate) const ORDER_STRATEGY_POSITION_SYNC_GRACE_MS: u128 = 10_000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplayProtectedExitSettlement {
+    pub(crate) account_id: i64,
+    pub(crate) contract_id: i64,
+    pub(crate) order_strategy_id: i64,
+    pub(crate) reason: String,
+}
+
+/// Releases the guarded execution lifecycle after a replay-simulated,
+/// broker-owned protection order closes the position.
+///
+/// Replay advances virtual bars much faster than wall-clock time.  The live
+/// broker path therefore cannot use its normal position-sync grace to infer
+/// that a terminal TP/SL fill has completed: the entry's latency tracker can
+/// otherwise block every subsequent signal for ten virtual seconds.  Replay
+/// emits an explicit terminal fill marker, so settle only the matching
+/// account/contract/order-strategy lifecycle and leave the live path untouched.
+pub(crate) fn settle_replay_protected_exit(
+    session: &mut SessionState,
+    entities: &[EntityEnvelope],
+) -> Option<ReplayProtectedExitSettlement> {
+    if !session.replay_enabled || session.session_kind != SessionKind::Replay {
+        return None;
+    }
+
+    let key = selected_strategy_key(session).ok()?;
+    let (order_strategy_id, reason) = entities.iter().rev().find_map(|envelope| {
+        if envelope.deleted || !envelope.entity_type.eq_ignore_ascii_case("fill") {
+            return None;
+        }
+
+        let fill = &envelope.entity;
+        if !fill
+            .get("source")
+            .and_then(Value::as_str)
+            .is_some_and(|source| source.eq_ignore_ascii_case("replay"))
+        {
+            return None;
+        }
+
+        let reason = fill
+            .get("replayExitReason")
+            .and_then(Value::as_str)
+            .filter(|reason| {
+                matches!(
+                    reason.to_ascii_lowercase().as_str(),
+                    "take_profit" | "stop_loss" | "trailing_stop"
+                )
+            })?;
+        let account_id = extract_account_id("fill", fill)?;
+        let contract_id = json_i64(fill, "contractId")?;
+        let order_strategy_id = json_i64(fill, "orderStrategyId")?;
+        (account_id == key.account_id && contract_id == key.contract_id)
+            .then(|| (order_strategy_id, reason.to_string()))
+    })?;
+
+    // A partial protection fill is not terminal and must continue through the
+    // ordinary guarded reconciliation path.
+    if selected_market_position_qty(session) != 0 {
+        return None;
+    }
+
+    let tracked_strategy_id = session
+        .order_latency_tracker
+        .as_ref()
+        .and_then(|tracker| tracker.order_strategy_id);
+    let active_strategy_id = session
+        .active_order_strategy
+        .as_ref()
+        .filter(|tracked| tracked.key == key)
+        .map(|tracked| tracked.order_strategy_id);
+    let visible_strategy_id = session
+        .user_store
+        .find_active_order_strategy(key.account_id, key.contract_id)
+        .and_then(extract_entity_id);
+
+    // Never let a terminal fill for an older strategy release a newer
+    // submission.  The replay simulator normally deletes the strategy and
+    // linked children in the same entity batch, but this guard also covers
+    // delayed or reordered entity delivery.
+    if tracked_strategy_id.is_some_and(|id| id != order_strategy_id)
+        || active_strategy_id.is_some_and(|id| id != order_strategy_id)
+        || visible_strategy_id.is_some_and(|id| id != order_strategy_id)
+    {
+        return None;
+    }
+    if tracked_strategy_id != Some(order_strategy_id)
+        && active_strategy_id != Some(order_strategy_id)
+    {
+        return None;
+    }
+
+    // A remaining live child means the protection fill was only partial (or a
+    // new bracket was already created), so leave normal reconciliation in
+    // charge of that lifecycle.
+    if strategy_has_live_broker_path(session, key, order_strategy_id) {
+        return None;
+    }
+
+    if tracked_strategy_id == Some(order_strategy_id) {
+        session.order_submit_in_flight = false;
+        session.order_latency_tracker = None;
+        session.pending_signal_context = None;
+    }
+    session.execution_runtime.pending_target_qty = None;
+    session.managed_protection.remove(&key);
+    if active_strategy_id == Some(order_strategy_id) {
+        session.active_order_strategy = None;
+    }
+
+    Some(ReplayProtectedExitSettlement {
+        account_id: key.account_id,
+        contract_id: key.contract_id,
+        order_strategy_id,
+        reason,
+    })
+}
+
 pub(crate) fn tracker_within_broker_path_grace(
     session: &SessionState,
     order_strategy_id: i64,

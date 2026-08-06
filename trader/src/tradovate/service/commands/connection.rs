@@ -108,6 +108,7 @@ pub(super) async fn enter_replay_mode(
     candle_mode: CandleMode,
     replay_dataset_manifest: Option<std::path::PathBuf>,
     replay_dataset_view: Option<std::path::PathBuf>,
+    shared_frames: Option<Arc<ReplayFrameSet>>,
     state: &mut ServiceState,
     event_tx: &UnboundedSender<ServiceEvent>,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
@@ -121,12 +122,13 @@ pub(super) async fn enter_replay_mode(
         cfg.replay_file_path.display()
     )));
 
-    let replay = replay::load_replay_state(
+    let replay = replay::load_replay_state_with_shared_frames(
         &cfg,
         bar_type,
         candle_mode,
         replay_dataset_manifest.as_deref(),
         replay_dataset_view.as_deref(),
+        shared_frames,
     )
     .await?;
     let accounts = replay::replay_accounts(&replay);

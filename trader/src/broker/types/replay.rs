@@ -1,7 +1,9 @@
+use super::{Bar, BarType, CandleMode};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(feature = "replay")]
 use std::sync::{
     OnceLock,
@@ -278,6 +280,35 @@ pub struct ReplayMarketDom {
     pub bids: Vec<ReplayDomLevel>,
     #[serde(default)]
     pub asks: Vec<ReplayDomLevel>,
+}
+
+/// Immutable market frame prepared once for a replay sweep.
+///
+/// The bar and its execution/DOM updates are shared between sweep children;
+/// each child still owns its mutable broker, strategy, and ledger state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayBarFrame {
+    pub bar: Bar,
+    pub ticks: Arc<[ReplayMarketTick]>,
+    pub dom_updates: Arc<[ReplayMarketDom]>,
+}
+
+/// Immutable frame set shared by `batch_cpu` replay-sweep candidates.
+///
+/// `bar_type` and `candle_mode` are retained as a guard against accidentally
+/// attaching frames prepared for a different market shape to a child.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayFrameSet {
+    pub bar_type: BarType,
+    pub candle_mode: CandleMode,
+    pub bars: Arc<[Bar]>,
+    pub frames: Arc<[ReplayBarFrame]>,
+}
+
+impl ReplayFrameSet {
+    pub fn matches(&self, bar_type: BarType, candle_mode: CandleMode) -> bool {
+        self.bar_type == bar_type && self.candle_mode == candle_mode
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

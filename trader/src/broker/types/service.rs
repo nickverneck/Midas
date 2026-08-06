@@ -1,3 +1,5 @@
+#[cfg(feature = "replay")]
+use super::ReplayFrameSet;
 use super::{
     AccountInfo, AccountSnapshot, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, ExecutionProbeSnapshot, LatencySnapshot,
@@ -9,6 +11,8 @@ use crate::strategy::{ExecutionStateSnapshot, ExecutionStrategyConfig};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(feature = "replay")]
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceCommand {
@@ -20,6 +24,19 @@ pub enum ServiceCommand {
         replay_dataset_manifest: Option<PathBuf>,
         #[serde(default)]
         replay_dataset_view: Option<PathBuf>,
+    },
+    /// Replay-sweep-only entry point that reuses immutable bars/frames while
+    /// keeping broker, strategy, and ledger state private to the child.
+    #[cfg(feature = "replay")]
+    EnterReplayModeWithSharedFrames {
+        config: AppConfig,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+        replay_dataset_manifest: Option<PathBuf>,
+        #[serde(default)]
+        replay_dataset_view: Option<PathBuf>,
+        #[serde(skip)]
+        replay_shared_frames: Option<Arc<ReplayFrameSet>>,
     },
     DownloadReplayData {
         operation_id: ReplayDownloadOperationId,

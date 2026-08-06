@@ -8,7 +8,7 @@ use crate::broker::{
     ReplayDownloadOperationId, ReplaySpeed, ReplayWindowSnapshot, ServiceCommand, ServiceEvent,
     SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
 };
-use crate::broker::{ReplayDomLevel, ReplayMarketDom};
+use crate::broker::{ReplayBarFrame, ReplayDomLevel, ReplayFrameSet, ReplayMarketDom};
 #[cfg(any(feature = "replay", test))]
 use crate::broker::{ReplayExecutionPrecision, ReplayMarketTick};
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};

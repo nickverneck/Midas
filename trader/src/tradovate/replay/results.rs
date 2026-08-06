@@ -450,6 +450,13 @@ pub(crate) struct ReplayResultMetadata {
     pub(crate) broker: String,
     pub(crate) environment: TradingEnvironment,
     pub(crate) run_mode: String,
+    /// Backend used by a sweep child.  These optional fields intentionally
+    /// live in the typed result document so accounting-only repricing keeps
+    /// the execution provenance instead of dropping JSON extensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback_reason: Option<String>,
     pub(crate) strategy: ExecutionStrategyConfig,
     #[serde(default)]
     pub(crate) path_dependence: ReplayPathDependence,
@@ -1232,6 +1239,8 @@ fn build_metadata(
         broker: input.config.broker.label().to_string(),
         environment: input.config.env,
         run_mode: "single".to_string(),
+        execution_backend: None,
+        fallback_reason: None,
         strategy: input.strategy.clone(),
         path_dependence: replay_path_dependence(input.strategy),
         signal_source: input.ledger.signal_source.clone(),
@@ -2419,6 +2428,7 @@ mod tests {
             data: ReplayDataSource::PriceTicks(std::sync::Arc::from(
                 Vec::<ReplayTick>::new().into_boxed_slice(),
             )),
+            shared_frames: None,
         }
     }
 
@@ -2927,11 +2937,18 @@ mod tests {
             signal_diagnostics: None,
         })
         .expect("write result");
-        let neutral_document: ReplayResultDocument =
+        let mut neutral_document: ReplayResultDocument =
             serde_json::from_slice(&fs::read(&written.result_path).expect("read neutral result"))
                 .expect("parse neutral result");
         assert!(neutral_document.margin_analysis.is_some());
         assert_eq!(neutral_document.metadata.margin_model, "fixed_per_contract");
+        neutral_document.metadata.execution_backend = Some("prepared_cpu".to_string());
+        neutral_document.metadata.fallback_reason = Some("test fallback".to_string());
+        fs::write(
+            &written.result_path,
+            serde_json::to_vec_pretty(&neutral_document).expect("encode backend metadata"),
+        )
+        .expect("write backend metadata");
         assert_eq!(
             neutral_document
                 .trade_excursions
@@ -2980,6 +2997,14 @@ mod tests {
                 .expect("parse repriced result");
         assert_eq!(document.schema_version, REPLAY_RESULT_SCHEMA_VERSION);
         assert_eq!(document.active_fee_scenario, "broker_standard");
+        assert_eq!(
+            document.metadata.execution_backend.as_deref(),
+            Some("prepared_cpu")
+        );
+        assert_eq!(
+            document.metadata.fallback_reason.as_deref(),
+            Some("test fallback")
+        );
         assert_eq!(document.fee_scenarios.len(), 2);
         assert_eq!(document.ledger.fills, ledger.fills);
         assert_eq!(

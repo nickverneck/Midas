@@ -206,7 +206,7 @@ pub(crate) struct RunReplaySweepArgs {
     /// Explicitly bypass hard resource guardrails for this launch.
     #[arg(long)]
     pub(crate) override_guardrails: bool,
-    /// Override the persisted candidate scheduler for this launch (`isolated_services` or `batch_cpu`).
+    /// Override the persisted candidate scheduler for this launch (`isolated_services`, `batch_cpu`, or `prepared_cpu`).
     #[arg(long, value_name = "MODE")]
     pub(crate) execution_mode: Option<String>,
     /// Override indicator evaluation for this launch (`legacy` or `streaming`).

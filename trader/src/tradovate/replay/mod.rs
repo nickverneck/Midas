@@ -14,6 +14,8 @@ mod ledger;
 mod liquidation;
 mod load;
 #[cfg(feature = "replay")]
+mod prepared_sweep;
+#[cfg(feature = "replay")]
 mod result_parquet;
 #[cfg(feature = "replay")]
 mod results;
@@ -54,6 +56,11 @@ pub(crate) use ledger::ReplayLedgerMarketContext;
 #[cfg(feature = "replay")]
 pub(crate) use liquidation::ReplayLiquidationConfig;
 pub(crate) use load::load_replay_state;
+pub(crate) use load::load_replay_state_with_shared_frames;
+#[cfg(feature = "replay")]
+pub(crate) use prepared_sweep::{
+    PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, run_prepared_ema_candidate,
+};
 #[cfg(feature = "replay")]
 pub(crate) use results::{
     ReplayEquityPoint, ReplayFeeScenario, ReplayResultEntry, ReplayResultInput,

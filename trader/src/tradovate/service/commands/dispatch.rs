@@ -24,6 +24,30 @@ pub(in crate::tradovate::service) async fn handle_command(
                 candle_mode,
                 replay_dataset_manifest,
                 replay_dataset_view,
+                None,
+                state,
+                event_tx,
+                market_tx,
+                internal_tx,
+            )
+            .await
+        }
+        #[cfg(feature = "replay")]
+        ServiceCommand::EnterReplayModeWithSharedFrames {
+            config: cfg,
+            bar_type,
+            candle_mode,
+            replay_dataset_manifest,
+            replay_dataset_view,
+            replay_shared_frames,
+        } => {
+            enter_replay_mode(
+                cfg,
+                bar_type,
+                candle_mode,
+                replay_dataset_manifest,
+                replay_dataset_view,
+                replay_shared_frames,
                 state,
                 event_tx,
                 market_tx,

@@ -37,12 +37,15 @@ pub(crate) const REPLAY_SWEEP_PLAN_SCHEMA_VERSION: u32 = 1;
 /// immutable dataset preparation and scheduling candidates through the CPU
 /// worker pool.  It deliberately does not split a single candidate into
 /// chronological windows; fills, protection, and account state remain ordered
-/// within each candidate.
+/// within each candidate. `prepared_cpu` additionally shares immutable EMA
+/// traces and protection indexes for the supported deterministic minute-bar
+/// subset, and falls back to the reference simulator for unsupported children.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReplaySweepExecutionMode {
     IsolatedServices,
     BatchCpu,
+    PreparedCpu,
 }
 
 impl Default for ReplaySweepExecutionMode {
@@ -56,6 +59,7 @@ impl ReplaySweepExecutionMode {
         match self {
             Self::IsolatedServices => "isolated_services",
             Self::BatchCpu => "batch_cpu",
+            Self::PreparedCpu => "prepared_cpu",
         }
     }
 
@@ -65,8 +69,9 @@ impl ReplaySweepExecutionMode {
                 Ok(Self::IsolatedServices)
             }
             "batch_cpu" | "batch-cpu" | "batch" | "cpu" => Ok(Self::BatchCpu),
+            "prepared_cpu" | "prepared-cpu" | "prepared" => Ok(Self::PreparedCpu),
             _ => bail!(
-                "unknown replay sweep execution mode `{raw}`; choose isolated_services or batch_cpu"
+                "unknown replay sweep execution mode `{raw}`; choose isolated_services, batch_cpu, or prepared_cpu"
             ),
         }
     }
@@ -1326,6 +1331,10 @@ mod tests {
             ReplaySweepExecutionMode::BatchCpu
         );
         assert_eq!(
+            ReplaySweepExecutionMode::parse("prepared-cpu").expect("prepared mode"),
+            ReplaySweepExecutionMode::PreparedCpu
+        );
+        assert_eq!(
             ReplaySweepExecutionMode::parse("legacy").expect("legacy alias"),
             ReplaySweepExecutionMode::IsolatedServices
         );
@@ -1333,6 +1342,10 @@ mod tests {
         let encoded =
             serde_json::to_string(&ReplaySweepExecutionMode::BatchCpu).expect("serialize mode");
         assert_eq!(encoded, "\"batch_cpu\"");
+        assert_eq!(
+            ReplaySweepExecutionMode::PreparedCpu.label(),
+            "prepared_cpu"
+        );
     }
 
     #[test]

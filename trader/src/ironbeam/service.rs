@@ -146,6 +146,12 @@ async fn handle_command(
                 "Ironbeam replay is not available in this build.".to_string(),
             ));
         }
+        #[cfg(feature = "replay")]
+        ServiceCommand::EnterReplayModeWithSharedFrames { .. } => {
+            let _ = event_tx.send(ServiceEvent::Error(
+                "Ironbeam replay is not available in this build.".to_string(),
+            ));
+        }
         ServiceCommand::ReplayState => {
             let Some(session) = state.session.as_ref() else {
                 let _ = event_tx.send(ServiceEvent::Disconnected);

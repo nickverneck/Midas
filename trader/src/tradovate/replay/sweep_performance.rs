@@ -879,6 +879,8 @@ mod tests {
             max_drawdown: None,
             trade_count: None,
             fill_count: None,
+            execution_backend: None,
+            fallback_reason: None,
         };
         let row = observe_child(&summary);
         assert_eq!(row.result_json_rows, Some(1));
