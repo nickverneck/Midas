@@ -59,7 +59,8 @@ pub(crate) use load::load_replay_state;
 pub(crate) use load::load_replay_state_with_shared_frames;
 #[cfg(feature = "replay")]
 pub(crate) use prepared_sweep::{
-    PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, run_prepared_ema_candidate,
+    PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, prepared_hma_child_as_ema,
+    run_prepared_ema_candidate, run_prepared_hma_candidate,
 };
 #[cfg(feature = "replay")]
 pub(crate) use results::{

@@ -83,6 +83,75 @@ pub(crate) struct ReplayDownloadArgs {
     /// Smallest raw-tick chunk produced after an incomplete request.
     #[arg(long, default_value_t = 5)]
     pub(crate) raw_minimum_split_minutes: u32,
+    /// Optional maximum duration, in hours, for each historical server-bar request.
+    /// Zero keeps the broker's single-request behavior; use a small value for dense range bars.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) server_chunk_hours: u32,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct DatabentoTradesArgs {
+    /// Exact Databento raw contract symbols. Repeat or comma-separate, for example GCQ6,GCZ6.
+    #[arg(long = "contract", value_delimiter = ',')]
+    pub(crate) contracts: Vec<String>,
+    /// Inclusive UTC start. Accepts YYYY-MM-DD or an RFC3339 timestamp.
+    #[arg(long)]
+    pub(crate) start: String,
+    /// Exclusive UTC end. Accepts YYYY-MM-DD or an RFC3339 timestamp.
+    #[arg(long)]
+    pub(crate) end: String,
+    /// Databento dataset.
+    #[arg(long, default_value = "GLBX.MDP3")]
+    pub(crate) dataset: String,
+    /// Destination for downloaded Databento job archives and metadata.
+    #[arg(long, default_value = ".run/databento-downloads")]
+    pub(crate) output_dir: PathBuf,
+    /// Split the batch response into daily files. Use `none` only for small requests.
+    #[arg(long, default_value = "day")]
+    pub(crate) split_duration: String,
+    /// Poll interval while Databento prepares the batch job.
+    #[arg(long, default_value_t = 5)]
+    pub(crate) poll_seconds: u64,
+    /// Maximum time to wait for each batch job.
+    #[arg(long, default_value_t = 180)]
+    pub(crate) timeout_minutes: u64,
+    /// Submit jobs and print IDs without waiting for completion or downloading archives.
+    #[arg(long)]
+    pub(crate) submit_only: bool,
+    /// Query Databento's cost estimate for each exact contract without submitting a job.
+    #[arg(long)]
+    pub(crate) estimate_only: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ImportDatabentoTradesArgs {
+    /// Databento trades ZIP archive produced by download-databento-trades.
+    #[arg(long)]
+    pub(crate) input: PathBuf,
+    /// Exact contract symbol. If omitted, infer it from the archive rows or sibling request.json.
+    #[arg(long)]
+    pub(crate) contract: Option<String>,
+    /// Inclusive UTC start. If omitted, read the sibling job.json request window.
+    #[arg(long)]
+    pub(crate) start: Option<String>,
+    /// Exclusive UTC end. If omitted, read the sibling job.json request window.
+    #[arg(long)]
+    pub(crate) end: Option<String>,
+    /// Instrument root. If omitted, derive it from the exact contract symbol.
+    #[arg(long)]
+    pub(crate) instrument: Option<String>,
+    /// Replay-cache root. Databento imports default to an isolated local cache.
+    #[arg(long, default_value = ".run/databento-replay-cache")]
+    pub(crate) cache_dir: PathBuf,
+    /// Contract minimum price increment. Defaults for common CME futures are inferred.
+    #[arg(long)]
+    pub(crate) tick_size: Option<f64>,
+    /// Contract point value. Defaults for common CME futures are inferred.
+    #[arg(long)]
+    pub(crate) value_per_point: Option<f64>,
+    /// Replace the raw-tick dataset if this provider/environment/contract/date already exists.
+    #[arg(long)]
+    pub(crate) overwrite: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -438,6 +507,12 @@ pub(crate) enum Mode {
     /// Download replay data into the local replay cache.
     #[command(name = "download-replay-data")]
     DownloadReplayData(ReplayDownloadArgs),
+    /// Download exact-contract Databento historical trades as reusable job archives.
+    #[command(name = "download-databento-trades")]
+    DownloadDatabentoTrades(DatabentoTradesArgs),
+    /// Import a Databento trades ZIP into an isolated replay raw-tick Parquet cache.
+    #[command(name = "import-databento-trades")]
+    ImportDatabentoTrades(ImportDatabentoTradesArgs),
     /// Reprice a saved replay result with an accounting-only fee schedule.
     #[command(name = "reprice-replay-result")]
     RepriceReplayResult(RepriceReplayResultArgs),

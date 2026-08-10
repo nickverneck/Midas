@@ -327,3 +327,37 @@ fn preset_view_construction_rejects_a_session_outside_source_coverage() {
     assert!(error.to_string().contains("outside source coverage"));
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[test]
+fn recurring_daily_session_filter_uses_new_york_clock_and_excludes_weekends() {
+    let filter = ReplayDatasetDailySessionFilter {
+        timezone: "America/New_York".to_string(),
+        start_local: chrono::NaiveTime::from_hms_opt(8, 30, 0).unwrap(),
+        end_local: chrono::NaiveTime::from_hms_opt(16, 15, 0).unwrap(),
+    };
+    assert!(
+        filter
+            .contains_timestamp(dt("2026-07-23T12:30:00Z").timestamp_nanos_opt().unwrap())
+            .unwrap()
+    );
+    assert!(
+        filter
+            .contains_timestamp(dt("2026-07-23T20:14:00Z").timestamp_nanos_opt().unwrap())
+            .unwrap()
+    );
+    assert!(
+        !filter
+            .contains_timestamp(dt("2026-07-23T20:15:00Z").timestamp_nanos_opt().unwrap())
+            .unwrap()
+    );
+    assert!(
+        !filter
+            .contains_timestamp(dt("2026-07-23T12:29:00Z").timestamp_nanos_opt().unwrap())
+            .unwrap()
+    );
+    assert!(
+        !filter
+            .contains_timestamp(dt("2026-07-25T14:00:00Z").timestamp_nanos_opt().unwrap())
+            .unwrap()
+    );
+}

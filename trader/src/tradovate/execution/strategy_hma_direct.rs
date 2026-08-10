@@ -1,4 +1,5 @@
 use super::*;
+use crate::strategies::PositionSide;
 
 pub(crate) fn maybe_run_hma_direct_execution_strategy(
     session: &mut SessionState,
@@ -9,9 +10,13 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         return Ok(());
     }
 
-    if session.execution_config.native_strategy != NativeStrategyKind::HmaCross {
+    if !matches!(
+        session.execution_config.native_strategy,
+        NativeStrategyKind::HmaCross | NativeStrategyKind::VolumeAdaptiveHmaCross
+    ) {
         session.execution_runtime.last_summary =
-            "HMA Direct path only supports HMA Crossover; falling back to no-op.".to_string();
+            "HMA Direct path only supports HMA crossover variants; falling back to no-op."
+                .to_string();
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -67,17 +72,43 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         .last()
         .expect("checked non-empty strategy bars")
         .clone();
-    let config = session.execution_config.native_hma_cross.clone();
-    let evaluation = config.evaluate_current_cross(
-        &mut session.execution_runtime.hma_cross_execution,
-        &bars,
-        side_from_signed_qty(actual_qty),
-    );
-    let signal = evaluation.signal;
-    let debug_summary = evaluation.debug_summary();
+    let current_side = side_from_signed_qty(actual_qty);
+    let (signal, strategy_summary, debug_summary) = match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_hma_cross
+                .evaluate_current_cross(
+                    &mut session.execution_runtime.hma_cross_execution,
+                    &bars,
+                    current_side,
+                );
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_volume_hma_cross
+                .evaluate_current_cross(
+                    &mut session.execution_runtime.volume_hma_cross_execution,
+                    &bars,
+                    current_side,
+                );
+            (
+                evaluation.signal(),
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
+        _ => unreachable!("unsupported strategy passed HMA direct guard"),
+    };
     let summary = format!(
         "{} | {}",
-        evaluation.summary(),
+        strategy_summary,
         hma_cross_market_debug(session, actual_qty)
     );
     session.execution_runtime.last_summary = format!("HMA Direct: {summary}");
@@ -371,38 +402,53 @@ pub(crate) fn hma_cross_market_debug(session: &SessionState, actual_qty: i32) ->
     let closed_ts = closed_bars(session).last().map(|bar| bar.ts_ns);
     let forming_ts = session.market.bars.get(closed_len).map(|bar| bar.ts_ns);
     let current_side = side_from_signed_qty(actual_qty);
-    let closed_summary = session
-        .execution_config
-        .native_hma_cross
-        .evaluate(closed_bars(session), current_side)
-        .summary();
+    let closed_summary = hma_cross_variant_summary(session, closed_bars(session), current_side);
     let forming_summary = if forming_ts.is_some() {
-        session
-            .execution_config
-            .native_hma_cross
-            .evaluate(&session.market.bars, current_side)
-            .summary()
+        hma_cross_variant_summary(session, &session.market.bars, current_side)
     } else {
         "no forming bar".to_string()
+    };
+    let execution = match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaCross => &session.execution_runtime.hma_cross_execution,
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            &session.execution_runtime.volume_hma_cross_execution
+        }
+        _ => unreachable!("unsupported HMA crossover variant"),
     };
 
     format!(
         "closed_len {closed_len} | market_bars {market_len} | closed_ts {:?} | forming_ts {:?} | stored_side {} | stored_delta {} | closed_eval [{}] | forming_preview [{}]",
         closed_ts,
         forming_ts,
-        session
-            .execution_runtime
-            .hma_cross_execution
+        execution
             .last_observed_side
             .map(|side| side.label())
             .unwrap_or("unset"),
-        session
-            .execution_runtime
-            .hma_cross_execution
+        execution
             .last_observed_delta
             .map(|delta| format!("{delta:.4}"))
             .unwrap_or_else(|| "unset".to_string()),
         closed_summary,
         forming_summary
     )
+}
+
+fn hma_cross_variant_summary(
+    session: &SessionState,
+    bars: &[Bar],
+    current_side: Option<PositionSide>,
+) -> String {
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaCross => session
+            .execution_config
+            .native_hma_cross
+            .evaluate(bars, current_side)
+            .summary(),
+        NativeStrategyKind::VolumeAdaptiveHmaCross => session
+            .execution_config
+            .native_volume_hma_cross
+            .evaluate(bars, current_side)
+            .summary(),
+        _ => "unsupported HMA crossover variant".to_string(),
+    }
 }

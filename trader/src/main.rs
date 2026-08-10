@@ -2,6 +2,9 @@ mod app;
 mod broker;
 mod cli;
 mod config;
+mod databento_cli;
+#[cfg(feature = "replay")]
+mod databento_import;
 mod engine_cli;
 mod engine_control;
 mod engine_registry;
@@ -26,6 +29,9 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Mode};
 use config::AppConfig;
+use databento_cli::download_databento_trades;
+#[cfg(feature = "replay")]
+use databento_import::import_databento_trades;
 use engine_cli::{configure_attach_mode, kill_all_engines, kill_engine, list_engines};
 use ipc::run_engine_server;
 use replay_cli::{
@@ -67,6 +73,17 @@ async fn main() -> Result<()> {
     if let Some(Mode::DownloadReplayData(args)) = cli.mode.clone() {
         let config = AppConfig::load(cli.config.as_deref())?;
         return download_replay_data(&config, args).await;
+    }
+    if let Some(Mode::DownloadDatabentoTrades(args)) = cli.mode.clone() {
+        return download_databento_trades(args).await;
+    }
+    #[cfg(feature = "replay")]
+    if let Some(Mode::ImportDatabentoTrades(args)) = cli.mode.clone() {
+        return import_databento_trades(args);
+    }
+    #[cfg(not(feature = "replay"))]
+    if matches!(cli.mode, Some(Mode::ImportDatabentoTrades(_))) {
+        anyhow::bail!("Databento replay import requires the replay feature");
     }
     if let Some(Mode::RepriceReplayResult(args)) = cli.mode.clone() {
         let config = AppConfig::load(cli.config.as_deref())?;

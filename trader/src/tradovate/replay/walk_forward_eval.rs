@@ -1351,6 +1351,7 @@ mod tests {
             evaluation_end: start + chrono::Duration::hours(10),
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
+            daily_session: None,
             warmup: ReplayDatasetWarmupPolicy {
                 duration_seconds: 60,
                 ..ReplayDatasetWarmupPolicy::default()

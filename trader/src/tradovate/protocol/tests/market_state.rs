@@ -532,6 +532,11 @@ fn replay_window_progress_survives_market_update_and_display_trimming() {
 
 #[test]
 fn display_market_snapshot_trims_to_recent_closed_bars_and_keeps_forming_bar() {
+    assert!(
+        UI_MARKET_BAR_LIMIT >= crate::strategies::hma_cross::hma_warmup_bars(300) + 1,
+        "dashboard history must cover HMA 300 warmup"
+    );
+
     let bar = |ts_ns| Bar {
         ts_ns,
         open: 5000.0 + ts_ns as f64,
@@ -541,11 +546,11 @@ fn display_market_snapshot_trims_to_recent_closed_bars_and_keeps_forming_bar() {
         volume: None,
     };
 
-    let mut bars = (1..=300).map(bar).collect::<Vec<_>>();
-    bars.push(bar(301));
+    let mut bars = (1..=600).map(bar).collect::<Vec<_>>();
+    bars.push(bar(601));
     let market = MarketSnapshot {
         bars,
-        history_loaded: 300,
+        history_loaded: 600,
         status: "streaming".to_string(),
         ..MarketSnapshot::default()
     };
@@ -553,8 +558,14 @@ fn display_market_snapshot_trims_to_recent_closed_bars_and_keeps_forming_bar() {
     let snapshot = display_market_snapshot(&market);
     assert_eq!(snapshot.history_loaded, UI_MARKET_BAR_LIMIT);
     assert_eq!(snapshot.bars.len(), UI_MARKET_BAR_LIMIT + 1);
-    assert_eq!(snapshot.bars.first().map(|bar| bar.ts_ns), Some(45));
-    assert_eq!(snapshot.bars.last().map(|bar| bar.ts_ns), Some(301));
+    assert_eq!(snapshot.bars.first().map(|bar| bar.ts_ns), Some(89));
+    assert_eq!(snapshot.bars.last().map(|bar| bar.ts_ns), Some(601));
+    let closes = snapshot.bars[..snapshot.history_loaded]
+        .iter()
+        .map(|bar| bar.close)
+        .collect::<Vec<_>>();
+    let slow_hma = crate::strategies::hma_cross::hma_series(&closes, 300);
+    assert!(slow_hma.last().is_some_and(|value| value.is_finite()));
     assert_eq!(snapshot.status, "streaming");
 }
 

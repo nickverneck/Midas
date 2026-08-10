@@ -838,17 +838,7 @@ fn display_estimate_f64(value: Option<f64>) -> String {
 async fn download_tradovate_replay(config: &AppConfig, plan: ReplayDownloadPlan) -> Result<()> {
     match plan.source_kind {
         crate::replay_cache::ReplayCacheSourceKind::ServerBars => {
-            let download = crate::tradovate::download_replay_server_bars(
-                config,
-                crate::tradovate::TradovateServerBarDownloadRequest {
-                    contract: plan.contract.clone(),
-                    exact_contract: None,
-                    start: plan.start,
-                    end: plan.end,
-                    bar_type: plan.bar_type,
-                },
-            )
-            .await?;
+            let download = download_server_bars_for_plan(config, &plan).await?;
             let outcome = crate::replay_cache::write_server_bars_parquet_cache(
                 crate::replay_cache::ReplayCacheServerBarsWrite {
                     cache_root: plan.cache_root.clone(),
@@ -898,6 +888,12 @@ async fn download_tradovate_replay(config: &AppConfig, plan: ReplayDownloadPlan)
                 plan.bar_type.mode_label(plan.chart_mode)
             );
             println!("Rows: {}", outcome.row_count);
+            if plan.server_chunk_hours > 0 {
+                println!(
+                    "Server-bar request chunking: {} hour(s)",
+                    plan.server_chunk_hours
+                );
+            }
             print_suggested_contract_coverage(&download.contract_metadata);
             println!("Data: {}", outcome.data_path.display());
             println!("Manifest: {}", outcome.manifest_path.display());
@@ -975,6 +971,58 @@ async fn download_tradovate_replay(config: &AppConfig, plan: ReplayDownloadPlan)
     }
 }
 
+#[cfg(all(feature = "replay", feature = "tradovate"))]
+async fn download_server_bars_for_plan(
+    config: &AppConfig,
+    plan: &ReplayDownloadPlan,
+) -> Result<crate::tradovate::TradovateServerBarDownload> {
+    let request = crate::tradovate::TradovateServerBarDownloadRequest {
+        contract: plan.contract.clone(),
+        exact_contract: None,
+        start: plan.start,
+        end: plan.end,
+        bar_type: plan.bar_type,
+    };
+    if plan.server_chunk_hours == 0 {
+        return crate::tradovate::download_replay_server_bars(config, request).await;
+    }
+
+    let chunk_duration = chrono::Duration::hours(i64::from(plan.server_chunk_hours));
+    if chunk_duration <= chrono::Duration::zero() {
+        bail!("server chunk duration must be positive when enabled");
+    }
+    let session =
+        crate::tradovate::prepare_replay_download_session(config, &plan.contract, None).await?;
+    let mut cursor = plan.start;
+    let mut aggregate: Option<crate::tradovate::TradovateServerBarDownload> = None;
+    let mut chunk_count = 0usize;
+    while cursor < plan.end {
+        let candidate_end = cursor + chunk_duration;
+        let chunk_end = if candidate_end < plan.end {
+            candidate_end
+        } else {
+            plan.end
+        };
+        let mut chunk = session
+            .download_server_bars(cursor, chunk_end, plan.bar_type)
+            .await?;
+        if let Some(existing) = aggregate.as_mut() {
+            existing.bars.append(&mut chunk.bars);
+            existing.warnings.extend(chunk.warnings);
+        } else {
+            aggregate = Some(chunk);
+        }
+        chunk_count = chunk_count.saturating_add(1);
+        cursor = chunk_end;
+    }
+    let mut aggregate = aggregate.context("server-bar chunking produced no request")?;
+    aggregate.warnings.push(format!(
+        "Server-bar history was downloaded in {} {}-hour chunks and normalized into one cache file.",
+        chunk_count, plan.server_chunk_hours
+    ));
+    Ok(aggregate)
+}
+
 #[cfg(feature = "replay")]
 fn print_suggested_contract_coverage(metadata: &crate::replay_cache::ReplayCacheContractMetadata) {
     if let Some(coverage) = &metadata.suggested_coverage {
@@ -1028,6 +1076,7 @@ struct ReplayDownloadPlan {
     tags: Vec<String>,
     raw_chunk_minutes: u32,
     raw_minimum_split_minutes: u32,
+    server_chunk_hours: u32,
 }
 
 #[cfg(feature = "replay")]
@@ -1099,6 +1148,7 @@ fn build_replay_download_plan(
         tags,
         raw_chunk_minutes: args.raw_chunk_minutes,
         raw_minimum_split_minutes: args.raw_minimum_split_minutes,
+        server_chunk_hours: args.server_chunk_hours,
     })
 }
 
@@ -1155,6 +1205,7 @@ mod tests {
             tags: Vec::new(),
             raw_chunk_minutes: 60,
             raw_minimum_split_minutes: 5,
+            server_chunk_hours: 0,
         }
     }
 
@@ -1207,6 +1258,7 @@ mod tests {
         assert_eq!(plan.tags, vec!["baseline"]);
         assert_eq!(plan.raw_chunk_minutes, 60);
         assert_eq!(plan.raw_minimum_split_minutes, 5);
+        assert_eq!(plan.server_chunk_hours, 0);
     }
 
     #[test]

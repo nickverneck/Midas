@@ -81,6 +81,76 @@ impl App {
                         }
                     }
                 }
+                NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                    order.extend([
+                        Focus::EmaFastLength,
+                        Focus::EmaSlowLength,
+                        Focus::EmaInverted,
+                        Focus::VolumeHmaLookbackBars,
+                        Focus::VolumeHmaInvertBelowRatio,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::EmaTakeProfitTicks,
+                            Focus::EmaStopLossTicks,
+                            Focus::EmaTrailingStop,
+                        ]);
+                        if self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .use_trailing_stop
+                        {
+                            order.extend([Focus::EmaTrailTriggerTicks, Focus::EmaTrailOffsetTicks]);
+                        }
+                    }
+                }
+                NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                    order.extend([
+                        Focus::EmaFastLength,
+                        Focus::EmaSlowLength,
+                        Focus::EmaInverted,
+                        Focus::VolumeHmaLookbackBars,
+                        Focus::VolumeHmaInvertBelowRatio,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::EmaTakeProfitTicks,
+                            Focus::EmaStopLossTicks,
+                            Focus::EmaTrailingStop,
+                        ]);
+                        if self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .use_trailing_stop
+                        {
+                            order.extend([Focus::EmaTrailTriggerTicks, Focus::EmaTrailOffsetTicks]);
+                        }
+                    }
+                }
+                NativeStrategyKind::Adx => {
+                    order.extend([
+                        Focus::AdxLength,
+                        Focus::AdxEntryThreshold,
+                        Focus::AdxExitThreshold,
+                        Focus::AdxDiImbalance,
+                        Focus::AdxSlopeLookback,
+                        Focus::AdxDominanceBars,
+                        Focus::AdxBreakoutLookback,
+                        Focus::AdxInverted,
+                    ]);
+                    if show_protection_controls {
+                        order.extend([
+                            Focus::AdxTakeProfitTicks,
+                            Focus::AdxStopLossTicks,
+                            Focus::AdxTrailingStop,
+                        ]);
+                        if self.strategy.native_adx.use_trailing_stop {
+                            order.extend([Focus::AdxTrailTriggerTicks, Focus::AdxTrailOffsetTicks]);
+                        }
+                    }
+                }
             }
         } else if self.strategy.kind == StrategyKind::Lua {
             order.push(Focus::LuaSourceMode);
@@ -285,6 +355,19 @@ impl App {
                 | Focus::EmaStopLossTicks
                 | Focus::EmaTrailTriggerTicks
                 | Focus::EmaTrailOffsetTicks
+                | Focus::VolumeHmaLookbackBars
+                | Focus::VolumeHmaInvertBelowRatio
+                | Focus::AdxLength
+                | Focus::AdxEntryThreshold
+                | Focus::AdxExitThreshold
+                | Focus::AdxDiImbalance
+                | Focus::AdxSlopeLookback
+                | Focus::AdxDominanceBars
+                | Focus::AdxBreakoutLookback
+                | Focus::AdxTakeProfitTicks
+                | Focus::AdxStopLossTicks
+                | Focus::AdxTrailTriggerTicks
+                | Focus::AdxTrailOffsetTicks
                 | Focus::NativeBlockoutMinutes
                 | Focus::NativeSignalDelayBars
                 | Focus::LuaFilePath

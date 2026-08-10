@@ -194,6 +194,22 @@ impl App {
                         1,
                         1,
                     ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaFastLength,
+                        &mut self.strategy.native_volume_hma_cross.hma_cross.fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaFastLength,
+                        &mut self.strategy.native_volume_ema_cross.ema_cross.fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
                     _ => edit_strategy_usize(
                         &mut self.strategy_numeric_input,
                         Focus::EmaFastLength,
@@ -214,6 +230,22 @@ impl App {
                         1,
                         1,
                     ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaSlowLength,
+                        &mut self.strategy.native_volume_hma_cross.hma_cross.slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaSlowLength,
+                        &mut self.strategy.native_volume_ema_cross.ema_cross.slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
                     _ => edit_strategy_usize(
                         &mut self.strategy_numeric_input,
                         Focus::EmaSlowLength,
@@ -229,6 +261,14 @@ impl App {
                     NativeStrategyKind::HmaCross => {
                         toggle_bool(&mut self.strategy.native_hma_cross.inverted, key)
                     }
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => toggle_bool(
+                        &mut self.strategy.native_volume_hma_cross.hma_cross.inverted,
+                        key,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => toggle_bool(
+                        &mut self.strategy.native_volume_ema_cross.ema_cross.inverted,
+                        key,
+                    ),
                     _ => toggle_bool(&mut self.strategy.native_ema.inverted, key),
                 };
             }
@@ -238,6 +278,30 @@ impl App {
                         &mut self.strategy_numeric_input,
                         Focus::EmaTakeProfitTicks,
                         &mut self.strategy.native_hma_cross.take_profit_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTakeProfitTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .take_profit_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTakeProfitTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .take_profit_ticks,
                         key,
                         0.0,
                         1.0,
@@ -262,6 +326,30 @@ impl App {
                         0.0,
                         1.0,
                     ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaStopLossTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .stop_loss_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaStopLossTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .stop_loss_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
                     _ => edit_strategy_float(
                         &mut self.strategy_numeric_input,
                         Focus::EmaStopLossTicks,
@@ -277,6 +365,22 @@ impl App {
                     NativeStrategyKind::HmaCross => {
                         toggle_bool(&mut self.strategy.native_hma_cross.use_trailing_stop, key)
                     }
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => toggle_bool(
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .use_trailing_stop,
+                        key,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => toggle_bool(
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .use_trailing_stop,
+                        key,
+                    ),
                     _ => toggle_bool(&mut self.strategy.native_ema.use_trailing_stop, key),
                 };
             }
@@ -286,6 +390,30 @@ impl App {
                         &mut self.strategy_numeric_input,
                         Focus::EmaTrailTriggerTicks,
                         &mut self.strategy.native_hma_cross.trail_trigger_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailTriggerTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .trail_trigger_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailTriggerTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .trail_trigger_ticks,
                         key,
                         0.0,
                         1.0,
@@ -310,6 +438,30 @@ impl App {
                         0.0,
                         1.0,
                     ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailOffsetTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .trail_offset_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaTrailOffsetTicks,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .trail_offset_ticks,
+                        key,
+                        0.0,
+                        1.0,
+                    ),
                     _ => edit_strategy_float(
                         &mut self.strategy_numeric_input,
                         Focus::EmaTrailOffsetTicks,
@@ -319,6 +471,182 @@ impl App {
                         1.0,
                     ),
                 };
+            }
+            Focus::VolumeHmaLookbackBars => match self.strategy.native_strategy {
+                NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                    let _ = edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::VolumeHmaLookbackBars,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .volume_regime
+                            .lookback_bars,
+                        key,
+                        1,
+                        1,
+                    );
+                }
+                _ => {
+                    let _ = edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::VolumeHmaLookbackBars,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .volume_regime
+                            .lookback_bars,
+                        key,
+                        1,
+                        1,
+                    );
+                }
+            },
+            Focus::VolumeHmaInvertBelowRatio => match self.strategy.native_strategy {
+                NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                    let _ = edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::VolumeHmaInvertBelowRatio,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .volume_regime
+                            .invert_below_relative_volume,
+                        key,
+                        0.0,
+                        0.05,
+                    );
+                }
+                _ => {
+                    let _ = edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::VolumeHmaInvertBelowRatio,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .volume_regime
+                            .invert_below_relative_volume,
+                        key,
+                        0.0,
+                        0.05,
+                    );
+                }
+            },
+            Focus::AdxLength => {
+                let _ = edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxLength,
+                    &mut self.strategy.native_adx.adx_length,
+                    key,
+                    1,
+                    1,
+                );
+            }
+            Focus::AdxEntryThreshold => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxEntryThreshold,
+                    &mut self.strategy.native_adx.adx_entry_threshold,
+                    key,
+                    0.0,
+                    1.0,
+                );
+            }
+            Focus::AdxExitThreshold => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxExitThreshold,
+                    &mut self.strategy.native_adx.adx_exit_threshold,
+                    key,
+                    0.0,
+                    1.0,
+                );
+            }
+            Focus::AdxDiImbalance => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxDiImbalance,
+                    &mut self.strategy.native_adx.di_imbalance_threshold,
+                    key,
+                    0.0,
+                    0.01,
+                );
+            }
+            Focus::AdxSlopeLookback => {
+                let _ = edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxSlopeLookback,
+                    &mut self.strategy.native_adx.slope_lookback,
+                    key,
+                    1,
+                    1,
+                );
+            }
+            Focus::AdxDominanceBars => {
+                let _ = edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxDominanceBars,
+                    &mut self.strategy.native_adx.dominance_bars,
+                    key,
+                    1,
+                    1,
+                );
+            }
+            Focus::AdxBreakoutLookback => {
+                let _ = edit_strategy_usize(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxBreakoutLookback,
+                    &mut self.strategy.native_adx.breakout_lookback,
+                    key,
+                    0,
+                    1,
+                );
+            }
+            Focus::AdxInverted => {
+                let _ = toggle_bool(&mut self.strategy.native_adx.inverted, key);
+            }
+            Focus::AdxTakeProfitTicks => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxTakeProfitTicks,
+                    &mut self.strategy.native_adx.take_profit_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                );
+            }
+            Focus::AdxStopLossTicks => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxStopLossTicks,
+                    &mut self.strategy.native_adx.stop_loss_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                );
+            }
+            Focus::AdxTrailingStop => {
+                let _ = toggle_bool(&mut self.strategy.native_adx.use_trailing_stop, key);
+            }
+            Focus::AdxTrailTriggerTicks => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxTrailTriggerTicks,
+                    &mut self.strategy.native_adx.trail_trigger_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                );
+            }
+            Focus::AdxTrailOffsetTicks => {
+                let _ = edit_strategy_float(
+                    &mut self.strategy_numeric_input,
+                    Focus::AdxTrailOffsetTicks,
+                    &mut self.strategy.native_adx.trail_offset_ticks,
+                    key,
+                    0.0,
+                    1.0,
+                );
             }
             Focus::LuaSourceMode => match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {

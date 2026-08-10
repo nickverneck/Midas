@@ -145,7 +145,18 @@ pub(super) fn load_replay_state_blocking_with_shared_frames(
         let view = store.load_path(view_path)?;
         let resolved = store.resolve_model(&view, view_path.to_path_buf())?;
         let replay_window = ReplayWindowSnapshot {
-            preset: resolved.view.session_preset.label().to_string(),
+            preset: resolved
+                .view
+                .daily_session
+                .as_ref()
+                .map(|filter| {
+                    format!(
+                        "{} | daily {}",
+                        resolved.view.session_preset.label(),
+                        filter.label()
+                    )
+                })
+                .unwrap_or_else(|| resolved.view.session_preset.label().to_string()),
             input_timezone: resolved.view.input_timezone.clone(),
             warmup_start: resolved.load_range.start,
             evaluation_start: resolved.evaluation_range.start,
@@ -165,7 +176,8 @@ pub(super) fn load_replay_state_blocking_with_shared_frames(
             return attach_dom_updates(
                 attach_shared_frames(
                     {
-                        let (resolved_file, bars) = if let Some(shared) = shared_frames.as_ref() {
+                        let (resolved_file, mut bars) = if let Some(shared) = shared_frames.as_ref()
+                        {
                             (
                                 resolved.dataset.resolve_server_bars_file(
                                     bar_type,
@@ -183,6 +195,14 @@ pub(super) fn load_replay_state_blocking_with_shared_frames(
                                 Some(&resolved.load_range),
                             )?
                         };
+                        if resolved.view.daily_session.is_some() {
+                            bars = Arc::from(
+                                resolved
+                                    .view
+                                    .filter_server_bars(bars.to_vec())?
+                                    .into_boxed_slice(),
+                            );
+                        }
                         replay_state_from_shared_server_bars(
                             resolved_file,
                             bars,

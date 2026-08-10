@@ -5,6 +5,21 @@ fn current_native_fixed_take_profit_ticks(session: &SessionState) -> f64 {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.take_profit_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.take_profit_ticks,
         NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.take_profit_ticks,
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            session
+                .execution_config
+                .native_volume_hma_cross
+                .hma_cross
+                .take_profit_ticks
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            session
+                .execution_config
+                .native_volume_ema_cross
+                .ema_cross
+                .take_profit_ticks
+        }
+        NativeStrategyKind::Adx => session.execution_config.native_adx.take_profit_ticks,
     }
 }
 
@@ -20,6 +35,21 @@ fn current_native_fixed_stop_ticks(session: &SessionState) -> f64 {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.stop_loss_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.stop_loss_ticks,
         NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.stop_loss_ticks,
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            session
+                .execution_config
+                .native_volume_hma_cross
+                .hma_cross
+                .stop_loss_ticks
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            session
+                .execution_config
+                .native_volume_ema_cross
+                .ema_cross
+                .stop_loss_ticks
+        }
+        NativeStrategyKind::Adx => session.execution_config.native_adx.stop_loss_ticks,
     }
 }
 
@@ -35,6 +65,21 @@ fn active_native_uses_trailing_stop(session: &SessionState) -> bool {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.use_trailing_stop,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.use_trailing_stop,
         NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.use_trailing_stop,
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            session
+                .execution_config
+                .native_volume_hma_cross
+                .hma_cross
+                .use_trailing_stop
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            session
+                .execution_config
+                .native_volume_ema_cross
+                .ema_cross
+                .use_trailing_stop
+        }
+        NativeStrategyKind::Adx => session.execution_config.native_adx.use_trailing_stop,
     }
 }
 
@@ -48,6 +93,21 @@ fn current_native_trail_trigger_ticks(session: &SessionState) -> f64 {
                 .native_hma_cross
                 .trail_trigger_ticks
         }
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            session
+                .execution_config
+                .native_volume_hma_cross
+                .hma_cross
+                .trail_trigger_ticks
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            session
+                .execution_config
+                .native_volume_ema_cross
+                .ema_cross
+                .trail_trigger_ticks
+        }
+        NativeStrategyKind::Adx => session.execution_config.native_adx.trail_trigger_ticks,
     }
 }
 
@@ -58,6 +118,21 @@ fn current_native_trail_offset_ticks(session: &SessionState) -> f64 {
         NativeStrategyKind::HmaCross => {
             session.execution_config.native_hma_cross.trail_offset_ticks
         }
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            session
+                .execution_config
+                .native_volume_hma_cross
+                .hma_cross
+                .trail_offset_ticks
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            session
+                .execution_config
+                .native_volume_ema_cross
+                .ema_cross
+                .trail_offset_ticks
+        }
+        NativeStrategyKind::Adx => session.execution_config.native_adx.trail_offset_ticks,
     }
 }
 

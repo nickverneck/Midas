@@ -902,6 +902,7 @@ mod tests {
             evaluation_end: Utc.with_ymd_and_hms(2026, 7, 1, 14, 30, 0).unwrap(),
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
+            daily_session: None,
             warmup: ReplayDatasetWarmupPolicy::default(),
         };
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap();

@@ -1,5 +1,7 @@
 use super::*;
-use chrono::{Datelike, Duration as ChronoDuration, LocalResult, NaiveDateTime, TimeZone, Weekday};
+use chrono::{
+    Datelike, Duration as ChronoDuration, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Weekday,
+};
 use chrono_tz::Tz;
 use std::str::FromStr;
 
@@ -200,6 +202,53 @@ impl Default for ReplayDatasetWarmupPolicy {
     }
 }
 
+/// Optional recurring local-time filter applied to replay bars after the
+/// source range is loaded. The immutable source cache is never rewritten.
+/// Weekends are excluded because this filter models a weekday trading window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayDatasetDailySessionFilter {
+    pub timezone: String,
+    pub start_local: NaiveTime,
+    pub end_local: NaiveTime,
+}
+
+impl ReplayDatasetDailySessionFilter {
+    pub fn validate(&self) -> Result<()> {
+        Tz::from_str(self.timezone.trim())
+            .with_context(|| format!("daily session timezone is invalid: {}", self.timezone))?;
+        if self.start_local >= self.end_local {
+            bail!(
+                "daily session start {} must be before end {}",
+                self.start_local,
+                self.end_local
+            );
+        }
+        Ok(())
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "{} {}-{} weekdays",
+            self.timezone, self.start_local, self.end_local
+        )
+    }
+
+    pub fn contains_timestamp(&self, ts_ns: i64) -> Result<bool> {
+        self.validate()?;
+        if ts_ns <= 0 {
+            return Ok(false);
+        }
+        let timezone = Tz::from_str(self.timezone.trim())
+            .with_context(|| format!("daily session timezone is invalid: {}", self.timezone))?;
+        let local = DateTime::<Utc>::from_timestamp_nanos(ts_ns).with_timezone(&timezone);
+        if matches!(local.weekday(), Weekday::Sat | Weekday::Sun) {
+            return Ok(false);
+        }
+        let time = local.time();
+        Ok(time >= self.start_local && time < self.end_local)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplayDatasetView {
     pub view_version: u32,
@@ -209,6 +258,10 @@ pub struct ReplayDatasetView {
     pub evaluation_end: DateTime<Utc>,
     pub input_timezone: String,
     pub session_preset: ReplayDatasetSessionPreset,
+    /// Optional recurring local-time filter, evaluated on every loaded bar.
+    /// Older view documents omit this field and retain full-source behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_session: Option<ReplayDatasetDailySessionFilter>,
     #[serde(default)]
     pub warmup: ReplayDatasetWarmupPolicy,
 }
@@ -257,6 +310,7 @@ impl ReplayDatasetView {
             evaluation_end: evaluation.end,
             input_timezone: input_timezone.into(),
             session_preset,
+            daily_session: None,
             warmup,
         };
         view.validate_model()?;
@@ -292,12 +346,16 @@ impl ReplayDatasetView {
         let timezone = self.input_tz()?;
         let start = self.evaluation_start.with_timezone(&timezone);
         let end = self.evaluation_end.with_timezone(&timezone);
-        Ok(format!(
+        let range = format!(
             "{}: {} to {}",
             self.session_preset.label(),
             start.format("%Y-%m-%d %H:%M:%S %Z"),
             end.format("%Y-%m-%d %H:%M:%S %Z")
-        ))
+        );
+        Ok(match self.daily_session.as_ref() {
+            Some(filter) => format!("{range} | daily {}", filter.label()),
+            None => range,
+        })
     }
 
     pub fn validate_model(&self) -> Result<()> {
@@ -314,11 +372,30 @@ impl ReplayDatasetView {
             bail!("dataset view source instrument and contract must not be empty");
         }
         self.input_tz()?;
+        if let Some(filter) = self.daily_session.as_ref() {
+            filter.validate()?;
+        }
         self.load_range()?;
         if self.warmup.trading == ReplayWarmupTradingPolicy::CarryWarmupPosition {
             bail!("carrying a warmup position is not implemented; use flat_until_evaluation");
         }
         Ok(())
+    }
+
+    /// Apply this view's recurring session filter to an already range-bounded
+    /// server-bar sequence. Filtering is stable and never mutates the cache.
+    pub fn filter_server_bars(&self, bars: Vec<Bar>) -> Result<Vec<Bar>> {
+        let Some(filter) = self.daily_session.as_ref() else {
+            return Ok(bars);
+        };
+        filter.validate()?;
+        bars.into_iter()
+            .filter_map(|bar| match filter.contains_timestamp(bar.ts_ns) {
+                Ok(true) => Some(Ok(bar)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
 }
 
@@ -396,13 +473,15 @@ impl ResolvedReplayDatasetView {
         candle_mode: CandleMode,
     ) -> Result<ReplayCacheLoadedServerBars> {
         let coverage = self.requested_coverage();
-        load_server_bars_cache_file_range(
+        let mut loaded = load_server_bars_cache_file_range(
             &self.dataset,
             bar_type,
             candle_mode,
             Some(&coverage),
             Some(&self.load_range),
-        )
+        )?;
+        loaded.bars = self.view.filter_server_bars(loaded.bars)?;
+        Ok(loaded)
     }
 
     pub fn load_raw_ticks(&self) -> Result<ReplayCacheLoadedRawTicks> {

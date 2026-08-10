@@ -218,6 +218,142 @@ impl App {
                     ]);
                     detail
                 }
+                NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                    let config = &self.strategy.native_volume_hma_cross;
+                    let mut detail = vec![
+                        Line::from("Volume-Adaptive HMA Crossover Strategy"),
+                        Line::from(format!(
+                            "Type: {}",
+                            NativeStrategyKind::VolumeAdaptiveHmaCross.label()
+                        )),
+                        Line::from(format!(
+                            "Params: fast={} slow={} volume_lookback={} invert_below={:.2}x ema_gate={} ema_length={}",
+                            config.hma_cross.fast_length,
+                            config.hma_cross.slow_length,
+                            config.volume_regime.lookback_bars,
+                            config.volume_regime.invert_below_relative_volume,
+                            bool_label(config.ema_gate.enabled),
+                            config.ema_gate.ema_length,
+                        )),
+                        Line::from(format!(
+                            "Flags: base_inverted={} trailing={} timing={} delay={} path={} reversal={}",
+                            bool_label(config.hma_cross.inverted),
+                            bool_label(config.hma_cross.use_trailing_stop),
+                            self.strategy.native_signal_timing.label(),
+                            self.strategy.native_signal_delay_bars,
+                            self.strategy.native_execution_path.label(),
+                            self.strategy.native_reversal_mode.label(),
+                        )),
+                        Line::from(""),
+                        Line::from("Signal logic"),
+                        Line::from("Base signal: fast HMA crosses above/below slow HMA."),
+                        Line::from(
+                            "When current volume is below the rolling relative-volume threshold, the base direction is inverted.",
+                        ),
+                        Line::from("Missing volume leaves the base HMA orientation unchanged."),
+                        Line::from(
+                            "When enabled, close above the reference EMA inverts the wrapped orientation; close below keeps it normal.",
+                        ),
+                    ];
+                    if show_protection {
+                        detail.push(Line::from(format!(
+                            "Risk: tp_ticks={:.0} sl_ticks={:.0} trailing={}",
+                            config.hma_cross.take_profit_ticks,
+                            config.hma_cross.stop_loss_ticks,
+                            bool_label(config.hma_cross.use_trailing_stop),
+                        )));
+                    }
+                    detail
+                }
+                NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                    let config = &self.strategy.native_volume_ema_cross;
+                    let mut detail = vec![
+                        Line::from("Volume-Adaptive EMA Crossover Strategy"),
+                        Line::from(format!(
+                            "Type: {}",
+                            NativeStrategyKind::VolumeAdaptiveEmaCross.label()
+                        )),
+                        Line::from(format!(
+                            "Params: fast={} slow={} volume_lookback={} invert_below={:.2}x ema_gate={} ema_length={}",
+                            config.ema_cross.fast_length,
+                            config.ema_cross.slow_length,
+                            config.volume_regime.lookback_bars,
+                            config.volume_regime.invert_below_relative_volume,
+                            bool_label(config.ema_gate.enabled),
+                            config.ema_gate.ema_length,
+                        )),
+                        Line::from(format!(
+                            "Flags: base_inverted={} trailing={} timing={} delay={} path={} reversal={}",
+                            bool_label(config.ema_cross.inverted),
+                            bool_label(config.ema_cross.use_trailing_stop),
+                            self.strategy.native_signal_timing.label(),
+                            self.strategy.native_signal_delay_bars,
+                            self.strategy.native_execution_path.label(),
+                            self.strategy.native_reversal_mode.label(),
+                        )),
+                        Line::from(""),
+                        Line::from("Signal logic"),
+                        Line::from("Base signal: fast EMA crosses above/below slow EMA."),
+                        Line::from(
+                            "When current volume is below the rolling relative-volume threshold, the base direction is inverted.",
+                        ),
+                        Line::from(
+                            "When enabled, close above the reference EMA inverts the wrapped orientation; close below keeps it normal.",
+                        ),
+                    ];
+                    if show_protection {
+                        detail.push(Line::from(format!(
+                            "Risk: tp_ticks={:.0} sl_ticks={:.0} trailing={}",
+                            config.ema_cross.take_profit_ticks,
+                            config.ema_cross.stop_loss_ticks,
+                            bool_label(config.ema_cross.use_trailing_stop),
+                        )));
+                    }
+                    detail
+                }
+                NativeStrategyKind::Adx => {
+                    let config = &self.strategy.native_adx;
+                    let mut detail = vec![
+                        Line::from("ADX Trend-Regime Strategy"),
+                        Line::from(format!("Type: {}", NativeStrategyKind::Adx.label())),
+                        Line::from(format!(
+                            "Params: len={} entry={:.1} exit={:.1} DI imbalance={:.2} slope={} dominance={} breakout={}",
+                            config.adx_length,
+                            config.adx_entry_threshold,
+                            config.adx_exit_threshold,
+                            config.di_imbalance_threshold,
+                            config.slope_lookback,
+                            config.dominance_bars,
+                            config.breakout_lookback,
+                        )),
+                        Line::from(format!(
+                            "Flags: inverted={} timing={} delay={} path={} reversal={}",
+                            bool_label(config.inverted),
+                            self.strategy.native_signal_timing.label(),
+                            self.strategy.native_signal_delay_bars,
+                            self.strategy.native_execution_path.label(),
+                            self.strategy.native_reversal_mode.label(),
+                        )),
+                        Line::from(""),
+                        Line::from("Signal logic"),
+                        Line::from(
+                            "ADX enters a hysteretic trend regime above the entry threshold and exits below the exit threshold.",
+                        ),
+                        Line::from(
+                            "+DI/-DI imbalance, positive ADX slope, dominance bars, and a completed-bar breakout confirm entries.",
+                        ),
+                        Line::from("Inverted swaps buy/sell decisions before order routing."),
+                    ];
+                    if show_protection {
+                        detail.push(Line::from(format!(
+                            "Risk: tp_ticks={:.0} sl_ticks={:.0} trailing={}",
+                            config.take_profit_ticks,
+                            config.stop_loss_ticks,
+                            bool_label(config.use_trailing_stop),
+                        )));
+                    }
+                    detail
+                }
             };
             if show_protection {
                 lines.extend([

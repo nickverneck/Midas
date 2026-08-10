@@ -15,9 +15,14 @@ use crate::replay_cache::ReplayDatasetView;
 use crate::replay_cache::{
     ReplayCacheCoverage, ReplayCacheDataFile, ReplayCacheTimeRange, ReplayDatasetViewStore,
 };
+use crate::strategies::adx::AdxConfig;
 use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
 use crate::strategies::hma_cross::HmaCrossConfig;
+use crate::strategies::orientation_gate::EmaOrientationGateConfig;
+use crate::strategies::volume_regime::{
+    VolumeAdaptiveEmaCrossConfig, VolumeAdaptiveHmaCrossConfig,
+};
 use crate::strategy::ExecutionStrategyConfig;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -335,6 +340,7 @@ impl Default for ReplaySweepSpec {
                 evaluation_end: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
                 input_timezone: "UTC".to_string(),
                 session_preset: crate::replay_cache::ReplayDatasetSessionPreset::FullSource,
+                daily_session: None,
                 warmup: crate::replay_cache::ReplayDatasetWarmupPolicy::default(),
             },
             bar_type: BarType::default(),
@@ -1000,7 +1006,34 @@ fn validate_strategy_config(config: &ExecutionStrategyConfig) -> Result<()> {
     validate_hma_angle(&config.native_hma)?;
     validate_ema(&config.native_ema)?;
     validate_hma_cross(&config.native_hma_cross)?;
+    validate_volume_adaptive_hma_cross(&config.native_volume_hma_cross)?;
+    validate_volume_adaptive_ema_cross(&config.native_volume_ema_cross)?;
+    validate_adx(&config.native_adx)?;
     Ok(())
+}
+
+fn validate_adx(config: &AdxConfig) -> Result<()> {
+    if config.adx_length == 0 {
+        bail!("ADX adx_length must be greater than zero");
+    }
+    if !config.adx_entry_threshold.is_finite()
+        || !config.adx_exit_threshold.is_finite()
+        || config.adx_entry_threshold <= config.adx_exit_threshold
+    {
+        bail!("ADX entry threshold must be finite and greater than exit threshold");
+    }
+    if !config.di_imbalance_threshold.is_finite()
+        || !(0.0..=1.0).contains(&config.di_imbalance_threshold)
+    {
+        bail!("ADX DI imbalance threshold must be finite and between 0 and 1");
+    }
+    validate_protection_values(
+        "ADX",
+        config.take_profit_ticks,
+        config.stop_loss_ticks,
+        config.trail_trigger_ticks,
+        config.trail_offset_ticks,
+    )
 }
 
 fn validate_hma_angle(config: &HmaAngleConfig) -> Result<()> {
@@ -1059,6 +1092,34 @@ fn validate_hma_cross(config: &HmaCrossConfig) -> Result<()> {
     )
 }
 
+fn validate_volume_adaptive_hma_cross(config: &VolumeAdaptiveHmaCrossConfig) -> Result<()> {
+    validate_hma_cross(&config.hma_cross).context("volume-adaptive HMA base")?;
+    config
+        .volume_regime
+        .validate()
+        .map_err(|error| anyhow::anyhow!("volume-adaptive HMA {error}"))?;
+    validate_ema_orientation_gate(&config.ema_gate)
+        .map_err(|error| anyhow::anyhow!("volume-adaptive HMA {error}"))?;
+    Ok(())
+}
+
+fn validate_volume_adaptive_ema_cross(config: &VolumeAdaptiveEmaCrossConfig) -> Result<()> {
+    validate_ema(&config.ema_cross).context("volume-adaptive EMA base")?;
+    config
+        .volume_regime
+        .validate()
+        .map_err(|error| anyhow::anyhow!("volume-adaptive EMA {error}"))?;
+    validate_ema_orientation_gate(&config.ema_gate)
+        .map_err(|error| anyhow::anyhow!("volume-adaptive EMA {error}"))?;
+    Ok(())
+}
+
+fn validate_ema_orientation_gate(config: &EmaOrientationGateConfig) -> Result<()> {
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!("EMA orientation gate {error}"))
+}
+
 fn validate_protection_values(
     label: &str,
     take_profit_ticks: f64,
@@ -1115,6 +1176,46 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_hma_cross.use_trailing_stop",
     "native_hma_cross.trail_trigger_ticks",
     "native_hma_cross.trail_offset_ticks",
+    "native_volume_hma_cross.fast_length",
+    "native_volume_hma_cross.slow_length",
+    "native_volume_hma_cross.calculation_mode",
+    "native_volume_hma_cross.inverted",
+    "native_volume_hma_cross.take_profit_ticks",
+    "native_volume_hma_cross.stop_loss_ticks",
+    "native_volume_hma_cross.use_trailing_stop",
+    "native_volume_hma_cross.trail_trigger_ticks",
+    "native_volume_hma_cross.trail_offset_ticks",
+    "native_volume_hma_cross.volume_regime.lookback_bars",
+    "native_volume_hma_cross.volume_regime.invert_below_relative_volume",
+    "native_volume_hma_cross.ema_gate.enabled",
+    "native_volume_hma_cross.ema_gate.ema_length",
+    "native_volume_hma_cross.ema_gate.invert_when_above",
+    "native_volume_ema_cross.fast_length",
+    "native_volume_ema_cross.slow_length",
+    "native_volume_ema_cross.inverted",
+    "native_volume_ema_cross.take_profit_ticks",
+    "native_volume_ema_cross.stop_loss_ticks",
+    "native_volume_ema_cross.use_trailing_stop",
+    "native_volume_ema_cross.trail_trigger_ticks",
+    "native_volume_ema_cross.trail_offset_ticks",
+    "native_volume_ema_cross.volume_regime.lookback_bars",
+    "native_volume_ema_cross.volume_regime.invert_below_relative_volume",
+    "native_volume_ema_cross.ema_gate.enabled",
+    "native_volume_ema_cross.ema_gate.ema_length",
+    "native_volume_ema_cross.ema_gate.invert_when_above",
+    "native_adx.adx_length",
+    "native_adx.adx_entry_threshold",
+    "native_adx.adx_exit_threshold",
+    "native_adx.di_imbalance_threshold",
+    "native_adx.slope_lookback",
+    "native_adx.dominance_bars",
+    "native_adx.breakout_lookback",
+    "native_adx.inverted",
+    "native_adx.take_profit_ticks",
+    "native_adx.stop_loss_ticks",
+    "native_adx.use_trailing_stop",
+    "native_adx.trail_trigger_ticks",
+    "native_adx.trail_offset_ticks",
     "order_qty",
 ];
 
@@ -1228,6 +1329,7 @@ mod tests {
             evaluation_end: Utc.with_ymd_and_hms(2026, 7, 1, 14, 30, 0).unwrap(),
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
+            daily_session: None,
             warmup: ReplayDatasetWarmupPolicy {
                 duration_seconds: 600,
                 ..ReplayDatasetWarmupPolicy::default()

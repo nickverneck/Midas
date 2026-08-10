@@ -25,6 +25,13 @@ fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig
         NativeStrategyKind::HmaAngle => config.native_hma.uses_native_protection(),
         NativeStrategyKind::EmaCross => config.native_ema.uses_native_protection(),
         NativeStrategyKind::HmaCross => config.native_hma_cross.uses_native_protection(),
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            config.native_volume_hma_cross.uses_native_protection()
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            config.native_volume_ema_cross.uses_native_protection()
+        }
+        NativeStrategyKind::Adx => config.native_adx.uses_native_protection(),
     };
     if uses_protection && config.native_reversal_mode == NativeReversalMode::Direct {
         config.native_reversal_mode = NativeReversalMode::CloseAllEnter;

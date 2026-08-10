@@ -422,6 +422,21 @@ impl App {
             | Focus::EmaTrailingStop
             | Focus::EmaTrailTriggerTicks
             | Focus::EmaTrailOffsetTicks
+            | Focus::VolumeHmaLookbackBars
+            | Focus::VolumeHmaInvertBelowRatio
+            | Focus::AdxLength
+            | Focus::AdxEntryThreshold
+            | Focus::AdxExitThreshold
+            | Focus::AdxDiImbalance
+            | Focus::AdxSlopeLookback
+            | Focus::AdxDominanceBars
+            | Focus::AdxBreakoutLookback
+            | Focus::AdxInverted
+            | Focus::AdxTakeProfitTicks
+            | Focus::AdxStopLossTicks
+            | Focus::AdxTrailingStop
+            | Focus::AdxTrailTriggerTicks
+            | Focus::AdxTrailOffsetTicks
             | Focus::LuaSourceMode
             | Focus::LuaFilePath
             | Focus::LuaEditor

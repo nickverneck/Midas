@@ -1,4 +1,5 @@
 use super::*;
+use crate::strategies::hma_cross::{HmaCrossConfig, HmaCrossExecutionState};
 
 /// Indicator values and gate inputs associated with one strategy evaluation.
 /// This is kept separate from the execution tuple so existing order paths can
@@ -102,6 +103,66 @@ pub(crate) fn snapshot_active_execution_strategy(
                 ..Default::default()
             }
         }
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_volume_hma_cross
+                .evaluate(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "HMA+RVOL",
+                previous_fast_indicator: evaluation.hma.previous_fast_hma,
+                previous_slow_indicator: evaluation.hma.previous_slow_hma,
+                fast_indicator: evaluation.hma.fast_hma,
+                slow_indicator: evaluation.hma.slow_hma,
+                auxiliary_name: Some("relative_volume"),
+                auxiliary_value: evaluation.relative_volume,
+                raw_buy_signal: evaluation.hma.raw_buy_signal,
+                raw_sell_signal: evaluation.hma.raw_sell_signal,
+                effective_buy_signal: evaluation.hma.effective_buy_signal,
+                effective_sell_signal: evaluation.hma.effective_sell_signal,
+                hold_reason: evaluation.hma.hold_reason,
+            }
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_volume_ema_cross
+                .evaluate(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "EMA+RVOL",
+                previous_fast_indicator: evaluation.ema.previous_fast_ema,
+                previous_slow_indicator: evaluation.ema.previous_slow_ema,
+                fast_indicator: evaluation.ema.fast_ema,
+                slow_indicator: evaluation.ema.slow_ema,
+                auxiliary_name: Some("relative_volume"),
+                auxiliary_value: evaluation.relative_volume,
+                raw_buy_signal: evaluation.ema.raw_buy_signal,
+                raw_sell_signal: evaluation.ema.raw_sell_signal,
+                effective_buy_signal: evaluation.ema.effective_buy_signal,
+                effective_sell_signal: evaluation.ema.effective_sell_signal,
+                hold_reason: evaluation.ema.hold_reason,
+            }
+        }
+        NativeStrategyKind::Adx => {
+            let evaluation = session
+                .execution_config
+                .native_adx
+                .evaluate(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "ADX",
+                previous_fast_indicator: evaluation.previous_adx,
+                fast_indicator: evaluation.adx,
+                slow_indicator: evaluation.plus_di,
+                auxiliary_name: Some("signed_trend_score"),
+                auxiliary_value: evaluation.signed_trend_score,
+                raw_buy_signal: evaluation.raw_buy_signal,
+                raw_sell_signal: evaluation.raw_sell_signal,
+                effective_buy_signal: evaluation.effective_buy_signal,
+                effective_sell_signal: evaluation.effective_sell_signal,
+                hold_reason: evaluation.hold_reason,
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -137,6 +198,39 @@ pub(crate) fn evaluate_active_execution_strategy(
             let evaluation = session
                 .execution_config
                 .native_hma_cross
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_volume_hma_cross
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (
+                evaluation.signal(),
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
+        NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            let evaluation = session
+                .execution_config
+                .native_volume_ema_cross
+                .evaluate(bars, side_from_signed_qty(current_qty));
+            (
+                evaluation.signal(),
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
+        NativeStrategyKind::Adx => {
+            let evaluation = session
+                .execution_config
+                .native_adx
                 .evaluate(bars, side_from_signed_qty(current_qty));
             (
                 evaluation.signal,
@@ -198,6 +292,39 @@ pub(crate) fn evaluate_active_execution_strategy_since(
                 let evaluation = session
                     .execution_config
                     .native_hma_cross
+                    .evaluate(window, current_side);
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let evaluation = session
+                    .execution_config
+                    .native_volume_hma_cross
+                    .evaluate(window, current_side);
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                let evaluation = session
+                    .execution_config
+                    .native_volume_ema_cross
+                    .evaluate(window, current_side);
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::Adx => {
+                let evaluation = session
+                    .execution_config
+                    .native_adx
                     .evaluate(window, current_side);
                 (
                     evaluation.signal,
@@ -272,6 +399,50 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                     evaluation.debug_summary(),
                 )
             }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let config = session.execution_config.native_volume_hma_cross.clone();
+                let evaluation = config.evaluate_current_cross(
+                    &mut session.execution_runtime.volume_hma_cross_execution,
+                    bars,
+                    current_side,
+                );
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                let config = session.execution_config.native_volume_ema_cross.clone();
+                let evaluation = if session.replay_enabled
+                    && session.cfg.replay_evaluator_mode
+                        == crate::broker::ReplayEvaluatorMode::Streaming
+                {
+                    config.evaluate_streaming(
+                        &mut session.execution_runtime.volume_ema_cross_execution,
+                        bars,
+                        current_side,
+                    )
+                } else {
+                    config.evaluate(bars, current_side)
+                };
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::Adx => {
+                let evaluation = session
+                    .execution_config
+                    .native_adx
+                    .evaluate(bars, current_side);
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
         };
         return (signal_bar, signal, summary, debug_summary);
     }
@@ -329,11 +500,102 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                     evaluation.debug_summary(),
                 )
             }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let config = session.execution_config.native_volume_hma_cross.clone();
+                let evaluation = config.evaluate_current_cross(
+                    &mut session.execution_runtime.volume_hma_cross_execution,
+                    window,
+                    current_side,
+                );
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                let config = session.execution_config.native_volume_ema_cross.clone();
+                let evaluation = if session.replay_enabled
+                    && session.cfg.replay_evaluator_mode
+                        == crate::broker::ReplayEvaluatorMode::Streaming
+                {
+                    config.evaluate_streaming(
+                        &mut session.execution_runtime.volume_ema_cross_execution,
+                        window,
+                        current_side,
+                    )
+                } else {
+                    config.evaluate(window, current_side)
+                };
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::Adx => {
+                let evaluation = session
+                    .execution_config
+                    .native_adx
+                    .evaluate(window, current_side);
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
         };
         if signal != StrategySignal::Hold {
             latest = Some((signal_bar, signal, summary, debug_summary));
         } else if latest.is_none() {
             latest = Some((signal_bar, signal, summary, debug_summary));
+        }
+    }
+    latest.expect("strategy bars must not be empty")
+}
+
+/// Evaluate an incremental HMA crossover directly against the retained market
+/// slice.  Replay normally calls the generic strategy helper with a cloned
+/// bar vector; that clone is inexpensive for a small live window but becomes
+/// quadratic over a month of one-minute bars.  Keeping this narrow helper
+/// replay-only preserves the existing dispatch and legacy evaluator behavior.
+pub(crate) fn evaluate_incremental_hma_cross_since(
+    config: &HmaCrossConfig,
+    runtime: &mut HmaCrossExecutionState,
+    signal_timing: NativeSignalTiming,
+    bars: &[Bar],
+    current_qty: i32,
+    after_ts: Option<i64>,
+) -> (Bar, StrategySignal, String, String) {
+    let current_side = side_from_signed_qty(current_qty);
+    if signal_timing == NativeSignalTiming::LiveBar {
+        let signal_bar = bars
+            .last()
+            .expect("strategy bars must not be empty")
+            .clone();
+        let evaluation = config.evaluate_current_cross(runtime, bars, current_side);
+        return (
+            signal_bar,
+            evaluation.signal,
+            evaluation.summary(),
+            evaluation.debug_summary(),
+        );
+    }
+
+    let start_idx = after_ts
+        .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
+        .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let mut latest = None;
+    for idx in start_idx..bars.len() {
+        let evaluation = config.evaluate_current_cross(runtime, &bars[..=idx], current_side);
+        let candidate = (
+            bars[idx].clone(),
+            evaluation.signal,
+            evaluation.summary(),
+            evaluation.debug_summary(),
+        );
+        if candidate.1 != StrategySignal::Hold || latest.is_none() {
+            latest = Some(candidate);
         }
     }
     latest.expect("strategy bars must not be empty")

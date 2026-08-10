@@ -16,6 +16,7 @@ use crate::broker::{
 };
 use crate::config::AppConfig;
 use crate::strategies::ema_cross::{EmaCrossConfig, EmaCrossExecutionState};
+use crate::strategies::hma_cross::{hma_series_incremental, hma_warmup_bars};
 use crate::strategy::{NativeExecutionPath, NativeReversalMode, NativeSignalTiming, StrategyKind};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -34,6 +35,7 @@ pub(crate) struct PreparedEmaSweepInputs {
     pub(crate) signal_start: usize,
     pub(crate) signal_bars: Arc<[Bar]>,
     traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
+    hma_traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
     pub(crate) protection: Arc<BarProtectionIndex>,
 }
 
@@ -333,8 +335,18 @@ pub(crate) fn prepare_ema_sweep_inputs(
             periods.insert(child.resolved_strategy.native_ema.slow_length.max(1));
         }
     }
-    if periods.is_empty() {
-        bail!("prepared replay sweep contains no native EMA candidates");
+    let mut hma_periods = HashSet::new();
+    for child in children {
+        if child.resolved_strategy.kind == StrategyKind::Native
+            && child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::HmaCross
+        {
+            hma_periods.insert(child.resolved_strategy.native_hma_cross.fast_length.max(1));
+            hma_periods.insert(child.resolved_strategy.native_hma_cross.slow_length.max(1));
+        }
+    }
+    if periods.is_empty() && hma_periods.is_empty() {
+        bail!("prepared replay sweep contains no native EMA or HMA candidates");
     }
 
     let signal_bars: Arc<[Bar]> = Arc::from(
@@ -382,6 +394,55 @@ pub(crate) fn prepare_ema_sweep_inputs(
                 fast,
                 slow,
                 signal_start,
+                None,
+            )),
+        );
+    }
+    let mut hma_series: BTreeMap<usize, Arc<[f64]>> = BTreeMap::new();
+    for period in hma_periods {
+        let start = signal_start.min(signal_bars.len());
+        let closes = signal_bars[start..]
+            .iter()
+            .map(|bar| bar.close)
+            .collect::<Vec<_>>();
+        let local = hma_series_incremental(&closes, period);
+        let mut values = vec![f64::NAN; signal_bars.len()];
+        values[start..].copy_from_slice(&local);
+        hma_series.insert(period, Arc::from(values.into_boxed_slice()));
+    }
+    let hma_series = Arc::new(hma_series);
+    let mut hma_traces = BTreeMap::new();
+    let mut hma_pairs = HashSet::new();
+    for child in children {
+        if child.resolved_strategy.kind == StrategyKind::Native
+            && child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::HmaCross
+        {
+            let config = &child.resolved_strategy.native_hma_cross;
+            hma_pairs.insert((config.fast_length.max(1), config.slow_length.max(1)));
+        }
+    }
+    for (fast_length, slow_length) in hma_pairs {
+        let fast = hma_series
+            .get(&fast_length)
+            .context("prepared HMA fast series missing")?
+            .clone();
+        let slow = hma_series
+            .get(&slow_length)
+            .context("prepared HMA slow series missing")?
+            .clone();
+        let warmup = hma_warmup_bars(fast_length.max(1))
+            .max(hma_warmup_bars(slow_length.max(1)))
+            .saturating_add(1);
+        hma_traces.insert(
+            (fast_length, slow_length),
+            Arc::new(build_trace(
+                fast_length,
+                slow_length,
+                fast,
+                slow,
+                signal_start,
+                Some(warmup),
             )),
         );
     }
@@ -391,6 +452,7 @@ pub(crate) fn prepare_ema_sweep_inputs(
         signal_start,
         signal_bars,
         traces: Arc::new(traces),
+        hma_traces: Arc::new(hma_traces),
         protection: Arc::new(BarProtectionIndex::new(&frames.bars)),
     })
 }
@@ -430,12 +492,13 @@ fn build_trace(
     fast: Arc<[f64]>,
     slow: Arc<[f64]>,
     signal_start: usize,
+    warmup_override: Option<usize>,
 ) -> EmaCrossTrace {
     let mut previous_fast = vec![f64::NAN; fast.len()];
     let mut previous_slow = vec![f64::NAN; slow.len()];
     let mut raw_buy = vec![false; fast.len()];
     let mut raw_sell = vec![false; fast.len()];
-    let warmup = fast_length.max(slow_length).max(2) + 1;
+    let warmup = warmup_override.unwrap_or_else(|| fast_length.max(slow_length).max(2) + 1);
     let signal_start = signal_start.min(fast.len().min(slow.len()));
     for index in (signal_start + 1)..fast.len().min(slow.len()) {
         previous_fast[index] = fast[index - 1];
@@ -475,9 +538,6 @@ impl PreparedEmaSweepInputs {
     ) -> Result<(), String> {
         if !replay.is_cached_server_bars() {
             return Err("dataset is not cached server bars".to_string());
-        }
-        if child.bar_type.kind() != crate::broker::BarKind::Minute {
-            return Err("prepared kernel currently requires minute bars".to_string());
         }
         if child.engine_mode != ReplayEngineMode::Deterministic {
             return Err("prepared kernel requires deterministic replay".to_string());
@@ -539,6 +599,27 @@ impl PreparedEmaSweepInputs {
         }
         Ok(())
     }
+}
+
+/// The prepared kernel's execution/ledger code is indicator-agnostic once a
+/// crossover trace has been materialized.  Reuse that kernel for HMA by
+/// mapping the HMA protection fields into the existing EMA-shaped config;
+/// this adapter is replay-only and never reaches live strategy dispatch.
+pub(crate) fn prepared_hma_child_as_ema(child: &ReplaySweepChildSpec) -> ReplaySweepChildSpec {
+    let hma = &child.resolved_strategy.native_hma_cross;
+    let mut prepared = child.clone();
+    prepared.resolved_strategy.native_strategy = crate::strategy::NativeStrategyKind::EmaCross;
+    prepared.resolved_strategy.native_ema = EmaCrossConfig {
+        fast_length: hma.fast_length,
+        slow_length: hma.slow_length,
+        inverted: hma.inverted,
+        take_profit_ticks: hma.take_profit_ticks,
+        stop_loss_ticks: hma.stop_loss_ticks,
+        use_trailing_stop: hma.use_trailing_stop,
+        trail_trigger_ticks: hma.trail_trigger_ticks,
+        trail_offset_ticks: hma.trail_offset_ticks,
+    };
+    prepared
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -913,6 +994,27 @@ pub(crate) fn run_prepared_ema_candidate(
         evaluation_rows_total,
         evaluation_rows_processed: processed.min(evaluation_rows_total),
     })
+}
+
+/// Run one HMA crossover candidate through the replay-only prepared kernel.
+/// HMA signals come from the immutable incremental traces prepared above; the
+/// fill, session blockout, and ledger behavior is shared with the established
+/// prepared EMA implementation.
+pub(crate) fn run_prepared_hma_candidate(
+    inputs: &PreparedEmaSweepInputs,
+    replay: &ReplayState,
+    config: &AppConfig,
+    child: &ReplaySweepChildSpec,
+) -> Result<PreparedSweepRun> {
+    let hma = &child.resolved_strategy.native_hma_cross;
+    inputs
+        .hma_traces
+        .get(&(hma.fast_length.max(1), hma.slow_length.max(1)))
+        .context("prepared HMA crossover trace missing")?;
+    let prepared_child = prepared_hma_child_as_ema(child);
+    let mut prepared_inputs = inputs.clone();
+    prepared_inputs.traces = inputs.hma_traces.clone();
+    run_prepared_ema_candidate(&prepared_inputs, replay, config, &prepared_child)
 }
 
 fn prepared_history_loaded(replay: &ReplayState, config: &AppConfig, bars: &[Bar]) -> usize {

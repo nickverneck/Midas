@@ -126,6 +126,82 @@ impl App {
                     ));
                 }
             }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let config = &self.strategy.native_volume_hma_cross;
+                let fast = config.hma_cross.fast_length;
+                let slow = config.hma_cross.slow_length;
+                if fast >= slow {
+                    blockers.push(format!(
+                        "Fast HMA Length ({fast}) must be less than Slow HMA Length ({slow})."
+                    ));
+                }
+                if let Err(error) = config.volume_regime.validate() {
+                    blockers.push(error);
+                }
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                let config = &self.strategy.native_volume_ema_cross;
+                let fast = config.ema_cross.fast_length;
+                let slow = config.ema_cross.slow_length;
+                if fast >= slow {
+                    blockers.push(format!(
+                        "Fast EMA Length ({fast}) must be less than Slow EMA Length ({slow})."
+                    ));
+                }
+                if let Err(error) = config.volume_regime.validate() {
+                    blockers.push(error);
+                }
+                if let Err(error) = config.ema_gate.validate() {
+                    blockers.push(error);
+                }
+            }
+            NativeStrategyKind::Adx => {
+                let config = &self.strategy.native_adx;
+                if config.adx_length == 0 {
+                    blockers.push("ADX Length must be at least 1.".to_string());
+                }
+                if !config.adx_entry_threshold.is_finite()
+                    || !(0.0..=100.0).contains(&config.adx_entry_threshold)
+                {
+                    blockers.push(
+                        "ADX Entry Threshold must be finite and between 0 and 100.".to_string(),
+                    );
+                }
+                if !config.adx_exit_threshold.is_finite()
+                    || !(0.0..=100.0).contains(&config.adx_exit_threshold)
+                {
+                    blockers.push(
+                        "ADX Exit Threshold must be finite and between 0 and 100.".to_string(),
+                    );
+                }
+                if config.adx_entry_threshold.is_finite()
+                    && config.adx_exit_threshold.is_finite()
+                    && config.adx_exit_threshold >= config.adx_entry_threshold
+                {
+                    blockers.push("ADX Exit Threshold must be below Entry Threshold.".to_string());
+                }
+                if !config.di_imbalance_threshold.is_finite()
+                    || !(0.0..=1.0).contains(&config.di_imbalance_threshold)
+                {
+                    blockers.push("DI Imbalance Threshold must be between 0 and 1.".to_string());
+                }
+                if config.slope_lookback == 0 {
+                    blockers.push("ADX Slope Lookback must be at least 1.".to_string());
+                }
+                if config.dominance_bars == 0 {
+                    blockers.push("ADX Dominance Bars must be at least 1.".to_string());
+                }
+                for (label, value) in [
+                    ("ADX Take Profit Ticks", config.take_profit_ticks),
+                    ("ADX Stop Loss Ticks", config.stop_loss_ticks),
+                    ("ADX Trail Trigger Ticks", config.trail_trigger_ticks),
+                    ("ADX Trail Offset Ticks", config.trail_offset_ticks),
+                ] {
+                    if !value.is_finite() || value < 0.0 {
+                        blockers.push(format!("{label} must be finite and nonnegative."));
+                    }
+                }
+            }
         }
 
         if self.strategy.native_signal_timing == NativeSignalTiming::ClosedBar
@@ -254,13 +330,30 @@ impl App {
             NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
             NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
             NativeStrategyKind::HmaCross => self.strategy.native_hma_cross.uses_native_protection(),
+            NativeStrategyKind::VolumeAdaptiveHmaCross => self
+                .strategy
+                .native_volume_hma_cross
+                .uses_native_protection(),
+            NativeStrategyKind::VolumeAdaptiveEmaCross => self
+                .strategy
+                .native_volume_ema_cross
+                .uses_native_protection(),
+            NativeStrategyKind::Adx => self.strategy.native_adx.uses_native_protection(),
         }
     }
 
     pub(in crate::app) fn active_native_requires_guarded_path(&self) -> bool {
         self.strategy.kind == StrategyKind::Native
             && (self.strategy.native_reversal_mode != NativeReversalMode::Direct
-                || self.active_native_uses_broker_owned_protection())
+                || self.active_native_uses_broker_owned_protection()
+                // HMA Direct is implemented only for HMA Crossover.  Other
+                // native strategies must be normalized to Guarded so an
+                // armed configuration cannot silently become a no-op.
+                || (self.strategy.native_execution_path == NativeExecutionPath::HmaDirect
+                    && !matches!(
+                        self.strategy.native_strategy,
+                        NativeStrategyKind::HmaCross | NativeStrategyKind::VolumeAdaptiveHmaCross
+                    )))
     }
 
     pub(in crate::app) fn normalize_native_reversal_mode_before_arm(

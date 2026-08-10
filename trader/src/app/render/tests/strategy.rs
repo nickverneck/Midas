@@ -96,6 +96,187 @@ fn strategy_setting_edit_updates_draft_without_service_command() {
 }
 
 #[test]
+fn adx_focus_order_and_setup_expose_editable_fields() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::Adx;
+    app.strategy.native_execution_path = NativeExecutionPath::Guarded;
+    app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    app.strategy.native_adx.use_trailing_stop = true;
+
+    let order = app.strategy_focus_order();
+    let expected = [
+        Focus::AdxLength,
+        Focus::AdxEntryThreshold,
+        Focus::AdxExitThreshold,
+        Focus::AdxDiImbalance,
+        Focus::AdxSlopeLookback,
+        Focus::AdxDominanceBars,
+        Focus::AdxBreakoutLookback,
+        Focus::AdxInverted,
+        Focus::AdxTakeProfitTicks,
+        Focus::AdxStopLossTicks,
+        Focus::AdxTrailingStop,
+        Focus::AdxTrailTriggerTicks,
+        Focus::AdxTrailOffsetTicks,
+    ];
+    let start = order
+        .iter()
+        .position(|focus| *focus == Focus::AdxLength)
+        .expect("ADX controls should be in strategy focus order");
+    assert_eq!(&order[start..start + expected.len()], expected);
+
+    let setup = strategy_setup_text(&app);
+    for label in [
+        "ADX Length",
+        "ADX Entry Threshold",
+        "ADX Exit Threshold",
+        "DI Imbalance Threshold",
+        "Slope Lookback",
+        "Dominance Bars",
+        "Breakout Lookback",
+        "Inverted",
+        "Take Profit Ticks",
+        "Stop Loss Ticks",
+        "Trailing Stop",
+        "Trail Trigger Ticks",
+        "Trail Offset Ticks",
+    ] {
+        assert!(
+            setup.iter().any(|line| line.contains(label)),
+            "missing {label}"
+        );
+    }
+}
+
+#[test]
+fn adx_controls_edit_and_toggle_without_commands() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.screen = Screen::Strategy;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::Adx;
+
+    app.focus = Focus::AdxLength;
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(app.strategy.native_adx.adx_length, 15);
+
+    app.focus = Focus::AdxEntryThreshold;
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(app.strategy.native_adx.adx_entry_threshold, 26.0);
+
+    app.focus = Focus::AdxDiImbalance;
+    app.handle_strategy_key(key(KeyCode::Left), &cmd_tx);
+    assert!((app.strategy.native_adx.di_imbalance_threshold - 0.09).abs() < 1e-9);
+
+    app.focus = Focus::AdxBreakoutLookback;
+    app.strategy.native_adx.breakout_lookback = 1;
+    app.handle_strategy_key(key(KeyCode::Left), &cmd_tx);
+    assert_eq!(app.strategy.native_adx.breakout_lookback, 0);
+
+    app.focus = Focus::AdxInverted;
+    assert!(!app.strategy.native_adx.inverted);
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert!(app.strategy.native_adx.inverted);
+
+    app.focus = Focus::AdxTrailingStop;
+    assert!(!app.strategy.native_adx.use_trailing_stop);
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+    assert!(app.strategy.native_adx.use_trailing_stop);
+
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "draft edits must not send commands"
+    );
+}
+
+#[test]
+fn adx_focus_navigation_skips_disabled_trailing_detail() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::Adx;
+    app.strategy.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
+    app.strategy.native_adx.use_trailing_stop = false;
+
+    let order = app.strategy_focus_order();
+    assert!(order.contains(&Focus::AdxTrailingStop));
+    assert!(!order.contains(&Focus::AdxTrailTriggerTicks));
+    assert!(!order.contains(&Focus::AdxTrailOffsetTicks));
+
+    app.focus = Focus::AdxTrailingStop;
+    assert_eq!(app.next_strategy_focus(), Focus::StrategyContinue);
+
+    app.strategy.native_adx.use_trailing_stop = true;
+    assert_eq!(app.next_strategy_focus(), Focus::AdxTrailTriggerTicks);
+}
+
+#[test]
+fn adx_config_is_dispatched_when_strategy_is_armed() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::StrategyContinue;
+    app.strategy.native_strategy = NativeStrategyKind::Adx;
+    app.strategy.native_adx.adx_length = 7;
+    app.strategy.native_adx.adx_entry_threshold = 20.0;
+    app.strategy.native_adx.adx_exit_threshold = 10.0;
+    app.strategy.native_adx.di_imbalance_threshold = 0.05;
+    app.strategy.native_adx.slope_lookback = 1;
+    app.strategy.native_adx.dominance_bars = 2;
+    app.strategy.native_adx.breakout_lookback = 20;
+    app.strategy.native_adx.take_profit_ticks = 70.0;
+
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx.try_recv().expect("expected config sync command") {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(config.native_strategy, NativeStrategyKind::Adx);
+            assert_eq!(config.native_adx.adx_length, 7);
+            assert_eq!(config.native_adx.adx_entry_threshold, 20.0);
+            assert_eq!(config.native_adx.take_profit_ticks, 70.0);
+        }
+        _ => panic!("expected execution-config command"),
+    }
+    assert!(matches!(
+        cmd_rx.try_recv().expect("expected arm command"),
+        ServiceCommand::ArmExecutionStrategy
+    ));
+}
+
+#[test]
+fn invalid_adx_values_need_attention() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.accounts = vec![account(1, "DEMO4769136")];
+    select_ready_contract(&mut app);
+    app.strategy.native_strategy = NativeStrategyKind::Adx;
+    app.strategy.native_adx.adx_entry_threshold = f64::NAN;
+    app.strategy.native_adx.slope_lookback = 0;
+
+    let readiness = app.strategy_readiness();
+    assert_eq!(readiness.status, StrategyReadinessStatus::NeedsAttention);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Entry Threshold"))
+    );
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Slope Lookback"))
+    );
+}
+
+#[test]
 fn strategy_type_hides_lua_and_machine_learning_options() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();

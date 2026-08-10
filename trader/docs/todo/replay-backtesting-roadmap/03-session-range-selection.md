@@ -37,6 +37,7 @@ Implemented fourth slice (RBT-023):
 - Saving selects the view, `Enter` selects an existing view, and `C` explicitly returns to full-source coverage. Replay startup now passes both the selected manifest and view path so the loader fails closed if their source identities differ.
 - The Replay screen labels whether startup will use full source coverage or a saved view. Automatic cache resolution recognizes both current Parquet server-bar downloads and legacy JSONL caches.
 - End-to-end validation used 1,380 downloaded MESU6 one-minute bars for 2026-07-27. A TUI-created New York RTH view loaded exactly 390 evaluation rows from 09:30 through 16:00 EDT without starting live user or order streams.
+- Replay views also support an optional recurring weekday local-time filter over cached server bars. The filter keeps the immutable source manifest/Parquet intact and applies a half-open local interval on each weekday, including DST-aware timezone conversion. This supports custom windows such as 08:30-16:15 America/New_York across a multi-day or multi-week source range. The current TUI editor does not create this advanced field; CLI/spec users can persist it directly.
 
 Still pending:
 

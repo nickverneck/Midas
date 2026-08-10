@@ -1,5 +1,6 @@
 ninja-login.sh
 docs/*
+!docs/replay-strategy-history.csv
 !docs/large-file-refactoring.md
 !docs/GCZ6_MINUTE_BAR_FEED_LAG.md
 !docs/todo/

@@ -217,6 +217,48 @@ impl App {
                     self.strategy.native_hma_cross.trail_offset_ticks,
                     self.strategy.native_hma_cross.stop_loss_ticks,
                 ),
+                NativeStrategyKind::VolumeAdaptiveHmaCross => (
+                    self.strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .use_trailing_stop,
+                    self.strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .trail_trigger_ticks,
+                    self.strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .trail_offset_ticks,
+                    self.strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .stop_loss_ticks,
+                ),
+                NativeStrategyKind::VolumeAdaptiveEmaCross => (
+                    self.strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .use_trailing_stop,
+                    self.strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .trail_trigger_ticks,
+                    self.strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .trail_offset_ticks,
+                    self.strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .stop_loss_ticks,
+                ),
+                NativeStrategyKind::Adx => (
+                    self.strategy.native_adx.use_trailing_stop,
+                    self.strategy.native_adx.trail_trigger_ticks,
+                    self.strategy.native_adx.trail_offset_ticks,
+                    self.strategy.native_adx.stop_loss_ticks,
+                ),
             };
         if !use_trailing_stop || trigger_ticks <= 0.0 || offset_ticks <= 0.0 {
             return None;
@@ -297,6 +339,18 @@ impl App {
                 .strategy
                 .native_hma_cross
                 .take_profit_offset(self.market.tick_size)?,
+            NativeStrategyKind::VolumeAdaptiveHmaCross => self
+                .strategy
+                .native_volume_hma_cross
+                .take_profit_offset(self.market.tick_size)?,
+            NativeStrategyKind::VolumeAdaptiveEmaCross => self
+                .strategy
+                .native_volume_ema_cross
+                .take_profit_offset(self.market.tick_size)?,
+            NativeStrategyKind::Adx => self
+                .strategy
+                .native_adx
+                .take_profit_offset(self.market.tick_size)?,
         };
 
         Some(if signed_qty > 0 {
@@ -344,6 +398,37 @@ impl App {
                 );
                 self.strategy
                     .native_hma_cross
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let mut runtime = crate::strategies::hma_cross::HmaCrossExecutionState::default();
+                self.strategy.native_volume_hma_cross.sync_position(
+                    &mut runtime,
+                    signed_qty,
+                    Some(entry_price),
+                );
+                self.strategy
+                    .native_volume_hma_cross
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                let mut runtime = crate::strategies::ema_cross::EmaCrossExecutionState::default();
+                self.strategy.native_volume_ema_cross.sync_position(
+                    &mut runtime,
+                    signed_qty,
+                    Some(entry_price),
+                );
+                self.strategy
+                    .native_volume_ema_cross
+                    .current_effective_stop_price(&runtime, self.market.tick_size)
+            }
+            NativeStrategyKind::Adx => {
+                let mut runtime = crate::strategies::adx::AdxExecutionState::default();
+                self.strategy
+                    .native_adx
+                    .sync_position(&mut runtime, signed_qty, Some(entry_price));
+                self.strategy
+                    .native_adx
                     .current_effective_stop_price(&runtime, self.market.tick_size)
             }
         }

@@ -61,7 +61,10 @@ pub(super) fn closed_bar_signal_already_dispatched(
 
 pub(super) fn seed_hma_cross_observed_side(session: &mut SessionState) {
     if session.execution_config.kind != StrategyKind::Native
-        || session.execution_config.native_strategy != NativeStrategyKind::HmaCross
+        || !matches!(
+            session.execution_config.native_strategy,
+            NativeStrategyKind::HmaCross | NativeStrategyKind::VolumeAdaptiveHmaCross
+        )
     {
         return;
     }
@@ -71,10 +74,23 @@ pub(super) fn seed_hma_cross_observed_side(session: &mut SessionState) {
         return;
     }
     let current_side = side_from_signed_qty(effective_market_position_qty(session));
-    let config = session.execution_config.native_hma_cross.clone();
-    let _ = config.evaluate_current_cross(
-        &mut session.execution_runtime.hma_cross_execution,
-        &bars,
-        current_side,
-    );
+    match session.execution_config.native_strategy {
+        NativeStrategyKind::HmaCross => {
+            let config = session.execution_config.native_hma_cross.clone();
+            let _ = config.evaluate_current_cross(
+                &mut session.execution_runtime.hma_cross_execution,
+                &bars,
+                current_side,
+            );
+        }
+        NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            let config = session.execution_config.native_volume_hma_cross.clone();
+            let _ = config.evaluate_current_cross(
+                &mut session.execution_runtime.volume_hma_cross_execution,
+                &bars,
+                current_side,
+            );
+        }
+        _ => unreachable!("strategy was checked above"),
+    }
 }

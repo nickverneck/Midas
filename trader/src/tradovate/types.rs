@@ -190,6 +190,9 @@ struct ExecutionRuntimeState {
     hma_execution: HmaAngleExecutionState,
     ema_execution: EmaCrossExecutionState,
     hma_cross_execution: HmaCrossExecutionState,
+    volume_hma_cross_execution: HmaCrossExecutionState,
+    volume_ema_cross_execution: EmaCrossExecutionState,
+    adx_execution: crate::strategies::adx::AdxExecutionState,
     /// Replay-only structured strategy decision rows. Kept in runtime state
     /// so live session construction remains allocation-free and unchanged.
     replay_signal_diagnostics: Vec<crate::broker::ReplaySignalDiagnostic>,
@@ -214,6 +217,9 @@ impl ExecutionRuntimeState {
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
         self.hma_cross_execution = HmaCrossExecutionState::default();
+        self.volume_hma_cross_execution = HmaCrossExecutionState::default();
+        self.volume_ema_cross_execution = EmaCrossExecutionState::default();
+        self.adx_execution = crate::strategies::adx::AdxExecutionState::default();
     }
 }
 
@@ -261,4 +267,9 @@ struct TrackedOrderStrategy {
 const TOKEN_REFRESH_LEAD_SECS: i64 = 900;
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 pub(crate) const ENGINE_MARKET_BAR_LIMIT: usize = 4_096;
-const UI_MARKET_BAR_LIMIT: usize = 256;
+// Keep enough closed bars for the dashboard to render long native indicators.
+// A 300-period HMA needs 317 bars before its first finite value (plus one
+// prior bar for crossover display), while the chart itself still only paints
+// the latest 180 bars.  This is display-only; the execution path retains its
+// independent ENGINE_MARKET_BAR_LIMIT history.
+const UI_MARKET_BAR_LIMIT: usize = 512;

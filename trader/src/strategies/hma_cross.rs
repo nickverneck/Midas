@@ -318,8 +318,7 @@ impl RollingWma {
             if was_full && old_invalid_count == 0 && value.is_finite() {
                 // For weights 1..=p, shifting the window subtracts the old
                 // unweighted sum and adds p * newest.
-                self.weighted_sum = self.weighted_sum - old_sum
-                    + self.period as f64 * value;
+                self.weighted_sum = self.weighted_sum - old_sum + self.period as f64 * value;
             } else {
                 self.rebuild_weighted_sum();
             }
@@ -365,21 +364,37 @@ impl HmaIncrementalState {
     ) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
         let fast_length = fast_length.max(1);
         let slow_length = slow_length.max(1);
-        let lengths_changed = self.fast_length != Some(fast_length)
-            || self.slow_length != Some(slow_length);
+        let lengths_changed =
+            self.fast_length != Some(fast_length) || self.slow_length != Some(slow_length);
 
         let appended_bar_is_out_of_order = bars
             .get(self.bars.len())
             .zip(self.bars.last())
             .is_some_and(|(next, (previous_ts, _))| next.ts_ns <= *previous_ts);
-        let prefix_matches = !lengths_changed
+        // Appended bars are the hot path during replay/live operation.  The
+        // previous implementation scanned the entire retained prefix on every
+        // append, turning the rolling evaluator into O(N²) over a month of
+        // minute bars.  Verify the cached tail and ordering for append-only
+        // updates; when the length is unchanged, retain the full scan so an
+        // in-place correction anywhere in the window still rebuilds exactly.
+        let append_only_prefix_matches = !lengths_changed
+            && bars.len() > self.bars.len()
             && !appended_bar_is_out_of_order
-            && bars.len() >= self.bars.len()
+            && self
+                .bars
+                .last()
+                .zip(bars.get(self.bars.len().saturating_sub(1)))
+                .is_some_and(|((ts_ns, close), bar)| {
+                    bar.ts_ns == *ts_ns && bar.close.to_bits() == close.to_bits()
+                });
+        let same_length_prefix_matches = !lengths_changed
+            && bars.len() == self.bars.len()
             && self.bars.iter().enumerate().all(|(index, (ts_ns, close))| {
                 bars.get(index)
                     .map(|bar| bar.ts_ns == *ts_ns && bar.close.to_bits() == close.to_bits())
                     .unwrap_or(false)
             });
+        let prefix_matches = append_only_prefix_matches || same_length_prefix_matches;
 
         if !prefix_matches {
             self.fast_length = Some(fast_length);
@@ -495,11 +510,10 @@ impl HmaCrossConfig {
             return self.evaluate(bars, current_side);
         };
 
-        let (prev_fast, prev_slow, curr_fast, curr_slow) = runtime.incremental.sync(
-            bars,
-            self.fast_length,
-            self.slow_length,
-        );
+        let (prev_fast, prev_slow, curr_fast, curr_slow) =
+            runtime
+                .incremental
+                .sync(bars, self.fast_length, self.slow_length);
 
         if bars.len() < self.warmup_bars() {
             return HmaCrossEvaluation {
@@ -831,7 +845,7 @@ impl HmaCrossConfig {
     }
 }
 
-fn hma_warmup_bars(length: usize) -> usize {
+pub(crate) fn hma_warmup_bars(length: usize) -> usize {
     let length = length.max(1);
     let sqrt_len = (length as f64).sqrt().floor().max(1.0) as usize;
     length + sqrt_len
@@ -855,6 +869,19 @@ pub(crate) fn hma_series(values: &[f64], length: usize) -> Vec<f64> {
         })
         .collect::<Vec<_>>();
     wma(&diff, sqrt_length)
+}
+
+/// Build an HMA series with the same recurrence used by the incremental
+/// strategy runtime.  Replay preparation uses this to materialize each
+/// candidate's immutable crossover trace once instead of recomputing the
+/// complete HMA prefix for every bar/candidate.  The legacy `hma_series`
+/// implementation remains the reference path and is intentionally unchanged.
+pub(crate) fn hma_series_incremental(values: &[f64], length: usize) -> Vec<f64> {
+    let mut stream = HmaStream::new(length);
+    values
+        .iter()
+        .map(|value| stream.push(*value).unwrap_or(f64::NAN))
+        .collect()
 }
 
 fn wma(values: &[f64], period: usize) -> Vec<f64> {
@@ -1157,16 +1184,18 @@ mod tests {
 
         encoded["calculation_mode"] = serde_json::Value::String("incremental".to_string());
         let incremental: HmaCrossConfig = serde_json::from_value(encoded).unwrap();
-        assert_eq!(incremental.calculation_mode, HmaCalculationMode::Incremental);
+        assert_eq!(
+            incremental.calculation_mode,
+            HmaCalculationMode::Incremental
+        );
     }
 
     #[test]
     fn incremental_hma_matches_legacy_reference_at_every_prefix() {
         let bars = (0..160)
             .map(|index| {
-                let close = 100.0
-                    + (index as f64 * 0.37).sin() * 2.0
-                    + (index as f64 * 0.11).cos() * 0.75;
+                let close =
+                    100.0 + (index as f64 * 0.37).sin() * 2.0 + (index as f64 * 0.11).cos() * 0.75;
                 bar(index as i64 + 1, close)
             })
             .collect::<Vec<_>>();

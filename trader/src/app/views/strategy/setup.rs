@@ -181,7 +181,10 @@ impl App {
                         }
                     }
                 }
-                NativeStrategyKind::EmaCross | NativeStrategyKind::HmaCross => {
+                NativeStrategyKind::EmaCross
+                | NativeStrategyKind::HmaCross
+                | NativeStrategyKind::VolumeAdaptiveHmaCross
+                | NativeStrategyKind::VolumeAdaptiveEmaCross => {
                     let (
                         label,
                         fast_length,
@@ -215,7 +218,60 @@ impl App {
                             self.strategy.native_hma_cross.trail_trigger_ticks,
                             self.strategy.native_hma_cross.trail_offset_ticks,
                         ),
+                        NativeStrategyKind::VolumeAdaptiveHmaCross => (
+                            "HMA+RVOL",
+                            self.strategy.native_volume_hma_cross.hma_cross.fast_length,
+                            self.strategy.native_volume_hma_cross.hma_cross.slow_length,
+                            self.strategy.native_volume_hma_cross.hma_cross.inverted,
+                            self.strategy
+                                .native_volume_hma_cross
+                                .hma_cross
+                                .take_profit_ticks,
+                            self.strategy
+                                .native_volume_hma_cross
+                                .hma_cross
+                                .stop_loss_ticks,
+                            self.strategy
+                                .native_volume_hma_cross
+                                .hma_cross
+                                .use_trailing_stop,
+                            self.strategy
+                                .native_volume_hma_cross
+                                .hma_cross
+                                .trail_trigger_ticks,
+                            self.strategy
+                                .native_volume_hma_cross
+                                .hma_cross
+                                .trail_offset_ticks,
+                        ),
+                        NativeStrategyKind::VolumeAdaptiveEmaCross => (
+                            "EMA+RVOL",
+                            self.strategy.native_volume_ema_cross.ema_cross.fast_length,
+                            self.strategy.native_volume_ema_cross.ema_cross.slow_length,
+                            self.strategy.native_volume_ema_cross.ema_cross.inverted,
+                            self.strategy
+                                .native_volume_ema_cross
+                                .ema_cross
+                                .take_profit_ticks,
+                            self.strategy
+                                .native_volume_ema_cross
+                                .ema_cross
+                                .stop_loss_ticks,
+                            self.strategy
+                                .native_volume_ema_cross
+                                .ema_cross
+                                .use_trailing_stop,
+                            self.strategy
+                                .native_volume_ema_cross
+                                .ema_cross
+                                .trail_trigger_ticks,
+                            self.strategy
+                                .native_volume_ema_cross
+                                .ema_cross
+                                .trail_offset_ticks,
+                        ),
                         NativeStrategyKind::HmaAngle => unreachable!(),
+                        NativeStrategyKind::Adx => unreachable!(),
                     };
                     lines.push(styled_line(
                         format!(
@@ -241,6 +297,39 @@ impl App {
                         format!("Inverted: {}", bool_label(inverted)),
                         self.focus == Focus::EmaInverted,
                     ));
+                    if matches!(
+                        self.strategy.native_strategy,
+                        NativeStrategyKind::VolumeAdaptiveHmaCross
+                            | NativeStrategyKind::VolumeAdaptiveEmaCross
+                    ) {
+                        let config = if self.strategy.native_strategy
+                            == NativeStrategyKind::VolumeAdaptiveEmaCross
+                        {
+                            &self.strategy.native_volume_ema_cross.volume_regime
+                        } else {
+                            &self.strategy.native_volume_hma_cross.volume_regime
+                        };
+                        lines.push(styled_line(
+                            format!(
+                                "Volume Lookback Bars: {}",
+                                self.strategy_numeric_value(
+                                    Focus::VolumeHmaLookbackBars,
+                                    config.lookback_bars.to_string(),
+                                )
+                            ),
+                            self.focus == Focus::VolumeHmaLookbackBars,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Invert Below Relative Volume: {}",
+                                self.strategy_numeric_value(
+                                    Focus::VolumeHmaInvertBelowRatio,
+                                    format!("{:.2}", config.invert_below_relative_volume),
+                                )
+                            ),
+                            self.focus == Focus::VolumeHmaInvertBelowRatio,
+                        ));
+                    }
                     if show_protection_controls {
                         lines.push(styled_line(
                             format!(
@@ -286,6 +375,131 @@ impl App {
                                     )
                                 ),
                                 self.focus == Focus::EmaTrailOffsetTicks,
+                            ));
+                        }
+                    }
+                }
+                NativeStrategyKind::Adx => {
+                    let config = &self.strategy.native_adx;
+                    lines.push(styled_line(
+                        format!(
+                            "ADX Length: {}",
+                            self.strategy_numeric_value(
+                                Focus::AdxLength,
+                                config.adx_length.to_string(),
+                            )
+                        ),
+                        self.focus == Focus::AdxLength,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "ADX Entry Threshold: {}",
+                            self.strategy_numeric_value(
+                                Focus::AdxEntryThreshold,
+                                format!("{:.1}", config.adx_entry_threshold),
+                            )
+                        ),
+                        self.focus == Focus::AdxEntryThreshold,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "ADX Exit Threshold: {}",
+                            self.strategy_numeric_value(
+                                Focus::AdxExitThreshold,
+                                format!("{:.1}", config.adx_exit_threshold),
+                            )
+                        ),
+                        self.focus == Focus::AdxExitThreshold,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "DI Imbalance Threshold: {}",
+                            self.strategy_numeric_value(
+                                Focus::AdxDiImbalance,
+                                format!("{:.2}", config.di_imbalance_threshold),
+                            )
+                        ),
+                        self.focus == Focus::AdxDiImbalance,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Slope Lookback: {}",
+                            self.strategy_numeric_value(
+                                Focus::AdxSlopeLookback,
+                                config.slope_lookback.to_string(),
+                            )
+                        ),
+                        self.focus == Focus::AdxSlopeLookback,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Dominance Bars: {}",
+                            self.strategy_numeric_value(
+                                Focus::AdxDominanceBars,
+                                config.dominance_bars.to_string(),
+                            )
+                        ),
+                        self.focus == Focus::AdxDominanceBars,
+                    ));
+                    lines.push(styled_line(
+                        format!(
+                            "Breakout Lookback: {} (0 disables)",
+                            self.strategy_numeric_value(
+                                Focus::AdxBreakoutLookback,
+                                config.breakout_lookback.to_string(),
+                            )
+                        ),
+                        self.focus == Focus::AdxBreakoutLookback,
+                    ));
+                    lines.push(styled_line(
+                        format!("Inverted: {}", bool_label(config.inverted)),
+                        self.focus == Focus::AdxInverted,
+                    ));
+                    if show_protection_controls {
+                        lines.push(styled_line(
+                            format!(
+                                "Take Profit Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::AdxTakeProfitTicks,
+                                    format!("{:.0}", config.take_profit_ticks),
+                                )
+                            ),
+                            self.focus == Focus::AdxTakeProfitTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!(
+                                "Stop Loss Ticks: {}",
+                                self.strategy_numeric_value(
+                                    Focus::AdxStopLossTicks,
+                                    format!("{:.0}", config.stop_loss_ticks),
+                                )
+                            ),
+                            self.focus == Focus::AdxStopLossTicks,
+                        ));
+                        lines.push(styled_line(
+                            format!("Trailing Stop: {}", bool_label(config.use_trailing_stop)),
+                            self.focus == Focus::AdxTrailingStop,
+                        ));
+                        if config.use_trailing_stop {
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Trigger Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::AdxTrailTriggerTicks,
+                                        format!("{:.0}", config.trail_trigger_ticks),
+                                    )
+                                ),
+                                self.focus == Focus::AdxTrailTriggerTicks,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Trail Offset Ticks: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::AdxTrailOffsetTicks,
+                                        format!("{:.0}", config.trail_offset_ticks),
+                                    )
+                                ),
+                                self.focus == Focus::AdxTrailOffsetTicks,
                             ));
                         }
                     }

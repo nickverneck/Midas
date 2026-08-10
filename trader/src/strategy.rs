@@ -1,6 +1,10 @@
+use crate::strategies::adx::AdxConfig;
 use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
 use crate::strategies::hma_cross::HmaCrossConfig;
+use crate::strategies::volume_regime::{
+    VolumeAdaptiveEmaCrossConfig, VolumeAdaptiveHmaCrossConfig,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -30,6 +34,9 @@ pub enum NativeStrategyKind {
     HmaAngle,
     EmaCross,
     HmaCross,
+    VolumeAdaptiveHmaCross,
+    VolumeAdaptiveEmaCross,
+    Adx,
 }
 
 impl NativeStrategyKind {
@@ -38,6 +45,9 @@ impl NativeStrategyKind {
             Self::HmaAngle => "HMA Angle",
             Self::EmaCross => "EMA Crossover",
             Self::HmaCross => "HMA Crossover",
+            Self::VolumeAdaptiveHmaCross => "Volume-Adaptive HMA",
+            Self::VolumeAdaptiveEmaCross => "Volume-Adaptive EMA",
+            Self::Adx => "ADX Trend Regime",
         }
     }
 
@@ -46,6 +56,9 @@ impl NativeStrategyKind {
             Self::HmaAngle => "hma_angle",
             Self::EmaCross => "ema_cross",
             Self::HmaCross => "hma_cross",
+            Self::VolumeAdaptiveHmaCross => "volume_adaptive_hma_cross",
+            Self::VolumeAdaptiveEmaCross => "volume_adaptive_ema_cross",
+            Self::Adx => "adx",
         }
     }
 
@@ -53,15 +66,21 @@ impl NativeStrategyKind {
         match self {
             Self::HmaAngle => Self::EmaCross,
             Self::EmaCross => Self::HmaCross,
-            Self::HmaCross => Self::HmaAngle,
+            Self::HmaCross => Self::VolumeAdaptiveHmaCross,
+            Self::VolumeAdaptiveHmaCross => Self::VolumeAdaptiveEmaCross,
+            Self::VolumeAdaptiveEmaCross => Self::Adx,
+            Self::Adx => Self::HmaAngle,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::HmaAngle => Self::HmaCross,
+            Self::HmaAngle => Self::Adx,
             Self::EmaCross => Self::HmaAngle,
             Self::HmaCross => Self::EmaCross,
+            Self::VolumeAdaptiveHmaCross => Self::HmaCross,
+            Self::VolumeAdaptiveEmaCross => Self::VolumeAdaptiveHmaCross,
+            Self::Adx => Self::VolumeAdaptiveEmaCross,
         }
     }
 }
@@ -432,6 +451,9 @@ pub struct StrategyState {
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
     pub native_hma_cross: HmaCrossConfig,
+    pub native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig,
+    pub native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig,
+    pub native_adx: AdxConfig,
     pub order_qty: i32,
     pub lua_source_mode: LuaSourceMode,
     pub lua_file_path: String,
@@ -458,6 +480,12 @@ pub struct ExecutionStrategyConfig {
     pub native_ema: EmaCrossConfig,
     #[serde(default)]
     pub native_hma_cross: HmaCrossConfig,
+    #[serde(default)]
+    pub native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig,
+    #[serde(default)]
+    pub native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig,
+    #[serde(default)]
+    pub native_adx: AdxConfig,
     #[serde(default = "default_order_qty")]
     pub order_qty: i32,
 }
@@ -504,6 +532,9 @@ impl Default for ExecutionStrategyConfig {
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
+            native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig::default(),
+            native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig::default(),
+            native_adx: AdxConfig::default(),
             order_qty: 1,
         }
     }
@@ -564,6 +595,9 @@ impl StrategyState {
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
+            native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig::default(),
+            native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig::default(),
+            native_adx: AdxConfig::default(),
             order_qty: 1,
             lua_source_mode: LuaSourceMode::Editor,
             lua_file_path: String::new(),
@@ -657,6 +691,72 @@ impl StrategyState {
                 self.native_hma_cross.use_trailing_stop,
                 self.native_hma_cross.inverted,
             ),
+            NativeStrategyKind::VolumeAdaptiveHmaCross => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} lookback={} invert_below={:.2} tp={:.0} sl={:.0} trail={} inverted={}",
+                NativeStrategyKind::VolumeAdaptiveHmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_volume_hma_cross.hma_cross.fast_length,
+                self.native_volume_hma_cross.hma_cross.slow_length,
+                self.native_volume_hma_cross.volume_regime.lookback_bars,
+                self.native_volume_hma_cross
+                    .volume_regime
+                    .invert_below_relative_volume,
+                self.native_volume_hma_cross.hma_cross.take_profit_ticks,
+                self.native_volume_hma_cross.hma_cross.stop_loss_ticks,
+                self.native_volume_hma_cross.hma_cross.use_trailing_stop,
+                self.native_volume_hma_cross.hma_cross.inverted,
+            ),
+            NativeStrategyKind::VolumeAdaptiveEmaCross => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} lookback={} invert_below={:.2} gate_ema={} gate_enabled={} tp={:.0} sl={:.0} trail={} inverted={}",
+                NativeStrategyKind::VolumeAdaptiveEmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_volume_ema_cross.ema_cross.fast_length,
+                self.native_volume_ema_cross.ema_cross.slow_length,
+                self.native_volume_ema_cross.volume_regime.lookback_bars,
+                self.native_volume_ema_cross
+                    .volume_regime
+                    .invert_below_relative_volume,
+                self.native_volume_ema_cross.ema_gate.ema_length,
+                self.native_volume_ema_cross.ema_gate.enabled,
+                self.native_volume_ema_cross.ema_cross.take_profit_ticks,
+                self.native_volume_ema_cross.ema_cross.stop_loss_ticks,
+                self.native_volume_ema_cross.ema_cross.use_trailing_stop,
+                self.native_volume_ema_cross.ema_cross.inverted,
+            ),
+            NativeStrategyKind::Adx => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) len={} entry={:.1} exit={:.1} imbalance={:.2} slope={} dominance={} breakout={} tp={:.0} sl={:.0} trail={} inverted={}",
+                NativeStrategyKind::Adx.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_adx.adx_length,
+                self.native_adx.adx_entry_threshold,
+                self.native_adx.adx_exit_threshold,
+                self.native_adx.di_imbalance_threshold,
+                self.native_adx.slope_lookback,
+                self.native_adx.dominance_bars,
+                self.native_adx.breakout_lookback,
+                self.native_adx.take_profit_ticks,
+                self.native_adx.stop_loss_ticks,
+                self.native_adx.use_trailing_stop,
+                self.native_adx.inverted,
+            ),
         }
     }
 
@@ -707,6 +807,63 @@ impl StrategyState {
                 self.native_hma_cross.slow_length,
                 self.native_hma_cross.inverted,
             ),
+            NativeStrategyKind::VolumeAdaptiveHmaCross => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} lookback={} invert_below={:.2} inverted={}",
+                NativeStrategyKind::VolumeAdaptiveHmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_volume_hma_cross.hma_cross.fast_length,
+                self.native_volume_hma_cross.hma_cross.slow_length,
+                self.native_volume_hma_cross.volume_regime.lookback_bars,
+                self.native_volume_hma_cross
+                    .volume_regime
+                    .invert_below_relative_volume,
+                self.native_volume_hma_cross.hma_cross.inverted,
+            ),
+            NativeStrategyKind::VolumeAdaptiveEmaCross => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} lookback={} invert_below={:.2} gate_ema={} gate_enabled={} inverted={}",
+                NativeStrategyKind::VolumeAdaptiveEmaCross.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_volume_ema_cross.ema_cross.fast_length,
+                self.native_volume_ema_cross.ema_cross.slow_length,
+                self.native_volume_ema_cross.volume_regime.lookback_bars,
+                self.native_volume_ema_cross
+                    .volume_regime
+                    .invert_below_relative_volume,
+                self.native_volume_ema_cross.ema_gate.ema_length,
+                self.native_volume_ema_cross.ema_gate.enabled,
+                self.native_volume_ema_cross.ema_cross.inverted,
+            ),
+            NativeStrategyKind::Adx => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) len={} entry={:.1} exit={:.1} imbalance={:.2} slope={} dominance={} breakout={} inverted={}",
+                NativeStrategyKind::Adx.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_adx.adx_length,
+                self.native_adx.adx_entry_threshold,
+                self.native_adx.adx_exit_threshold,
+                self.native_adx.di_imbalance_threshold,
+                self.native_adx.slope_lookback,
+                self.native_adx.dominance_bars,
+                self.native_adx.breakout_lookback,
+                self.native_adx.inverted,
+            ),
         }
     }
 
@@ -723,6 +880,9 @@ impl StrategyState {
             native_hma: self.native_hma.clone(),
             native_ema: self.native_ema.clone(),
             native_hma_cross: self.native_hma_cross.clone(),
+            native_volume_hma_cross: self.native_volume_hma_cross.clone(),
+            native_volume_ema_cross: self.native_volume_ema_cross.clone(),
+            native_adx: self.native_adx.clone(),
             order_qty: self.order_qty,
         }
     }
@@ -739,6 +899,9 @@ impl StrategyState {
         self.native_hma = config.native_hma.clone();
         self.native_ema = config.native_ema.clone();
         self.native_hma_cross = config.native_hma_cross.clone();
+        self.native_volume_hma_cross = config.native_volume_hma_cross.clone();
+        self.native_volume_ema_cross = config.native_volume_ema_cross.clone();
+        self.native_adx = config.native_adx.clone();
         self.order_qty = config.order_qty;
     }
 }

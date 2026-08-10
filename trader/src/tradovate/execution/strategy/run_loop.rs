@@ -318,6 +318,34 @@ pub(crate) fn maybe_run_execution_strategy(
         };
         session.execution_runtime.ema_execution = ema_runtime;
         result
+    } else if session.replay_enabled
+        && session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming
+        && session.execution_config.native_strategy == NativeStrategyKind::HmaCross
+        && session.execution_config.native_hma_cross.calculation_mode
+            == crate::strategies::hma_cross::HmaCalculationMode::Incremental
+    {
+        // Keep the incremental HMA path on the retained market slice.  The
+        // generic branch clones the full one-minute history for every bar,
+        // which dominates month-long replay runtime even when the indicator
+        // itself is O(1) per append.
+        let config = session.execution_config.native_hma_cross.clone();
+        let mut hma_runtime = std::mem::take(&mut session.execution_runtime.hma_cross_execution);
+        let result = {
+            let bars = signal_evaluation_bars(session);
+            if bars.is_empty() {
+                bail!("latest strategy bar disappeared during strategy evaluation");
+            }
+            evaluate_incremental_hma_cross_since(
+                &config,
+                &mut hma_runtime,
+                session.execution_config.native_signal_timing,
+                bars,
+                current_qty,
+                previous_strategy_ts,
+            )
+        };
+        session.execution_runtime.hma_cross_execution = hma_runtime;
+        result
     } else {
         let bars = signal_evaluation_bars(session).to_vec();
         if bars.is_empty() {

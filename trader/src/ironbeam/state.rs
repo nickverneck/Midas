@@ -2,6 +2,7 @@ use crate::broker::{
     AccountInfo, AccountSnapshot, ContractSuggestion, LatencySnapshot, MarketSnapshot,
 };
 use crate::config::AppConfig;
+use crate::strategies::adx::AdxExecutionState;
 use crate::strategies::ema_cross::EmaCrossExecutionState;
 use crate::strategies::hma_angle::HmaAngleExecutionState;
 use crate::strategies::hma_cross::HmaCrossExecutionState;
@@ -58,6 +59,9 @@ pub(super) struct ExecutionRuntimeState {
     pub(super) hma_execution: HmaAngleExecutionState,
     pub(super) ema_execution: EmaCrossExecutionState,
     pub(super) hma_cross_execution: HmaCrossExecutionState,
+    pub(super) volume_hma_cross_execution: HmaCrossExecutionState,
+    pub(super) volume_ema_cross_execution: EmaCrossExecutionState,
+    pub(super) adx_execution: AdxExecutionState,
 }
 
 impl ExecutionRuntimeState {
@@ -75,6 +79,9 @@ impl ExecutionRuntimeState {
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
         self.hma_cross_execution = HmaCrossExecutionState::default();
+        self.volume_hma_cross_execution = HmaCrossExecutionState::default();
+        self.volume_ema_cross_execution = EmaCrossExecutionState::default();
+        self.adx_execution = AdxExecutionState::default();
     }
 
     pub(super) fn set_pending_target(&mut self, target_qty: Option<i32>) {

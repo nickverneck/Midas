@@ -9,7 +9,8 @@
 use super::ReplayState;
 use super::load::load_replay_state_blocking;
 use super::prepared_sweep::{
-    PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, run_prepared_ema_candidate,
+    PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, prepared_hma_child_as_ema,
+    run_prepared_ema_candidate, run_prepared_hma_candidate,
 };
 use super::results::{ReplayResultInput, write_replay_result};
 use super::sweep::{
@@ -644,8 +645,11 @@ async fn prepare_prepared_ema_inputs(
     };
     if !children.iter().any(|child| {
         child.resolved_strategy.kind == crate::strategy::StrategyKind::Native
-            && child.resolved_strategy.native_strategy
-                == crate::strategy::NativeStrategyKind::EmaCross
+            && matches!(
+                child.resolved_strategy.native_strategy,
+                crate::strategy::NativeStrategyKind::EmaCross
+                    | crate::strategy::NativeStrategyKind::HmaCross
+            )
     }) {
         return Ok(None);
     }
@@ -754,7 +758,21 @@ async fn run_child(
 
     let mut prepared_fallback_reason = None;
     if let Some(prepared_inputs) = prepared_inputs.as_ref() {
-        match prepared_inputs.supports(&prepared_inputs.replay, &cfg, &child) {
+        let is_hma = child.resolved_strategy.native_strategy
+            == crate::strategy::NativeStrategyKind::HmaCross;
+        let prepared_support = if is_hma {
+            if child.resolved_strategy.native_hma_cross.calculation_mode
+                != crate::strategies::hma_cross::HmaCalculationMode::Incremental
+            {
+                Err("prepared HMA kernel requires incremental calculation mode".to_string())
+            } else {
+                let prepared_child = prepared_hma_child_as_ema(&child);
+                prepared_inputs.supports(&prepared_inputs.replay, &cfg, &prepared_child)
+            }
+        } else {
+            prepared_inputs.supports(&prepared_inputs.replay, &cfg, &child)
+        };
+        match prepared_support {
             Ok(()) => {
                 let inputs = prepared_inputs.clone();
                 let signal_bars = inputs.signal_bars.clone();
@@ -765,10 +783,24 @@ async fn run_child(
                 let worker_replay = replay.clone();
                 let worker_child = run_child.clone();
                 let prepared_result = tokio::task::spawn_blocking(move || {
-                    run_prepared_ema_candidate(&inputs, &worker_replay, &worker_cfg, &worker_child)
+                    if is_hma {
+                        run_prepared_hma_candidate(
+                            &inputs,
+                            &worker_replay,
+                            &worker_cfg,
+                            &worker_child,
+                        )
+                    } else {
+                        run_prepared_ema_candidate(
+                            &inputs,
+                            &worker_replay,
+                            &worker_cfg,
+                            &worker_child,
+                        )
+                    }
                 })
                 .await
-                .context("join prepared EMA candidate")?;
+                .context("join prepared crossover candidate")?;
                 match prepared_result {
                     Ok(prepared) => {
                         let result_path = write_prepared_result(
@@ -1556,6 +1588,7 @@ mod tests {
             evaluation_end: Utc::now() + chrono::Duration::minutes(1),
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
+            daily_session: None,
             warmup: ReplayDatasetWarmupPolicy::default(),
         };
         ReplaySweepChildSpec {

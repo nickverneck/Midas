@@ -412,7 +412,10 @@ fn group_execution_ticks(
     tick_size: Option<f64>,
 ) -> Vec<Vec<ReplayMarketTick>> {
     let mut groups = vec![Vec::new(); bars.len()];
-    if bars.is_empty() {
+    // Cached server-bar replay deliberately has no execution-tick stream.
+    // There is still a valid bar frame for each cached bar, so leave the
+    // per-bar tick groups empty instead of indexing an absent first tick.
+    if bars.is_empty() || ticks.is_empty() {
         return groups;
     }
     match bar_type.kind() {

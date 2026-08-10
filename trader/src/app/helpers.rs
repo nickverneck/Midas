@@ -71,9 +71,9 @@ fn focused_paragraph_scroll_offset(lines: &[Line<'_>], area: Rect) -> u16 {
 
 fn focused_line_index(lines: &[Line<'_>]) -> Option<usize> {
     lines.iter().position(|line| {
-        line.spans.iter().any(|span| {
-            span.style.fg == Some(Color::Black) && span.style.bg == Some(Color::Cyan)
-        })
+        line.spans
+            .iter()
+            .any(|span| span.style.fg == Some(Color::Black) && span.style.bg == Some(Color::Cyan))
     })
 }
 
@@ -258,7 +258,11 @@ fn trade_marker_matches_selection(
 }
 
 fn bool_label(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
+    if value {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn append_overlay_series_segments(
@@ -566,7 +570,14 @@ impl App {
             StrategyKind::Native => match self.strategy.native_strategy {
                 NativeStrategyKind::EmaCross => "on | EMA fast/slow + fills".to_string(),
                 NativeStrategyKind::HmaCross => "on | HMA fast/slow + fills".to_string(),
+                NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                    "on | volume-adaptive HMA + fills".to_string()
+                }
+                NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                    "on | volume-adaptive EMA + fills".to_string()
+                }
                 NativeStrategyKind::HmaAngle => "on | HMA cross map + fills".to_string(),
+                NativeStrategyKind::Adx => "on | ADX/+DI/-DI + fills".to_string(),
             },
             _ => "on | fills only".to_string(),
         }
@@ -580,20 +591,26 @@ impl App {
         sell_marker_points: &[(f64, f64)],
     ) -> DashboardVisualOverlay {
         let mut overlay = DashboardVisualOverlay::default();
-        overlay
-            .glyphs
-            .extend(buy_marker_points.iter().copied().map(|center| OverlayGlyph {
-                center,
-                color: Color::Cyan,
-                kind: OverlayGlyphKind::BuyMarker,
-            }));
-        overlay
-            .glyphs
-            .extend(sell_marker_points.iter().copied().map(|center| OverlayGlyph {
-                center,
-                color: Color::Magenta,
-                kind: OverlayGlyphKind::SellMarker,
-            }));
+        overlay.glyphs.extend(
+            buy_marker_points
+                .iter()
+                .copied()
+                .map(|center| OverlayGlyph {
+                    center,
+                    color: Color::Cyan,
+                    kind: OverlayGlyphKind::BuyMarker,
+                }),
+        );
+        overlay.glyphs.extend(
+            sell_marker_points
+                .iter()
+                .copied()
+                .map(|center| OverlayGlyph {
+                    center,
+                    color: Color::Magenta,
+                    kind: OverlayGlyphKind::SellMarker,
+                }),
+        );
 
         if self.strategy.kind != StrategyKind::Native || bars.len() < 2 {
             overlay.label = "fills".to_string();
@@ -635,10 +652,7 @@ impl App {
                         continue;
                     }
 
-                    let center = (
-                        (idx - visible_start) as f64,
-                        (curr_fast + curr_slow) / 2.0,
-                    );
+                    let center = ((idx - visible_start) as f64, (curr_fast + curr_slow) / 2.0);
                     let bullish_cross = crossed_above(prev_fast, prev_slow, curr_fast, curr_slow);
                     let bearish_cross = crossed_below(prev_fast, prev_slow, curr_fast, curr_slow);
                     let show_bullish = if self.strategy.native_ema.inverted {
@@ -701,10 +715,7 @@ impl App {
                         continue;
                     }
 
-                    let center = (
-                        (idx - visible_start) as f64,
-                        (curr_fast + curr_slow) / 2.0,
-                    );
+                    let center = ((idx - visible_start) as f64, (curr_fast + curr_slow) / 2.0);
                     let bullish_cross = crossed_above(prev_fast, prev_slow, curr_fast, curr_slow);
                     let bearish_cross = crossed_below(prev_fast, prev_slow, curr_fast, curr_slow);
                     let show_bullish = if self.strategy.native_hma_cross.inverted {
@@ -734,6 +745,109 @@ impl App {
 
                 overlay.label = "hma x".to_string();
             }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let config = &self.strategy.native_volume_hma_cross;
+                let fast = hma_series(&close, config.hma_cross.fast_length.max(1));
+                let slow = hma_series(&close, config.hma_cross.slow_length.max(1));
+                append_overlay_series_segments(
+                    &fast,
+                    visible_start,
+                    Color::Cyan,
+                    &mut overlay.indicator_segments,
+                );
+                append_overlay_series_segments(
+                    &slow,
+                    visible_start,
+                    Color::Yellow,
+                    &mut overlay.indicator_segments,
+                );
+                if config.ema_gate.enabled {
+                    let gate_ema = ema_series(&close, config.ema_gate.ema_length.max(1));
+                    append_overlay_series_segments(
+                        &gate_ema,
+                        visible_start,
+                        Color::Magenta,
+                        &mut overlay.indicator_segments,
+                    );
+                }
+                let warmup_bars = config.warmup_bars();
+                for idx in visible_start.max(1)..close.len() {
+                    if idx + 1 < warmup_bars {
+                        continue;
+                    }
+                    let prev_fast = fast[idx - 1];
+                    let curr_fast = fast[idx];
+                    let prev_slow = slow[idx - 1];
+                    let curr_slow = slow[idx];
+                    if !prev_fast.is_finite()
+                        || !curr_fast.is_finite()
+                        || !prev_slow.is_finite()
+                        || !curr_slow.is_finite()
+                    {
+                        continue;
+                    }
+                    let center = ((idx - visible_start) as f64, (curr_fast + curr_slow) / 2.0);
+                    let bullish_cross = crossed_above(prev_fast, prev_slow, curr_fast, curr_slow);
+                    let bearish_cross = crossed_below(prev_fast, prev_slow, curr_fast, curr_slow);
+                    let volume_inverted = config.volume_regime.should_invert(&bars[..=idx]);
+                    let ema_inverted = config.ema_gate.evaluate(&bars[..=idx]).inverted;
+                    let show_bullish = if config.hma_cross.inverted ^ volume_inverted ^ ema_inverted
+                    {
+                        bearish_cross
+                    } else {
+                        bullish_cross
+                    };
+                    let show_bearish = if config.hma_cross.inverted ^ volume_inverted ^ ema_inverted
+                    {
+                        bullish_cross
+                    } else {
+                        bearish_cross
+                    };
+                    if show_bullish {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Green,
+                            kind: OverlayGlyphKind::BullishCross,
+                        });
+                    } else if show_bearish {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: Color::Red,
+                            kind: OverlayGlyphKind::BearishCross,
+                        });
+                    }
+                }
+                overlay.label = if config.ema_gate.enabled {
+                    "hma+rvol+ema".to_string()
+                } else {
+                    "hma+rvol".to_string()
+                };
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                // Keep the compact overlay intentionally separate from the
+                // legacy EMA path; detailed gate values remain in strategy
+                // diagnostics and replay artifacts.
+                let config = &self.strategy.native_volume_ema_cross;
+                let fast = ema_series(&close, config.ema_cross.fast_length.max(1));
+                let slow = ema_series(&close, config.ema_cross.slow_length.max(1));
+                append_overlay_series_segments(
+                    &fast,
+                    visible_start,
+                    Color::Cyan,
+                    &mut overlay.indicator_segments,
+                );
+                append_overlay_series_segments(
+                    &slow,
+                    visible_start,
+                    Color::Yellow,
+                    &mut overlay.indicator_segments,
+                );
+                overlay.label = if config.ema_gate.enabled {
+                    "ema+rvol+gate".to_string()
+                } else {
+                    "ema+rvol".to_string()
+                };
+            }
             NativeStrategyKind::HmaAngle => {
                 let hma = zero_lag_hma_series(&close, self.strategy.native_hma.hma_length.max(1));
                 append_overlay_series_segments(
@@ -756,10 +870,7 @@ impl App {
                         continue;
                     }
 
-                    let center = (
-                        (idx - visible_start) as f64,
-                        (curr_close + curr_hma) / 2.0,
-                    );
+                    let center = ((idx - visible_start) as f64, (curr_close + curr_hma) / 2.0);
                     if crossed_above(prev_close, prev_hma, curr_close, curr_hma) {
                         overlay.glyphs.push(OverlayGlyph {
                             center,
@@ -776,6 +887,12 @@ impl App {
                 }
 
                 overlay.label = "hma".to_string();
+            }
+            NativeStrategyKind::Adx => {
+                // ADX is rendered in the strategy diagnostics; the price
+                // overlay stays uncluttered because its score is not on the
+                // same scale as price.
+                overlay.label = "adx".to_string();
             }
         }
 

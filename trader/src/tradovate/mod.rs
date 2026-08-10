@@ -71,11 +71,12 @@ pub use browser_har::{BrowserHarImportOptions, import_browser_har};
 pub use download::{
     TradovateChunkedRawTickCacheRequest, TradovateChunkedRawTickPhase,
     TradovateChunkedRawTickProgress, TradovateRawTickDownloadRequest,
-    TradovateReplayDownloadSession, TradovateServerBarDownloadRequest, download_replay_raw_ticks,
-    download_replay_raw_ticks_after_auth, download_replay_raw_ticks_chunked_to_cache,
-    download_replay_server_bars, download_replay_server_bars_after_auth,
-    inspect_replay_download_contract, prepare_replay_download_session,
-    prepare_replay_download_session_after_auth, search_replay_download_contracts,
+    TradovateReplayDownloadSession, TradovateServerBarDownload, TradovateServerBarDownloadRequest,
+    download_replay_raw_ticks, download_replay_raw_ticks_after_auth,
+    download_replay_raw_ticks_chunked_to_cache, download_replay_server_bars,
+    download_replay_server_bars_after_auth, inspect_replay_download_contract,
+    prepare_replay_download_session, prepare_replay_download_session_after_auth,
+    search_replay_download_contracts,
 };
 use execution::*;
 use gateway::*;

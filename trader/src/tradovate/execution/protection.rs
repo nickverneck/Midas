@@ -219,6 +219,27 @@ pub(crate) fn sync_active_execution_position(
             signed_qty,
             entry_price,
         ),
+        NativeStrategyKind::VolumeAdaptiveHmaCross => session
+            .execution_config
+            .native_volume_hma_cross
+            .sync_position(
+                &mut session.execution_runtime.volume_hma_cross_execution,
+                signed_qty,
+                entry_price,
+            ),
+        NativeStrategyKind::VolumeAdaptiveEmaCross => session
+            .execution_config
+            .native_volume_ema_cross
+            .sync_position(
+                &mut session.execution_runtime.volume_ema_cross_execution,
+                signed_qty,
+                entry_price,
+            ),
+        NativeStrategyKind::Adx => session.execution_config.native_adx.sync_position(
+            &mut session.execution_runtime.adx_execution,
+            signed_qty,
+            entry_price,
+        ),
     }
 }
 
