@@ -103,6 +103,25 @@ pub(crate) fn snapshot_active_execution_strategy(
                 ..Default::default()
             }
         }
+        NativeStrategyKind::HeikinAshiColor => {
+            let evaluation = session
+                .execution_config
+                .native_heikin_ashi
+                .evaluate_from_source_bars(bars, current_side);
+            StrategyEvaluationSnapshot {
+                indicator_name: "Heikin-Ashi",
+                previous_fast_indicator: evaluation.previous_ha_open,
+                previous_slow_indicator: evaluation.previous_ha_close,
+                fast_indicator: evaluation.current_ha_open,
+                slow_indicator: evaluation.current_ha_close,
+                raw_buy_signal: evaluation.raw_buy_signal,
+                raw_sell_signal: evaluation.raw_sell_signal,
+                effective_buy_signal: evaluation.effective_buy_signal,
+                effective_sell_signal: evaluation.effective_sell_signal,
+                hold_reason: evaluation.hold_reason,
+                ..Default::default()
+            }
+        }
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             let evaluation = session
                 .execution_config
@@ -205,6 +224,17 @@ pub(crate) fn evaluate_active_execution_strategy(
                 evaluation.debug_summary(),
             )
         }
+        NativeStrategyKind::HeikinAshiColor => {
+            let evaluation = session
+                .execution_config
+                .native_heikin_ashi
+                .evaluate_from_source_bars(bars, side_from_signed_qty(current_qty));
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             let evaluation = session
                 .execution_config
@@ -293,6 +323,17 @@ pub(crate) fn evaluate_active_execution_strategy_since(
                     .execution_config
                     .native_hma_cross
                     .evaluate(window, current_side);
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::HeikinAshiColor => {
+                let evaluation = session
+                    .execution_config
+                    .native_heikin_ashi
+                    .evaluate_from_source_bars(window, current_side);
                 (
                     evaluation.signal,
                     evaluation.summary(),
@@ -399,6 +440,17 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                     evaluation.debug_summary(),
                 )
             }
+            NativeStrategyKind::HeikinAshiColor => {
+                let evaluation = session
+                    .execution_config
+                    .native_heikin_ashi
+                    .evaluate_from_source_bars(bars, current_side);
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
                 let config = session.execution_config.native_volume_hma_cross.clone();
                 let evaluation = config.evaluate_current_cross(
@@ -494,6 +546,17 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                     window,
                     current_side,
                 );
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    evaluation.debug_summary(),
+                )
+            }
+            NativeStrategyKind::HeikinAshiColor => {
+                let evaluation = session
+                    .execution_config
+                    .native_heikin_ashi
+                    .evaluate_from_source_bars(window, current_side);
                 (
                     evaluation.signal,
                     evaluation.summary(),

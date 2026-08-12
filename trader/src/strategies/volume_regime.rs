@@ -1,4 +1,5 @@
 use crate::broker::{Bar, MarketHistoryUpdate};
+use crate::strategies::adaptive_gate::{RegimeAdaptiveGateConfig, RegimeAdaptiveGateEvaluation};
 use crate::strategies::ema_cross::{EmaCrossConfig, EmaCrossEvaluation, EmaCrossExecutionState};
 use crate::strategies::hma_cross::{HmaCrossConfig, HmaCrossEvaluation, HmaCrossExecutionState};
 use crate::strategies::orientation_gate::{EmaOrientationGateConfig, EmaOrientationGateEvaluation};
@@ -107,6 +108,10 @@ pub struct VolumeAdaptiveEmaCrossConfig {
     pub volume_regime: VolumeRegimeConfig,
     #[serde(default)]
     pub ema_gate: EmaOrientationGateConfig,
+    /// Optional multi-feature causal orientation layer.  It is disabled by
+    /// default so existing live/replay configurations retain their behavior.
+    #[serde(default)]
+    pub adaptive_gate: RegimeAdaptiveGateConfig,
 }
 
 impl Default for VolumeAdaptiveEmaCrossConfig {
@@ -115,6 +120,7 @@ impl Default for VolumeAdaptiveEmaCrossConfig {
             ema_cross: EmaCrossConfig::default(),
             volume_regime: VolumeRegimeConfig::default(),
             ema_gate: EmaOrientationGateConfig::default(),
+            adaptive_gate: RegimeAdaptiveGateConfig::default(),
         }
     }
 }
@@ -305,6 +311,7 @@ pub struct VolumeAdaptiveEmaCrossEvaluation {
     pub ema_value: Option<f64>,
     pub ema_inverted: bool,
     pub ema_ready: bool,
+    pub adaptive_gate: RegimeAdaptiveGateEvaluation,
 }
 
 impl VolumeAdaptiveEmaCrossEvaluation {
@@ -314,7 +321,7 @@ impl VolumeAdaptiveEmaCrossEvaluation {
 
     pub fn summary(&self) -> String {
         format!(
-            "{} | Relative volume: {} | Volume gate: {} | EMA gate: {}",
+            "{} | Relative volume: {} | Volume gate: {} | EMA gate: {} | {}",
             self.ema.summary(),
             format_ratio(self.relative_volume),
             if self.volume_inverted {
@@ -329,12 +336,13 @@ impl VolumeAdaptiveEmaCrossEvaluation {
             } else {
                 "warming_up"
             },
+            self.adaptive_gate.summary(),
         )
     }
 
     pub fn debug_summary(&self) -> String {
         format!(
-            "{} | relative_volume={} | volume_gate_inverted={} | ema={} | ema_gate_inverted={} | ema_ready={}",
+            "{} | relative_volume={} | volume_gate_inverted={} | ema={} | ema_gate_inverted={} | ema_ready={} | {}",
             self.ema.debug_summary(),
             format_ratio(self.relative_volume),
             self.volume_inverted,
@@ -343,12 +351,13 @@ impl VolumeAdaptiveEmaCrossEvaluation {
                 .unwrap_or_else(|| "n/a".to_string()),
             self.ema_inverted,
             self.ema_ready,
+            self.adaptive_gate.summary(),
         )
     }
 
     pub fn gate_summary(&self) -> String {
         format!(
-            "relative_volume={} volume_gate_inverted={} ema={} ema_gate_inverted={} ema_ready={}",
+            "relative_volume={} volume_gate_inverted={} ema={} ema_gate_inverted={} ema_ready={} | {}",
             format_ratio(self.relative_volume),
             self.volume_inverted,
             self.ema_value
@@ -356,6 +365,7 @@ impl VolumeAdaptiveEmaCrossEvaluation {
                 .unwrap_or_else(|| "n/a".to_string()),
             self.ema_inverted,
             self.ema_ready,
+            self.adaptive_gate.summary(),
         )
     }
 }
@@ -370,6 +380,10 @@ impl VolumeAdaptiveEmaCrossConfig {
             .warmup_bars()
             .max(self.volume_regime.warmup_bars())
             .max(self.ema_gate.warmup_bars())
+            .max(
+                self.adaptive_gate
+                    .warmup_bars(self.ema_cross.fast_length, self.ema_cross.slow_length),
+            )
     }
 
     pub fn evaluate(
@@ -377,10 +391,23 @@ impl VolumeAdaptiveEmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> VolumeAdaptiveEmaCrossEvaluation {
-        let (effective, relative_volume, volume_inverted, ema_gate) = self.effective_ema(bars);
+        // The adaptive layer is intentionally evaluated only at a decision
+        // point.  A full-prefix feature reconstruction on every non-crossing
+        // bar would make an enabled research gate needlessly quadratic.
+        if self.adaptive_gate.enabled {
+            let base = self.ema_cross.evaluate(bars, current_side);
+            if !base.raw_buy_signal && !base.raw_sell_signal {
+                return self.wrap_without_adaptive(base, bars);
+            }
+        }
+        let (effective, relative_volume, volume_inverted, ema_gate, adaptive_gate) =
+            self.effective_ema(bars);
         let mut ema = effective.evaluate(bars, current_side);
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_ema(&mut ema);
+        }
+        if adaptive_gate.should_hold() {
+            hold_for_adaptive_gate_ema(&mut ema, adaptive_gate.hold_reason);
         }
         VolumeAdaptiveEmaCrossEvaluation {
             ema,
@@ -389,6 +416,7 @@ impl VolumeAdaptiveEmaCrossConfig {
             ema_value: ema_gate.ema,
             ema_inverted: ema_gate.inverted,
             ema_ready: ema_gate.ready,
+            adaptive_gate,
         }
     }
 
@@ -398,10 +426,22 @@ impl VolumeAdaptiveEmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> VolumeAdaptiveEmaCrossEvaluation {
-        let (effective, relative_volume, volume_inverted, ema_gate) = self.effective_ema(bars);
+        if self.adaptive_gate.enabled {
+            let base = self
+                .ema_cross
+                .evaluate_streaming(runtime, bars, current_side);
+            if !base.raw_buy_signal && !base.raw_sell_signal {
+                return self.wrap_without_adaptive(base, bars);
+            }
+        }
+        let (effective, relative_volume, volume_inverted, ema_gate, adaptive_gate) =
+            self.effective_ema(bars);
         let mut ema = effective.evaluate_streaming(runtime, bars, current_side);
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_ema(&mut ema);
+        }
+        if adaptive_gate.should_hold() {
+            hold_for_adaptive_gate_ema(&mut ema, adaptive_gate.hold_reason);
         }
         VolumeAdaptiveEmaCrossEvaluation {
             ema,
@@ -410,6 +450,7 @@ impl VolumeAdaptiveEmaCrossConfig {
             ema_value: ema_gate.ema,
             ema_inverted: ema_gate.inverted,
             ema_ready: ema_gate.ready,
+            adaptive_gate,
         }
     }
 
@@ -436,7 +477,20 @@ impl VolumeAdaptiveEmaCrossConfig {
         source_update_sequence: Option<u64>,
         market_update: MarketHistoryUpdate,
     ) -> VolumeAdaptiveEmaCrossEvaluation {
-        let (effective, relative_volume, volume_inverted, ema_gate) = self.effective_ema(bars);
+        if self.adaptive_gate.enabled {
+            let base = self.ema_cross.evaluate_streaming_with_market_update(
+                runtime,
+                bars,
+                current_side,
+                source_update_sequence,
+                market_update,
+            );
+            if !base.raw_buy_signal && !base.raw_sell_signal {
+                return self.wrap_without_adaptive(base, bars);
+            }
+        }
+        let (effective, relative_volume, volume_inverted, ema_gate, adaptive_gate) =
+            self.effective_ema(bars);
         let mut ema = effective.evaluate_streaming_with_market_update(
             runtime,
             bars,
@@ -447,6 +501,9 @@ impl VolumeAdaptiveEmaCrossConfig {
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_ema(&mut ema);
         }
+        if adaptive_gate.should_hold() {
+            hold_for_adaptive_gate_ema(&mut ema, adaptive_gate.hold_reason);
+        }
         VolumeAdaptiveEmaCrossEvaluation {
             ema,
             relative_volume,
@@ -454,6 +511,7 @@ impl VolumeAdaptiveEmaCrossConfig {
             ema_value: ema_gate.ema,
             ema_inverted: ema_gate.inverted,
             ema_ready: ema_gate.ready,
+            adaptive_gate,
         }
     }
 
@@ -498,14 +556,59 @@ impl VolumeAdaptiveEmaCrossConfig {
         Option<f64>,
         bool,
         EmaOrientationGateEvaluation,
+        RegimeAdaptiveGateEvaluation,
     ) {
         let relative_volume = self.volume_regime.relative_volume(bars);
         let volume_inverted = relative_volume
             .is_some_and(|ratio| ratio < self.volume_regime.invert_below_relative_volume);
         let ema_gate = self.ema_gate.evaluate(bars);
+        let adaptive_gate = self.adaptive_gate.evaluate(
+            bars,
+            self.ema_cross.fast_length,
+            self.ema_cross.slow_length,
+        );
         let mut effective = self.ema_cross.clone();
-        effective.inverted ^= volume_inverted ^ ema_gate.inverted;
-        (effective, relative_volume, volume_inverted, ema_gate)
+        effective.inverted ^= volume_inverted ^ ema_gate.inverted ^ adaptive_gate.inverted;
+        (
+            effective,
+            relative_volume,
+            volume_inverted,
+            ema_gate,
+            adaptive_gate,
+        )
+    }
+
+    fn wrap_without_adaptive(
+        &self,
+        mut ema: EmaCrossEvaluation,
+        bars: &[Bar],
+    ) -> VolumeAdaptiveEmaCrossEvaluation {
+        let relative_volume = self.volume_regime.relative_volume(bars);
+        let volume_inverted = relative_volume
+            .is_some_and(|ratio| ratio < self.volume_regime.invert_below_relative_volume);
+        let ema_gate = if self.ema_gate.enabled {
+            self.ema_gate.evaluate(bars)
+        } else {
+            EmaOrientationGateEvaluation::default()
+        };
+        let adaptive_gate = self.adaptive_gate.evaluate(
+            &[],
+            self.ema_cross.fast_length,
+            self.ema_cross.slow_length,
+        );
+        ema.inverted ^= volume_inverted ^ ema_gate.inverted;
+        if self.ema_gate.enabled && !ema_gate.ready {
+            hold_for_ema_gate_ema(&mut ema);
+        }
+        VolumeAdaptiveEmaCrossEvaluation {
+            ema,
+            relative_volume,
+            volume_inverted,
+            ema_value: ema_gate.ema,
+            ema_inverted: ema_gate.inverted,
+            ema_ready: ema_gate.ready,
+            adaptive_gate,
+        }
     }
 }
 
@@ -521,6 +624,13 @@ fn hold_for_ema_gate_ema(evaluation: &mut EmaCrossEvaluation) {
     evaluation.effective_buy_signal = false;
     evaluation.effective_sell_signal = false;
     evaluation.hold_reason = Some("ema_gate_warming_up");
+}
+
+fn hold_for_adaptive_gate_ema(evaluation: &mut EmaCrossEvaluation, reason: Option<&'static str>) {
+    evaluation.signal = StrategySignal::Hold;
+    evaluation.effective_buy_signal = false;
+    evaluation.effective_sell_signal = false;
+    evaluation.hold_reason = Some(reason.unwrap_or("adaptive_gate"));
 }
 
 fn format_ratio(value: Option<f64>) -> String {
@@ -589,6 +699,7 @@ mod tests {
                 invert_below_relative_volume: 0.0,
             },
             ema_gate: EmaOrientationGateConfig::default(),
+            adaptive_gate: RegimeAdaptiveGateConfig::default(),
         };
         let bars = vec![
             bar(1, 1.0, Some(100.0)),
@@ -625,6 +736,7 @@ mod tests {
                 invert_below_relative_volume: 0.5,
             },
             ema_gate: EmaOrientationGateConfig::default(),
+            adaptive_gate: RegimeAdaptiveGateConfig::default(),
         };
         let bars = vec![
             bar(1, 1.0, Some(100.0)),

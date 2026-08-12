@@ -126,6 +126,7 @@ impl App {
                     ));
                 }
             }
+            NativeStrategyKind::HeikinAshiColor => {}
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
                 let config = &self.strategy.native_volume_hma_cross;
                 let fast = config.hma_cross.fast_length;
@@ -330,6 +331,7 @@ impl App {
             NativeStrategyKind::HmaAngle => self.strategy.native_hma.uses_native_protection(),
             NativeStrategyKind::EmaCross => self.strategy.native_ema.uses_native_protection(),
             NativeStrategyKind::HmaCross => self.strategy.native_hma_cross.uses_native_protection(),
+            NativeStrategyKind::HeikinAshiColor => false,
             NativeStrategyKind::VolumeAdaptiveHmaCross => self
                 .strategy
                 .native_volume_hma_cross

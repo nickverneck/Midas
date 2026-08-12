@@ -19,6 +19,7 @@ use crate::strategies::adx::AdxConfig;
 use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
 use crate::strategies::hma_cross::HmaCrossConfig;
+use crate::strategies::markov_orientation_gate::ReplayMarkovOrientationGateConfig;
 use crate::strategies::orientation_gate::EmaOrientationGateConfig;
 use crate::strategies::volume_regime::{
     VolumeAdaptiveEmaCrossConfig, VolumeAdaptiveHmaCrossConfig,
@@ -315,6 +316,11 @@ pub(crate) struct ReplaySweepSpec {
     pub(crate) execution_mode: ReplaySweepExecutionMode,
     #[serde(default)]
     pub(crate) guardrails: ReplaySweepGuardrails,
+    /// Strictly replay-only orientation scheduler. It is copied into each
+    /// child and accepted solely by the prepared EMA kernel; it cannot reach
+    /// live execution configuration or dispatch.
+    #[serde(default)]
+    pub(crate) replay_markov_orientation_gate: ReplayMarkovOrientationGateConfig,
     pub(crate) output_dir: std::path::PathBuf,
     pub(crate) output_formats: Vec<ReplaySweepOutputFormat>,
 }
@@ -361,6 +367,7 @@ impl Default for ReplaySweepSpec {
             parallelism: 1,
             execution_mode: ReplaySweepExecutionMode::default(),
             guardrails: ReplaySweepGuardrails::default(),
+            replay_markov_orientation_gate: ReplayMarkovOrientationGateConfig::default(),
             output_dir: std::path::PathBuf::from("runs"),
             output_formats: default_output_formats(),
         }
@@ -390,6 +397,8 @@ pub(crate) struct ReplaySweepChildSpec {
     pub(crate) fee_scenarios: Vec<ReplayFeeSchedule>,
     pub(crate) initial_capital: f64,
     pub(crate) margin: Option<ReplayMarginConfig>,
+    #[serde(default)]
+    pub(crate) replay_markov_orientation_gate: ReplayMarkovOrientationGateConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -435,6 +444,14 @@ impl ReplaySweepSpec {
             bail!("parallelism must be greater than zero");
         }
         self.guardrails.validate()?;
+        self.replay_markov_orientation_gate
+            .validate()
+            .map_err(|error| anyhow::anyhow!("replay Markov orientation gate {error}"))?;
+        if self.replay_markov_orientation_gate.enabled
+            && self.execution_mode != ReplaySweepExecutionMode::PreparedCpu
+        {
+            bail!("replay Markov orientation gate requires execution_mode=prepared_cpu");
+        }
         if self.output_dir.as_os_str().is_empty() {
             bail!("output_dir cannot be empty");
         }
@@ -745,6 +762,7 @@ impl ReplaySweepSpec {
                 fee_scenarios: self.fee_scenarios.clone(),
                 initial_capital: self.initial_capital,
                 margin: self.margin.clone(),
+                replay_markov_orientation_gate: self.replay_markov_orientation_gate.clone(),
             });
         }
         Ok(children)
@@ -1111,6 +1129,10 @@ fn validate_volume_adaptive_ema_cross(config: &VolumeAdaptiveEmaCrossConfig) -> 
         .map_err(|error| anyhow::anyhow!("volume-adaptive EMA {error}"))?;
     validate_ema_orientation_gate(&config.ema_gate)
         .map_err(|error| anyhow::anyhow!("volume-adaptive EMA {error}"))?;
+    config
+        .adaptive_gate
+        .validate()
+        .map_err(|error| anyhow::anyhow!("volume-adaptive EMA {error}"))?;
     Ok(())
 }
 
@@ -1176,6 +1198,7 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_hma_cross.use_trailing_stop",
     "native_hma_cross.trail_trigger_ticks",
     "native_hma_cross.trail_offset_ticks",
+    "native_heikin_ashi.inverted",
     "native_volume_hma_cross.fast_length",
     "native_volume_hma_cross.slow_length",
     "native_volume_hma_cross.calculation_mode",
@@ -1203,6 +1226,57 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_volume_ema_cross.ema_gate.enabled",
     "native_volume_ema_cross.ema_gate.ema_length",
     "native_volume_ema_cross.ema_gate.invert_when_above",
+    "native_volume_ema_cross.adaptive_gate.enabled",
+    "native_volume_ema_cross.adaptive_gate.combine",
+    "native_volume_ema_cross.adaptive_gate.minimum_feature_votes",
+    "native_volume_ema_cross.adaptive_gate.invert_confirmation_bars",
+    "native_volume_ema_cross.adaptive_gate.normal_confirmation_bars",
+    "native_volume_ema_cross.adaptive_gate.hold_on_missing_features",
+    "native_volume_ema_cross.adaptive_gate.hold_during_dwell",
+    "native_volume_ema_cross.adaptive_gate.reset_on_missing_features",
+    "native_volume_ema_cross.adaptive_gate.use_relative_volume",
+    "native_volume_ema_cross.adaptive_gate.volume_lookback_bars",
+    "native_volume_ema_cross.adaptive_gate.invert_below_relative_volume",
+    "native_volume_ema_cross.adaptive_gate.invert_above_relative_volume",
+    "native_volume_ema_cross.adaptive_gate.use_atr_ratio",
+    "native_volume_ema_cross.adaptive_gate.atr_length",
+    "native_volume_ema_cross.adaptive_gate.atr_lookback_bars",
+    "native_volume_ema_cross.adaptive_gate.invert_below_atr_ratio",
+    "native_volume_ema_cross.adaptive_gate.invert_above_atr_ratio",
+    "native_volume_ema_cross.adaptive_gate.use_choppiness",
+    "native_volume_ema_cross.adaptive_gate.choppiness_length",
+    "native_volume_ema_cross.adaptive_gate.invert_below_choppiness",
+    "native_volume_ema_cross.adaptive_gate.invert_above_choppiness",
+    "native_volume_ema_cross.adaptive_gate.use_directional_return",
+    "native_volume_ema_cross.adaptive_gate.directional_return_length",
+    "native_volume_ema_cross.adaptive_gate.invert_when_aligned_return_below",
+    "native_volume_ema_cross.adaptive_gate.invert_when_aligned_return_above",
+    "native_volume_ema_cross.adaptive_gate.use_adx",
+    "native_volume_ema_cross.adaptive_gate.adx_length",
+    "native_volume_ema_cross.adaptive_gate.invert_below_adx",
+    "native_volume_ema_cross.adaptive_gate.invert_above_adx",
+    "native_volume_ema_cross.adaptive_gate.use_di_imbalance",
+    "native_volume_ema_cross.adaptive_gate.invert_when_di_imbalance_below",
+    "native_volume_ema_cross.adaptive_gate.invert_when_di_imbalance_above",
+    "native_volume_ema_cross.adaptive_gate.use_ema_spread",
+    "native_volume_ema_cross.adaptive_gate.invert_when_normalized_spread_below",
+    "native_volume_ema_cross.adaptive_gate.invert_when_normalized_spread_above",
+    "native_volume_ema_cross.adaptive_gate.use_ema_slope",
+    "native_volume_ema_cross.adaptive_gate.ema_slope_lookback",
+    "native_volume_ema_cross.adaptive_gate.invert_when_normalized_slope_below",
+    "native_volume_ema_cross.adaptive_gate.invert_when_normalized_slope_above",
+    "native_volume_ema_cross.adaptive_gate.use_directional_ema_gap",
+    "native_volume_ema_cross.adaptive_gate.directional_ema_length",
+    "native_volume_ema_cross.adaptive_gate.directional_gap_lookback_bars",
+    "native_volume_ema_cross.adaptive_gate.invert_when_bullish_gap_below",
+    "native_volume_ema_cross.adaptive_gate.invert_when_bullish_gap_above",
+    "native_volume_ema_cross.adaptive_gate.invert_when_bearish_gap_below",
+    "native_volume_ema_cross.adaptive_gate.invert_when_bearish_gap_above",
+    "native_volume_ema_cross.adaptive_gate.use_session_window",
+    "native_volume_ema_cross.adaptive_gate.session_start_minute_et",
+    "native_volume_ema_cross.adaptive_gate.session_end_minute_et",
+    "native_volume_ema_cross.adaptive_gate.invert_inside_session_window",
+    "native_volume_ema_cross.adaptive_gate.session_weekdays_mask",
     "native_adx.adx_length",
     "native_adx.adx_entry_threshold",
     "native_adx.adx_exit_threshold",
@@ -1383,6 +1457,7 @@ mod tests {
             parallelism: 2,
             execution_mode: ReplaySweepExecutionMode::BatchCpu,
             guardrails: ReplaySweepGuardrails::default(),
+            replay_markov_orientation_gate: ReplayMarkovOrientationGateConfig::default(),
             output_dir: "runs/ema-mes".into(),
             output_formats: vec![
                 ReplaySweepOutputFormat::JsonSummary,
@@ -1481,6 +1556,22 @@ mod tests {
         let mut spec = sample_spec();
         spec.parameters[0].path = "native_ema.not_a_field".to_string();
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn replay_markov_gate_requires_prepared_cpu_but_is_disabled_by_default() {
+        let spec = sample_spec();
+        assert!(spec.validate().is_ok());
+
+        let mut enabled = sample_spec();
+        enabled.replay_markov_orientation_gate.enabled = true;
+        let error = enabled
+            .validate()
+            .expect_err("Markov gate must not use the service-backed path");
+        assert!(error.to_string().contains("prepared_cpu"));
+
+        enabled.execution_mode = ReplaySweepExecutionMode::PreparedCpu;
+        assert!(enabled.validate().is_ok());
     }
 
     #[test]

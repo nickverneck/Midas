@@ -217,6 +217,7 @@ impl App {
                     self.strategy.native_hma_cross.trail_offset_ticks,
                     self.strategy.native_hma_cross.stop_loss_ticks,
                 ),
+                NativeStrategyKind::HeikinAshiColor => (false, 0.0, 0.0, 0.0),
                 NativeStrategyKind::VolumeAdaptiveHmaCross => (
                     self.strategy
                         .native_volume_hma_cross
@@ -339,6 +340,7 @@ impl App {
                 .strategy
                 .native_hma_cross
                 .take_profit_offset(self.market.tick_size)?,
+            NativeStrategyKind::HeikinAshiColor => return None,
             NativeStrategyKind::VolumeAdaptiveHmaCross => self
                 .strategy
                 .native_volume_hma_cross
@@ -400,6 +402,7 @@ impl App {
                     .native_hma_cross
                     .current_effective_stop_price(&runtime, self.market.tick_size)
             }
+            NativeStrategyKind::HeikinAshiColor => None,
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
                 let mut runtime = crate::strategies::hma_cross::HmaCrossExecutionState::default();
                 self.strategy.native_volume_hma_cross.sync_position(

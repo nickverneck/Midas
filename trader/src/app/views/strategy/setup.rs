@@ -271,6 +271,7 @@ impl App {
                                 .trail_offset_ticks,
                         ),
                         NativeStrategyKind::HmaAngle => unreachable!(),
+                        NativeStrategyKind::HeikinAshiColor => unreachable!(),
                         NativeStrategyKind::Adx => unreachable!(),
                     };
                     lines.push(styled_line(
@@ -378,6 +379,17 @@ impl App {
                             ));
                         }
                     }
+                }
+                NativeStrategyKind::HeikinAshiColor => {
+                    lines.push(Line::from("Completed Heikin-Ashi color transitions"));
+                    lines.push(Line::from("Green transition: Buy | Red transition: Sell"));
+                    lines.push(styled_line(
+                        format!(
+                            "Inverted: {}",
+                            bool_label(self.strategy.native_heikin_ashi.inverted)
+                        ),
+                        self.focus == Focus::EmaInverted,
+                    ));
                 }
                 NativeStrategyKind::Adx => {
                     let config = &self.strategy.native_adx;

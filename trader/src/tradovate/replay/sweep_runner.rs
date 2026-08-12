@@ -826,6 +826,11 @@ async fn run_child(
                         );
                     }
                     Err(error) => {
+                        if child.replay_markov_orientation_gate.enabled {
+                            bail!(
+                                "replay Markov orientation gate must run in the prepared kernel; refusing reference fallback: {error}"
+                            );
+                        }
                         let reason = format!("prepared kernel failed: {error}");
                         eprintln!(
                             "prepared sweep child {} falling back to reference simulator: {}",
@@ -836,6 +841,11 @@ async fn run_child(
                 }
             }
             Err(reason) => {
+                if child.replay_markov_orientation_gate.enabled {
+                    bail!(
+                        "replay Markov orientation gate must run in the prepared kernel; refusing reference fallback: {reason}"
+                    );
+                }
                 eprintln!(
                     "prepared sweep child {} falling back to reference simulator: {}",
                     child.run_id, reason
@@ -1610,6 +1620,7 @@ mod tests {
             fee_scenarios: Vec::new(),
             initial_capital: 10_000.0,
             margin: None,
+            replay_markov_orientation_gate: Default::default(),
         }
     }
 

@@ -7,6 +7,7 @@ use crate::broker::{
     ContractSuggestion, EngineHistorySnapshot, InstrumentSessionWindow, LatencySnapshot,
     MarketSnapshot, ReplayExecutionLedgerSummary, ReplayLatencyModel, ReplaySpeed, ServiceCommand,
     ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
+    transform_bars_for_candle_mode,
 };
 #[cfg(feature = "replay")]
 use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};

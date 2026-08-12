@@ -510,13 +510,13 @@ impl AdxConfig {
 }
 
 #[derive(Debug, Clone)]
-struct AdxSeries {
-    adx: Vec<f64>,
-    plus_di: Vec<f64>,
-    minus_di: Vec<f64>,
+pub(crate) struct AdxSeries {
+    pub(crate) adx: Vec<f64>,
+    pub(crate) plus_di: Vec<f64>,
+    pub(crate) minus_di: Vec<f64>,
 }
 
-fn adx_series(bars: &[Bar], period: usize) -> AdxSeries {
+pub(crate) fn adx_series(bars: &[Bar], period: usize) -> AdxSeries {
     let period = period.max(1);
     let len = bars.len();
     let mut tr = vec![f64::NAN; len];

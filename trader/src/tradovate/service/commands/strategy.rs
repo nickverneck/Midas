@@ -25,6 +25,7 @@ fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig
         NativeStrategyKind::HmaAngle => config.native_hma.uses_native_protection(),
         NativeStrategyKind::EmaCross => config.native_ema.uses_native_protection(),
         NativeStrategyKind::HmaCross => config.native_hma_cross.uses_native_protection(),
+        NativeStrategyKind::HeikinAshiColor => false,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             config.native_volume_hma_cross.uses_native_protection()
         }

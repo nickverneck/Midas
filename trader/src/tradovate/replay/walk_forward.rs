@@ -671,6 +671,7 @@ mod tests {
             parallelism: 1,
             execution_mode: Default::default(),
             guardrails: Default::default(),
+            replay_markov_orientation_gate: Default::default(),
             output_dir: PathBuf::from("runs/mes-ema"),
             output_formats: vec![super::super::sweep::ReplaySweepOutputFormat::JsonSummary],
         }

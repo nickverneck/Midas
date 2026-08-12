@@ -218,6 +218,27 @@ impl App {
                     ]);
                     detail
                 }
+                NativeStrategyKind::HeikinAshiColor => vec![
+                    Line::from("Heikin-Ashi Color Strategy"),
+                    Line::from(format!(
+                        "Type: {}",
+                        NativeStrategyKind::HeikinAshiColor.label()
+                    )),
+                    Line::from(format!(
+                        "Flags: inverted={} timing={} delay={} path={} reversal={}",
+                        bool_label(self.strategy.native_heikin_ashi.inverted),
+                        self.strategy.native_signal_timing.label(),
+                        self.strategy.native_signal_delay_bars,
+                        self.strategy.native_execution_path.label(),
+                        self.strategy.native_reversal_mode.label(),
+                    )),
+                    Line::from(""),
+                    Line::from("Signal logic"),
+                    Line::from("Buy: a completed Heikin-Ashi bar turns green."),
+                    Line::from("Sell: a completed Heikin-Ashi bar turns red."),
+                    Line::from("Doji bars are neutral; same-color bars hold."),
+                    Line::from("Inverted swaps green/red transition directions."),
+                ],
                 NativeStrategyKind::VolumeAdaptiveHmaCross => {
                     let config = &self.strategy.native_volume_hma_cross;
                     let mut detail = vec![

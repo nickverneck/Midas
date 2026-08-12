@@ -5,6 +5,7 @@ fn current_native_fixed_take_profit_ticks(session: &SessionState) -> f64 {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.take_profit_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.take_profit_ticks,
         NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.take_profit_ticks,
+        NativeStrategyKind::HeikinAshiColor => 0.0,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             session
                 .execution_config
@@ -35,6 +36,7 @@ fn current_native_fixed_stop_ticks(session: &SessionState) -> f64 {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.stop_loss_ticks,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.stop_loss_ticks,
         NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.stop_loss_ticks,
+        NativeStrategyKind::HeikinAshiColor => 0.0,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             session
                 .execution_config
@@ -65,6 +67,7 @@ fn active_native_uses_trailing_stop(session: &SessionState) -> bool {
         NativeStrategyKind::HmaAngle => session.execution_config.native_hma.use_trailing_stop,
         NativeStrategyKind::EmaCross => session.execution_config.native_ema.use_trailing_stop,
         NativeStrategyKind::HmaCross => session.execution_config.native_hma_cross.use_trailing_stop,
+        NativeStrategyKind::HeikinAshiColor => false,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             session
                 .execution_config
@@ -93,6 +96,7 @@ fn current_native_trail_trigger_ticks(session: &SessionState) -> f64 {
                 .native_hma_cross
                 .trail_trigger_ticks
         }
+        NativeStrategyKind::HeikinAshiColor => 0.0,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             session
                 .execution_config
@@ -118,6 +122,7 @@ fn current_native_trail_offset_ticks(session: &SessionState) -> f64 {
         NativeStrategyKind::HmaCross => {
             session.execution_config.native_hma_cross.trail_offset_ticks
         }
+        NativeStrategyKind::HeikinAshiColor => 0.0,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             session
                 .execution_config

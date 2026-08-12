@@ -1,5 +1,6 @@
 use crate::strategies::adx::AdxConfig;
 use crate::strategies::ema_cross::EmaCrossConfig;
+use crate::strategies::heikin_ashi::HeikinAshiConfig;
 use crate::strategies::hma_angle::HmaAngleConfig;
 use crate::strategies::hma_cross::HmaCrossConfig;
 use crate::strategies::volume_regime::{
@@ -34,6 +35,7 @@ pub enum NativeStrategyKind {
     HmaAngle,
     EmaCross,
     HmaCross,
+    HeikinAshiColor,
     VolumeAdaptiveHmaCross,
     VolumeAdaptiveEmaCross,
     Adx,
@@ -45,6 +47,7 @@ impl NativeStrategyKind {
             Self::HmaAngle => "HMA Angle",
             Self::EmaCross => "EMA Crossover",
             Self::HmaCross => "HMA Crossover",
+            Self::HeikinAshiColor => "Heikin-Ashi Color",
             Self::VolumeAdaptiveHmaCross => "Volume-Adaptive HMA",
             Self::VolumeAdaptiveEmaCross => "Volume-Adaptive EMA",
             Self::Adx => "ADX Trend Regime",
@@ -56,6 +59,7 @@ impl NativeStrategyKind {
             Self::HmaAngle => "hma_angle",
             Self::EmaCross => "ema_cross",
             Self::HmaCross => "hma_cross",
+            Self::HeikinAshiColor => "heikin_ashi_color",
             Self::VolumeAdaptiveHmaCross => "volume_adaptive_hma_cross",
             Self::VolumeAdaptiveEmaCross => "volume_adaptive_ema_cross",
             Self::Adx => "adx",
@@ -66,7 +70,8 @@ impl NativeStrategyKind {
         match self {
             Self::HmaAngle => Self::EmaCross,
             Self::EmaCross => Self::HmaCross,
-            Self::HmaCross => Self::VolumeAdaptiveHmaCross,
+            Self::HmaCross => Self::HeikinAshiColor,
+            Self::HeikinAshiColor => Self::VolumeAdaptiveHmaCross,
             Self::VolumeAdaptiveHmaCross => Self::VolumeAdaptiveEmaCross,
             Self::VolumeAdaptiveEmaCross => Self::Adx,
             Self::Adx => Self::HmaAngle,
@@ -78,7 +83,8 @@ impl NativeStrategyKind {
             Self::HmaAngle => Self::Adx,
             Self::EmaCross => Self::HmaAngle,
             Self::HmaCross => Self::EmaCross,
-            Self::VolumeAdaptiveHmaCross => Self::HmaCross,
+            Self::HeikinAshiColor => Self::HmaCross,
+            Self::VolumeAdaptiveHmaCross => Self::HeikinAshiColor,
             Self::VolumeAdaptiveEmaCross => Self::VolumeAdaptiveHmaCross,
             Self::Adx => Self::VolumeAdaptiveEmaCross,
         }
@@ -451,6 +457,7 @@ pub struct StrategyState {
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
     pub native_hma_cross: HmaCrossConfig,
+    pub native_heikin_ashi: HeikinAshiConfig,
     pub native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig,
     pub native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig,
     pub native_adx: AdxConfig,
@@ -480,6 +487,8 @@ pub struct ExecutionStrategyConfig {
     pub native_ema: EmaCrossConfig,
     #[serde(default)]
     pub native_hma_cross: HmaCrossConfig,
+    #[serde(default)]
+    pub native_heikin_ashi: HeikinAshiConfig,
     #[serde(default)]
     pub native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig,
     #[serde(default)]
@@ -532,6 +541,7 @@ impl Default for ExecutionStrategyConfig {
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
+            native_heikin_ashi: HeikinAshiConfig::default(),
             native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig::default(),
             native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig::default(),
             native_adx: AdxConfig::default(),
@@ -595,6 +605,7 @@ impl StrategyState {
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
+            native_heikin_ashi: HeikinAshiConfig::default(),
             native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig::default(),
             native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig::default(),
             native_adx: AdxConfig::default(),
@@ -690,6 +701,18 @@ impl StrategyState {
                 self.native_hma_cross.stop_loss_ticks,
                 self.native_hma_cross.use_trailing_stop,
                 self.native_hma_cross.inverted,
+            ),
+            NativeStrategyKind::HeikinAshiColor => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) transitions=green-buy/red-sell inverted={}",
+                NativeStrategyKind::HeikinAshiColor.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_heikin_ashi.inverted,
             ),
             NativeStrategyKind::VolumeAdaptiveHmaCross => format!(
                 "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} lookback={} invert_below={:.2} tp={:.0} sl={:.0} trail={} inverted={}",
@@ -807,6 +830,18 @@ impl StrategyState {
                 self.native_hma_cross.slow_length,
                 self.native_hma_cross.inverted,
             ),
+            NativeStrategyKind::HeikinAshiColor => format!(
+                "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) transitions=green-buy/red-sell inverted={}",
+                NativeStrategyKind::HeikinAshiColor.label(),
+                self.order_qty,
+                self.native_signal_timing.label(),
+                self.native_signal_delay_bars,
+                self.native_execution_path.label(),
+                self.native_reversal_mode.label(),
+                self.blockout_enabled,
+                self.blockout_minutes_before_close,
+                self.native_heikin_ashi.inverted,
+            ),
             NativeStrategyKind::VolumeAdaptiveHmaCross => format!(
                 "{} | qty={} timing={} delay={} path={} reversal={} blockout={}({:.0}m) fast={} slow={} lookback={} invert_below={:.2} inverted={}",
                 NativeStrategyKind::VolumeAdaptiveHmaCross.label(),
@@ -880,6 +915,7 @@ impl StrategyState {
             native_hma: self.native_hma.clone(),
             native_ema: self.native_ema.clone(),
             native_hma_cross: self.native_hma_cross.clone(),
+            native_heikin_ashi: self.native_heikin_ashi.clone(),
             native_volume_hma_cross: self.native_volume_hma_cross.clone(),
             native_volume_ema_cross: self.native_volume_ema_cross.clone(),
             native_adx: self.native_adx.clone(),
@@ -899,6 +935,7 @@ impl StrategyState {
         self.native_hma = config.native_hma.clone();
         self.native_ema = config.native_ema.clone();
         self.native_hma_cross = config.native_hma_cross.clone();
+        self.native_heikin_ashi = config.native_heikin_ashi.clone();
         self.native_volume_hma_cross = config.native_volume_hma_cross.clone();
         self.native_volume_ema_cross = config.native_volume_ema_cross.clone();
         self.native_adx = config.native_adx.clone();

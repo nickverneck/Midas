@@ -3,6 +3,8 @@ docs/*
 !docs/replay-strategy-history.csv
 !docs/large-file-refactoring.md
 !docs/GCZ6_MINUTE_BAR_FEED_LAG.md
+!docs/research/
+!docs/research/gc-regime-gate-research-20260810.md
 !docs/todo/
 docs/todo/*
 !docs/todo/replay-backtesting-roadmap/

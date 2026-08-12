@@ -1,7 +1,10 @@
+pub mod adaptive_gate;
 pub mod adx;
 pub mod ema_cross;
+pub mod heikin_ashi;
 pub mod hma_angle;
 pub mod hma_cross;
+pub mod markov_orientation_gate;
 pub mod orientation_gate;
 pub mod volume_regime;
 

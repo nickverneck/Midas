@@ -81,6 +81,9 @@ impl App {
                         }
                     }
                 }
+                NativeStrategyKind::HeikinAshiColor => {
+                    order.push(Focus::EmaInverted);
+                }
                 NativeStrategyKind::VolumeAdaptiveHmaCross => {
                     order.extend([
                         Focus::EmaFastLength,

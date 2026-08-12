@@ -164,6 +164,30 @@ async fn replay_market_worker_inner(
             }
         }
     } else {
+        // Dataset-view warmup must reach the service-backed market series so
+        // stateful indicators (including higher-timeframe gates) see the
+        // completed history.  The service recognizes the zero-live-bar
+        // replay snapshot as seed-only and does not execute a strategy on it.
+        if history_loaded > 0
+            && let Some(mut update) = build_market_update(
+                &contract,
+                Some(replay.market_specs),
+                candle_mode,
+                series.closed_bars.len(),
+                0,
+                initial_status.clone(),
+                0,
+                None,
+                None,
+                &series,
+            )
+        {
+            update.replay_window = replay_window.clone();
+            emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
+            if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
+                drain_replay_broker(&broker_tx, None, None).await?;
+            }
+        }
         let _ = internal_tx.send(InternalEvent::UserSocketStatus(initial_status));
     }
 

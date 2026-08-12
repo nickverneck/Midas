@@ -700,6 +700,17 @@ fn evaluate_active_execution_strategy(
                 evaluation.debug_summary(),
             )
         }
+        NativeStrategyKind::HeikinAshiColor => {
+            let evaluation = session
+                .execution_config
+                .native_heikin_ashi
+                .evaluate_from_source_bars(bars, side_from_signed_qty(current_qty));
+            (
+                evaluation.signal,
+                evaluation.summary(),
+                evaluation.debug_summary(),
+            )
+        }
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             let evaluation = session
                 .execution_config
@@ -784,6 +795,7 @@ fn sync_active_execution_position(
             signed_qty,
             entry_price,
         ),
+        NativeStrategyKind::HeikinAshiColor => {}
         NativeStrategyKind::VolumeAdaptiveHmaCross => session
             .execution_config
             .native_volume_hma_cross
@@ -820,6 +832,7 @@ fn active_native_uses_protection(session: &IronbeamSession) -> bool {
             .execution_config
             .native_hma_cross
             .uses_native_protection(),
+        NativeStrategyKind::HeikinAshiColor => false,
         NativeStrategyKind::VolumeAdaptiveHmaCross => session
             .execution_config
             .native_volume_hma_cross
@@ -847,6 +860,7 @@ fn take_profit_price(session: &IronbeamSession, entry_price: f64, signed_qty: i3
             .execution_config
             .native_hma_cross
             .take_profit_offset(session.market.tick_size)?,
+        NativeStrategyKind::HeikinAshiColor => return None,
         NativeStrategyKind::VolumeAdaptiveHmaCross => session
             .execution_config
             .native_volume_hma_cross
@@ -925,6 +939,7 @@ fn combined_stop_price(session: &mut IronbeamSession, trailing_bar: Option<&Bar>
                     session.market.tick_size,
                 )
         }
+        NativeStrategyKind::HeikinAshiColor => None,
         NativeStrategyKind::VolumeAdaptiveHmaCross => {
             if let Some(bar) = trailing_bar {
                 let _ = session

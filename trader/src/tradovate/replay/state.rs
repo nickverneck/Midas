@@ -2,8 +2,8 @@ use super::*;
 
 #[cfg(feature = "replay")]
 use super::bars::{
-    build_range_bars, build_tick_count_bars, build_time_bars, build_volume_bars,
-    derive_cached_raw_tick_bars, make_bar_timestamps_strictly_increasing,
+    RangeBarBoundaryTracker, build_range_bars, build_tick_count_bars, build_time_bars,
+    build_volume_bars, derive_cached_raw_tick_bars, make_bar_timestamps_strictly_increasing,
 };
 #[cfg(feature = "replay")]
 use super::ticks::ReplayTick;
@@ -101,8 +101,15 @@ pub(crate) fn search_replay_contracts(
 
 #[cfg(feature = "replay")]
 impl ReplayState {
-    pub(super) fn is_cached_server_bars(&self) -> bool {
-        matches!(self.data, ReplayDataSource::CachedServerBars { .. })
+    /// Prepared replay may also use time bars deterministically derived from
+    /// a cached raw-tick archive. Event/range construction remains excluded:
+    /// its ordering/parity rules are materially different and are validated
+    /// separately.
+    pub(super) fn has_prepared_time_bar_source(&self) -> bool {
+        matches!(
+            self.data,
+            ReplayDataSource::CachedServerBars { .. } | ReplayDataSource::CachedRawTicks { .. }
+        )
     }
 
     pub(super) fn market_tick_size(&self) -> Option<f64> {
@@ -151,15 +158,11 @@ impl ReplayState {
                         make_bar_timestamps_strictly_increasing(&mut bars);
                         Ok(bars)
                     }
-                    BarKind::Range => {
-                        let mut bars = build_range_bars(
-                            ticks,
-                            self.market_specs.tick_size.unwrap_or(0.25).max(0.01)
-                                * f64::from(bar_type.value()),
-                        );
-                        make_bar_timestamps_strictly_increasing(&mut bars);
-                        Ok(bars)
-                    }
+                    BarKind::Range => Ok(build_range_bars(
+                        ticks,
+                        self.market_specs.tick_size.unwrap_or(0.25).max(0.01)
+                            * f64::from(bar_type.value()),
+                    )),
                     BarKind::Volume => {
                         if matches!(&self.data, ReplayDataSource::PriceTicks(_)) {
                             bail!(
@@ -250,7 +253,7 @@ impl ReplayState {
 
     fn frames_for_bars(&self, bars: &[Bar], bar_type: BarType) -> Result<Vec<ReplayBarFrame>> {
         let ticks = self.execution_ticks()?;
-        let groups = group_execution_ticks(&ticks, bars, bar_type, self.market_specs.tick_size);
+        let groups = group_execution_ticks(&ticks, bars, bar_type, self.market_specs.tick_size)?;
         let dom_groups = group_dom_updates(&self.dom_updates, bars, bar_type);
         Ok(bars
             .iter()
@@ -410,13 +413,13 @@ fn group_execution_ticks(
     bars: &[Bar],
     bar_type: BarType,
     tick_size: Option<f64>,
-) -> Vec<Vec<ReplayMarketTick>> {
+) -> Result<Vec<Vec<ReplayMarketTick>>> {
     let mut groups = vec![Vec::new(); bars.len()];
     // Cached server-bar replay deliberately has no execution-tick stream.
     // There is still a valid bar frame for each cached bar, so leave the
     // per-bar tick groups empty instead of indexing an absent first tick.
     if bars.is_empty() || ticks.is_empty() {
-        return groups;
+        return Ok(groups);
     }
     match bar_type.kind() {
         BarKind::Minute | BarKind::Second => {
@@ -453,24 +456,24 @@ fn group_execution_ticks(
         }
         BarKind::Range => {
             let range = tick_size.unwrap_or(0.25).max(0.01) * f64::from(bar_type.value());
+            let mut tracker = RangeBarBoundaryTracker::new(range);
             let mut index = 0usize;
-            let mut open = ticks[0].last;
-            let mut high = open;
-            let mut low = open;
             for tick in ticks {
-                groups[index].push(*tick);
-                high = high.max(tick.last);
-                low = low.min(tick.last);
-                if (high - low) + f64::EPSILON >= range && index + 1 < groups.len() {
-                    index += 1;
-                    open = tick.last;
-                    high = open;
-                    low = open;
+                if index >= groups.len() {
+                    bail!("raw-tick range frame boundaries exceeded the supplied derived bars");
                 }
+                groups[index].push(*tick);
+                let completed = tracker.push_tick(tick.ts_ns, tick.last, |_| {});
+                if completed > groups.len().saturating_sub(index + 1) {
+                    bail!(
+                        "raw-tick range frame boundaries disagree with the supplied derived bars"
+                    );
+                }
+                index += completed;
             }
         }
     }
-    groups
+    Ok(groups)
 }
 
 #[cfg(feature = "replay")]
@@ -601,17 +604,13 @@ fn replay_market_tick_from_row(row: &ReplayCacheRawTickRow) -> ReplayMarketTick 
 struct RawTickFrameAssembler<'a> {
     bars: Arc<[Bar]>,
     bar_type: BarType,
-    tick_size: f64,
     dom_groups: Vec<Vec<ReplayMarketDom>>,
     sender: &'a mpsc::Sender<Result<ReplayBarFrame, String>>,
     next_bar_index: usize,
     current_ticks: Vec<ReplayMarketTick>,
     tick_ordinal: usize,
     cumulative_volume: f64,
-    range_initialized: bool,
-    range_high: f64,
-    range_low: f64,
-    range_index: usize,
+    range_tracker: Option<RangeBarBoundaryTracker>,
 }
 
 #[cfg(feature = "replay")]
@@ -626,23 +625,23 @@ impl<'a> RawTickFrameAssembler<'a> {
         Self {
             bars,
             bar_type,
-            tick_size,
             dom_groups,
             sender,
             next_bar_index: 0,
             current_ticks: Vec::new(),
             tick_ordinal: 0,
             cumulative_volume: 0.0,
-            range_initialized: false,
-            range_high: 0.0,
-            range_low: 0.0,
-            range_index: 0,
+            range_tracker: (bar_type.kind() == BarKind::Range)
+                .then(|| RangeBarBoundaryTracker::new(tick_size * f64::from(bar_type.value()))),
         }
     }
 
     fn push(&mut self, row: &ReplayCacheRawTickRow) -> Result<()> {
         if self.bars.is_empty() {
             return Ok(());
+        }
+        if self.bar_type.kind() == BarKind::Range {
+            return self.push_range_tick(row);
         }
         let index = self.group_index(row).min(self.bars.len() - 1);
         if index < self.next_bar_index {
@@ -655,6 +654,30 @@ impl<'a> RawTickFrameAssembler<'a> {
             }
         }
         self.current_ticks.push(replay_market_tick_from_row(row));
+        Ok(())
+    }
+
+    /// Range aggregation is allowed to close several derived bars from one
+    /// source tick. That tick causally belongs to the first open range bar;
+    /// each further bar is a synthetic completion at the same market
+    /// timestamp and therefore has an empty execution-tick frame. The shared
+    /// boundary tracker keeps this exactly aligned with `RangeBarBuilder`.
+    fn push_range_tick(&mut self, row: &ReplayCacheRawTickRow) -> Result<()> {
+        if self.next_bar_index >= self.bars.len() {
+            bail!("raw-tick range frame stream received data after all derived bars completed");
+        }
+        self.current_ticks.push(replay_market_tick_from_row(row));
+        let completed = self
+            .range_tracker
+            .as_mut()
+            .context("range frame assembler is missing its boundary tracker")?
+            .push_tick(row.ts_ns, row.price, |_| {});
+        for _ in 0..completed {
+            if self.next_bar_index >= self.bars.len() {
+                bail!("raw-tick range boundaries completed more bars than the aggregation pass");
+            }
+            self.emit_current()?;
+        }
         Ok(())
     }
 
@@ -681,25 +704,7 @@ impl<'a> RawTickFrameAssembler<'a> {
                 self.cumulative_volume += row.size.max(0.0);
                 index
             }
-            BarKind::Range => {
-                if !self.range_initialized {
-                    self.range_initialized = true;
-                    self.range_high = row.price;
-                    self.range_low = row.price;
-                }
-                self.range_high = self.range_high.max(row.price);
-                self.range_low = self.range_low.min(row.price);
-                let index = self.range_index;
-                let range = self.bar_type.value().max(1) as f64 * self.tick_size;
-                if (self.range_high - self.range_low) + f64::EPSILON >= range
-                    && self.range_index + 1 < self.bars.len()
-                {
-                    self.range_index += 1;
-                    self.range_high = row.price;
-                    self.range_low = row.price;
-                }
-                index
-            }
+            BarKind::Range => unreachable!("range frames use shared range boundaries"),
         };
         self.tick_ordinal = self.tick_ordinal.saturating_add(1);
         index

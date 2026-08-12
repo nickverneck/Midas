@@ -219,6 +219,7 @@ pub(crate) fn sync_active_execution_position(
             signed_qty,
             entry_price,
         ),
+        NativeStrategyKind::HeikinAshiColor => {}
         NativeStrategyKind::VolumeAdaptiveHmaCross => session
             .execution_config
             .native_volume_hma_cross

@@ -16,7 +16,7 @@ pub(super) fn derive_cached_raw_tick_bars(
             let interval_ns = i64::from(bar_type.value()) * 60 * 1_000_000_000;
             let mut builder = TimeBarBuilder::new(interval_ns.max(1));
             stream_resolved_raw_ticks(resolved, timestamp_range, |row| {
-                builder.push_tick(row.ts_ns, row.price);
+                builder.push_tick_with_size(row.ts_ns, row.price, Some(row.size));
                 Ok(())
             })?;
             builder.finish()
@@ -25,7 +25,7 @@ pub(super) fn derive_cached_raw_tick_bars(
             let interval_ns = i64::from(bar_type.value()) * 1_000_000_000;
             let mut builder = TimeBarBuilder::new(interval_ns.max(1));
             stream_resolved_raw_ticks(resolved, timestamp_range, |row| {
-                builder.push_tick(row.ts_ns, row.price);
+                builder.push_tick_with_size(row.ts_ns, row.price, Some(row.size));
                 Ok(())
             })?;
             builder.finish()
@@ -55,7 +55,7 @@ pub(super) fn derive_cached_raw_tick_bars(
             builder.finish()
         }
     };
-    if matches!(bar_type.kind(), BarKind::Tick | BarKind::Range) {
+    if matches!(bar_type.kind(), BarKind::Tick) {
         make_bar_timestamps_strictly_increasing(&mut bars);
     }
     Ok(bars)
@@ -64,7 +64,7 @@ pub(super) fn derive_cached_raw_tick_bars(
 pub(super) fn build_time_bars(ticks: &[ReplayTick], interval_ns: i64) -> Vec<Bar> {
     let mut builder = TimeBarBuilder::new(interval_ns);
     for tick in ticks {
-        builder.push_tick(tick.ts_ns, tick.last);
+        builder.push_tick_with_size(tick.ts_ns, tick.last, tick.size);
     }
     builder.finish()
 }
@@ -123,23 +123,31 @@ impl TimeBarBuilder {
     }
 
     pub(super) fn push_tick(&mut self, ts_ns: i64, price: f64) {
+        self.push_tick_with_size(ts_ns, price, None);
+    }
+
+    pub(super) fn push_tick_with_size(&mut self, ts_ns: i64, price: f64, volume: Option<f64>) {
+        let volume = volume.filter(|value| value.is_finite() && *value >= 0.0);
         let period_ts_ns = ts_ns - ts_ns.rem_euclid(self.interval_ns);
         match self.current_bar.as_mut() {
             Some(current) if self.current_period_ts_ns == Some(period_ts_ns) => {
                 current.high = current.high.max(price);
                 current.low = current.low.min(price);
                 current.close = price;
+                if let Some(size) = volume {
+                    current.volume = Some(current.volume.unwrap_or(0.0) + size);
+                }
             }
             Some(_) => {
                 if let Some(current) = self.current_bar.take() {
                     self.bars.push(current);
                 }
                 self.current_period_ts_ns = Some(period_ts_ns);
-                self.current_bar = Some(new_bar(period_ts_ns, price, None));
+                self.current_bar = Some(new_bar(period_ts_ns, price, volume));
             }
             None => {
                 self.current_period_ts_ns = Some(period_ts_ns);
-                self.current_bar = Some(new_bar(period_ts_ns, price, None));
+                self.current_bar = Some(new_bar(period_ts_ns, price, volume));
             }
         }
     }
@@ -249,23 +257,36 @@ impl VolumeBarBuilder {
     }
 }
 
-pub(super) struct RangeBarBuilder {
+/// Stateful range-bar boundary engine shared by bar aggregation and raw-tick
+/// frame construction. A source tick can close more than one range bar; the
+/// caller receives each completed bar in source-event order.
+///
+/// Keeping this state machine in one place is important: replay frames must
+/// assign the closing source tick to the same derived-bar boundary that the
+/// aggregation pass used. Do not replace this with a high/low-only indexer.
+pub(super) struct RangeBarBoundaryTracker {
     range_size: f64,
     current_bar: Option<Bar>,
-    bars: Vec<Bar>,
 }
 
-impl RangeBarBuilder {
+impl RangeBarBoundaryTracker {
     pub(super) fn new(range_size: f64) -> Self {
         Self {
-            range_size,
+            range_size: range_size.max(f64::EPSILON),
             current_bar: None,
-            bars: Vec::new(),
         }
     }
 
-    pub(super) fn push_tick(&mut self, ts_ns: i64, price: f64) {
+    /// Applies one source tick and invokes `on_complete` once for every range
+    /// bar that tick closes. The returned count is deliberately available to
+    /// streaming frame assembly, which needs to emit the corresponding empty
+    /// synthetic-bar frames after the one frame that owns the source tick.
+    pub(super) fn push_tick<F>(&mut self, ts_ns: i64, price: f64, mut on_complete: F) -> usize
+    where
+        F: FnMut(Bar),
+    {
         const EPSILON: f64 = 1e-9;
+        let mut completed = 0usize;
         let mut current = self
             .current_bar
             .take()
@@ -284,7 +305,8 @@ impl RangeBarBuilder {
                 current.high = close;
                 current.close = close;
                 current.ts_ns = ts_ns;
-                self.bars.push(current.clone());
+                on_complete(current);
+                completed = completed.saturating_add(1);
                 current = new_bar(ts_ns, close, None);
                 if price <= close + EPSILON {
                     break;
@@ -297,7 +319,8 @@ impl RangeBarBuilder {
                 current.low = close;
                 current.close = close;
                 current.ts_ns = ts_ns;
-                self.bars.push(current.clone());
+                on_complete(current);
+                completed = completed.saturating_add(1);
                 current = new_bar(ts_ns, close, None);
                 if price >= close - EPSILON {
                     break;
@@ -313,10 +336,34 @@ impl RangeBarBuilder {
         }
 
         self.current_bar = Some(current);
+        completed
+    }
+
+    pub(super) fn finish(mut self) -> Option<Bar> {
+        self.current_bar.take()
+    }
+}
+
+pub(super) struct RangeBarBuilder {
+    tracker: RangeBarBoundaryTracker,
+    bars: Vec<Bar>,
+}
+
+impl RangeBarBuilder {
+    pub(super) fn new(range_size: f64) -> Self {
+        Self {
+            tracker: RangeBarBoundaryTracker::new(range_size),
+            bars: Vec::new(),
+        }
+    }
+
+    pub(super) fn push_tick(&mut self, ts_ns: i64, price: f64) {
+        self.tracker
+            .push_tick(ts_ns, price, |bar| self.bars.push(bar));
     }
 
     pub(super) fn finish(mut self) -> Vec<Bar> {
-        if let Some(current) = self.current_bar.take() {
+        if let Some(current) = self.tracker.finish() {
             self.bars.push(current);
         }
         self.bars

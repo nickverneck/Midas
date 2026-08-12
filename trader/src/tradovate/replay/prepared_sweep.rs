@@ -17,6 +17,9 @@ use crate::broker::{
 use crate::config::AppConfig;
 use crate::strategies::ema_cross::{EmaCrossConfig, EmaCrossExecutionState};
 use crate::strategies::hma_cross::{hma_series_incremental, hma_warmup_bars};
+use crate::strategies::markov_orientation_gate::{
+    MarkovOrientationDecision, ReplayMarkovOrientationGate,
+};
 use crate::strategy::{NativeExecutionPath, NativeReversalMode, NativeSignalTiming, StrategyKind};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -536,8 +539,11 @@ impl PreparedEmaSweepInputs {
         config: &AppConfig,
         child: &ReplaySweepChildSpec,
     ) -> Result<(), String> {
-        if !replay.is_cached_server_bars() {
-            return Err("dataset is not cached server bars".to_string());
+        if !replay.has_prepared_time_bar_source() || !child.bar_type.is_time_based() {
+            return Err(
+                "prepared kernel requires cached server bars or cached raw-tick-derived time bars; event/range bars are excluded"
+                    .to_string(),
+            );
         }
         if child.engine_mode != ReplayEngineMode::Deterministic {
             return Err("prepared kernel requires deterministic replay".to_string());
@@ -588,6 +594,13 @@ impl PreparedEmaSweepInputs {
             return Err("prepared kernel requires a valid market tick size".to_string());
         }
         let ema = &child.resolved_strategy.native_ema;
+        if child.replay_markov_orientation_gate.enabled
+            && (ema.take_profit_ticks > 0.0 || ema.stop_loss_ticks > 0.0 || ema.use_trailing_stop)
+        {
+            return Err(
+                "replay Markov orientation gate currently requires no TP/SL/trailing protection; shadow outcomes are close-to-close marks, not broker exits"
+                    .to_string());
+        }
         if ema.use_trailing_stop
             && (ema.trail_trigger_ticks <= 0.0 || ema.trail_offset_ticks <= 0.0)
         {
@@ -746,6 +759,12 @@ pub(crate) fn run_prepared_ema_candidate(
     let evaluation_rows_total = bars.len().saturating_sub(history_loaded);
     let latency_ns = (child.latency.fixed_latency_ms as i64).saturating_mul(1_000_000);
     let mut state = KernelState::new();
+    // This scheduler exists only in the prepared replay kernel.  It is never
+    // part of an ExecutionStrategyConfig or live evaluation path.
+    let mut markov_gate = child
+        .replay_markov_orientation_gate
+        .enabled
+        .then(|| ReplayMarkovOrientationGate::new(child.replay_markov_orientation_gate.clone()));
     let mut anchored = false;
     let mut processed = 0usize;
 
@@ -816,7 +835,28 @@ pub(crate) fn run_prepared_ema_candidate(
             .unwrap_or_default();
         let raw_buy = trace.raw_buy[signal_index];
         let raw_sell = trace.raw_sell[signal_index];
-        let (effective_buy, effective_sell) = if ema.inverted {
+        let raw_direction = if raw_buy {
+            Some(1)
+        } else if raw_sell {
+            Some(-1)
+        } else {
+            None
+        };
+        let markov_decision = raw_direction.and_then(|direction| {
+            markov_gate
+                .as_mut()
+                .map(|gate| gate.observe_cross(&signal_bars[..=signal_index], direction, tick_size))
+        });
+        let effective_inverted = markov_decision
+            .as_ref()
+            .and_then(|decision| decision.effective_inverted)
+            .unwrap_or(ema.inverted);
+        let (effective_buy, effective_sell) = if markov_decision
+            .as_ref()
+            .is_some_and(|decision| decision.effective_inverted.is_none())
+        {
+            (false, false)
+        } else if effective_inverted {
             (raw_sell, raw_buy)
         } else {
             (raw_buy, raw_sell)
@@ -863,6 +903,7 @@ pub(crate) fn run_prepared_ema_candidate(
                     Some(0),
                     "dispatching",
                     "session hold flattening",
+                    markov_decision.as_ref(),
                 );
             } else {
                 append_diagnostic(
@@ -876,6 +917,7 @@ pub(crate) fn run_prepared_ema_candidate(
                     None,
                     "blocked",
                     "session hold blocks entries",
+                    markov_decision.as_ref(),
                 );
             }
             continue;
@@ -893,6 +935,7 @@ pub(crate) fn run_prepared_ema_candidate(
                 None,
                 "no_target",
                 "no actionable crossover",
+                markov_decision.as_ref(),
             );
             continue;
         };
@@ -909,6 +952,7 @@ pub(crate) fn run_prepared_ema_candidate(
                 Some(target_qty),
                 "flat_entry_already_consumed",
                 "entry side was already consumed while flat",
+                markov_decision.as_ref(),
             );
             continue;
         }
@@ -929,6 +973,7 @@ pub(crate) fn run_prepared_ema_candidate(
                 } else {
                     "target already current"
                 },
+                markov_decision.as_ref(),
             );
             continue;
         }
@@ -965,6 +1010,7 @@ pub(crate) fn run_prepared_ema_candidate(
             Some(target_qty),
             "dispatching",
             "crossover passed prepared execution gates",
+            markov_decision.as_ref(),
         );
     }
 
@@ -1532,17 +1578,24 @@ fn append_diagnostic(
     target_qty: Option<i32>,
     decision: &str,
     gate_reason: &str,
+    markov: Option<&MarkovOrientationDecision>,
 ) {
     let Some(bar) = bars.get(signal_index) else {
         return;
     };
     let raw_buy = trace.raw_buy.get(signal_index).copied().unwrap_or(false);
     let raw_sell = trace.raw_sell.get(signal_index).copied().unwrap_or(false);
-    let (effective_buy, effective_sell) = if strategy.native_ema.inverted {
-        (raw_sell, raw_buy)
-    } else {
-        (raw_buy, raw_sell)
-    };
+    let effective_inverted = markov
+        .and_then(|decision| decision.effective_inverted)
+        .unwrap_or(strategy.native_ema.inverted);
+    let (effective_buy, effective_sell) =
+        if markov.is_some_and(|decision| decision.effective_inverted.is_none()) {
+            (false, false)
+        } else if effective_inverted {
+            (raw_sell, raw_buy)
+        } else {
+            (raw_buy, raw_sell)
+        };
     let signal = if effective_buy {
         "Enter Long"
     } else if effective_sell {
@@ -1588,7 +1641,7 @@ fn append_diagnostic(
         effective_position_qty: current_qty,
         target_qty,
         decision: decision.to_string(),
-        gate_reason: gate_reason.to_string(),
+        gate_reason: format_markov_audit(gate_reason, markov),
         order_action: target_qty.map(|target| {
             if target > current_qty {
                 "Buy".to_string()
@@ -1620,13 +1673,50 @@ fn append_diagnostic(
             .filter(|v| v.is_finite()),
         auxiliary_name: None,
         auxiliary_value: None,
-        hold_reason: (signal == "Hold").then(|| gate_reason.to_string()),
+        hold_reason: (signal == "Hold").then(|| format_markov_audit(gate_reason, markov)),
         strategy_detail: format!(
-            "EMA {} / {} | inverted {}",
-            trace.fast_length, trace.slow_length, strategy.native_ema.inverted
+            "EMA {} / {} | inverted {}{}",
+            trace.fast_length,
+            trace.slow_length,
+            effective_inverted,
+            markov.map(|decision| format!(
+                " | markov state={:?} proposal={:?} normal_ticks={:.2} inverted_ticks={:.2} outcomes={} confirm={} dwell={} er={} reset={} reason={}",
+                decision.state,
+                decision.proposal,
+                decision.normal_score_ticks,
+                decision.inverted_score_ticks,
+                decision.completed_outcomes,
+                decision.confirmation_count,
+                decision.dwell_events,
+                decision.efficiency_ratio.map(|value| format!("{value:.3}")).unwrap_or_else(|| "n/a".to_string()),
+                decision.reset_for_gap,
+                decision.audit_reason,
+            )).unwrap_or_default(),
         ),
         fingerprint: None,
     });
+}
+
+fn format_markov_audit(base: &str, markov: Option<&MarkovOrientationDecision>) -> String {
+    let Some(decision) = markov else {
+        return base.to_string();
+    };
+    format!(
+        "{base}; markov state={:?} proposal={:?} normal_ticks={:.2} inverted_ticks={:.2} outcomes={} confirm={} dwell={} er={} reset={} reason={}",
+        decision.state,
+        decision.proposal,
+        decision.normal_score_ticks,
+        decision.inverted_score_ticks,
+        decision.completed_outcomes,
+        decision.confirmation_count,
+        decision.dwell_events,
+        decision
+            .efficiency_ratio
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        decision.reset_for_gap,
+        decision.audit_reason,
+    )
 }
 
 #[cfg(test)]

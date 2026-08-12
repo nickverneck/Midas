@@ -536,6 +536,15 @@ fn handle_market_update(
         return Ok(());
     }
 
+    let replay_warmup_only = state.session.as_ref().is_some_and(|session| {
+        session.replay_enabled
+            && update.live_bars == 0
+            && update.history_update == MarketHistoryUpdate::Snapshot
+            && update
+                .replay_window
+                .as_ref()
+                .is_some_and(|window| window.evaluation_rows_processed == 0)
+    });
     let broker_tx = state.broker_tx.clone();
     let (display_snapshot, closed_bar_advanced, engine_history) = {
         let session = state.session.as_mut().expect("checked session above");
@@ -544,15 +553,28 @@ fn handle_market_update(
         let closed_bar_advanced = apply_market_update(&mut session.market, update);
         session.execution_runtime.market_update_sequence = Some(history_sequence);
         session.execution_runtime.market_update_kind = history_update;
-        match session.execution_config.native_execution_path {
-            NativeExecutionPath::Guarded => {
-                maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
+        if replay_warmup_only {
+            // Seed closed-bar timing at the warmup boundary.  This keeps the
+            // first evaluation bar eligible without allowing the seed
+            // snapshot itself to place an order.
+            if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+                session.execution_runtime.last_closed_bar_ts = latest_strategy_bar_ts(session);
+                session.execution_runtime.last_closed_bar_fingerprint =
+                    latest_strategy_bar_fingerprint(session);
             }
-            NativeExecutionPath::SimpleDiagnostic => {
-                maybe_run_simple_execution_strategy(session, &broker_tx, event_tx)?;
-            }
-            NativeExecutionPath::HmaDirect => {
-                maybe_run_hma_direct_execution_strategy(session, &broker_tx, event_tx)?;
+            session.execution_runtime.last_summary =
+                "Replay warmup loaded; waiting for evaluation bars.".to_string();
+        } else {
+            match session.execution_config.native_execution_path {
+                NativeExecutionPath::Guarded => {
+                    maybe_run_execution_strategy(session, &broker_tx, event_tx)?;
+                }
+                NativeExecutionPath::SimpleDiagnostic => {
+                    maybe_run_simple_execution_strategy(session, &broker_tx, event_tx)?;
+                }
+                NativeExecutionPath::HmaDirect => {
+                    maybe_run_hma_direct_execution_strategy(session, &broker_tx, event_tx)?;
+                }
             }
         }
         refresh_engine_history_mark(session);

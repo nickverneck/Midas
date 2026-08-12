@@ -269,6 +269,9 @@ impl App {
                         &mut self.strategy.native_volume_ema_cross.ema_cross.inverted,
                         key,
                     ),
+                    NativeStrategyKind::HeikinAshiColor => {
+                        toggle_bool(&mut self.strategy.native_heikin_ashi.inverted, key)
+                    }
                     _ => toggle_bool(&mut self.strategy.native_ema.inverted, key),
                 };
             }

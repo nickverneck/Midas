@@ -28,6 +28,20 @@ fn time_bar_builder_groups_ticks_by_interval() {
 }
 
 #[test]
+fn time_bar_builder_preserves_trade_volume_when_sizes_are_available() {
+    let mut builder = TimeBarBuilder::new(2_000_000_000);
+    let base = 1_700_000_000_000_000_000i64;
+    builder.push_tick_with_size(base, 100.0, Some(2.0));
+    builder.push_tick_with_size(base + 1_000_000_000, 101.0, Some(3.0));
+    builder.push_tick_with_size(base + 2_000_000_000, 99.5, Some(4.0));
+    let bars = builder.finish();
+
+    assert_eq!(bars.len(), 2);
+    assert_eq!(bars[0].volume, Some(5.0));
+    assert_eq!(bars[1].volume, Some(4.0));
+}
+
+#[test]
 fn tick_count_bar_builder_groups_by_number_of_ticks() {
     let mut builder = TickCountBarBuilder::new(2);
     let base = 1_700_000_000_000_000_000i64;
@@ -57,6 +71,96 @@ fn range_bar_builder_rolls_on_one_tick_range_breaks() {
     assert_eq!(bars[0].open, 100.0);
     assert_eq!(bars[0].close, 100.25);
     assert_eq!(bars[1].open, 100.25);
+}
+
+#[test]
+fn range_bar_builder_emits_every_boundary_from_a_single_price_jump() {
+    let base = 1_700_000_000_000_000_000i64;
+    let completion_ts = base + 1;
+    let mut builder = RangeBarBuilder::new(1.0);
+    builder.push_tick(base, 100.0);
+    builder.push_tick(completion_ts, 103.0);
+    let bars = builder.finish();
+
+    // The jump closes 100→101, 101→102, and 102→103. The remaining open
+    // bar starts at 103, so all completed bars retain the one true source
+    // timestamp instead of synthetic +1ns timestamps.
+    assert_eq!(bars.len(), 4);
+    assert_eq!(
+        bars.iter().map(|bar| bar.close).collect::<Vec<_>>(),
+        vec![101.0, 102.0, 103.0, 103.0]
+    );
+    assert!(bars.iter().all(|bar| bar.ts_ns == completion_ts));
+}
+
+#[test]
+fn raw_range_frames_assign_a_multi_boundary_tick_once_and_preserve_bar_steps() {
+    use super::super::virtual_time::ReplayBarSchedule;
+    use crate::broker::ReplayEngineMode;
+
+    let base = 1_700_000_000_000_000_000i64;
+    let state = ReplayState {
+        evaluation_range: None,
+        replay_window: None,
+        contract: ContractSuggestion {
+            id: 1,
+            name: "MESU6".to_string(),
+            description: "range jump".to_string(),
+            raw: json!({}),
+        },
+        account: AccountInfo {
+            id: 1,
+            name: "REPLAY".to_string(),
+            raw: json!({}),
+        },
+        market_specs: MarketSpecs {
+            session_profile: Some(InstrumentSessionProfile::FuturesGlobex),
+            value_per_point: Some(5.0),
+            tick_size: Some(1.0),
+        },
+        dom_updates: Arc::from(Vec::<ReplayMarketDom>::new().into_boxed_slice()),
+        data: ReplayDataSource::RawTicks(Arc::from(
+            vec![
+                ReplayTick {
+                    ts_ns: base,
+                    last: 100.0,
+                    size: Some(1.0),
+                },
+                ReplayTick {
+                    ts_ns: base + 1,
+                    last: 103.0,
+                    size: Some(1.0),
+                },
+            ]
+            .into_boxed_slice(),
+        )),
+        shared_frames: None,
+    };
+
+    let bars = state
+        .bars_for_type(BarType::range(1))
+        .expect("derive range bars");
+    let frames = state
+        .frames_for_type(BarType::range(1))
+        .expect("build range frames");
+    assert_eq!(frames.len(), bars.len());
+    assert_eq!(frames[0].ticks.len(), 2, "the jump tick closes bar zero");
+    assert!(frames[1..].iter().all(|frame| frame.ticks.is_empty()));
+    assert!(frames.iter().all(|frame| frame.bar.ts_ns == base + 1));
+
+    // Same-timestamp bars are ordered by logical bar step, which is the
+    // virtual-time contract used by the deterministic lifecycle; no event is
+    // forced behind the clock merely because one tick crossed several ranges.
+    let mut schedule = ReplayBarSchedule::new(ReplayEngineMode::Deterministic, &bars)
+        .expect("create range schedule");
+    let events = std::iter::from_fn(|| schedule.next_bar(&bars)).collect::<Vec<_>>();
+    assert_eq!(events.len(), bars.len());
+    assert!(events.iter().all(|event| event.market_ts_ns == base + 1));
+    assert!(
+        events
+            .windows(2)
+            .all(|window| window[0].logical_step < window[1].logical_step)
+    );
 }
 
 #[test]
@@ -180,7 +284,10 @@ async fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
     let base = dt("2026-07-23T00:00:00Z");
     let prices_and_sizes = [
         (100.0, 60.0),
-        (100.25, 60.0),
+        // One source tick crosses eight 0.25-point range boundaries. This is
+        // the regression shape that used to leave the streaming frame path
+        // one bar behind and eventually schedule a tick behind virtual time.
+        (102.0, 60.0),
         (100.5, 30.0),
         (100.0, 20.0),
         (99.75, 40.0),
@@ -332,6 +439,23 @@ async fn cached_raw_tick_stream_matches_memory_derivation_for_every_bar_kind() {
                 buffered.ticks.as_ref(),
                 "{} ticks",
                 bar_type.label()
+            );
+        }
+        if bar_type.kind() == BarKind::Range {
+            assert!(
+                streamed
+                    .windows(2)
+                    .any(|window| window[0].bar.ts_ns == window[1].bar.ts_ns),
+                "multi-boundary raw range bars retain their shared source timestamp"
+            );
+            let streamed_tick_timestamps = streamed
+                .iter()
+                .flat_map(|frame| frame.ticks.iter().map(|tick| tick.ts_ns))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                streamed_tick_timestamps,
+                rows.iter().map(|row| row.ts_ns).collect::<Vec<_>>(),
+                "each raw source tick appears in exactly one chronological frame"
             );
         }
     }
@@ -553,7 +677,13 @@ fn replay_state_keeps_duplicate_timestamp_derived_bars_distinct() {
     assert!(
         range_bars
             .windows(2)
-            .all(|window| window[0].ts_ns < window[1].ts_ns)
+            .all(|window| window[0].ts_ns <= window[1].ts_ns)
+    );
+    assert!(
+        range_bars
+            .windows(2)
+            .any(|window| window[0].ts_ns == window[1].ts_ns),
+        "range bars completed by one source tick retain that source timestamp"
     );
 }
 

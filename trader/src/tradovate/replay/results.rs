@@ -786,9 +786,10 @@ pub(crate) fn write_replay_result(
         &equity,
         initial_capital,
         input
-            .replay
+            .market
             .replay_window
             .as_ref()
+            .or_else(|| input.replay.replay_window.as_ref())
             .map_or(0, |value| value.evaluation_rows_processed),
     );
     apply_excursion_summary(&mut summary, trade_excursions.as_deref());
@@ -1222,7 +1223,15 @@ fn build_metadata(
     initial_capital: f64,
     fills: &[ReplayExecutionFill],
 ) -> ReplayResultMetadata {
-    let window = input.replay.replay_window.as_ref();
+    // Service-backed replay advances the live window on each market update;
+    // the immutable ReplayState retains the zero-progress template used at
+    // load time. Prepared runs populate the market snapshot as well, so use
+    // it as the authoritative progress source and fall back for older callers.
+    let window = input
+        .market
+        .replay_window
+        .as_ref()
+        .or_else(|| input.replay.replay_window.as_ref());
     let evaluation_range = input.replay.evaluation_range;
     let mut fill_price_sources = BTreeSet::new();
     let mut execution_precisions = BTreeSet::new();

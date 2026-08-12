@@ -570,6 +570,7 @@ impl App {
             StrategyKind::Native => match self.strategy.native_strategy {
                 NativeStrategyKind::EmaCross => "on | EMA fast/slow + fills".to_string(),
                 NativeStrategyKind::HmaCross => "on | HMA fast/slow + fills".to_string(),
+                NativeStrategyKind::HeikinAshiColor => "on | Heikin-Ashi color + fills".to_string(),
                 NativeStrategyKind::VolumeAdaptiveHmaCross => {
                     "on | volume-adaptive HMA + fills".to_string()
                 }
@@ -744,6 +745,40 @@ impl App {
                 }
 
                 overlay.label = "hma x".to_string();
+            }
+            NativeStrategyKind::HeikinAshiColor => {
+                let heikin_bars = transform_bars_for_candle_mode(bars, CandleMode::HeikinAshi);
+                for idx in visible_start.max(1)..heikin_bars.len() {
+                    let previous = &heikin_bars[idx - 1];
+                    let current = &heikin_bars[idx];
+                    let previous_green = previous.close > previous.open;
+                    let previous_red = previous.close < previous.open;
+                    let current_green = current.close > current.open;
+                    let current_red = current.close < current.open;
+                    let center = ((idx - visible_start) as f64, current.close);
+                    if current_green && !previous_green {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: if self.strategy.native_heikin_ashi.inverted {
+                                Color::Red
+                            } else {
+                                Color::Green
+                            },
+                            kind: OverlayGlyphKind::BullishCross,
+                        });
+                    } else if current_red && !previous_red {
+                        overlay.glyphs.push(OverlayGlyph {
+                            center,
+                            color: if self.strategy.native_heikin_ashi.inverted {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            },
+                            kind: OverlayGlyphKind::BearishCross,
+                        });
+                    }
+                }
+                overlay.label = "heikin-ashi".to_string();
             }
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
                 let config = &self.strategy.native_volume_hma_cross;
