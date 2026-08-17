@@ -44,13 +44,40 @@ export const EVAL_KEYS: KeySet = {
 };
 
 export const EVAL_PROBE_KEYS = [
+	"eval_net_objective_pnl",
+	"eval_net_realized_pnl_after_costs_and_penalties",
+	"eval_total_net_equity_delta",
 	"eval_fitness_pnl",
 	"eval_pnl_realized",
 	"eval_pnl_total",
+	"eval_pnl",
+	"eval_realized_pnl",
+	"eval_total_pnl",
+	"eval_realized",
+	"eval_total",
 	"eval_sortino",
 	"eval_drawdown",
 	"eval_ret_mean"
 ] as const;
+
+const METRIC_ALIASES: Record<string, string[]> = {
+	train_fitness_pnl: ["train_net_objective_pnl", "train_fitness_pnl", "train_pnl"],
+	eval_fitness_pnl: ["eval_net_objective_pnl", "eval_fitness_pnl", "eval_pnl"],
+	train_pnl_realized: [
+		"train_net_realized_pnl_after_costs_and_penalties",
+		"train_pnl_realized",
+		"train_realized_pnl",
+		"train_realized"
+	],
+	eval_pnl_realized: [
+		"eval_net_realized_pnl_after_costs_and_penalties",
+		"eval_pnl_realized",
+		"eval_realized_pnl",
+		"eval_realized"
+	],
+	train_pnl_total: ["train_total_net_equity_delta", "train_pnl_total", "train_total_pnl", "train_total"],
+	eval_pnl_total: ["eval_total_net_equity_delta", "eval_pnl_total", "eval_total_pnl", "eval_total"]
+};
 
 export const createEmptyIssueState = (): IssueState => ({
 	highFitnessCount: 0,
@@ -71,6 +98,18 @@ export const toNumber = (value: unknown): number | null => {
 	}
 	return null;
 };
+
+const firstNumber = (row: LogRow, keys: string[]) => {
+	for (const key of keys) {
+		const value = toNumber(row[key]);
+		if (value !== null) return value;
+	}
+	return null;
+};
+
+/** Resolve a metric key across the current GA log schema and older aliases. */
+export const resolveLogValue = (row: LogRow, key: string): number | null =>
+	firstNumber(row, METRIC_ALIASES[key] ?? [key]);
 
 export const formatNum = (value: unknown, digits = 4) => {
 	const num = toNumber(value);
@@ -259,10 +298,12 @@ export const actionClass = (action: string) => {
 };
 
 export const detectEval = (rows: LogRow[]) => {
-	if (rows.length === 0) return false;
-	const first = rows[0];
-	if (!first || typeof first !== "object") return false;
-	return EVAL_PROBE_KEYS.some((key) => key in first);
+	return rows.some(
+		(row) =>
+			row &&
+			typeof row === "object" &&
+			EVAL_PROBE_KEYS.some((key) => toNumber(row[key]) !== null)
+	);
 };
 
 const formatIssueId = (row: LogRow) => {
@@ -300,14 +341,14 @@ export const applyLogChunk = (
 		if (!row || typeof row !== "object") continue;
 
 		const fitness = toNumber(row.fitness);
-		const pnl = toNumber(row[keys.pnlKey]);
-		const realized = toNumber(row[keys.pnlRealizedKey]);
-		const trainRealized = toNumber(row.train_pnl_realized);
-		const evalRealized = toNumber(row.eval_pnl_realized);
-		const total = toNumber(row[keys.pnlTotalKey]);
-		const metric = toNumber(row[keys.metricKey]);
-		const drawdown = toNumber(row[keys.drawdownKey]);
-		const ret = toNumber(row[keys.retKey]);
+		const pnl = resolveLogValue(row, keys.pnlKey);
+		const realized = resolveLogValue(row, keys.pnlRealizedKey);
+		const trainRealized = resolveLogValue(row, TRAIN_KEYS.pnlRealizedKey);
+		const evalRealized = resolveLogValue(row, EVAL_KEYS.pnlRealizedKey);
+		const total = resolveLogValue(row, keys.pnlTotalKey);
+		const metric = resolveLogValue(row, keys.metricKey);
+		const drawdown = resolveLogValue(row, keys.drawdownKey);
+		const ret = resolveLogValue(row, keys.retKey);
 		const genValue = toNumber(row.gen);
 		const idxValue = toNumber(row.idx);
 		const evalFitness = toNumber(row.eval_fitness);

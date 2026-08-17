@@ -117,8 +117,13 @@ pub(crate) fn run(args: Args, mut stack: ResolvedTrainingStack) -> anyhow::Resul
             false,
         )?;
         println!(
-            "test | fitness {:.2} | pnl {:.2} | sortino {:.2} | mdd {:.2}",
-            metrics.fitness, metrics.eval_pnl, metrics.eval_sortino, metrics.eval_drawdown
+            "test | fitness {:.2} | pnl {:.2} | realized {:.2} | terminal_liq {:.2} | sortino {:.2} | mdd {:.2}",
+            metrics.fitness,
+            metrics.eval_pnl_total,
+            metrics.eval_pnl_realized,
+            metrics.terminal_liquidation_cost,
+            metrics.eval_sortino,
+            metrics.eval_drawdown
         );
         persistence::save_best_overall_policy(
             &args,

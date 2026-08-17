@@ -26,6 +26,40 @@ export type FitnessPoint = {
 	fitness: number;
 };
 
+/** One candidate row from the candidate-level GA log. */
+export type GaLogPoint = {
+	gen: number;
+	idx: number | null;
+	fitness: number | null;
+	evalFitness: number | null;
+	selectionFitness: number | null;
+	trainPnl: number | null;
+	evalPnl: number | null;
+	trainRealizedPnl: number | null;
+	evalRealizedPnl: number | null;
+	trainTotalPnl: number | null;
+	evalTotalPnl: number | null;
+};
+
+/** Generation-level GA analytics anchored to the candidate selected by GA semantics. */
+export type GaGenerationPoint = {
+	gen: number;
+	/** Candidate used for all matched train/eval metrics in this generation. */
+	anchorSource: "selection_fitness" | "train_fitness";
+	trainFitness: number | null;
+	evalFitness: number | null;
+	selectionFitness: number | null;
+	trainPnl: number | null;
+	evalPnl: number | null;
+	trainRealizedPnl: number | null;
+	evalRealizedPnl: number | null;
+	trainTotalPnl: number | null;
+	evalTotalPnl: number | null;
+	fitnessGap: number | null;
+	pnlGap: number | null;
+	candidateCount: number;
+};
+
 export type FuturesPreset = {
 	label: string;
 	marginPerContract: number;

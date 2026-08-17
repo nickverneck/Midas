@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         MlBackend::Burn => run_burn(args, stack),
         MlBackend::Candle => run_candle(args, stack),
         MlBackend::Mlx => ml::ensure_backend_is_implemented(&stack),
+        MlBackend::CpuLinear => ml::ensure_backend_is_implemented(&stack),
     }
 }
 

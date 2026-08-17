@@ -1,0 +1,101 @@
+# Event-level supervised dataset configuration.
+# The input/output paths remain explicit CLI arguments so a run cannot
+# accidentally overwrite a different artifact.
+trigger_kind: ema
+trigger_fast: 10
+trigger_slow: 30
+context_kind: ema
+context_fast: 210
+context_slow: 240
+atr_period: 14
+slope_lookback: 5
+session_timezone: America/New_York
+session_start_hour: 18
+session_end_hour: 17
+bar_kind: minute
+bar_value: 1
+contract_multiplier: 100
+round_trip_cost: 3.10
+include_raw_direction: true
+
+# Removing a feature object removes its value/delta columns from the model
+# schema. Every value and delta is calculated at or before the crossover bar.
+features:
+  - indicator: ema
+    period: 10
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: ema
+    period: 30
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: ema
+    period: 210
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: ema
+    period: 240
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: hma
+    period: 10
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: hma
+    period: 30
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: kama
+    period: 30
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: alma
+    period: 30
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: sma
+    period: 30
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: atr
+    period: 14
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: adx
+    period: 14
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: rvol
+    period: 20
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true
+  - indicator: er
+    period: 14
+    lookbacks: [1, 3, 5]
+    include_value: true
+    include_delta: true
+    normalize_by_atr: true

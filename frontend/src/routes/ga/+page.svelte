@@ -146,6 +146,15 @@
 			activeLogDir = dir;
 
 			const res = await fetch(buildLogsUrl(0, dir));
+			if (res.status === 404) {
+				// A configured GA log does not exist yet. This is the normal empty
+				// state for a fresh run, not an application error.
+				if (token === loadToken) {
+					doneLoading = true;
+					nextOffset = 0;
+				}
+				return;
+			}
 			if (!res.ok) {
 				const errPayload = await res.json().catch(() => null);
 				throw new Error(errPayload?.error || `Failed to fetch logs (${res.status})`);
@@ -182,6 +191,14 @@
 
 			try {
 				const res = await fetch(buildLogsUrl(nextOffset, dir));
+				if (res.status === 404) {
+					// A log can disappear while a run is being browsed. Keep rows
+					// already loaded and finish pagination without surfacing an error.
+					if (token === loadToken && dir === activeLogDir) {
+						doneLoading = true;
+					}
+					return;
+				}
 				if (!res.ok) throw new Error("Failed to fetch logs");
 
 				const payload = await res.json();

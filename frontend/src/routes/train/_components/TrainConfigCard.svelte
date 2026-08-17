@@ -31,8 +31,8 @@
 		rlAlgorithm = $bindable(),
 		gaDataMode = $bindable(),
 		rlDataMode = $bindable(),
-		gaParams,
-		rlParams,
+		gaParams = $bindable(),
+		rlParams = $bindable(),
 		onBrowseParquet,
 		onApplyFuturesPreset,
 		onSubmitGa,
@@ -68,7 +68,7 @@
 		<Tabs.Content value="ga">
 			<form class="space-y-4" onsubmit={handleGaSubmit}>
 				<GaTrainingForm
-					params={gaParams}
+					bind:params={gaParams}
 					bind:dataMode={gaDataMode}
 					onBrowseParquet={(key) => onBrowseParquet("ga", key)}
 					onApplyFuturesPreset={(presetKey) => onApplyFuturesPreset("ga", presetKey)}
@@ -79,7 +79,7 @@
 		<Tabs.Content value="rl">
 			<form class="space-y-4" onsubmit={handleRlSubmit}>
 				<RlTrainingForm
-					params={rlParams}
+					bind:params={rlParams}
 					bind:dataMode={rlDataMode}
 					bind:rlAlgorithm
 					onBrowseParquet={(key) => onBrowseParquet("rl", key)}

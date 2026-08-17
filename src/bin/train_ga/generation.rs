@@ -225,9 +225,10 @@ fn print_candidate_debug(train_metrics: &CandidateResult) {
         train_metrics.debug_mean_abs_pnl
     );
     println!(
-        "  debug cand0 | pnl realized {:.2} | pnl total {:.2} | dd_penalty {:.4}",
+        "  debug cand0 | pnl realized {:.2} | pnl total {:.2} | terminal_liq {:.2} | dd_penalty {:.4}",
         train_metrics.eval_pnl_realized,
         train_metrics.eval_pnl_total,
+        train_metrics.terminal_liquidation_cost,
         train_metrics.debug_drawdown_penalty
     );
     println!(

@@ -1,3 +1,5 @@
+const ACCOUNT_FEE_EPSILON: f64 = 0.005;
+
 impl UserSyncStore {
     fn apply(&mut self, envelope: EntityEnvelope) {
         let entity_type = envelope.entity_type.to_ascii_lowercase();
@@ -149,6 +151,7 @@ impl UserSyncStore {
                     .get(&account.id)
                     .map(|items| items.values().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
+                let fees = self.account_fee_total(account.id);
                 let replay_account = raw_account.as_ref().is_some_and(is_replay_entity)
                     || raw_risk.as_ref().is_some_and(is_replay_entity)
                     || raw_cash.as_ref().is_some_and(is_replay_entity);
@@ -374,6 +377,7 @@ impl UserSyncStore {
                     net_liq,
                     realized_pnl,
                     unrealized_pnl,
+                    fees,
                     intraday_margin,
                     open_position_qty,
                     market_position_qty,
@@ -391,6 +395,54 @@ impl UserSyncStore {
 
     fn find_order(&self, account_id: i64, order_id: i64) -> Option<&Value> {
         self.orders.get(&account_id)?.get(&order_id)
+    }
+
+    /// Return the cumulative explicit fees visible for an account.
+    ///
+    /// Tradovate can expose a fee as a `fillFee` entity, or as a commission
+    /// field on the corresponding `fill`. Prefer `fillFee` when both exist so
+    /// the same commission is not counted twice. Do not infer fees from a
+    /// balance delta: a balance delta can also be ordinary mark-to-market PnL.
+    fn account_fee_total(&self, account_id: i64) -> Option<f64> {
+        let mut total = 0.0;
+        let mut found = false;
+
+        for fill in self.history_fills.values().filter(|fill| {
+            extract_account_id("fill", fill) == Some(account_id)
+        }) {
+            let fill_id = extract_entity_id(fill);
+            let explicit_fill_fee = fill_id.and_then(|fill_id| {
+                let amount = self
+                    .fill_fees
+                    .values()
+                    .filter(|fee| json_i64(fee, "fillId") == Some(fill_id))
+                    .filter_map(explicit_fee_amount)
+                    .sum::<f64>();
+                (amount > ACCOUNT_FEE_EPSILON).then_some(amount)
+            });
+
+            if let Some(amount) = explicit_fill_fee {
+                total += amount;
+                found = true;
+            } else if let Some(amount) = explicit_fee_amount(fill) {
+                total += amount;
+                found = true;
+            }
+        }
+
+        // Keep this fallback for a broker payload that sends fillFee before
+        // the matching fill, provided the fee entity carries accountId.
+        for fee in self.fill_fees.values().filter(|fee| {
+            json_i64(fee, "accountId") == Some(account_id)
+                && json_i64(fee, "fillId").is_none()
+        }) {
+            if let Some(amount) = explicit_fee_amount(fee) {
+                total += amount;
+                found = true;
+            }
+        }
+
+        (found && total.is_finite()).then_some(total)
     }
 
     fn find_order_by_id(&self, order_id: i64) -> Option<&Value> {
@@ -531,6 +583,12 @@ fn order_strategy_is_active(strategy: &Value) -> bool {
 
 fn pick_number(value: &Value, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|key| json_number(value, key))
+}
+
+fn explicit_fee_amount(value: &Value) -> Option<f64> {
+    pick_number(value, &["amount", "fee", "commission", "totalFee", "totalFees"])
+        .map(f64::abs)
+        .filter(|amount| amount.is_finite() && *amount > ACCOUNT_FEE_EPSILON)
 }
 
 fn sum_position_metric(positions: &[Value], keys: &[&str]) -> Option<f64> {

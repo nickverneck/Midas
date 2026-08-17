@@ -134,7 +134,10 @@ mod tests {
     #[test]
     fn requires_on_bar() {
         let script = "function on_init(ctx) end";
-        let err = ScriptRunner::new(script, ScriptLimits::default()).unwrap_err();
+        let err = match ScriptRunner::new(script, ScriptLimits::default()) {
+            Ok(_) => panic!("script without on_bar should be rejected"),
+            Err(err) => err,
+        };
         assert!(err.to_string().contains("on_bar"));
     }
 

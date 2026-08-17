@@ -145,6 +145,7 @@ pub(super) fn rebuild_account_snapshots(session: &mut IronbeamSession) {
                     .as_ref()
                     .and_then(|item| pick_number(item, &["realizedPL", "realizedPnl"])),
                 unrealized_pnl,
+                fees: None,
                 intraday_margin: balance
                     .as_ref()
                     .and_then(|item| item.get("marginInfo"))

@@ -19,7 +19,9 @@ chrono = "0.4.38"
 chrono-tz = "0.9.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+toml = "0.8"
 serde_json = "1.0"
+sha2 = "0.10"
 csv = "1.3"
 rand = "0.8"
 rand_distr = "0.4"
@@ -28,7 +30,6 @@ tch = { version = "0.22.0", optional = true }
 candle-core = { git = "https://github.com/huggingface/candle.git", optional = true }
 candle-nn = { git = "https://github.com/huggingface/candle.git", optional = true }
 burn = { version = "0.20.1", optional = true }
-burn-cpu = { version = "0.20.1", optional = true }
 burn-ndarray = { version = "0.20.1", optional = true }
 burn-cuda = { version = "0.20.1", optional = true }
 burn-mlx = { git = "https://github.com/eidolons-ai/burn-mlx.git", branch = "burn-0-20", optional = true }
@@ -41,9 +42,8 @@ mlua = { version = "0.9", features = ["lua54", "vendored"] }
 default = []
 python = ["pyo3/extension-module", "pyo3", "numpy"]
 torch = ["tch"]
-backend-burn = ["dep:burn", "dep:burn-cpu"]
-backend-burn-ndarray = ["backend-burn", "dep:burn-ndarray"]
-backend-burn-cuda = ["backend-burn", "dep:burn-cuda"]
+backend-burn = ["dep:burn", "dep:burn-ndarray", "burn/autodiff"]
+backend-burn-cuda = ["backend-burn", "dep:burn-cuda", "burn/cuda"]
 backend-burn-mlx = ["backend-burn", "dep:burn-mlx"]
 backend-candle = ["dep:candle-core", "dep:candle-nn"]
 backend-candle-accelerate = ["backend-candle", "candle-core/accelerate"]
@@ -66,3 +66,8 @@ path = "src/bin/train_rl.rs"
 [[bin]]
 name = "backtest_script"
 path = "src/bin/backtest_script.rs"
+
+[[bin]]
+name = "inspect_rl_policy"
+path = "src/bin/inspect_rl_policy.rs"
+required-features = ["backend-candle"]

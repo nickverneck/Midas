@@ -6,12 +6,12 @@ use crate::ga;
 use crate::types::{BehaviorRow, CandidateResult};
 use midas_env::ml::ComputeRuntime;
 
-pub fn resolve_device(requested: ComputeRuntime) -> ExecutionTarget {
-    match crate::util::resolve_device(requested) {
+pub fn resolve_device(requested: ComputeRuntime) -> Result<ExecutionTarget> {
+    Ok(match crate::util::resolve_device(requested)? {
         tch::Device::Cuda(idx) => ExecutionTarget::Cuda(idx),
         tch::Device::Mps => ExecutionTarget::Mps,
         _ => ExecutionTarget::Cpu,
-    }
+    })
 }
 
 pub fn print_device(device: ExecutionTarget) {

@@ -174,6 +174,8 @@ pub struct StepInfo {
     pub realized_pnl_change: f64,
     pub drawdown_penalty: f64,
     pub session_close_penalty: f64,
+    pub early_exit_penalty: f64,
+    pub early_flip_penalty: f64,
     pub invalid_revert_penalty: f64,
     pub hold_duration_penalty: f64,
     pub flat_hold_penalty: f64,
@@ -274,6 +276,8 @@ impl TradingEnv {
                         realized_pnl_change: 0.0,
                         drawdown_penalty: 0.0,
                         session_close_penalty: 0.0,
+                        early_exit_penalty: 0.0,
+                        early_flip_penalty: 0.0,
                         invalid_revert_penalty: 0.0,
                         hold_duration_penalty: 0.0,
                         flat_hold_penalty: 0.0,
@@ -298,6 +302,8 @@ impl TradingEnv {
                     realized_pnl_change: 0.0,
                     drawdown_penalty: 0.0,
                     session_close_penalty: 0.0,
+                    early_exit_penalty: 0.0,
+                    early_flip_penalty: 0.0,
                     invalid_revert_penalty: 0.0,
                     hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
@@ -359,6 +365,8 @@ impl TradingEnv {
                     realized_pnl_change: 0.0,
                     drawdown_penalty: 0.0,
                     session_close_penalty: 0.0,
+                    early_exit_penalty: 0.0,
+                    early_flip_penalty: 0.0,
                     invalid_revert_penalty: 0.0,
                     hold_duration_penalty: 0.0,
                     flat_hold_penalty: 0.0,
@@ -397,6 +405,8 @@ impl TradingEnv {
                         realized_pnl_change: 0.0,
                         drawdown_penalty: 0.0,
                         session_close_penalty: 0.0,
+                        early_exit_penalty: 0.0,
+                        early_flip_penalty: 0.0,
                         invalid_revert_penalty: 0.0,
                         hold_duration_penalty: 0.0,
                         flat_hold_penalty: 0.0,
@@ -409,7 +419,10 @@ impl TradingEnv {
             }
         }
 
-        let delta_pos = target_position - self.state.position;
+        // Keep the position from before this transition for calculations that
+        // depend on the position being closed or flipped.
+        let prior_position = self.state.position;
+        let delta_pos = target_position - prior_position;
         let traded_contracts = delta_pos.unsigned_abs();
         let commission_per_side = self.cfg.commission_round_turn / 2.0;
         let commission_paid = commission_per_side * (delta_pos.abs() as f64);
@@ -426,13 +439,13 @@ impl TradingEnv {
         let slippage_paid = fixed_slippage_paid + adverse_slippage_paid;
 
         let price_change = next_price - self.state.last_price;
-        let pnl_change = price_change * multiplier * (self.state.position as f64);
+        let pnl_change = price_change * multiplier * (prior_position as f64);
 
         let trade_costs = commission_paid + slippage_paid;
         self.state.cash -= trade_costs;
         self.state.unrealized_pnl += pnl_change;
-        let closing = self.state.position != 0
-            && (target_position == 0 || self.state.position.signum() != target_position.signum());
+        let closing = prior_position != 0
+            && (target_position == 0 || prior_position.signum() != target_position.signum());
         let mut realized_pnl_change = 0.0;
         if closing {
             realized_pnl_change = self.state.unrealized_pnl;
@@ -472,7 +485,7 @@ impl TradingEnv {
             0.0
         };
 
-        let missing_hold_bars = if self.state.position != 0
+        let missing_hold_bars = if prior_position != 0
             && self.cfg.min_hold_bars > 0
             && hold_bars < self.cfg.min_hold_bars
         {
@@ -481,7 +494,7 @@ impl TradingEnv {
             0.0
         };
         let early_exit_penalty = if !auto_close_executed
-            && self.state.position != 0
+            && prior_position != 0
             && target_position == 0
             && missing_hold_bars > 0.0
         {
@@ -490,9 +503,9 @@ impl TradingEnv {
             0.0
         };
         let early_flip_penalty = if !auto_close_executed
-            && self.state.position != 0
+            && prior_position != 0
             && target_position != 0
-            && self.state.position.signum() != target_position.signum()
+            && prior_position.signum() != target_position.signum()
             && missing_hold_bars > 0.0
         {
             self.cfg.early_flip_penalty * missing_hold_bars
@@ -594,6 +607,8 @@ impl TradingEnv {
                 realized_pnl_change,
                 drawdown_penalty,
                 session_close_penalty,
+                early_exit_penalty,
+                early_flip_penalty,
                 invalid_revert_penalty,
                 hold_duration_penalty,
                 flat_hold_penalty,
@@ -876,8 +891,10 @@ mod tests {
             },
         );
         let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
-        let (reward, _info) = env.step(Action::Sell, 100.0, StepContext::default());
+        let (reward, info) = env.step(Action::Sell, 100.0, StepContext::default());
         assert!(reward < -3.0);
+        assert_eq!(info.early_exit_penalty, 6.0);
+        assert_eq!(info.early_flip_penalty, 0.0);
         assert_eq!(env.state.position, 0);
     }
 
@@ -897,6 +914,8 @@ mod tests {
         let (_r1, _i1) = env.step(Action::Buy, 100.0, StepContext::default());
         let (reward, info) = env.step(Action::Revert, 100.0, StepContext::default());
         assert!(reward < -5.0);
+        assert_eq!(info.early_exit_penalty, 0.0);
+        assert_eq!(info.early_flip_penalty, 12.0);
         assert!(matches!(info.effective_action, Action::Revert));
         assert_eq!(env.state.position, -1);
     }
@@ -927,6 +946,9 @@ mod tests {
                 max_position: 3,
                 enforce_margin: false,
                 auto_close_minutes_before_close: 5.0,
+                min_hold_bars: 3,
+                early_exit_penalty: 2.0,
+                early_flip_penalty: 3.0,
                 ..Default::default()
             },
         );
@@ -947,6 +969,8 @@ mod tests {
         assert!(matches!(info3.effective_action, Action::Sell));
         assert_eq!(env.state.position, 0);
         assert_eq!(info3.session_close_penalty, 0.0);
+        assert_eq!(info3.early_exit_penalty, 0.0);
+        assert_eq!(info3.early_flip_penalty, 0.0);
     }
 
     #[test]

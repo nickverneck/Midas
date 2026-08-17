@@ -502,6 +502,61 @@ fn session_stats_classifies_es_commissions_as_fees() {
 }
 
 #[test]
+fn session_stats_uses_gc_snapshot_fees_and_ignores_mark_noise() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    let snapshot = |balance: f64, realized_pnl: f64, fees: f64, position: f64| {
+        let mut snapshot = balance_snapshot_with_position(7, "SIM", balance, position);
+        snapshot.realized_pnl = Some(realized_pnl);
+        snapshot.fees = Some(fees);
+        snapshot
+    };
+
+    for snapshot in [
+        snapshot(1_000.00, 0.00, 0.00, 0.0),
+        snapshot(996.90, 0.00, 3.10, 1.0),
+        snapshot(995.30, 0.00, 3.10, 1.0),
+        snapshot(1_192.20, 196.90, 6.20, 0.0),
+    ] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked GC session stats");
+    assert_eq!(stats.wins, 1);
+    assert_eq!(stats.losses, 0);
+    assert_eq!(stats.fee_events, 2);
+    assert_money_eq(stats.session_pnl(), 192.20);
+    assert_money_eq(stats.trade_pnl_ex_fees(), 200.00);
+    assert_money_eq(stats.total_fees, -6.20);
+    assert_eq!(stats.events[0].kind, SessionBalanceEventKind::Fee);
+    assert_eq!(stats.events[1].kind, SessionBalanceEventKind::Mark);
+    assert_eq!(stats.events[2].kind, SessionBalanceEventKind::Mixed);
+    assert_money_eq(stats.events[1].trade_delta, 0.0);
+
+    let lines = app
+        .selected_session_stats_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Trade PnL Ex Fees: +200.00  Fees: -6.20 (2)"))
+    );
+    assert!(lines.iter().any(|line| line.contains("Wins: 1  Losses: 0")));
+}
+
+#[test]
 fn session_stats_identity_keeps_same_account_separate_by_active_engine() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();

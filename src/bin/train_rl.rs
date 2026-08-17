@@ -1,18 +1,33 @@
 #[path = "train_rl/args.rs"]
 mod args;
+#[cfg(feature = "backend-burn")]
+#[path = "train_rl/burn.rs"]
+mod burn;
 #[cfg(feature = "backend-candle")]
 #[path = "train_rl/candle.rs"]
 mod candle;
-#[cfg(any(feature = "torch", feature = "backend-candle"))]
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_rl/common.rs"]
 mod common;
-#[cfg(any(feature = "torch", feature = "backend-candle"))]
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_rl/data.rs"]
 mod data;
 #[cfg(feature = "torch")]
 #[path = "train_rl/grpo.rs"]
 mod grpo;
-#[cfg(any(feature = "torch", feature = "backend-candle"))]
+#[cfg(any(
+    feature = "torch",
+    feature = "backend-candle",
+    feature = "backend-burn"
+))]
 #[path = "train_rl/metrics.rs"]
 mod metrics;
 #[cfg(feature = "torch")]
@@ -61,7 +76,9 @@ fn main() -> anyhow::Result<()> {
     match stack.backend {
         MlBackend::Libtorch => run_libtorch(args, stack),
         MlBackend::Candle => run_candle(args, stack),
-        MlBackend::Burn | MlBackend::Mlx => ml::ensure_backend_is_implemented(&stack),
+        MlBackend::Burn => run_burn(args, stack),
+        MlBackend::Mlx => ml::ensure_backend_is_implemented(&stack),
+        MlBackend::CpuLinear => ml::ensure_backend_is_implemented(&stack),
     }
 }
 
@@ -90,6 +107,19 @@ fn run_candle(_args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
     )
 }
 
+#[cfg(feature = "backend-burn")]
+fn run_burn(args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    burn::run(args, stack)
+}
+
+#[cfg(not(feature = "backend-burn"))]
+fn run_burn(_args: Args, stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "backend '{}' requires the 'backend-burn' Cargo feature. Re-run with `cargo run --features backend-burn --bin train_rl -- --backend burn ...`.",
+        stack.backend
+    )
+}
+
 #[cfg(feature = "torch")]
 fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.outdir)?;
@@ -99,7 +129,7 @@ fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<()> {
         anyhow::bail!("--dropout must be in [0, 1), got {}", args.dropout);
     }
 
-    let device = util::resolve_device(stack.requested_runtime);
+    let device = util::resolve_device(stack.requested_runtime)?;
     stack.effective_runtime = util::runtime_from_device(&device);
     ml::write_run_metadata(
         &args.outdir.join("training_stack.json"),

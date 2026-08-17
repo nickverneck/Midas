@@ -1,3 +1,5 @@
+#[cfg(feature = "replay")]
+use clap::ValueEnum;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -475,6 +477,43 @@ pub(crate) struct ImportBrowserHarArgs {
     pub(crate) overwrite: bool,
 }
 
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum MetaGateScheduleFormat {
+    /// Fixed-width columns suitable for an interactive terminal.
+    Table,
+    /// One JSON object per event, with no non-JSON decoration on stdout.
+    Jsonl,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum MetaGateInitialSide {
+    Flat,
+    Long,
+    Short,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Args)]
+pub(crate) struct MetaGateScheduleArgs {
+    /// Event parquet produced by the parent Midas prepare_meta_dataset command.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) events: PathBuf,
+    /// meta-gate-policy-v1 policy.json produced by train_meta_gate.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) policy: PathBuf,
+    /// Initial position state used to interpret skip at the first event.
+    #[arg(long, value_enum, default_value = "flat")]
+    pub(crate) initial_side: MetaGateInitialSide,
+    /// Maximum number of schedule rows written to stdout.
+    #[arg(long, default_value_t = 500, value_name = "ROWS")]
+    pub(crate) limit: usize,
+    /// Output encoding. JSONL keeps stdout machine-readable.
+    #[arg(long, value_enum, default_value = "table")]
+    pub(crate) format: MetaGateScheduleFormat,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum Mode {
     /// Run the background engine server.
@@ -555,4 +594,8 @@ pub(crate) enum Mode {
     /// Import a NinjaTrader/Tradovate browser market-data HAR into replay cache.
     #[command(name = "import-browser-har")]
     ImportBrowserHar(ImportBrowserHarArgs),
+    /// Print a bounded, read-only stateful schedule from a meta-gate policy.
+    #[cfg(feature = "replay")]
+    #[command(name = "print-meta-gate-schedule")]
+    PrintMetaGateSchedule(MetaGateScheduleArgs),
 }

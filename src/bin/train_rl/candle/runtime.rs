@@ -34,8 +34,15 @@ pub(crate) fn print_device(device: &Device) {
 fn auto_device() -> Result<Device> {
     #[cfg(feature = "backend-candle-cuda")]
     {
-        if Device::new_cuda(0).is_ok() {
-            return Device::new_cuda(0).context("initialize candle cuda device");
+        if midas_env::ml::candle_cuda::auto_is_allowed() {
+            match Device::new_cuda(0) {
+                Ok(device) => return Ok(device),
+                Err(error) => {
+                    eprintln!(
+                        "warning: Candle auto CUDA initialization failed; falling back to CPU: {error:#}"
+                    );
+                }
+            }
         }
     }
 
@@ -43,6 +50,8 @@ fn auto_device() -> Result<Device> {
 }
 
 fn explicit_cuda_device() -> Result<Device> {
+    ensure_candle_cuda_policy()?;
+
     #[cfg(feature = "backend-candle-cuda")]
     {
         return Device::new_cuda(0).context("initialize candle cuda device");
@@ -54,4 +63,11 @@ fn explicit_cuda_device() -> Result<Device> {
             "candle cuda support is not compiled into this build; re-run with the 'backend-candle-cuda' Cargo feature"
         )
     }
+}
+
+fn ensure_candle_cuda_policy() -> Result<()> {
+    if let Some(reason) = midas_env::ml::candle_cuda::explicit_block_reason() {
+        bail!("{reason}");
+    }
+    Ok(())
 }

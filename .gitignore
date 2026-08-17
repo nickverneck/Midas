@@ -26,6 +26,8 @@ target
 /target
 
 *.parquet
+.run/meta-gate/
+.run/supervised/
 *.pt
 .env
 .auth/

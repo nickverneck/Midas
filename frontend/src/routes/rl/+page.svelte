@@ -110,6 +110,14 @@
 			activeLogDir = dir;
 
 			const res = await fetch(buildLogsUrl(0, dir));
+			if (res.status === 404) {
+				if (token === loadToken) {
+					logMap = new Map();
+					nextOffset = 0;
+					doneLoading = true;
+				}
+				return;
+			}
 			if (!res.ok) {
 				const errPayload = await res.json().catch(() => null);
 				throw new Error(errPayload?.error || `Failed to fetch logs (${res.status})`);
@@ -126,8 +134,10 @@
 				void scheduleLoadMore(token, dir);
 			}
 		} catch (err) {
-			console.error("Failed to fetch logs", err);
-			error = err instanceof Error ? err.message : String(err);
+			if (token === loadToken) {
+				console.error("Failed to fetch logs", err);
+				error = err instanceof Error ? err.message : String(err);
+			}
 		} finally {
 			if (token === loadToken) {
 				loading = false;
@@ -147,6 +157,13 @@
 
 			try {
 				const res = await fetch(buildLogsUrl(nextOffset, dir));
+				if (res.status === 404) {
+					if (token === loadToken && dir === activeLogDir) {
+						doneLoading = true;
+						error = "";
+					}
+					return;
+				}
 				if (!res.ok) throw new Error(`Failed to fetch logs (${res.status})`);
 
 				const payload = await res.json();
@@ -177,9 +194,14 @@
 	let resolvedWeights = $derived.by(() => resolveFitnessWeights(fitnessWeights));
 	let charts = $derived.by(() => buildRlCharts(epochData, resolvedWeights));
 	let snapshotRows = $derived.by(() => buildSnapshotRows(latest, resolvedWeights));
+	let showEmptyState = $derived(!loading && !error && epochData.length === 0);
 </script>
 
-<main class="space-y-8 p-8">
+<svelte:head>
+	<title>RL Analytics · Midas</title>
+</svelte:head>
+
+<main class="min-w-0 space-y-8 p-4 sm:p-8">
 	<RlPageHeader
 		bind:logDir
 		bind:fitnessWeights
@@ -194,14 +216,24 @@
 		</div>
 	{/if}
 
-	<div class="grid gap-6 xl:grid-cols-3">
-		<RlTrainingCurvesCard
-			bind:chartTab
-			{activeLogDir}
-			epochCount={epochData.length}
-			{charts}
-		/>
-		<RlLatestSnapshotCard {latest} {snapshotRows} {loading} />
+	<div class="min-w-0 grid gap-6 xl:grid-cols-3">
+		{#if showEmptyState}
+			<div class="flex min-h-[420px] min-w-0 items-center justify-center rounded-xl border border-dashed px-4 text-center text-sm text-muted-foreground xl:col-span-2">
+				No RL run logs yet
+			</div>
+		{:else}
+			<div class="min-w-0">
+				<RlTrainingCurvesCard
+					bind:chartTab
+					{activeLogDir}
+					epochCount={epochData.length}
+					{charts}
+				/>
+			</div>
+		{/if}
+		<div class="min-w-0">
+			<RlLatestSnapshotCard {latest} {snapshotRows} {loading} />
+		</div>
 	</div>
 
 	<RlFolderPicker

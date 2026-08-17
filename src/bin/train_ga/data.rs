@@ -33,6 +33,37 @@ impl DataSet {
         }
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_for_test(closes: &[f64]) -> Self {
+        assert!(
+            closes.len() >= 2,
+            "synthetic GA data needs at least two bars"
+        );
+        let close = closes.to_vec();
+        let open = close.clone();
+        let high = close.clone();
+        let low = close.clone();
+        let feature_cols = Vec::new();
+        let obs_dim = observation_len(&open, &close, None, &feature_cols);
+        Self {
+            open,
+            close: close.clone(),
+            _high: high,
+            _low: low,
+            signal_open: close.clone(),
+            signal_close: close,
+            volume: None,
+            datetime_ns: None,
+            session_open: None,
+            minutes_to_close: None,
+            margin_ok: vec![true; closes.len()],
+            feature_cols,
+            obs_dim,
+            symbol: "TEST".to_string(),
+            session_from_parquet: false,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -186,9 +217,12 @@ pub fn load_dataset_with_bars(
 }
 
 fn extract_symbol(df: &DataFrame) -> Result<String> {
-    let symbol = match df.column("symbol")?.get(0)? {
-        AnyValue::String(s) => s.to_string(),
-        _ => "UNKNOWN".to_string(),
+    let symbol = match df.column("symbol") {
+        Ok(column) => match column.get(0)? {
+            AnyValue::String(s) => s.to_string(),
+            _ => "UNKNOWN".to_string(),
+        },
+        Err(_) => "UNKNOWN".to_string(),
     };
     Ok(symbol)
 }

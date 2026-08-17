@@ -14,6 +14,8 @@ mod ipc;
 #[cfg(feature = "ironbeam")]
 mod ironbeam;
 #[cfg(feature = "replay")]
+mod meta_gate_schedule;
+#[cfg(feature = "replay")]
 mod replay_cache;
 mod replay_cli;
 #[cfg(feature = "replay")]
@@ -45,6 +47,10 @@ use tui_runtime::run_tui;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
+    #[cfg(feature = "replay")]
+    if let Some(Mode::PrintMetaGateSchedule(args)) = cli.mode.clone() {
+        return meta_gate_schedule::print_schedule(&args);
+    }
     #[cfg(feature = "tradovate")]
     if let Some(Mode::SwipeProfile(args)) = cli.mode.clone() {
         let config = AppConfig::load(cli.config.as_deref())?;

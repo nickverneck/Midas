@@ -1,0 +1,5 @@
+# Burn/CubeCL's cudarc build script needs the CUDA toolkit/API version when
+# nvcc is not installed. This host uses the CUDA 12.8-compatible driver API.
+# Keep force=false so an explicit shell value can override this per build.
+[env]
+CUDARC_CUDA_VERSION = { value = "12080", force = false }

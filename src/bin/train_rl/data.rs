@@ -237,9 +237,12 @@ pub fn load_dataset_with_schema_and_bars(
 }
 
 fn extract_symbol(df: &DataFrame) -> Result<String> {
-    let symbol = match df.column("symbol")?.get(0)? {
-        AnyValue::String(s) => s.to_string(),
-        _ => "UNKNOWN".to_string(),
+    let symbol = match df.column("symbol") {
+        Ok(column) => match column.get(0)? {
+            AnyValue::String(s) => s.to_string(),
+            _ => "UNKNOWN".to_string(),
+        },
+        Err(_) => "UNKNOWN".to_string(),
     };
     Ok(symbol)
 }

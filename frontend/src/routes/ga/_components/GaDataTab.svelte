@@ -2,7 +2,7 @@
 	import * as Card from "$lib/components/ui/card";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import * as Table from "$lib/components/ui/table";
-	import { formatNum } from "../analytics";
+	import { formatNum, resolveLogValue } from "../analytics";
 	import type { LogRow } from "../types";
 
 	type Props = {
@@ -34,6 +34,11 @@
 		logPage = $bindable(),
 		maxLogPage
 	}: Props = $props();
+
+	const isNonNegative = (log: LogRow, key: string) => {
+		const value = resolveLogValue(log, key);
+		return value !== null && value >= 0;
+	};
 </script>
 
 <Card.Root>
@@ -70,21 +75,21 @@
 								{formatNum(log.fitness)}
 							</Table.Cell>
 							<Table.Cell
-								class={log[pnlKey] >= 0 ? "font-medium text-green-500" : "text-red-500"}
+								class={isNonNegative(log, pnlKey) ? "font-medium text-green-500" : "text-red-500"}
 							>
-								{formatNum(log[pnlKey])}
+								{formatNum(resolveLogValue(log, pnlKey))}
 							</Table.Cell>
 							<Table.Cell
-								class={log[pnlRealizedKey] >= 0
+								class={isNonNegative(log, pnlRealizedKey)
 									? "font-medium text-emerald-500"
 									: "text-red-500"}
 							>
-								{formatNum(log[pnlRealizedKey])}
+								{formatNum(resolveLogValue(log, pnlRealizedKey))}
 							</Table.Cell>
 							<Table.Cell
-								class={log[pnlTotalKey] >= 0 ? "font-medium text-teal-500" : "text-red-500"}
+								class={isNonNegative(log, pnlTotalKey) ? "font-medium text-teal-500" : "text-red-500"}
 							>
-								{formatNum(log[pnlTotalKey])}
+								{formatNum(resolveLogValue(log, pnlTotalKey))}
 							</Table.Cell>
 							<Table.Cell>{formatNum(log[metricKey])}</Table.Cell>
 							<Table.Cell class="text-red-400">{formatNum(log[drawdownKey])}%</Table.Cell>

@@ -1,14 +1,21 @@
 # ML Backend Rollout
 
-This branch establishes a single backend-selection surface for both GA and RL training so we can benchmark different tensor/runtime stacks without rewriting the surrounding training workflow each time.
+This branch establishes a single backend-selection surface for GA, RL, and supervised training so we can benchmark different tensor/runtime stacks without rewriting the surrounding training workflow each time.
 
 ## Current state
 
 - `libtorch` is implemented for GA and RL.
-- `candle` is implemented for GA training and RL PPO/GRPO training in this branch. It currently targets CPU by default, exports `.safetensors`, and keeps CUDA behind the optional `backend-candle-cuda` Cargo feature.
-- `burn` is implemented for GA training in this branch. It currently targets CPU via `burn-cpu`, can target Linux CUDA with the optional `backend-burn-cuda` Cargo feature, can target Apple GPU through `burn-mlx` with the optional `backend-burn-mlx` Cargo feature, and can still compile the legacy `burn-ndarray` CPU path behind `backend-burn-ndarray`.
+- `candle` is implemented for GA training and RL PPO/GRPO training in this branch. It targets CPU by default and native CUDA when built with the optional `backend-candle-cuda` Cargo feature. Candle Metal is not wired into the training binaries.
+- `burn` is implemented for GA, RL PPO/GRPO, and supervised event classification. GA, the CPU RL inference path, and supervised CPU use deterministic `burn-ndarray` for reliable small-matrix execution; there is no separate CPU backend selector. Linux CUDA is available with the optional `backend-burn-cuda` Cargo feature, and Apple GPU through `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
+- On Linux hosts without `nvcc`, Cargo reads the project default from
+  `.cargo/config.toml`. This checkout uses `12080` (CUDA 12.8 API), which is
+  compatible with the local 580.142 driver and avoids cudarc requesting the
+  CUDA 13.1-only `cuDevSmResourceSplit` symbol. Override it for another GPU
+  or toolkit with `CUDARC_CUDA_VERSION=13000 cargo build ...`; the project
+  setting uses `force = false`, so an explicit environment value wins.
+- The supervised CLI exposes the deterministic `cpu-linear` reference plus parity-preserving Candle and Burn linear classifiers. Candle can run on CPU or native CUDA when the optional `backend-candle-cuda` feature is compiled; Burn uses autodiff over burn-ndarray on CPU or native Burn CUDA.
 - `mlx` remains a separate first-class CLI/UI option, but it still intentionally fails fast until a dedicated runner exists.
-- GA orchestration now calls through a backend runner boundary in `src/bin/train_ga/backends/` instead of reaching directly into the `tch` policy code. RL now has a matching Candle runner in `src/bin/train_rl/candle.rs` for PPO and GRPO.
+- GA orchestration now calls through a backend runner boundary in `src/bin/train_ga/backends/` instead of reaching directly into the `tch` policy code. RL now has matching Candle and Burn runners in `src/bin/train_rl/candle.rs` and `src/bin/train_rl/burn.rs` for PPO and GRPO.
 - Every successful training run now writes `training_stack.json` into the run directory so benchmark scripts can compare backend/runtime/algorithm combinations later.
 - `python/examples/mlx_probe.py` is wired into the frontend diagnostics flow so Mac MLX viability can be checked before a full MLX trainer exists. (Only remaining Python example in active use.)
 
@@ -25,8 +32,8 @@ Current runtime policy:
 
 - `auto` prefers `cuda`, then `mps`, then `cpu`.
 - `libtorch` resolves to the effective runtime at startup and records it in `training_stack.json`.
-- `candle` resolves to `cpu` by default, rejects `mps` explicitly, and can target `cuda` when compiled with `backend-candle-cuda`.
-- `burn` resolves to `cpu` by default, can target `cuda` when compiled with `backend-burn-cuda`, and can target `mps` through `burn-mlx` when compiled with `backend-burn-mlx`.
+- `candle` resolves to `cpu` by default, rejects `mps` explicitly, and can target `cuda` when compiled with `backend-candle-cuda`. An explicit CUDA request fails before data loading when that feature is absent.
+- `burn` probes a compiled CUDA backend for `auto`, falls back to deterministic `burn-ndarray` CPU when no usable device is present, and can target `mps` through `burn-mlx` on macOS. An explicit CUDA/Metal request fails before data loading when the corresponding feature or usable runtime is absent.
 - `mlx` still reserves the same interface for a later dedicated runner.
 
 ## Machine strategy
@@ -43,9 +50,8 @@ Current runtime policy:
 
 ## Recommended implementation order
 
-1. Mirror the Burn GA seam into RL.
-2. Add an `mlx` runner path after the probe work proves the Mac path is worth it. Treat it as a separate runtime adapter, not a drop-in replacement for `tch`.
-3. Add a benchmark harness that iterates over:
+1. Add an `mlx` runner path after the probe work proves the Mac path is worth it. Treat it as a separate runtime adapter, not a drop-in replacement for `tch`.
+2. Add a benchmark harness that iterates over:
    - trainer: `ga`, `rl`
    - backend: `libtorch`, `burn`, `candle`, `mlx`
    - device: `cpu`, `mps`, `cuda`

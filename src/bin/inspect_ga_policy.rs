@@ -60,9 +60,13 @@ struct Args {
 #[derive(Serialize)]
 struct ReplayMetrics {
     fitness: f64,
-    eval_pnl: f64,
-    eval_pnl_realized: f64,
-    eval_pnl_total: f64,
+    net_objective_pnl: f64,
+    net_realized_pnl_after_costs_and_penalties: f64,
+    total_net_equity_delta: f64,
+    gross_realized_pnl: f64,
+    execution_costs: f64,
+    shaping_penalties: f64,
+    terminal_liquidation_cost: f64,
     eval_sortino: f64,
     eval_drawdown: f64,
     eval_ret_mean: f64,
@@ -107,10 +111,17 @@ struct BehaviorStats {
     winning_exits: usize,
     losing_exits: usize,
     total_reward: f64,
-    total_realized_pnl_change: f64,
-    total_pnl_change: f64,
+    gross_realized_pnl_change_total: f64,
+    gross_mark_to_market_pnl_change_total: f64,
+    net_realized_pnl_change_total: f64,
     total_commission_paid: f64,
     total_slippage_paid: f64,
+    total_execution_cost: f64,
+    total_shaping_penalty: f64,
+    total_net_equity_delta: f64,
+    total_account_equity_delta: f64,
+    terminal_liquidations: usize,
+    total_terminal_liquidation_cost: f64,
     avg_bars_per_trade: f64,
     max_bars_per_trade: usize,
     pct_flat: f64,
@@ -343,9 +354,13 @@ fn run() -> Result<()> {
         price_source: bar_selection.price_source.to_string(),
         metrics: ReplayMetrics {
             fitness: metrics.fitness,
-            eval_pnl: metrics.eval_pnl,
-            eval_pnl_realized: metrics.eval_pnl_realized,
-            eval_pnl_total: metrics.eval_pnl_total,
+            net_objective_pnl: metrics.eval_pnl,
+            net_realized_pnl_after_costs_and_penalties: metrics.eval_pnl_realized,
+            total_net_equity_delta: metrics.eval_pnl_total,
+            gross_realized_pnl: metrics.eval_gross_realized_pnl,
+            execution_costs: metrics.eval_execution_costs,
+            shaping_penalties: metrics.eval_shaping_penalties,
+            terminal_liquidation_cost: metrics.terminal_liquidation_cost,
             eval_sortino: metrics.eval_sortino,
             eval_drawdown: metrics.eval_drawdown,
             eval_ret_mean: metrics.eval_ret_mean,
@@ -375,8 +390,13 @@ fn run() -> Result<()> {
     )?;
 
     println!(
-        "Replay complete: pnl {:.2}, sortino {:.2}, mdd {:.2}, entries {}, exits {}, pct_flat {:.2}%",
-        summary.metrics.eval_pnl_total,
+        "Replay complete: net_equity {:.2}, gross_realized {:.2}, net_realized {:.2}, costs {:.2}, penalties {:.2}, terminal_liq {:.2}, sortino {:.2}, mdd {:.2}, entries {}, exits {}, pct_flat {:.2}%",
+        summary.metrics.total_net_equity_delta,
+        summary.metrics.gross_realized_pnl,
+        summary.metrics.net_realized_pnl_after_costs_and_penalties,
+        summary.metrics.execution_costs,
+        summary.metrics.shaping_penalties,
+        summary.metrics.terminal_liquidation_cost,
         summary.metrics.eval_sortino,
         summary.metrics.eval_drawdown,
         summary.behavior.entries,
@@ -640,9 +660,9 @@ fn summarize_behavior(rows: &[types::BehaviorRow]) -> BehaviorStats {
         }
         if row.position_before != 0 && row.position_after == 0 {
             out.exits += 1;
-            if row.realized_pnl_change > 0.0 {
+            if row.gross_realized_pnl_change > 0.0 {
                 out.winning_exits += 1;
-            } else if row.realized_pnl_change < 0.0 {
+            } else if row.gross_realized_pnl_change < 0.0 {
                 out.losing_exits += 1;
             }
             if let Some(entry_step) = tracker.entry_step.take() {
@@ -665,10 +685,26 @@ fn summarize_behavior(rows: &[types::BehaviorRow]) -> BehaviorStats {
         out.margin_call_violations += usize::from(row.margin_call_violation);
         out.position_limit_violations += usize::from(row.position_limit_violation);
         out.total_reward += row.reward;
-        out.total_realized_pnl_change += row.realized_pnl_change;
-        out.total_pnl_change += row.pnl_change;
+        out.gross_realized_pnl_change_total += row.gross_realized_pnl_change;
+        out.gross_mark_to_market_pnl_change_total += row.gross_mark_to_market_pnl_change;
+        out.net_realized_pnl_change_total += row.net_realized_pnl_change;
         out.total_commission_paid += row.commission_paid;
         out.total_slippage_paid += row.slippage_paid;
+        out.total_execution_cost += row.commission_paid + row.slippage_paid;
+        out.total_shaping_penalty += row.drawdown_penalty
+            + row.session_close_penalty
+            + row.early_exit_penalty
+            + row.early_flip_penalty
+            + row.invalid_revert_penalty
+            + row.hold_duration_penalty
+            + row.flat_hold_penalty
+            + row.violation_penalty;
+        out.total_net_equity_delta += row.net_equity_delta;
+        out.total_account_equity_delta += row.equity_after - row.equity_before;
+        if row.terminal_liquidation {
+            out.terminal_liquidations += 1;
+            out.total_terminal_liquidation_cost += row.terminal_liquidation_cost;
+        }
     }
 
     if out.exits > 0 {
@@ -689,7 +725,7 @@ fn write_behavior_csv(
     let mut file = std::fs::File::create(path)?;
     writeln!(
         file,
-        "window_idx,step,data_idx,date,open,close,volume,action,effective_action,action_idx,position_before,position_after,equity_before,equity_after,cash,unrealized_pnl,realized_pnl,pnl_change,realized_pnl_change,reward,commission_paid,slippage_paid,drawdown_penalty,session_close_penalty,invalid_revert_penalty,hold_duration_penalty,flat_hold_penalty,auto_close_executed,session_open,margin_ok,minutes_to_close,session_closed_violation,margin_call_violation,position_limit_violation"
+        "window_idx,step,data_idx,date,open,close,volume,action,effective_action,action_idx,position_before,position_after,equity_before,equity_after,net_equity_delta,cash,unrealized_pnl,gross_realized_pnl,gross_mark_to_market_pnl_change,gross_realized_pnl_change,net_realized_pnl_change,reward,commission_paid,slippage_paid,drawdown_penalty,session_close_penalty,early_exit_penalty,early_flip_penalty,invalid_revert_penalty,hold_duration_penalty,flat_hold_penalty,violation_penalty,auto_close_executed,session_open,margin_ok,minutes_to_close,session_closed_violation,margin_call_violation,position_limit_violation,terminal_liquidation,terminal_liquidation_cost"
     )?;
 
     for row in rows {
@@ -731,19 +767,24 @@ fn write_behavior_csv(
             row.position_after.to_string(),
             row.equity_before.to_string(),
             row.equity_after.to_string(),
+            row.net_equity_delta.to_string(),
             row.cash.to_string(),
             row.unrealized_pnl.to_string(),
-            row.realized_pnl.to_string(),
-            row.pnl_change.to_string(),
-            row.realized_pnl_change.to_string(),
+            row.gross_realized_pnl.to_string(),
+            row.gross_mark_to_market_pnl_change.to_string(),
+            row.gross_realized_pnl_change.to_string(),
+            row.net_realized_pnl_change.to_string(),
             row.reward.to_string(),
             row.commission_paid.to_string(),
             row.slippage_paid.to_string(),
             row.drawdown_penalty.to_string(),
             row.session_close_penalty.to_string(),
+            row.early_exit_penalty.to_string(),
+            row.early_flip_penalty.to_string(),
             row.invalid_revert_penalty.to_string(),
             row.hold_duration_penalty.to_string(),
             row.flat_hold_penalty.to_string(),
+            row.violation_penalty.to_string(),
             row.auto_close_executed.to_string(),
             row.session_open.to_string(),
             row.margin_ok.to_string(),
@@ -753,6 +794,8 @@ fn write_behavior_csv(
             row.session_closed_violation.to_string(),
             row.margin_call_violation.to_string(),
             row.position_limit_violation.to_string(),
+            row.terminal_liquidation.to_string(),
+            row.terminal_liquidation_cost.to_string(),
         ];
         writeln!(file, "{}", columns.join(","))?;
     }

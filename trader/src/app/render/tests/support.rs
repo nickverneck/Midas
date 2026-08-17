@@ -119,6 +119,7 @@ pub(super) fn account_snapshot(
         net_liq: None,
         realized_pnl: None,
         unrealized_pnl: None,
+        fees: None,
         intraday_margin: None,
         open_position_qty: market_position_qty,
         market_position_qty,
@@ -143,8 +144,13 @@ pub(super) fn balance_snapshot(
         balance: Some(balance),
         cash_balance: Some(balance),
         net_liq: Some(balance),
-        realized_pnl: None,
+        // These helpers model a broker whose reported realized PnL follows
+        // the synthetic balance so legacy rendering tests remain balance
+        // based. Tests that exercise mark-to-market behavior override this
+        // field explicitly.
+        realized_pnl: Some(balance),
         unrealized_pnl: None,
+        fees: None,
         intraday_margin: None,
         open_position_qty: None,
         market_position_qty: None,

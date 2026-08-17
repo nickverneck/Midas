@@ -18,7 +18,7 @@ pub fn resolve_device(stack: &ResolvedTrainingStack) -> Result<ExecutionTarget> 
         MlBackend::Libtorch => {
             #[cfg(feature = "torch")]
             {
-                Ok(tch::resolve_device(stack.requested_runtime))
+                tch::resolve_device(stack.requested_runtime)
             }
             #[cfg(not(feature = "torch"))]
             {
@@ -48,6 +48,7 @@ pub fn resolve_device(stack: &ResolvedTrainingStack) -> Result<ExecutionTarget> 
         MlBackend::Mlx => {
             bail!("mlx GA device resolution is not implemented yet")
         }
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }
 
@@ -87,6 +88,7 @@ pub fn print_device(stack: &ResolvedTrainingStack, device: ExecutionTarget) -> R
             }
         }
         MlBackend::Mlx => bail!("mlx GA backend is not implemented yet"),
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }
 
@@ -96,6 +98,7 @@ pub fn policy_extension(stack: &ResolvedTrainingStack) -> &'static str {
         MlBackend::Candle => "safetensors",
         MlBackend::Burn => "portable.json",
         MlBackend::Mlx => "bin",
+        MlBackend::CpuLinear => "bin",
     }
 }
 
@@ -137,6 +140,7 @@ pub fn param_count(
                 bail!("candle GA backend was selected without the 'backend-candle' Cargo feature")
             }
         }
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }
 
@@ -180,6 +184,7 @@ pub fn evaluate_candidate(
                 bail!("candle GA backend was selected without the 'backend-candle' Cargo feature")
             }
         }
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }
 
@@ -222,6 +227,7 @@ pub fn evaluate_candidate_with_history(
                 bail!("candle GA backend was selected without the 'backend-candle' Cargo feature")
             }
         }
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }
 
@@ -267,6 +273,7 @@ pub fn evaluate_candidates_batch(
                 bail!("candle GA backend was selected without the 'backend-candle' Cargo feature")
             }
         }
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }
 
@@ -311,5 +318,6 @@ pub fn save_policy(
                 bail!("candle GA backend was selected without the 'backend-candle' Cargo feature")
             }
         }
+        MlBackend::CpuLinear => bail!("cpu-linear is only available to the supervised trainer"),
     }
 }

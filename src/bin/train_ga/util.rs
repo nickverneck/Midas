@@ -10,39 +10,47 @@ use midas_env::ml::ComputeRuntime;
 use std::env;
 
 #[cfg(feature = "torch")]
-pub fn resolve_device(requested: ComputeRuntime) -> tch::Device {
+pub fn resolve_device(requested: ComputeRuntime) -> Result<tch::Device> {
     preload_cuda_dlls();
     use tch::Device;
-    match requested {
+    let device = match requested {
         ComputeRuntime::Cuda => {
             if tch::Cuda::is_available() {
-                Device::Cuda(0)
+                Ok(Device::Cuda(0))
             } else {
-                Device::Cpu
+                Err(anyhow::anyhow!(
+                    "Torch CUDA was explicitly requested, but no usable CUDA runtime/device is available"
+                ))
             }
         }
         ComputeRuntime::Mps => {
             if mps_available() {
-                Device::Mps
+                Ok(Device::Mps)
             } else {
-                Device::Cpu
+                Err(anyhow::anyhow!(
+                    "Torch MPS was explicitly requested, but the MPS runtime/toolchain is unavailable"
+                ))
             }
         }
-        ComputeRuntime::Cpu => Device::Cpu,
+        ComputeRuntime::Cpu => Ok(Device::Cpu),
         ComputeRuntime::Auto => {
             if tch::Cuda::is_available() {
-                Device::Cuda(0)
+                Ok(Device::Cuda(0))
             } else if mps_available() {
-                Device::Mps
+                Ok(Device::Mps)
             } else {
-                Device::Cpu
+                Ok(Device::Cpu)
             }
         }
-    }
+    }?;
+    Ok(device)
 }
 
 #[cfg(feature = "torch")]
 fn mps_available() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
     let mps_device = tch::Device::Mps;
     std::panic::catch_unwind(|| {
         let _t = tch::Tensor::zeros(&[1], (tch::Kind::Float, mps_device));

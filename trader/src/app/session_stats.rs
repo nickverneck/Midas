@@ -1,6 +1,9 @@
 const SESSION_STATS_DELTA_EPSILON: f64 = 0.005;
 const SESSION_STATS_FEE_MATCH_EPSILON: f64 = 0.015;
-const SESSION_STATS_KNOWN_FEE_AMOUNTS: &[f64] = &[0.35, 0.56, 0.91, 2.88];
+// Fallback values used only when the broker does not expose cumulative
+// realized-PnL/fee fields.  GC's current commission stream is $3.10 per
+// contract-side; the authoritative snapshot path below takes precedence.
+const SESSION_STATS_KNOWN_FEE_AMOUNTS: &[f64] = &[0.35, 0.56, 0.91, 2.88, 3.10];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionStatSource {
@@ -104,6 +107,12 @@ enum SessionBalanceEventKind {
     Trade,
     Fee,
     Mixed,
+    Mark,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SessionFeeContext {
+    tick_value: Option<f64>,
 }
 
 impl SessionBalanceEventKind {
@@ -112,13 +121,9 @@ impl SessionBalanceEventKind {
             Self::Trade => "trade",
             Self::Fee => "fee",
             Self::Mixed => "mixed",
+            Self::Mark => "mark",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct SessionFeeContext {
-    tick_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -160,6 +165,8 @@ struct AccountSessionStats {
     last_position_side: SessionTradeSide,
     last_delta: Option<f64>,
     last_trade_delta: Option<f64>,
+    last_realized_pnl: Option<f64>,
+    last_fees: Option<f64>,
     wins: usize,
     losses: usize,
     flat_moves: usize,
@@ -203,6 +210,8 @@ impl AccountSessionStats {
             last_position_side: session_trade_side_from_snapshot(snapshot),
             last_delta: None,
             last_trade_delta: None,
+            last_realized_pnl: finite_metric(snapshot.realized_pnl),
+            last_fees: finite_metric(snapshot.fees),
             wins: 0,
             losses: 0,
             flat_moves: 0,
@@ -241,18 +250,34 @@ impl AccountSessionStats {
         self.sample_count += 1;
         let previous_position_side = self.last_position_side;
         let current_position_side = session_trade_side_from_snapshot(snapshot);
+        let realized_pnl = finite_metric(snapshot.realized_pnl);
+        let fees = finite_metric(snapshot.fees).filter(|value| *value >= 0.0);
 
         if self.source != source {
             self.source = source;
             self.current_value = value;
             self.last_delta = None;
             self.last_trade_delta = None;
+            self.last_realized_pnl = realized_pnl;
+            self.last_fees = fees;
             self.last_position_side = current_position_side;
             return;
         }
 
         let delta = value - self.current_value;
-        if delta.abs() < SESSION_STATS_DELTA_EPSILON {
+        let realized_delta = cumulative_delta(self.last_realized_pnl, realized_pnl);
+        let fee_delta = cumulative_fee_delta(self.last_fees, fees);
+        self.last_realized_pnl = realized_pnl.or(self.last_realized_pnl);
+        self.last_fees = fees.or(self.last_fees);
+
+        if delta.abs() < SESSION_STATS_DELTA_EPSILON
+            && realized_delta
+                .map(|value| value.abs() < SESSION_STATS_DELTA_EPSILON)
+                .unwrap_or(true)
+            && fee_delta
+                .map(|value| value.abs() < SESSION_STATS_DELTA_EPSILON)
+                .unwrap_or(true)
+        {
             self.current_value = value;
             self.last_delta = Some(0.0);
             self.last_trade_delta = Some(0.0);
@@ -264,7 +289,14 @@ impl AccountSessionStats {
         let previous_value = self.current_value;
         let side =
             session_trade_side_for_delta(source, previous_position_side, current_position_side);
-        let classification = classify_session_balance_delta(delta, fee_context);
+        let classification = classify_account_snapshot_delta(
+            delta,
+            realized_delta,
+            fee_delta,
+            fee_context,
+            previous_position_side,
+            current_position_side,
+        );
         self.current_value = value;
         self.last_delta = Some(delta);
         self.last_trade_delta = Some(classification.trade_delta);
@@ -289,6 +321,10 @@ impl AccountSessionStats {
         }
 
         let trade_delta = classification.trade_delta;
+        if classification.kind == SessionBalanceEventKind::Mark {
+            self.flat_moves += 1;
+            return;
+        }
         if trade_delta.abs() < SESSION_STATS_DELTA_EPSILON {
             return;
         }
@@ -485,6 +521,123 @@ fn format_session_position_transition(
     current_side: SessionTradeSide,
 ) -> String {
     format!("{}->{}", previous_side.label(), current_side.label())
+}
+
+fn finite_metric(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite())
+}
+
+fn cumulative_delta(previous: Option<f64>, current: Option<f64>) -> Option<f64> {
+    Some(current? - previous?)
+}
+
+fn cumulative_fee_delta(previous: Option<f64>, current: Option<f64>) -> Option<f64> {
+    let delta = current? - previous?;
+    (delta >= -SESSION_STATS_DELTA_EPSILON).then_some(delta.max(0.0))
+}
+
+fn classify_account_snapshot_delta(
+    delta: f64,
+    realized_delta: Option<f64>,
+    fee_delta: Option<f64>,
+    fee_context: SessionFeeContext,
+    previous_position_side: SessionTradeSide,
+    current_position_side: SessionTradeSide,
+) -> SessionDeltaClassification {
+    // When the broker exposes cumulative fee data, use it as the authority.
+    // Balance/cash values are net of those fees, so add the fee back to get
+    // the gross trade delta shown by the F6 "Ex Fees" statistics.
+    if let Some(fees) = fee_delta {
+        let fees = fees.max(0.0);
+        if let Some(realized) = realized_delta {
+            if realized.abs() < SESSION_STATS_DELTA_EPSILON {
+                if fees >= SESSION_STATS_DELTA_EPSILON {
+                    return SessionDeltaClassification {
+                        kind: SessionBalanceEventKind::Fee,
+                        fee_delta: -fees,
+                        trade_delta: 0.0,
+                    };
+                }
+
+                // Fee entities can arrive one snapshot after the balance
+                // update. Keep the legacy amount matcher as a narrow
+                // fallback before treating the unchanged realized PnL as a
+                // mark-to-market update.
+                let fallback = classify_session_balance_delta(delta, fee_context);
+                if fallback.kind != SessionBalanceEventKind::Trade {
+                    return fallback;
+                }
+
+                return SessionDeltaClassification {
+                    kind: SessionBalanceEventKind::Mark,
+                    fee_delta: 0.0,
+                    trade_delta: 0.0,
+                };
+            }
+
+            return SessionDeltaClassification {
+                kind: if fees >= SESSION_STATS_DELTA_EPSILON {
+                    SessionBalanceEventKind::Mixed
+                } else {
+                    SessionBalanceEventKind::Trade
+                },
+                fee_delta: -fees,
+                trade_delta: delta + fees,
+            };
+        }
+
+        if fees >= SESSION_STATS_DELTA_EPSILON {
+            let trade_delta = delta + fees;
+            return SessionDeltaClassification {
+                kind: if trade_delta.abs() < SESSION_STATS_DELTA_EPSILON {
+                    SessionBalanceEventKind::Fee
+                } else {
+                    SessionBalanceEventKind::Mixed
+                },
+                fee_delta: -fees,
+                trade_delta: if trade_delta.abs() < SESSION_STATS_DELTA_EPSILON {
+                    0.0
+                } else {
+                    trade_delta
+                },
+            };
+        }
+
+        // A broker may expose cumulative fees but omit realized PnL. Avoid
+        // counting mark-to-market balance noise while a position remains
+        // unchanged; position transitions still use the legacy fallback.
+        if previous_position_side == current_position_side
+            && current_position_side.non_flat().is_some()
+        {
+            return SessionDeltaClassification {
+                kind: SessionBalanceEventKind::Mark,
+                fee_delta: 0.0,
+                trade_delta: 0.0,
+            };
+        }
+    }
+
+    // If realized PnL is explicitly unchanged, this balance movement is not
+    // a realized win/loss. It may be an unrealized mark or an account update.
+    if realized_delta.is_some_and(|value| value.abs() < SESSION_STATS_DELTA_EPSILON)
+        && fee_delta
+            .map(|value| value.abs() < SESSION_STATS_DELTA_EPSILON)
+            .unwrap_or(true)
+    {
+        let fallback = classify_session_balance_delta(delta, fee_context);
+        if fallback.kind != SessionBalanceEventKind::Trade {
+            return fallback;
+        }
+        return SessionDeltaClassification {
+            kind: SessionBalanceEventKind::Mark,
+            fee_delta: 0.0,
+            trade_delta: 0.0,
+        };
+    }
+
+    // Preserve the existing fallback for brokers/tests that do not expose
+    // cumulative fee fields, including known fee-only and mixed deltas.
+    classify_session_balance_delta(delta, fee_context)
 }
 
 fn classify_session_balance_delta(

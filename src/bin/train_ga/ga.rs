@@ -6,15 +6,20 @@ use crate::actions::{
 };
 use crate::config::CandidateConfig;
 use crate::data::{DataSet, build_observation};
-use crate::metrics::{candidate_fitness, compute_sortino, liquidation_cost, max_drawdown};
+use crate::metrics::{
+    candidate_fitness, compute_sortino, liquidation_cost_components, max_drawdown,
+};
 use crate::model::{build_batched_policy, build_mlp, load_params_from_vec};
-use crate::types::{BehaviorRow, CandidateResult};
+use crate::types::{BehaviorRow, CandidateResult, StepAccounting};
 use midas_env::env::VIOLATION_PENALTY;
 
 struct CandidateStats {
     eval_pnls: Vec<f64>,
     eval_pnls_realized: Vec<f64>,
     eval_pnls_total: Vec<f64>,
+    eval_gross_realized_pnls: Vec<f64>,
+    eval_execution_costs: Vec<f64>,
+    terminal_liquidation_costs: Vec<f64>,
     eval_returns: Vec<f64>,
     eval_equity: Vec<Vec<f64>>,
     non_hold: usize,
@@ -42,6 +47,9 @@ impl CandidateStats {
             eval_pnls: Vec::new(),
             eval_pnls_realized: Vec::new(),
             eval_pnls_total: Vec::new(),
+            eval_gross_realized_pnls: Vec::new(),
+            eval_execution_costs: Vec::new(),
+            terminal_liquidation_costs: Vec::new(),
             eval_returns: Vec::new(),
             eval_equity: Vec::new(),
             non_hold: 0,
@@ -87,6 +95,25 @@ impl CandidateStats {
         } else {
             self.eval_pnls_total.iter().sum::<f64>() / self.eval_pnls_total.len() as f64
         };
+        let eval_gross_realized_pnl = if self.eval_gross_realized_pnls.is_empty() {
+            0.0
+        } else {
+            self.eval_gross_realized_pnls.iter().sum::<f64>()
+                / self.eval_gross_realized_pnls.len() as f64
+        };
+        let eval_execution_costs = if self.eval_execution_costs.is_empty() {
+            0.0
+        } else {
+            self.eval_execution_costs.iter().sum::<f64>() / self.eval_execution_costs.len() as f64
+        };
+        let eval_shaping_penalties =
+            eval_gross_realized_pnl - eval_execution_costs - eval_pnl_realized;
+        let terminal_liquidation_cost = if self.terminal_liquidation_costs.is_empty() {
+            0.0
+        } else {
+            self.terminal_liquidation_costs.iter().sum::<f64>()
+                / self.terminal_liquidation_costs.len() as f64
+        };
 
         let fitness = candidate_fitness(
             eval_pnl,
@@ -102,6 +129,10 @@ impl CandidateStats {
             eval_pnl,
             eval_pnl_realized,
             eval_pnl_total,
+            eval_gross_realized_pnl,
+            eval_execution_costs,
+            eval_shaping_penalties,
+            terminal_liquidation_cost,
             eval_sortino,
             eval_drawdown: eval_draw,
             eval_ret_mean: if self.eval_returns.is_empty() {
@@ -185,6 +216,9 @@ fn evaluate_candidate_internal(
     let mut eval_pnls = Vec::new();
     let mut eval_pnls_realized = Vec::new();
     let mut eval_pnls_total = Vec::new();
+    let mut eval_gross_realized_pnls = Vec::new();
+    let mut eval_execution_costs = Vec::new();
+    let mut terminal_liquidation_costs = Vec::new();
     let mut eval_returns = Vec::new();
     let mut eval_equity: Vec<Vec<f64>> = Vec::new();
     let mut non_hold = 0usize;
@@ -218,7 +252,9 @@ fn evaluate_candidate_internal(
         let mut window_hold_duration_penalty = 0.0f64;
         let mut window_flat_hold_penalty = 0.0f64;
         let mut window_session_close_penalty = 0.0f64;
-        let mut window_violation_penalty = 0.0f64;
+        let mut realized_pnl = 0.0f64;
+        let mut gross_realized_pnl = 0.0f64;
+        let mut execution_costs = 0.0f64;
         let mut step_idx = 0usize;
 
         for t in (start + 1)..end {
@@ -285,18 +321,16 @@ fn evaluate_candidate_internal(
             );
             if info.session_closed_violation {
                 session_violations += 1;
-                window_violation_penalty += VIOLATION_PENALTY;
             }
             if info.margin_call_violation {
                 margin_violations += 1;
-                window_violation_penalty += VIOLATION_PENALTY;
             }
             if info.position_limit_violation {
                 position_violations += 1;
-                window_violation_penalty += VIOLATION_PENALTY;
             }
             position = env.state().position;
             equity = env.state().cash + env.state().unrealized_pnl;
+            let accounting = StepAccounting::from_transition(equity_before, equity, &info);
             if let Some(hist) = history.as_deref_mut() {
                 let state = env.state();
                 hist.push(BehaviorRow {
@@ -310,19 +344,27 @@ fn evaluate_candidate_internal(
                     position_after: state.position,
                     equity_before,
                     equity_after: equity,
+                    net_equity_delta: accounting.net_equity_delta,
                     cash: state.cash,
                     unrealized_pnl: state.unrealized_pnl,
-                    realized_pnl: state.realized_pnl,
-                    pnl_change: info.pnl_change,
-                    realized_pnl_change: info.realized_pnl_change,
+                    gross_realized_pnl: state.realized_pnl,
+                    gross_mark_to_market_pnl_change: info.pnl_change,
+                    gross_realized_pnl_change: info.realized_pnl_change,
+                    net_realized_pnl_change: info.realized_pnl_change
+                        - info.commission_paid
+                        - info.slippage_paid
+                        - accounting.penalty_total,
                     reward,
                     commission_paid: info.commission_paid,
                     slippage_paid: info.slippage_paid,
                     drawdown_penalty: info.drawdown_penalty,
                     session_close_penalty: info.session_close_penalty,
+                    early_exit_penalty: info.early_exit_penalty,
+                    early_flip_penalty: info.early_flip_penalty,
                     invalid_revert_penalty: info.invalid_revert_penalty,
                     hold_duration_penalty: info.hold_duration_penalty,
                     flat_hold_penalty: info.flat_hold_penalty,
+                    violation_penalty: accounting.violation_penalty,
                     auto_close_executed: info.auto_close_executed,
                     session_open,
                     margin_ok,
@@ -330,49 +372,96 @@ fn evaluate_candidate_internal(
                     session_closed_violation: info.session_closed_violation,
                     margin_call_violation: info.margin_call_violation,
                     position_limit_violation: info.position_limit_violation,
+                    terminal_liquidation: false,
+                    terminal_liquidation_cost: 0.0,
                 });
             }
-            pnl_buf.push(info.pnl_change);
-            eq_curve.push(equity);
+            pnl_buf.push(accounting.net_equity_delta);
+            let previous_net_equity = eq_curve.last().copied().unwrap_or(cfg.initial_balance);
+            eq_curve.push(previous_net_equity + accounting.net_equity_delta);
             window_drawdown_penalty += info.drawdown_penalty;
             window_invalid_revert_penalty += info.invalid_revert_penalty;
             window_hold_duration_penalty += info.hold_duration_penalty;
             window_flat_hold_penalty += info.flat_hold_penalty;
             window_session_close_penalty += info.session_close_penalty;
+            realized_pnl += info.realized_pnl_change
+                - info.commission_paid
+                - info.slippage_paid
+                - accounting.penalty_total;
+            gross_realized_pnl += info.realized_pnl_change;
+            execution_costs += info.commission_paid + info.slippage_paid;
             if !matches!(action, Action::Hold) {
                 non_hold += 1;
             }
             if position != 0 {
                 non_zero_pos += 1;
             }
-            abs_pnl_sum += info.pnl_change.abs();
+            abs_pnl_sum += accounting.net_equity_delta.abs();
             pnl_steps += 1;
             step_idx += 1;
         }
 
-        let realized_pnl = env.state().realized_pnl;
-        let mut total_pnl = env.state().cash + env.state().unrealized_pnl - cfg.initial_balance;
-        let exit_cost = liquidation_cost(
+        let (exit_commission, exit_slippage) = liquidation_cost_components(
             env.state().position,
             env_cfg.commission_round_turn,
             env_cfg.slippage_per_contract,
         );
-        if exit_cost > 0.0 {
-            total_pnl -= exit_cost;
+        let exit_cost = exit_commission + exit_slippage;
+        let terminal_position = env.state().position;
+        if terminal_position != 0 {
+            if let Some(hist) = history.as_deref_mut() {
+                let terminal_data_idx = end.saturating_sub(1);
+                let terminal_session_open = if cfg.ignore_session {
+                    true
+                } else {
+                    data.session_open
+                        .as_ref()
+                        .and_then(|values| values.get(terminal_data_idx))
+                        .copied()
+                        .unwrap_or(true)
+                };
+                let terminal_minutes_to_close = data
+                    .minutes_to_close
+                    .as_ref()
+                    .and_then(|values| values.get(terminal_data_idx))
+                    .copied();
+                let terminal_margin_ok = *data.margin_ok.get(terminal_data_idx).unwrap_or(&true);
+                let state = env.state();
+                hist.push(BehaviorRow::terminal_liquidation(
+                    window_idx,
+                    step_idx,
+                    terminal_data_idx,
+                    state.position,
+                    equity,
+                    state.unrealized_pnl,
+                    state.realized_pnl,
+                    exit_commission,
+                    exit_slippage,
+                    terminal_session_open,
+                    terminal_margin_ok,
+                    terminal_minutes_to_close,
+                ));
+            }
             let last_eq = eq_curve.last().copied().unwrap_or(cfg.initial_balance);
             eq_curve.push(last_eq - exit_cost);
             pnl_buf.push(-exit_cost);
+            // The equity curve already marked this position to market on the
+            // last environment step.  Only the realized diagnostic needs the
+            // transfer of that mark into realized PnL here; adding it to the
+            // equity curve would double count it.
+            realized_pnl += env.state().unrealized_pnl - exit_cost;
+            gross_realized_pnl += env.state().unrealized_pnl;
+            execution_costs += exit_cost;
+            abs_pnl_sum += exit_cost;
+            pnl_steps += 1;
         }
-        let pnl_sum = total_pnl
-            - window_drawdown_penalty
-            - window_invalid_revert_penalty
-            - window_hold_duration_penalty
-            - window_flat_hold_penalty
-            - window_session_close_penalty
-            - window_violation_penalty;
-        eval_pnls.push(pnl_sum);
+        terminal_liquidation_costs.push(exit_cost);
+        let net_pnl = pnl_buf.iter().sum::<f64>();
+        eval_pnls.push(net_pnl);
         eval_pnls_realized.push(realized_pnl);
-        eval_pnls_total.push(total_pnl);
+        eval_pnls_total.push(net_pnl);
+        eval_gross_realized_pnls.push(gross_realized_pnl);
+        eval_execution_costs.push(execution_costs);
         drawdown_penalty_sum += window_drawdown_penalty;
         invalid_revert_penalty_sum += window_invalid_revert_penalty;
         hold_duration_penalty_sum += window_hold_duration_penalty;
@@ -410,6 +499,17 @@ fn evaluate_candidate_internal(
     } else {
         eval_pnls_total.iter().sum::<f64>() / eval_pnls_total.len() as f64
     };
+    let eval_gross_realized_pnl = if eval_gross_realized_pnls.is_empty() {
+        0.0
+    } else {
+        eval_gross_realized_pnls.iter().sum::<f64>() / eval_gross_realized_pnls.len() as f64
+    };
+    let eval_execution_costs = if eval_execution_costs.is_empty() {
+        0.0
+    } else {
+        eval_execution_costs.iter().sum::<f64>() / eval_execution_costs.len() as f64
+    };
+    let eval_shaping_penalties = eval_gross_realized_pnl - eval_execution_costs - eval_pnl_realized;
 
     let fitness = candidate_fitness(
         eval_pnl,
@@ -420,11 +520,20 @@ fn evaluate_candidate_internal(
         cfg.w_mdd,
     );
 
-    CandidateResult {
+    let terminal_liquidation_cost = if terminal_liquidation_costs.is_empty() {
+        0.0
+    } else {
+        terminal_liquidation_costs.iter().sum::<f64>() / terminal_liquidation_costs.len() as f64
+    };
+    let result = CandidateResult {
         fitness,
         eval_pnl,
         eval_pnl_realized,
         eval_pnl_total,
+        eval_gross_realized_pnl,
+        eval_execution_costs,
+        eval_shaping_penalties,
+        terminal_liquidation_cost,
         eval_sortino,
         eval_drawdown: eval_draw,
         eval_ret_mean: if eval_returns.is_empty() {
@@ -451,7 +560,16 @@ fn evaluate_candidate_internal(
         debug_hold_duration_penalty: hold_duration_penalty_sum,
         debug_flat_hold_penalty: flat_hold_penalty_sum,
         debug_session_close_penalty: session_close_penalty_sum,
+    };
+
+    if let Some(rows) = history.as_deref() {
+        let diagnostics = result.diagnostics(rows);
+        debug_assert!(diagnostics.penalties.reconciliation_error.abs() < 1e-8);
+        debug_assert!(diagnostics.candidate_reconciliation_error.abs() < 1e-8);
+        debug_assert!(diagnostics.terminal_liquidation_reconciliation_error.abs() < 1e-8);
     }
+
+    result
 }
 
 pub fn evaluate_candidate(
@@ -546,6 +664,9 @@ pub fn evaluate_candidates_batch(
         let mut window_flat_hold_penalty = vec![0.0f64; batch];
         let mut window_session_close_penalty = vec![0.0f64; batch];
         let mut window_violation_penalty = vec![0.0f64; batch];
+        let mut realized_pnls = vec![0.0f64; batch];
+        let mut gross_realized_pnls = vec![0.0f64; batch];
+        let mut execution_costs = vec![0.0f64; batch];
 
         for t in (start + 1)..end {
             let mut obs_batch: Vec<f32> = Vec::with_capacity(batch * data.obs_dim);
@@ -596,6 +717,7 @@ pub fn evaluate_candidates_batch(
                 let action_idx = action_indices[i];
                 let target_position = policy_target_position(action_idx);
                 let action = env_action_for_target(positions[i], target_position);
+                let equity_before = equities[i];
                 match action {
                     Action::Buy => stats[i].act_buy += 1,
                     Action::Sell => stats[i].act_sell += 1,
@@ -627,49 +749,63 @@ pub fn evaluate_candidates_batch(
 
                 positions[i] = envs[i].state().position;
                 equities[i] = envs[i].state().cash + envs[i].state().unrealized_pnl;
-                pnl_bufs[i].push(info.pnl_change);
-                eq_curves[i].push(equities[i]);
+                let accounting = StepAccounting::from_transition(equity_before, equities[i], &info);
+                let previous_net_equity =
+                    eq_curves[i].last().copied().unwrap_or(cfg.initial_balance);
+                pnl_bufs[i].push(accounting.net_equity_delta);
+                eq_curves[i].push(previous_net_equity + accounting.net_equity_delta);
                 window_drawdown_penalty[i] += info.drawdown_penalty;
                 window_invalid_revert_penalty[i] += info.invalid_revert_penalty;
                 window_hold_duration_penalty[i] += info.hold_duration_penalty;
                 window_flat_hold_penalty[i] += info.flat_hold_penalty;
                 window_session_close_penalty[i] += info.session_close_penalty;
+                realized_pnls[i] += info.realized_pnl_change
+                    - info.commission_paid
+                    - info.slippage_paid
+                    - accounting.penalty_total;
+                gross_realized_pnls[i] += info.realized_pnl_change;
+                execution_costs[i] += info.commission_paid + info.slippage_paid;
                 if !matches!(action, Action::Hold) {
                     stats[i].non_hold += 1;
                 }
                 if positions[i] != 0 {
                     stats[i].non_zero_pos += 1;
                 }
-                stats[i].abs_pnl_sum += info.pnl_change.abs();
+                stats[i].abs_pnl_sum += accounting.net_equity_delta.abs();
                 stats[i].pnl_steps += 1;
             }
         }
 
         for i in 0..batch {
-            let realized_pnl = envs[i].state().realized_pnl;
-            let mut total_pnl =
-                envs[i].state().cash + envs[i].state().unrealized_pnl - cfg.initial_balance;
-            let exit_cost = liquidation_cost(
+            let (exit_commission, exit_slippage) = liquidation_cost_components(
                 envs[i].state().position,
                 env_cfg.commission_round_turn,
                 env_cfg.slippage_per_contract,
             );
-            if exit_cost > 0.0 {
-                total_pnl -= exit_cost;
+            let exit_cost = exit_commission + exit_slippage;
+            let terminal_position = envs[i].state().position;
+            if terminal_position != 0 {
                 let last_eq = eq_curves[i].last().copied().unwrap_or(cfg.initial_balance);
                 eq_curves[i].push(last_eq - exit_cost);
                 pnl_bufs[i].push(-exit_cost);
+                // The batched equity curve already contains the final
+                // mark-to-market. Realize that mark only in the realized
+                // diagnostic so the total path is not double counted.
+                realized_pnls[i] += envs[i].state().unrealized_pnl - exit_cost;
+                gross_realized_pnls[i] += envs[i].state().unrealized_pnl;
+                execution_costs[i] += exit_cost;
+                stats[i].abs_pnl_sum += exit_cost;
+                stats[i].pnl_steps += 1;
             }
-            let pnl_sum = total_pnl
-                - window_drawdown_penalty[i]
-                - window_invalid_revert_penalty[i]
-                - window_hold_duration_penalty[i]
-                - window_flat_hold_penalty[i]
-                - window_session_close_penalty[i]
-                - window_violation_penalty[i];
-            stats[i].eval_pnls.push(pnl_sum);
-            stats[i].eval_pnls_realized.push(realized_pnl);
-            stats[i].eval_pnls_total.push(total_pnl);
+            stats[i].terminal_liquidation_costs.push(exit_cost);
+            let net_pnl = pnl_bufs[i].iter().sum::<f64>();
+            stats[i].eval_pnls.push(net_pnl);
+            stats[i].eval_pnls_realized.push(realized_pnls[i]);
+            stats[i].eval_pnls_total.push(net_pnl);
+            stats[i]
+                .eval_gross_realized_pnls
+                .push(gross_realized_pnls[i]);
+            stats[i].eval_execution_costs.push(execution_costs[i]);
             stats[i].drawdown_penalty_sum += window_drawdown_penalty[i];
             stats[i].invalid_revert_penalty_sum += window_invalid_revert_penalty[i];
             stats[i].hold_duration_penalty_sum += window_hold_duration_penalty[i];

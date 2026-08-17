@@ -23,12 +23,12 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - Both Rust trainers now accept `--backend libtorch|burn|candle|mlx` and `--device auto|cpu|cuda|mps`.
 - `libtorch` is implemented for both Rust trainers today.
 - `candle` now runs both the GA trainer and the RL PPO/GRPO trainer in this branch, saving `.safetensors` checkpoints.
-- `burn` now runs the GA trainer in this branch. The current runtime split is Burn CPU via `burn-cpu`, native Burn CUDA via the optional `backend-burn-cuda` Cargo feature, and Apple GPU via `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
+- `burn` now runs GA, RL (manual PPO/GRPO), and supervised event classification in this branch. Burn GA, the CPU RL inference path, and supervised CPU use `burn-ndarray` for reliable small-matrix execution. Native Burn CUDA is enabled with the optional `backend-burn-cuda` Cargo feature, and Apple GPU via `burn-mlx` with the optional `backend-burn-mlx` Cargo feature.
 - `mlx` is still a separate planned backend slot rather than the Burn Apple GPU path.
 - Successful runs write `training_stack.json` beside the log files so benchmark tooling can group results by backend/runtime/algorithm/host.
 - `python/examples/mlx_probe.py` remains as a Python-side MLX runtime probe. It is the only remaining Python example in active use.
-- Candle frontend runs now compile with `backend-candle` automatically, add `backend-candle-accelerate` on macOS unless `MIDAS_CANDLE_ACCELERATE=0`, and can opt into CUDA on Linux with `MIDAS_CANDLE_CUDA=1`.
-- Burn frontend runs always compile with `backend-burn`, add `backend-burn-cuda` when `MIDAS_BURN_CUDA=1`, add `backend-burn-mlx` only when you explicitly target `mps` or opt into it with `MIDAS_BURN_MLX=1`, and add `backend-burn-ndarray` only when `MIDAS_BURN_NDARRAY=1` or `MIDAS_BURN_CPU_BACKEND=ndarray`.
+- Candle frontend runs now compile with `backend-candle` automatically, add `backend-candle-accelerate` on macOS unless `MIDAS_CANDLE_ACCELERATE=0`, and add `backend-candle-cuda` when CUDA is selected or `MIDAS_CANDLE_CUDA=1` is set.
+- Burn frontend runs always compile with `backend-burn`, add `backend-burn-cuda` when CUDA is selected or `MIDAS_BURN_CUDA=1` is set, and add `backend-burn-mlx` when you explicitly target `mps` or opt into it with `MIDAS_BURN_MLX=1`.
 - `burn-mlx` currently needs both `cmake` and an active Xcode Metal Toolchain. On this machine the MLX source build progressed after installing `cmake`, but `xcrun metal` still reports the Metal toolchain as unavailable.
 - Rollout details live in [`docs/ml_backend_rollout.md`](docs/ml_backend_rollout.md).
 
@@ -45,12 +45,18 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
   `cargo run --features backend-candle --bin train_rl -- --backend candle --device cpu --algorithm ppo --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --test-parquet data/val/SPY.parquet --outdir runs_rl_candle`
 - Rust GA-only trainer on Burn CPU:  
   `cargo run --features backend-burn --bin train_ga -- --backend burn --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_cpu`
-- Rust GA-only trainer on Burn legacy ndarray CPU:  
-  `MIDAS_BURN_CPU_BACKEND=ndarray cargo run --features backend-burn,backend-burn-ndarray --bin train_ga -- --backend burn --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_ndarray`
+- Rust GA-only trainer on deterministic Burn CPU (`burn-ndarray`):
+  `cargo run --features backend-burn --bin train_ga -- --backend burn --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_cpu`
 - Rust GA-only trainer on Burn CUDA (Linux box):  
-  `cargo run --features backend-burn,backend-burn-cuda --bin train_ga -- --backend burn --device cuda --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_cuda`
+  `CUDARC_CUDA_VERSION=13000 cargo run --features backend-burn,backend-burn-cuda --bin train_ga -- --backend burn --device cuda --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_cuda`
 - Rust GA-only trainer on Burn MLX (macOS Apple GPU, toolchain required):  
   `cargo run --features backend-burn,backend-burn-mlx --bin train_ga -- --backend burn --device mps --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_burn_mlx`
+- Rust RL trainer on Burn CPU (manual PPO):
+  `cargo run --features backend-burn --bin train_rl -- --backend burn --device cpu --algorithm ppo --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --test-parquet data/val/SPY.parquet --outdir runs_rl_burn`
+- Supervised trainer on Burn CPU:
+  `cargo run --features backend-burn --bin supervised -- train --backend burn --device cpu --input .run/supervised/datasets/example.parquet --outdir .run/supervised/runs/burn-cpu`
+- Supervised long-run checkpoints:
+  add `--checkpoint-every 1000`; resumable policies and train/validation metrics are recorded at each checkpoint while holdout is reserved for the final policy. Burn/Candle resume artifacts preserve deterministic initialization and AdamW state.
 
 ## Python examples (deprecated)
 

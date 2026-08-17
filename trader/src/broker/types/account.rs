@@ -49,6 +49,9 @@ pub struct AccountSnapshot {
     pub net_liq: Option<f64>,
     pub realized_pnl: Option<f64>,
     pub unrealized_pnl: Option<f64>,
+    /// Cumulative broker-reported fees/commissions, when the broker exposes
+    /// them as explicit fill/account data. This is a positive magnitude.
+    pub fees: Option<f64>,
     pub intraday_margin: Option<f64>,
     pub open_position_qty: Option<f64>,
     pub market_position_qty: Option<f64>,

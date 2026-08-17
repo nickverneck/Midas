@@ -37,16 +37,19 @@ pub fn max_drawdown(equity: &[f64]) -> f64 {
     max_dd
 }
 
-pub fn liquidation_cost(
+pub fn liquidation_cost_components(
     position: i32,
     commission_round_turn: f64,
     slippage_per_contract: f64,
-) -> f64 {
+) -> (f64, f64) {
     if position == 0 {
-        return 0.0;
+        return (0.0, 0.0);
     }
     let contracts = position.abs() as f64;
-    contracts * ((commission_round_turn / 2.0) + slippage_per_contract)
+    (
+        contracts * (commission_round_turn / 2.0),
+        contracts * slippage_per_contract,
+    )
 }
 
 pub fn candidate_fitness(

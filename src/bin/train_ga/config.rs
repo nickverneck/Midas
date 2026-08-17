@@ -76,3 +76,42 @@ pub struct CandidateConfig {
     pub flat_hold_penalty_growth: f64,
     pub max_flat_hold_bars: usize,
 }
+
+#[cfg(test)]
+pub(crate) fn test_candidate_config(device: ExecutionTarget) -> CandidateConfig {
+    CandidateConfig {
+        initial_balance: 1_000.0,
+        max_position: 1,
+        margin_mode: MarginMode::PerContract,
+        contract_multiplier: 1.0,
+        margin_per_contract: 50.0,
+        disable_margin: false,
+        w_pnl: 1.0,
+        w_sortino: 0.0,
+        w_mdd: 0.0,
+        sortino_annualization: 1.0,
+        hidden: 0,
+        layers: 0,
+        eval_windows: 1,
+        device,
+        ignore_session: true,
+        drawdown_penalty: 0.0,
+        drawdown_penalty_growth: 0.0,
+        session_close_penalty: 0.0,
+        auto_close_minutes_before_close: -1.0,
+        max_hold_bars_positive: 0,
+        max_hold_bars_drawdown: 0,
+        hold_duration_penalty: 0.0,
+        hold_duration_penalty_growth: 0.0,
+        hold_duration_penalty_positive_scale: 0.5,
+        hold_duration_penalty_negative_scale: 1.5,
+        min_hold_bars: 0,
+        early_exit_penalty: 0.0,
+        early_flip_penalty: 0.0,
+        invalid_revert_penalty: 0.0,
+        invalid_revert_penalty_growth: 0.0,
+        flat_hold_penalty: 0.0,
+        flat_hold_penalty_growth: 0.0,
+        max_flat_hold_bars: 0,
+    }
+}

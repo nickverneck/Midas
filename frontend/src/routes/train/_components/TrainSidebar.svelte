@@ -57,8 +57,8 @@
 		rlAlgorithm = $bindable(),
 		gaDataMode = $bindable(),
 		rlDataMode = $bindable(),
-		gaParams,
-		rlParams,
+		gaParams = $bindable(),
+		rlParams = $bindable(),
 		diagnosticsLoading,
 		liveLogUpdates = $bindable(),
 		canStartTraining,
@@ -137,8 +137,8 @@
 							bind:rlAlgorithm
 							bind:gaDataMode
 							bind:rlDataMode
-							{gaParams}
-							{rlParams}
+							bind:gaParams
+							bind:rlParams
 							onBrowseParquet={onBrowseParquet}
 							onApplyFuturesPreset={onApplyFuturesPreset}
 							onSubmitGa={onSubmitGa}

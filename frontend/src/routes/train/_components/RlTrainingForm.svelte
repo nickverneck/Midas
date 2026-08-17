@@ -25,7 +25,7 @@
 	};
 
 	let {
-		params,
+		params = $bindable(),
 		dataMode = $bindable(),
 		rlAlgorithm = $bindable(),
 		onBrowseParquet,
@@ -168,7 +168,7 @@
 				{#if params.backend === "libtorch"}
 					<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
 				{:else if params.backend === "burn"}
-					<div>`burn` is implemented for GA in this branch, but the RL runner is still not implemented yet.</div>
+					<div>`burn` is implemented for GA and PPO/GRPO RL in this branch. Auto probes CUDA when available and otherwise falls back to CPU.</div>
 				{:else if params.backend === "candle"}
 					<div>`candle` is implemented for RL PPO and GRPO in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
 				{:else}

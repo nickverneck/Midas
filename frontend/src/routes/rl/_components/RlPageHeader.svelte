@@ -20,45 +20,45 @@
 	}: Props = $props();
 </script>
 
-<div class="flex flex-wrap items-center justify-between gap-4">
-	<div>
-		<h1 class="text-4xl font-bold tracking-tight">RL Analytics</h1>
+<div class="flex min-w-0 flex-wrap items-center justify-between gap-4">
+	<div class="min-w-0">
+		<h1 class="break-words text-3xl font-bold tracking-tight sm:text-4xl">RL Analytics</h1>
 		<p class="text-sm text-muted-foreground">RL training metrics from Rust runs.</p>
 	</div>
-	<div class="flex flex-wrap items-center gap-3">
-		<div class="flex items-center gap-2">
-			<Input class="w-56" placeholder="runs_rl" bind:value={logDir} />
+	<div class="flex w-full min-w-0 flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center sm:gap-5">
+		<div class="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
+			<Input class="w-full min-w-0 sm:w-56" placeholder="runs_rl" bind:value={logDir} />
 			<Button onclick={onReload} disabled={loading}>
 				{loading ? "Loading..." : "Reload"}
 			</Button>
 			<Button variant="outline" onclick={onBrowse}>Browse</Button>
 		</div>
-		<div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-			<span class="font-medium uppercase tracking-wide">Fitness weights</span>
-			<div class="flex items-center gap-1">
+		<div class="grid w-full min-w-0 gap-2 text-xs text-muted-foreground sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:gap-3 sm:border-l sm:border-border sm:pl-4">
+			<span class="whitespace-nowrap font-medium uppercase tracking-wide">Fitness weights</span>
+			<div class="grid min-w-0 grid-cols-[minmax(0,1fr)_5rem] items-center gap-2 sm:flex sm:items-center sm:gap-2">
 				<span>w_pnl</span>
 				<Input
-					class="h-8 w-20 text-xs"
+					class="h-8 w-full min-w-0 text-xs sm:w-20"
 					type="number"
 					step="0.01"
 					aria-label="Fitness weight PnL"
 					bind:value={fitnessWeights.pnl}
 				/>
 			</div>
-			<div class="flex items-center gap-1">
+			<div class="grid min-w-0 grid-cols-[minmax(0,1fr)_5rem] items-center gap-2 sm:flex sm:items-center sm:gap-2">
 				<span>w_sortino</span>
 				<Input
-					class="h-8 w-20 text-xs"
+					class="h-8 w-full min-w-0 text-xs sm:w-20"
 					type="number"
 					step="0.01"
 					aria-label="Fitness weight Sortino"
 					bind:value={fitnessWeights.sortino}
 				/>
 			</div>
-			<div class="flex items-center gap-1">
+			<div class="grid min-w-0 grid-cols-[minmax(0,1fr)_5rem] items-center gap-2 sm:flex sm:items-center sm:gap-2">
 				<span>w_mdd</span>
 				<Input
-					class="h-8 w-20 text-xs"
+					class="h-8 w-full min-w-0 text-xs sm:w-20"
 					type="number"
 					step="0.01"
 					aria-label="Fitness weight MDD"

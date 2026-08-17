@@ -5,9 +5,11 @@ pub mod bars;
 pub mod env;
 pub mod features;
 pub mod fill;
+pub mod meta_gate;
 pub mod ml;
 pub mod sampler;
 pub mod script;
+pub mod supervised;
 
 #[cfg(feature = "python")]
 mod py_bindings {

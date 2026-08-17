@@ -17,7 +17,7 @@
 		onApplyFuturesPreset: (presetKey: FuturesPresetKey) => void;
 	};
 
-	let { params, dataMode = $bindable(), onBrowseParquet, onApplyFuturesPreset }: Props = $props();
+	let { params = $bindable(), dataMode = $bindable(), onBrowseParquet, onApplyFuturesPreset }: Props = $props();
 
 	const volumeBarSizeInvalid = () => {
 		if (params["bar-kind"] !== "volume") return false;
@@ -165,7 +165,7 @@
 				{#if params.backend === "libtorch"}
 					<div>`libtorch` is the active implementation. `Auto` prefers CUDA, then MPS, then CPU.</div>
 				{:else if params.backend === "burn"}
-					<div>`burn` is implemented for GA in this branch. Use `cpu` for the Burn CPU backend, enable the Burn CUDA Cargo feature on the Linux box when you want native CUDA, select `mps` on macOS when the burn-mlx toolchain is installed, and set `MIDAS_BURN_CPU_BACKEND=ndarray` only when you want the legacy CPU path.</div>
+					<div>`burn` is implemented for GA in this branch. Auto probes for a usable accelerator and otherwise uses deterministic `burn-ndarray` CPU; explicit CUDA requires a usable NVIDIA device, and MPS is available on macOS when the burn-mlx toolchain is installed.</div>
 				{:else if params.backend === "candle"}
 					<div>`candle` is implemented for GA in this branch. Use `cpu` now, enable the Candle CUDA Cargo feature on the Linux box when you want to benchmark GPU, and keep MLX for Apple GPU viability.</div>
 				{:else}
