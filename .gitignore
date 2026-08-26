@@ -28,6 +28,16 @@ target
 *.parquet
 .run/meta-gate/
 .run/supervised/
+.run/
+*/.run/
+**/.DS_Store
+**/runs_ga/
+**/runs_rl/
+docs/research/
+trader/docs/research/
+config/supervised.*.yaml
+!config/supervised.example.yaml
+*.safetensors
 *.pt
 .env
 .auth/
