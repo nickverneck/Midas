@@ -47,6 +47,7 @@ pub(crate) fn grpo_update(
         let mut epoch_entropy = 0.0;
         let mut epoch_kl = 0.0;
         let mut epoch_clip_frac = 0.0;
+        let mut loss_terms = Vec::with_capacity(group.rollouts.len());
 
         for (i, rollout) in group.rollouts.iter().enumerate() {
             let logits = policy.forward(&rollout.obs, true)?;
@@ -67,9 +68,7 @@ pub(crate) fn grpo_update(
             let entropy = (&probs * &log_probs)?.sum(1)?.neg()?.mean_all()?;
 
             let loss = (&policy_loss - (&entropy * cfg.ent_coef)?)?;
-            let grads = loss.backward()?;
-            policy_grad_norm_sum += named_grad_l2_norm(varmap, "policy", &grads)?;
-            opt.step(&grads)?;
+            loss_terms.push(loss);
 
             epoch_policy_loss += policy_loss.to_scalar::<f32>()? as f64;
             epoch_entropy += entropy.to_scalar::<f32>()? as f64;
@@ -90,6 +89,18 @@ pub(crate) fn grpo_update(
         }
 
         let denom = group.rollouts.len().max(1) as f64;
+        if !loss_terms.is_empty() {
+            // One optimizer step is applied to the mean group objective. The
+            // old implementation stepped Adam once per rollout, so later
+            // rollouts were trained against a moving policy while still using
+            // the same old log-probabilities. That is not the clipped GRPO
+            // objective and made the update depend on group ordering.
+            let loss_refs = loss_terms.iter().collect::<Vec<_>>();
+            let group_loss = Tensor::stack(&loss_refs, 0)?.mean_all()?;
+            let grads = group_loss.backward()?;
+            policy_grad_norm_sum += named_grad_l2_norm(varmap, "policy", &grads)?;
+            opt.step(&grads)?;
+        }
         policy_loss_sum += epoch_policy_loss / denom;
         entropy_sum += epoch_entropy / denom;
         kl_sum += epoch_kl / denom;

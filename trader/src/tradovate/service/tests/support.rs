@@ -64,6 +64,7 @@ pub(super) fn test_state(session: SessionState) -> ServiceState {
         replay_lookup_job: None,
         replay_download_job: None,
         latency: LatencySnapshot::default(),
+        snapshot_generation: 0,
         snapshot_revision: 0,
     }
 }

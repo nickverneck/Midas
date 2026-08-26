@@ -66,6 +66,10 @@ pub struct ReplayMarkovOrientationGateConfig {
     /// Cap one marked excursion so one exceptional trend cannot make the
     /// selector chase an already-ended move.
     pub max_abs_outcome_ticks: f64,
+    /// Weight applied when moving one completed crossover farther into the
+    /// past. `1.0` is an equal-weight rolling history; values below `1.0`
+    /// make the gate respond more quickly to a regime transition.
+    pub outcome_decay: f64,
     /// Consecutive identical proposals required before a state transition.
     pub confirmation_events: usize,
     /// Number of raw-cross decisions the current normal/inverted state must
@@ -79,6 +83,11 @@ pub struct ReplayMarkovOrientationGateConfig {
     /// than treating chop as proof of inversion.
     pub efficiency_lookback_bars: Option<usize>,
     pub neutral_below_efficiency_ratio: Option<f64>,
+    /// Optional regime veto for the historical selector.  When the current
+    /// preceding-bar efficiency ratio is at or above this level, the gate
+    /// immediately restores Normal, even if the rolling shadow outcomes still
+    /// favor Inverted.  This lets a strong trend supersede stale chop history.
+    pub normal_override_above_efficiency_ratio: Option<f64>,
     #[serde(default)]
     pub neutral_action: MarkovNeutralAction,
 }
@@ -91,11 +100,13 @@ impl Default for ReplayMarkovOrientationGateConfig {
             minimum_completed_outcomes: 5,
             score_margin_ticks: 300.0,
             max_abs_outcome_ticks: 1_200.0,
+            outcome_decay: 1.0,
             confirmation_events: 3,
             minimum_dwell_events: 10,
             reset_after_gap_minutes: Some(120),
             efficiency_lookback_bars: Some(30),
             neutral_below_efficiency_ratio: Some(0.20),
+            normal_override_above_efficiency_ratio: None,
             neutral_action: MarkovNeutralAction::NormalFallback,
         }
     }
@@ -125,18 +136,31 @@ impl ReplayMarkovOrientationGateConfig {
         if !self.max_abs_outcome_ticks.is_finite() || self.max_abs_outcome_ticks <= 0.0 {
             return Err("Markov max_abs_outcome_ticks must be finite and greater than zero".into());
         }
+        if !self.outcome_decay.is_finite() || self.outcome_decay <= 0.0 || self.outcome_decay > 1.0
+        {
+            return Err("Markov outcome_decay must be finite and in (0, 1]".into());
+        }
         match (
             self.efficiency_lookback_bars,
             self.neutral_below_efficiency_ratio,
         ) {
             (None, None) => {}
-            (Some(lookback), Some(cutoff))
-                if lookback >= 2 && cutoff.is_finite() && (0.0..=1.0).contains(&cutoff) => {}
+            (Some(lookback), cutoff)
+                if lookback >= 2
+                    && cutoff
+                        .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value)) => {}
             _ => {
                 return Err(
                     "Markov efficiency settings require lookback >= 2 and cutoff in [0, 1]".into(),
                 );
             }
+        }
+        if let Some(cutoff) = self.normal_override_above_efficiency_ratio
+            && (!cutoff.is_finite() || !(0.0..=1.0).contains(&cutoff))
+        {
+            return Err(
+                "Markov normal_override_above_efficiency_ratio must be finite and in [0, 1]".into(),
+            );
         }
         Ok(())
     }
@@ -156,6 +180,7 @@ pub struct MarkovOrientationDecision {
     pub confirmation_count: usize,
     pub dwell_events: usize,
     pub efficiency_ratio: Option<f64>,
+    pub normal_regime_override: bool,
     pub reset_for_gap: bool,
     pub audit_reason: &'static str,
 }
@@ -172,6 +197,7 @@ impl MarkovOrientationDecision {
             confirmation_count: 0,
             dwell_events: 0,
             efficiency_ratio: None,
+            normal_regime_override: false,
             reset_for_gap: false,
             audit_reason: "markov_disabled",
         }
@@ -253,14 +279,17 @@ impl ReplayMarkovOrientationGate {
 
         let efficiency_ratio =
             efficiency_ratio_before_current(bars, self.config.efficiency_lookback_bars);
+        let normal_regime_override = self.normal_regime_override(efficiency_ratio);
         let proposal = self.proposal(efficiency_ratio);
-        self.apply_proposal(proposal);
+        self.apply_proposal(proposal, normal_regime_override);
         self.previous_event = Some((current.ts_ns, current.close, raw_direction));
         let (normal_score_ticks, inverted_score_ticks) = self.scores();
         let reason = if reset_for_gap {
             "markov_gap_reset"
         } else if matches!(proposal, MarkovOrientationState::Neutral) {
             "markov_neutral_context_or_warmup"
+        } else if normal_regime_override {
+            "markov_trend_normal_override"
         } else if self.state != proposal {
             "markov_confirmation_or_dwell"
         } else {
@@ -271,6 +300,7 @@ impl ReplayMarkovOrientationGate {
             normal_score_ticks,
             inverted_score_ticks,
             efficiency_ratio,
+            normal_regime_override,
             reset_for_gap,
             reason,
         )
@@ -286,13 +316,21 @@ impl ReplayMarkovOrientationGate {
     }
 
     fn scores(&self) -> (f64, f64) {
-        let normal = self.outcomes.iter().copied().sum::<f64>();
+        let mut weight = 1.0;
+        let mut normal = 0.0;
+        for outcome in self.outcomes.iter().rev() {
+            normal += *outcome * weight;
+            weight *= self.config.outcome_decay;
+        }
         (normal, -normal)
     }
 
     fn proposal(&self, efficiency_ratio: Option<f64>) -> MarkovOrientationState {
         if self.outcomes.len() < self.config.minimum_completed_outcomes {
             return MarkovOrientationState::Neutral;
+        }
+        if self.normal_regime_override(efficiency_ratio) {
+            return MarkovOrientationState::Normal;
         }
         if self
             .config
@@ -312,7 +350,20 @@ impl ReplayMarkovOrientationGate {
         }
     }
 
-    fn apply_proposal(&mut self, proposal: MarkovOrientationState) {
+    fn normal_regime_override(&self, efficiency_ratio: Option<f64>) -> bool {
+        self.config
+            .normal_override_above_efficiency_ratio
+            .is_some_and(|cutoff| efficiency_ratio.is_some_and(|ratio| ratio >= cutoff))
+    }
+
+    fn apply_proposal(&mut self, proposal: MarkovOrientationState, force_normal: bool) {
+        if force_normal && proposal == MarkovOrientationState::Normal {
+            self.state = MarkovOrientationState::Normal;
+            self.proposed = Some(proposal);
+            self.proposal_count = 1;
+            self.dwell_events = 0;
+            return;
+        }
         if self.proposed == Some(proposal) {
             self.proposal_count = self.proposal_count.saturating_add(1);
         } else {
@@ -349,6 +400,7 @@ impl ReplayMarkovOrientationGate {
         normal_score_ticks: f64,
         inverted_score_ticks: f64,
         efficiency_ratio: Option<f64>,
+        normal_regime_override: bool,
         reset_for_gap: bool,
         audit_reason: &'static str,
     ) -> MarkovOrientationDecision {
@@ -370,6 +422,7 @@ impl ReplayMarkovOrientationGate {
             confirmation_count: self.proposal_count,
             dwell_events: self.dwell_events,
             efficiency_ratio,
+            normal_regime_override,
             reset_for_gap,
             audit_reason,
         }
@@ -395,6 +448,7 @@ impl ReplayMarkovOrientationGate {
             confirmation_count: self.proposal_count,
             dwell_events: self.dwell_events,
             efficiency_ratio,
+            normal_regime_override: false,
             reset_for_gap,
             audit_reason: reason,
         }
@@ -446,11 +500,13 @@ mod tests {
             minimum_completed_outcomes: 1,
             score_margin_ticks: 0.5,
             max_abs_outcome_ticks: 100.0,
+            outcome_decay: 1.0,
             confirmation_events: 1,
             minimum_dwell_events: 0,
             reset_after_gap_minutes: None,
             efficiency_lookback_bars: None,
             neutral_below_efficiency_ratio: None,
+            normal_override_above_efficiency_ratio: None,
             neutral_action: MarkovNeutralAction::NormalFallback,
         }
     }
@@ -519,5 +575,55 @@ mod tests {
         invalid.efficiency_lookback_bars = Some(1);
         invalid.neutral_below_efficiency_ratio = Some(0.2);
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn decay_emphasizes_the_most_recent_completed_crosses() {
+        let mut equal = config();
+        equal.score_window_outcomes = 2;
+        equal.minimum_completed_outcomes = 2;
+        equal.score_margin_ticks = 1.0;
+
+        let mut decayed = equal.clone();
+        decayed.outcome_decay = 0.25;
+
+        // The first completed outcome is +10 ticks, the next is -10 ticks.
+        // Equal weighting is neutral; recency weighting should favor the
+        // latest negative outcome and therefore select inversion.
+        let bars = [bar(0, 100.0), bar(60, 110.0), bar(120, 100.0)];
+        let mut equal_gate = ReplayMarkovOrientationGate::new(equal);
+        let _ = equal_gate.observe_cross(&bars[..1], 1, 1.0);
+        let _ = equal_gate.observe_cross(&bars[..2], 1, 1.0);
+        let equal_decision = equal_gate.observe_cross(&bars[..3], 1, 1.0);
+        assert_eq!(equal_decision.state, MarkovOrientationState::Neutral);
+
+        let mut decayed_gate = ReplayMarkovOrientationGate::new(decayed);
+        let _ = decayed_gate.observe_cross(&bars[..1], 1, 1.0);
+        let _ = decayed_gate.observe_cross(&bars[..2], 1, 1.0);
+        let decayed_decision = decayed_gate.observe_cross(&bars[..3], 1, 1.0);
+        assert_eq!(decayed_decision.state, MarkovOrientationState::Inverted);
+        assert!(decayed_decision.normal_score_ticks < 0.0);
+    }
+
+    #[test]
+    fn strong_efficiency_can_immediately_restore_normal_orientation() {
+        let mut config = config();
+        config.score_window_outcomes = 1;
+        config.minimum_completed_outcomes = 1;
+        config.score_margin_ticks = 1.0;
+        config.efficiency_lookback_bars = Some(2);
+        config.normal_override_above_efficiency_ratio = Some(0.75);
+
+        let mut gate = ReplayMarkovOrientationGate::new(config);
+        let _ = gate.observe_cross(&[bar(0, 110.0)], 1, 1.0);
+        // The prior raw-long cross lost 10 ticks, but the current preceding
+        // window is a clean directional move with ER=1.0.  Trend context must
+        // supersede the stale inversion vote.
+        let decision =
+            gate.observe_cross(&[bar(0, 110.0), bar(60, 105.0), bar(120, 100.0)], 1, 1.0);
+        assert_eq!(decision.state, MarkovOrientationState::Normal);
+        assert_eq!(decision.effective_inverted, Some(false));
+        assert!(decision.normal_regime_override);
+        assert_eq!(decision.audit_reason, "markov_trend_normal_override");
     }
 }

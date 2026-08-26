@@ -57,6 +57,7 @@ struct ServiceState {
     replay_lookup_job: Option<ReplayLookupJob>,
     replay_download_job: Option<ReplayDownloadJob>,
     latency: LatencySnapshot,
+    snapshot_generation: u64,
     snapshot_revision: u64,
 }
 

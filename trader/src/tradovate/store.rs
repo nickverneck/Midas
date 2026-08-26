@@ -131,6 +131,10 @@ impl UserSyncStore {
         market: Option<&MarketSnapshot>,
         managed_protection: &BTreeMap<StrategyProtectionKey, ManagedProtectionOrders>,
     ) -> Vec<AccountSnapshot> {
+        // Build the fee index once for this snapshot batch. The old path
+        // rescanned every fill and every fillFee for each account, which made
+        // snapshot cost grow with both history size and account count.
+        let fee_totals = self.account_fee_totals();
         accounts
             .iter()
             .map(|account| {
@@ -151,7 +155,7 @@ impl UserSyncStore {
                     .get(&account.id)
                     .map(|items| items.values().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
-                let fees = self.account_fee_total(account.id);
+                let fees = fee_totals.get(&account.id).copied();
                 let replay_account = raw_account.as_ref().is_some_and(is_replay_entity)
                     || raw_risk.as_ref().is_some_and(is_replay_entity)
                     || raw_cash.as_ref().is_some_and(is_replay_entity);
@@ -397,52 +401,49 @@ impl UserSyncStore {
         self.orders.get(&account_id)?.get(&order_id)
     }
 
-    /// Return the cumulative explicit fees visible for an account.
+    /// Return cumulative explicit fees indexed by account.
     ///
     /// Tradovate can expose a fee as a `fillFee` entity, or as a commission
     /// field on the corresponding `fill`. Prefer `fillFee` when both exist so
     /// the same commission is not counted twice. Do not infer fees from a
     /// balance delta: a balance delta can also be ordinary mark-to-market PnL.
-    fn account_fee_total(&self, account_id: i64) -> Option<f64> {
-        let mut total = 0.0;
-        let mut found = false;
+    fn account_fee_totals(&self) -> BTreeMap<i64, f64> {
+        let mut fees_by_fill = BTreeMap::<i64, f64>::new();
+        let mut unlinked_fees_by_account = BTreeMap::<i64, f64>::new();
 
-        for fill in self.history_fills.values().filter(|fill| {
-            extract_account_id("fill", fill) == Some(account_id)
-        }) {
-            let fill_id = extract_entity_id(fill);
-            let explicit_fill_fee = fill_id.and_then(|fill_id| {
-                let amount = self
-                    .fill_fees
-                    .values()
-                    .filter(|fee| json_i64(fee, "fillId") == Some(fill_id))
-                    .filter_map(explicit_fee_amount)
-                    .sum::<f64>();
-                (amount > ACCOUNT_FEE_EPSILON).then_some(amount)
-            });
-
-            if let Some(amount) = explicit_fill_fee {
-                total += amount;
-                found = true;
-            } else if let Some(amount) = explicit_fee_amount(fill) {
-                total += amount;
-                found = true;
+        for fee in self.fill_fees.values() {
+            let Some(amount) = explicit_fee_amount(fee) else {
+                continue;
+            };
+            if let Some(fill_id) = json_i64(fee, "fillId") {
+                *fees_by_fill.entry(fill_id).or_default() += amount;
+            } else if let Some(account_id) = json_i64(fee, "accountId") {
+                // Keep this fallback for a broker payload that sends fillFee
+                // before the matching fill, provided it carries accountId.
+                *unlinked_fees_by_account.entry(account_id).or_default() += amount;
             }
         }
 
-        // Keep this fallback for a broker payload that sends fillFee before
-        // the matching fill, provided the fee entity carries accountId.
-        for fee in self.fill_fees.values().filter(|fee| {
-            json_i64(fee, "accountId") == Some(account_id)
-                && json_i64(fee, "fillId").is_none()
-        }) {
-            if let Some(amount) = explicit_fee_amount(fee) {
-                total += amount;
-                found = true;
+        let mut totals = BTreeMap::<i64, f64>::new();
+        for fill in self.history_fills.values() {
+            let Some(account_id) = extract_account_id("fill", fill) else {
+                continue;
+            };
+            let explicit_fill_fee = extract_entity_id(fill)
+                .and_then(|fill_id| fees_by_fill.get(&fill_id).copied())
+                .filter(|amount| *amount > ACCOUNT_FEE_EPSILON);
+            let amount = explicit_fill_fee.or_else(|| explicit_fee_amount(fill));
+            if let Some(amount) = amount {
+                *totals.entry(account_id).or_default() += amount;
             }
         }
 
-        (found && total.is_finite()).then_some(total)
+        for (account_id, amount) in unlinked_fees_by_account {
+            *totals.entry(account_id).or_default() += amount;
+        }
+
+        totals.retain(|_, total| total.is_finite());
+        totals
     }
 
     fn find_order_by_id(&self, order_id: i64) -> Option<&Value> {

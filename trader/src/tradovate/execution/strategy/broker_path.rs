@@ -239,10 +239,12 @@ pub(super) fn emit_pending_target_gate_debug(
     waiting_for_position_sync: bool,
 ) {
     let effective_qty = effective_market_position_qty(session);
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "strategy pending target gate | {source} | pending target {pending_target_qty} | actual {actual_qty} | effective {effective_qty} | reached {reached} | overshot {overshot} | live broker path {has_live_broker_path} | waiting position sync {waiting_for_position_sync} | {}",
-        execution_observability_context(session)
-    )));
+    emit_debug_log(event_tx, session, || {
+        format!(
+            "strategy pending target gate | {source} | pending target {pending_target_qty} | actual {actual_qty} | effective {effective_qty} | reached {reached} | overshot {overshot} | live broker path {has_live_broker_path} | waiting position sync {waiting_for_position_sync} | {}",
+            execution_observability_context(session)
+        )
+    });
 }
 
 pub(crate) fn should_wait_for_automated_position_sync(
@@ -281,7 +283,10 @@ pub(crate) fn clear_stale_pending_target(
     actual_qty: i32,
     event_tx: &UnboundedSender<ServiceEvent>,
 ) {
-    let observability = execution_observability_context(session);
+    // Capture the request context before clearing the tracker.  Otherwise
+    // the diagnostic loses the clOrdId/order id that explains which stale
+    // submission was recovered.
+    let pending_context = execution_observability_context(session);
     session.execution_runtime.pending_target_qty = None;
     session.pending_signal_context = None;
     session.order_latency_tracker = None;
@@ -292,9 +297,12 @@ pub(crate) fn clear_stale_pending_target(
     let _ = event_tx.send(ServiceEvent::Status(format!(
         "Pending target {pending} cleared: broker has no active order path; re-evaluating."
     )));
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "pending target cleared | target {pending} | actual {actual_qty} | broker has no active order path | {observability}"
-    )));
+    emit_debug_log(event_tx, session, || {
+        format!(
+            "pending target cleared | target {pending} | actual {actual_qty} | broker has no active order path | {}",
+            pending_context
+        )
+    });
 }
 
 pub(super) fn force_reevaluate_pending_window(session: &mut SessionState) {

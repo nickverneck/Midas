@@ -539,9 +539,11 @@ impl PreparedEmaSweepInputs {
         config: &AppConfig,
         child: &ReplaySweepChildSpec,
     ) -> Result<(), String> {
-        if !replay.has_prepared_time_bar_source() || !child.bar_type.is_time_based() {
+        if !replay.has_prepared_time_bar_source()
+            || (!child.bar_type.is_time_based() && !child.bar_type.is_range())
+        {
             return Err(
-                "prepared kernel requires cached server bars or cached raw-tick-derived time bars; event/range bars are excluded"
+                "prepared kernel requires cached server bars or cached raw-tick-derived time/range bars; tick/volume bars are excluded"
                     .to_string(),
             );
         }
@@ -593,14 +595,13 @@ impl PreparedEmaSweepInputs {
         {
             return Err("prepared kernel requires a valid market tick size".to_string());
         }
+        // The Markov gate's shadow score is intentionally a causal
+        // close-to-close mark between completed crosses.  It is independent
+        // of the broker protection on the actual simulated position, so the
+        // replay-only gate may be combined with TP/SL/trailing sweeps.  This
+        // mixed mode is useful for research, but it must not be described as
+        // protection-aware gate training.
         let ema = &child.resolved_strategy.native_ema;
-        if child.replay_markov_orientation_gate.enabled
-            && (ema.take_profit_ticks > 0.0 || ema.stop_loss_ticks > 0.0 || ema.use_trailing_stop)
-        {
-            return Err(
-                "replay Markov orientation gate currently requires no TP/SL/trailing protection; shadow outcomes are close-to-close marks, not broker exits"
-                    .to_string());
-        }
         if ema.use_trailing_stop
             && (ema.trail_trigger_ticks <= 0.0 || ema.trail_offset_ticks <= 0.0)
         {
@@ -1680,7 +1681,7 @@ fn append_diagnostic(
             trace.slow_length,
             effective_inverted,
             markov.map(|decision| format!(
-                " | markov state={:?} proposal={:?} normal_ticks={:.2} inverted_ticks={:.2} outcomes={} confirm={} dwell={} er={} reset={} reason={}",
+                " | markov state={:?} proposal={:?} normal_ticks={:.2} inverted_ticks={:.2} outcomes={} confirm={} dwell={} er={} normal_override={} reset={} reason={}",
                 decision.state,
                 decision.proposal,
                 decision.normal_score_ticks,
@@ -1689,6 +1690,7 @@ fn append_diagnostic(
                 decision.confirmation_count,
                 decision.dwell_events,
                 decision.efficiency_ratio.map(|value| format!("{value:.3}")).unwrap_or_else(|| "n/a".to_string()),
+                decision.normal_regime_override,
                 decision.reset_for_gap,
                 decision.audit_reason,
             )).unwrap_or_default(),
@@ -1702,7 +1704,7 @@ fn format_markov_audit(base: &str, markov: Option<&MarkovOrientationDecision>) -
         return base.to_string();
     };
     format!(
-        "{base}; markov state={:?} proposal={:?} normal_ticks={:.2} inverted_ticks={:.2} outcomes={} confirm={} dwell={} er={} reset={} reason={}",
+        "{base}; markov state={:?} proposal={:?} normal_ticks={:.2} inverted_ticks={:.2} outcomes={} confirm={} dwell={} er={} normal_override={} reset={} reason={}",
         decision.state,
         decision.proposal,
         decision.normal_score_ticks,
@@ -1714,6 +1716,7 @@ fn format_markov_audit(base: &str, markov: Option<&MarkovOrientationDecision>) -
             .efficiency_ratio
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "n/a".to_string()),
+        decision.normal_regime_override,
         decision.reset_for_gap,
         decision.audit_reason,
     )

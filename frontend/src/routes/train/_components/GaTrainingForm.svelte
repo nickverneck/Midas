@@ -217,7 +217,8 @@
 			</div>
 			<div class="grid gap-2">
 				<Label for="ga-eval-windows">Eval Windows</Label>
-				<Input id="ga-eval-windows" type="number" min="1" bind:value={params["eval-windows"]} />
+				<Input id="ga-eval-windows" type="number" min="0" bind:value={params["eval-windows"]} />
+				<p class="text-xs text-muted-foreground">0 scores every validation/test window.</p>
 			</div>
 		</div>
 	</details>
@@ -371,6 +372,18 @@
 					bind:value={params["selection-gap-penalty"]}
 				/>
 			</div>
+			<label class="flex items-start gap-2 text-sm md:col-span-2">
+				<input
+					id="ga-selection-use-eval"
+					type="checkbox"
+					class="mt-0.5"
+					bind:checked={params["selection-use-eval"]}
+				/>
+				<span>
+					<span class="block font-medium">Use validation for policy selection</span>
+					<span class="block text-xs text-muted-foreground">When enabled, GA ranks candidates with the train/eval score. Leave off only for a train-only diagnostic run.</span>
+				</span>
+			</label>
 		</div>
 	</details>
 

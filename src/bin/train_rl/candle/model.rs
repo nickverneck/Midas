@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
-use candle_core::Tensor;
-use candle_nn::{Dropout, Linear, Module, ModuleT, VarBuilder, VarMap, linear};
+use candle_core::{DType, Device, Tensor};
+use candle_nn::{Dropout, Init, Linear, Module, ModuleT, VarBuilder, VarMap, linear};
+use rand::Rng;
+use rand::rngs::StdRng;
+use rand_distr::{Distribution, Normal};
 use std::path::Path;
 
 pub(crate) struct Mlp {
@@ -32,6 +35,81 @@ pub(crate) fn build_policy(
     dropout: f64,
 ) -> Result<Mlp> {
     build_mlp(vb, input_dim, hidden, layers, action_dim, dropout)
+}
+
+/// Populate a model's variables using a host-side seeded RNG.
+///
+/// Candle's CPU backend does not expose a seedable device RNG, so its default
+/// Kaiming initializers cannot be made reproducible through the device API.
+/// Creating the tensors here keeps CPU runs reproducible while preserving the
+/// same Kaiming-normal weights and uniform biases used by candle_nn::linear.
+pub(crate) fn initialize_seeded_mlp(
+    varmap: &mut VarMap,
+    prefix: &str,
+    input_dim: usize,
+    hidden: usize,
+    layers: usize,
+    output_dim: usize,
+    seed_rng: &mut StdRng,
+    device: &Device,
+) -> Result<()> {
+    let mut in_dim = input_dim;
+    for layer_idx in 0..layers {
+        initialize_seeded_linear(
+            varmap,
+            &format!("{prefix}.layer_{layer_idx}"),
+            in_dim,
+            hidden,
+            seed_rng,
+            device,
+        )?;
+        in_dim = hidden;
+    }
+    initialize_seeded_linear(
+        varmap,
+        &format!("{prefix}.out"),
+        in_dim,
+        output_dim,
+        seed_rng,
+        device,
+    )?;
+    Ok(())
+}
+
+fn initialize_seeded_linear(
+    varmap: &mut VarMap,
+    prefix: &str,
+    in_dim: usize,
+    out_dim: usize,
+    seed_rng: &mut StdRng,
+    device: &Device,
+) -> Result<()> {
+    let weight_path = format!("{prefix}.weight");
+    let bias_path = format!("{prefix}.bias");
+    let weight_std = (2.0 / in_dim as f64).sqrt();
+    let normal = Normal::new(0.0, weight_std).context("create seeded Kaiming initializer")?;
+    let weights = (0..out_dim * in_dim)
+        .map(|_| normal.sample(seed_rng) as f32)
+        .collect::<Vec<_>>();
+    let bias_bound = 1.0 / (in_dim as f64).sqrt();
+    let biases = (0..out_dim)
+        .map(|_| seed_rng.gen_range(-bias_bound..=bias_bound) as f32)
+        .collect::<Vec<_>>();
+
+    varmap.get(
+        (out_dim, in_dim),
+        &weight_path,
+        Init::Const(0.0),
+        DType::F32,
+        device,
+    )?;
+    varmap.get(out_dim, &bias_path, Init::Const(0.0), DType::F32, device)?;
+    varmap.set_one(
+        &weight_path,
+        Tensor::from_vec(weights, (out_dim, in_dim), device)?,
+    )?;
+    varmap.set_one(&bias_path, Tensor::from_vec(biases, out_dim, device)?)?;
+    Ok(())
 }
 
 pub(super) fn build_value(

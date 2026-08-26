@@ -76,7 +76,8 @@
 			windowed: dataMode === 'windowed',
 			'full-file': dataMode === 'full',
 			'load-checkpoint': startMode === 'continue' ? checkpointPath.trim() : undefined,
-			'checkpoint-every': 1
+			'checkpoint-every': 1,
+			...(isGa ? { 'selection-use-eval': true, 'eval-windows': 0 } : {})
 		};
 
 		if (isGa) {

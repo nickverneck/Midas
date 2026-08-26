@@ -79,13 +79,13 @@ fn session_stats_reports_pnl_per_hour() {
     assert!(
         event_lines
             .iter()
-            .any(|line| line.contains("Hourly Trade PnL/H (local)"))
+            .any(|line| line == "Hourly PnL/H (local): Net | Trade | Fees")
     );
-    assert!(
-        event_lines
-            .iter()
-            .any(|line| line.contains("+20.00/h net +20.00 fees 0.00"))
-    );
+    assert!(event_lines.iter().any(|line| {
+        line.contains("Net +20.00/h")
+            && line.contains("Trade +20.00/h")
+            && line.contains("Fees 0.00/h")
+    }));
 
     let body = app.build_persisted_log_body("20260403T120000Z");
     assert!(body.contains("net_pnl_per_hour: +10.00/h"));
@@ -368,7 +368,17 @@ fn session_stats_filters_fee_only_and_mixed_fee_balance_deltas() {
     assert!(
         hidden_event_text
             .iter()
-            .any(|line| line.contains("(1/1, 2 trade events)"))
+            .any(|line| line == "Hourly PnL/H (local): Net | Trade")
+    );
+    assert!(
+        hidden_event_text
+            .iter()
+            .all(|line| !line.contains("Hourly PnL/H (local): Net | Trade | Fees"))
+    );
+    assert!(
+        hidden_event_text
+            .iter()
+            .any(|line| line.contains("| W/L 1/1 | 2 trade events"))
     );
     assert!(
         hidden_event_text
@@ -625,6 +635,7 @@ fn account_snapshot_changes_do_not_mutate_broker_attributed_engine_history() {
     let history = EngineHistorySnapshot {
         run_id: "gc-run".to_string(),
         started_at_utc: chrono::Utc::now(),
+        updated_at_utc: None,
         account_id: 7,
         account_name: "SIM".to_string(),
         contract_id: 4_095_561,
@@ -649,7 +660,195 @@ fn account_snapshot_changes_do_not_mutate_broker_attributed_engine_history() {
     let lines = rendered_text(app.selected_session_stats_lines());
     assert!(lines.iter().any(|line| line.contains("GCQ6")));
     assert!(lines.iter().any(|line| line.contains("240.00")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("PnL/H: Net n/a  Trade n/a"))
+    );
     assert!(lines.iter().all(|line| !line.contains("101000")));
+
+    let event_lines = rendered_text(app.session_stats_event_lines(8));
+    assert_eq!(
+        event_lines,
+        vec!["No broker-attributed fills for this engine run yet."]
+    );
+}
+
+#[test]
+fn broker_engine_history_restores_hourly_pnl_and_colorized_recent_fills() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(7, "SIM")];
+
+    let fill = |ts: &str, side, realized_pnl: f64, fill_id: i64| crate::broker::EngineHistoryFill {
+        fill_id,
+        order_id: fill_id + 100,
+        ts_ns: chrono::DateTime::parse_from_rfc3339(ts)
+            .expect("valid fill timestamp")
+            .timestamp_nanos_opt()
+            .expect("timestamp in range"),
+        side,
+        qty: 1,
+        price: 4_570.0 + fill_id as f64,
+        realized_pnl,
+    };
+    let fills = vec![
+        fill(
+            "2026-08-20T13:05:00Z",
+            crate::broker::TradeMarkerSide::Buy,
+            40.0,
+            1,
+        ),
+        fill(
+            "2026-08-20T13:35:00Z",
+            crate::broker::TradeMarkerSide::Sell,
+            10.0,
+            2,
+        ),
+        fill(
+            "2026-08-20T14:05:00Z",
+            crate::broker::TradeMarkerSide::Sell,
+            -25.0,
+            3,
+        ),
+    ];
+    let history = crate::broker::EngineHistorySnapshot {
+        run_id: "gc-run".to_string(),
+        started_at_utc: chrono::DateTime::parse_from_rfc3339("2026-08-20T12:05:00Z")
+            .expect("valid start timestamp")
+            .with_timezone(&chrono::Utc),
+        updated_at_utc: None,
+        account_id: 7,
+        account_name: "SIM".to_string(),
+        contract_id: 4_095_561,
+        contract_name: "GCZ6".to_string(),
+        position_qty: 0,
+        average_entry_price: None,
+        realized_pnl: 25.0,
+        unrealized_pnl: 0.0,
+        fees: 0.0,
+        wins: 2,
+        losses: 1,
+        fills,
+    };
+    app.handle_service_event(ServiceEvent::EngineHistoryUpdated(history), &cmd_tx);
+
+    let selected_lines = rendered_text(app.selected_session_stats_lines());
+    assert!(
+        selected_lines
+            .iter()
+            .any(|line| line.contains("PnL/H: Net +12.50/h  Trade +12.50/h"))
+    );
+
+    let event_lines = app.session_stats_event_lines(12);
+    let event_text = rendered_text(event_lines.clone());
+    assert!(
+        event_text
+            .iter()
+            .any(|line| line == "Hourly Trade PnL/H (local, net of fees)")
+    );
+    let first_hour = chrono::DateTime::parse_from_rfc3339("2026-08-20T13:05:00Z")
+        .expect("valid first timestamp")
+        .with_timezone(&chrono::Local)
+        .format("%H:00")
+        .to_string();
+    let second_hour = chrono::DateTime::parse_from_rfc3339("2026-08-20T14:05:00Z")
+        .expect("valid second timestamp")
+        .with_timezone(&chrono::Local)
+        .format("%H:00")
+        .to_string();
+    let first_hour_line = event_lines
+        .iter()
+        .find(|line| line.to_string().starts_with(&first_hour))
+        .expect("first local hour row");
+    let second_hour_line = event_lines
+        .iter()
+        .find(|line| line.to_string().starts_with(&second_hour))
+        .expect("second local hour row");
+    assert!(first_hour_line.to_string().contains("+50.00/h (2 fills)"));
+    assert!(second_hour_line.to_string().contains("-25.00/h (1 fills)"));
+    assert!(line_span_with_fg(first_hour_line, "+50.00/h", Color::Green));
+    assert!(line_span_with_fg(second_hour_line, "-25.00/h", Color::Red));
+
+    let positive_fill = event_lines
+        .iter()
+        .find(|line| line.to_string().contains("fill 1 order 101"))
+        .expect("positive recent fill row");
+    let negative_fill = event_lines
+        .iter()
+        .find(|line| line.to_string().contains("fill 3 order 103"))
+        .expect("negative recent fill row");
+    assert!(line_span_with_fg(positive_fill, "+40.00", Color::Green));
+    assert!(line_span_with_fg(negative_fill, "-25.00", Color::Red));
+    assert!(line_span_with_fg(positive_fill, "BUY", Color::Cyan));
+    assert!(line_span_with_fg(negative_fill, "SELL", Color::Magenta));
+
+    let hourly_index = event_text
+        .iter()
+        .position(|line| line == "Hourly Trade PnL/H (local, net of fees)")
+        .expect("hourly block");
+    let recent_fill_index = event_text
+        .iter()
+        .position(|line| line.contains("fill 3 order 103"))
+        .expect("recent fill row");
+    assert!(recent_fill_index > hourly_index);
+}
+
+#[test]
+fn broker_engine_history_keeps_a_recent_fill_when_hourly_rows_hit_the_limit() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.accounts = vec![account(7, "SIM")];
+    let fills = (0..5)
+        .map(|index| crate::broker::EngineHistoryFill {
+            fill_id: index,
+            order_id: index + 100,
+            ts_ns: chrono::DateTime::parse_from_rfc3339(&format!(
+                "2026-08-20T{:02}:00:00Z",
+                10 + index
+            ))
+            .expect("valid fill timestamp")
+            .timestamp_nanos_opt()
+            .expect("timestamp in range"),
+            side: crate::broker::TradeMarkerSide::Buy,
+            qty: 1,
+            price: 4_570.0,
+            realized_pnl: index as f64,
+        })
+        .collect::<Vec<_>>();
+    app.handle_service_event(
+        ServiceEvent::EngineHistoryUpdated(crate::broker::EngineHistorySnapshot {
+            run_id: "limit-run".to_string(),
+            started_at_utc: chrono::Utc::now(),
+            updated_at_utc: None,
+            account_id: 7,
+            account_name: "SIM".to_string(),
+            contract_id: 1,
+            contract_name: "GCZ6".to_string(),
+            position_qty: 0,
+            average_entry_price: None,
+            realized_pnl: 10.0,
+            unrealized_pnl: 0.0,
+            fees: 0.0,
+            wins: 1,
+            losses: 1,
+            fills,
+        }),
+        &cmd_tx,
+    );
+
+    let lines = app.session_stats_event_lines(4);
+    assert_eq!(lines.len(), 4);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.to_string().contains("fill 4 order 104"))
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.to_string().contains("fill 0 order 100"))
+    );
 }
 
 #[test]

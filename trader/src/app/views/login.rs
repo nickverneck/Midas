@@ -95,7 +95,9 @@ impl App {
                     "3. Credentials mode requests a fresh Ironbeam bearer token using username/password and optional api_key."
                 }
             }),
-            Line::from("4. Debug log mode adds submit/seen/ack/fill lifecycle lines."),
+            Line::from(
+                "4. Quiet suppresses routine strategy/order rows; Debug adds lifecycle diagnostics.",
+            ),
             Line::from(""),
             Line::from("Use Up/Down to move between fields."),
             Line::from("Use Left/Right on Env, Auth Mode, or Log Mode."),

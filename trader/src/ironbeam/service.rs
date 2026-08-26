@@ -22,8 +22,8 @@ use super::support::{
     FOLLOWUP_REFRESH_DELAY_MS, contract_session_profile, pick_number, pick_str, schedule_refresh,
 };
 use crate::broker::{
-    BrokerCapabilities, BrokerKind, CandleMode, LatencySnapshot, MarketSnapshot, ReplaySpeed,
-    ServiceCommand, ServiceEvent, SessionKind,
+    BarType, BrokerCapabilities, BrokerKind, CandleMode, LatencySnapshot, MarketSnapshot,
+    ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
 };
 use crate::strategy::ExecutionStateSnapshot;
 use anyhow::{Context, Result, bail};
@@ -562,6 +562,8 @@ fn emit_execution_state(event_tx: &UnboundedSender<ServiceEvent>, session: &Iron
     let snapshot = ExecutionStateSnapshot {
         config: session.execution_config.clone(),
         runtime: session.execution_runtime.snapshot(),
+        bar_type: Some(BarType::minute(1)),
+        candle_mode: Some(CandleMode::Standard),
         selected_account_id: session.selected_account_id,
         selected_contract_name: session
             .selected_contract

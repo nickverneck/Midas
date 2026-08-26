@@ -14,6 +14,10 @@ pub struct Args {
     pub val_parquet: PathBuf,
     #[arg(long, default_value = "data/test")]
     pub test_parquet: PathBuf,
+    /// Permit a smoke-test run to reuse the same parquet for train/validation/test.
+    /// This disables the chronological split safety check; it must be explicit.
+    #[arg(long)]
+    pub allow_overlapping_splits: bool,
     #[arg(long)]
     pub full_file: bool,
     #[arg(long)]
@@ -74,7 +78,8 @@ pub struct Args {
     #[arg(long, default_value_t = 2)]
     pub layers: usize,
 
-    #[arg(long, default_value_t = 2)]
+    /// Number of validation/test windows to score. Zero means all available windows.
+    #[arg(long, default_value_t = 0)]
     pub eval_windows: usize,
     #[arg(long, default_value_t = 5)]
     pub save_top_n: usize,
@@ -100,6 +105,10 @@ pub struct Args {
     pub selection_gap_penalty: f64,
     #[arg(long)]
     pub selection_use_eval: bool,
+    /// Keep validation metrics diagnostic only. By default validation
+    /// participates in candidate selection whenever it is evaluated.
+    #[arg(long)]
+    pub train_only_selection: bool,
     #[arg(long, default_value_t = 1.0)]
     pub sortino_annualization: f64,
     #[arg(long, default_value_t = 0.0)]
@@ -148,4 +157,10 @@ pub struct Args {
     pub debug_data: bool,
     #[arg(long)]
     pub ignore_session: bool,
+}
+
+impl Args {
+    pub(crate) fn validation_participates_in_selection(&self) -> bool {
+        self.selection_use_eval || !self.train_only_selection
+    }
 }

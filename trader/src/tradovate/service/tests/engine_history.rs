@@ -79,6 +79,82 @@ fn broker_history_filters_manual_other_engine_and_other_contract_fills() {
 }
 
 #[test]
+fn broker_history_fees_do_not_turn_a_gross_winner_into_a_loss() {
+    let mut session = test_session();
+    session.market.value_per_point = Some(50.0);
+    start_engine_run(&mut session).expect("engine run");
+    let prefix = session
+        .engine_run
+        .as_ref()
+        .expect("run")
+        .order_prefix
+        .clone();
+    let now = Utc::now().to_rfc3339();
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([
+            (
+                201,
+                json!({
+                    "id": 201,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "symbol": "ESM6",
+                    "action": "Buy",
+                    "clOrdId": format!("{prefix}-entry")
+                }),
+            ),
+            (
+                202,
+                json!({
+                    "id": 202,
+                    "accountId": 42,
+                    "contractId": 3570918,
+                    "symbol": "ESM6",
+                    "action": "Sell",
+                    "clOrdId": format!("{prefix}-exit")
+                }),
+            ),
+        ]),
+    );
+    session.user_store.history_fills.insert(
+        203,
+        json!({
+            "id": 203,
+            "orderId": 201,
+            "contractId": 3570918,
+            "symbol": "ESM6",
+            "action": "Buy",
+            "qty": 1,
+            "price": 5000.0,
+            "timestamp": now
+        }),
+    );
+    session.user_store.history_fills.insert(
+        204,
+        json!({
+            "id": 204,
+            "orderId": 202,
+            "contractId": 3570918,
+            "symbol": "ESM6",
+            "action": "Sell",
+            "qty": 1,
+            "price": 5000.02,
+            "commission": -2.0,
+            "timestamp": now
+        }),
+    );
+
+    refresh_engine_history(&mut session);
+
+    let history = &session.engine_run.as_ref().expect("run").history;
+    assert!((history.realized_pnl + 1.0).abs() < 1e-9);
+    assert_eq!(history.fees, 2.0);
+    assert_eq!(history.wins, 1);
+    assert_eq!(history.losses, 0);
+}
+
+#[test]
 fn broker_history_attributes_broker_strategy_child_orders() {
     let mut session = test_session();
     session.market.value_per_point = Some(50.0);

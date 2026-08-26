@@ -182,7 +182,7 @@ fn selection_score(
     train_metrics: &CandidateResult,
     eval_metrics: Option<&CandidateResult>,
 ) -> f64 {
-    if args.selection_use_eval {
+    if args.validation_participates_in_selection() {
         eval_metrics
             .map(|metrics| {
                 let gap = (train_metrics.fitness - metrics.fitness).max(0.0);

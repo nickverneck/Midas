@@ -60,6 +60,146 @@ async fn pending_target_watchdog_respects_order_strategy_position_sync_grace() {
 }
 
 #[tokio::test]
+async fn pending_target_watchdog_does_not_reset_a_staged_flatten_lifecycle() {
+    let mut session = test_session();
+    session.execution_runtime.pending_target_qty = Some(0);
+    session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
+        target_qty: -1,
+        reason: "test staged reversal".to_string(),
+        started_at: time::Instant::now(),
+        flat_seen_at: None,
+    });
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": 1,
+                "netPrice": 6400.0
+            }),
+        )]),
+    );
+
+    let mut state = test_state(session);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    handle_internal(
+        InternalEvent::PendingTargetWatchdog,
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("watchdog should preserve a staged flatten");
+
+    let session = state.session.expect("session should persist");
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(0));
+    assert!(session.execution_runtime.pending_reversal_entry.is_some());
+}
+
+#[tokio::test]
+async fn pending_target_watchdog_does_not_forget_a_stale_broker_owned_path() {
+    let mut session = test_session();
+    session.execution_runtime.pending_target_qty = Some(0);
+    session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
+        target_qty: -1,
+        reason: "test staged reversal".to_string(),
+        started_at: time::Instant::now() - Duration::from_secs(11),
+        flat_seen_at: None,
+    });
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": 1,
+                "netPrice": 6400.0
+            }),
+        )]),
+    );
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        started_at: time::Instant::now() - Duration::from_secs(11),
+        signal_started_at: None,
+        signal_context: None,
+        cl_ord_id: "midas-stale-flatten".to_string(),
+        order_id: Some(1001),
+        order_strategy_id: Some(77),
+        seen_recorded: true,
+        exec_report_recorded: true,
+        fill_recorded: false,
+    });
+    let key = StrategyProtectionKey {
+        account_id: 42,
+        contract_id: 3570918,
+    };
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key,
+        order_strategy_id: 77,
+        target_qty: 0,
+    });
+    session.user_store.order_strategies.insert(
+        77,
+        json!({
+            "id": 77,
+            "accountId": 42,
+            "contractId": 3570918,
+            "status": "Working"
+        }),
+    );
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            1001,
+            json!({
+                "id": 1001,
+                "accountId": 42,
+                "contractId": 3570918,
+                "orderStrategyId": 77,
+                "ordStatus": "Working"
+            }),
+        )]),
+    );
+    session.user_store.order_strategy_links.insert(
+        1,
+        json!({
+            "id": 1,
+            "orderStrategyId": 77,
+            "orderId": 1001
+        }),
+    );
+
+    let mut state = test_state(session);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    handle_internal(
+        InternalEvent::PendingTargetWatchdog,
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("watchdog should preserve a broker-owned path");
+
+    let session = state.session.expect("session should persist");
+    assert_eq!(session.execution_runtime.pending_target_qty, Some(0));
+    assert!(session.execution_runtime.pending_reversal_entry.is_some());
+    assert!(session.active_order_strategy.is_some());
+    assert!(!session.user_store.order_strategy_links.is_empty());
+}
+
+#[tokio::test]
 async fn set_target_position_records_pending_target_for_staged_reversal() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;
@@ -117,6 +257,7 @@ async fn set_target_position_records_pending_target_for_staged_reversal() {
         replay_lookup_job: None,
         replay_download_job: None,
         latency: LatencySnapshot::default(),
+        snapshot_generation: 0,
         snapshot_revision: 0,
     };
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();

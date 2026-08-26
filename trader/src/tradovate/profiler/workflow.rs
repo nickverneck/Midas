@@ -266,5 +266,15 @@ pub(super) fn build_profile_execution_config(
     config.native_hma.take_profit_ticks = options.take_profit_ticks.max(0.0);
     config.native_hma.stop_loss_ticks = options.stop_loss_ticks.max(0.0);
     config.native_hma.use_trailing_stop = false;
+
+    // The service intentionally normalizes protected Direct reversals to
+    // CloseAllEnter so broker-owned TP/SL remain attached to the new entry.
+    // Build the same effective config here; otherwise the profiler waits for
+    // a config value the service will never publish.
+    if (config.native_hma.take_profit_ticks > 0.0 || config.native_hma.stop_loss_ticks > 0.0)
+        && config.native_reversal_mode == NativeReversalMode::Direct
+    {
+        config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    }
     config
 }

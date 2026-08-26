@@ -32,8 +32,9 @@ impl App {
                 _ => {}
             },
             Focus::LogMode => match key.code {
-                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.form.log_mode = self.form.log_mode.toggle();
+                KeyCode::Left => self.form.log_mode = self.form.log_mode.previous(),
+                KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.form.log_mode = self.form.log_mode.next()
                 }
                 _ => {}
             },

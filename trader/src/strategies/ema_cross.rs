@@ -301,6 +301,85 @@ impl EmaCrossIndicatorState {
         self.last_bar = Some(latest.clone());
         true
     }
+
+    /// Replace only the latest bar when a forming/range bar is revised in
+    /// place.  The EMA recurrence before the latest bar is already cached, so
+    /// this avoids rebuilding the retained history on every quote update.
+    ///
+    /// If the preceding recurrence is unavailable (for example because the
+    /// retained history contains a non-finite close), callers should fall
+    /// back to `rebuild`; that keeps the correction path exactly equivalent to
+    /// the legacy evaluator.
+    fn revise_last(&mut self, latest: &Bar) -> bool {
+        if self.window_len <= 1
+            || self.first_bar.is_none()
+            || self.last_bar.is_none()
+            || !latest.close.is_finite()
+        {
+            return false;
+        }
+
+        let Some(previous_fast) = self.previous_fast_ema.filter(|value| value.is_finite()) else {
+            return false;
+        };
+        let Some(previous_slow) = self.previous_slow_ema.filter(|value| value.is_finite()) else {
+            return false;
+        };
+        let Some(first_close) = self
+            .first_bar
+            .as_ref()
+            .map(|bar| bar.close)
+            .filter(|value| value.is_finite())
+        else {
+            return false;
+        };
+
+        let (fast_recurrence, fast) =
+            next_ema(Some(previous_fast), latest.close, self.fast_length.max(1));
+        let (slow_recurrence, slow) =
+            next_ema(Some(previous_slow), latest.close, self.slow_length.max(1));
+        let (Some(fast), Some(slow)) = (fast, slow) else {
+            return false;
+        };
+
+        let update_tail = |previous: f64, period: usize| {
+            let alpha = 2.0 / (period.max(1) as f64 + 1.0);
+            let retain = 1.0 - alpha;
+            let prior_seed = retain.powi((self.window_len.saturating_sub(2)) as i32) * first_close;
+            let prior_tail = previous - prior_seed;
+            (retain * prior_tail + alpha * latest.close)
+                .is_finite()
+                .then_some(retain * prior_tail + alpha * latest.close)
+        };
+        let Some(fast_tail) = update_tail(previous_fast, self.fast_length) else {
+            return false;
+        };
+        let Some(slow_tail) = update_tail(previous_slow, self.slow_length) else {
+            return false;
+        };
+
+        let Some(old_last) = self.last_bar.as_ref() else {
+            return false;
+        };
+        let Some(history) = self.history_fingerprint else {
+            return false;
+        };
+        self.history_fingerprint = Some(
+            history
+                .wrapping_sub(bar_fingerprint(old_last))
+                .wrapping_add(bar_fingerprint(latest)),
+        );
+        self.fast_recurrence = Some(fast_recurrence);
+        self.slow_recurrence = Some(slow_recurrence);
+        self.previous_fast_ema = Some(previous_fast);
+        self.previous_slow_ema = Some(previous_slow);
+        self.fast_ema = Some(fast);
+        self.slow_ema = Some(slow);
+        self.fast_weighted_tail = Some(fast_tail);
+        self.slow_weighted_tail = Some(slow_tail);
+        self.last_bar = Some(latest.clone());
+        true
+    }
 }
 
 fn next_ema(previous: Option<f64>, value: f64, period: usize) -> (f64, Option<f64>) {
@@ -533,8 +612,9 @@ impl EmaCrossConfig {
             let history_matches = incoming_fingerprint
                 .is_none_or(|fingerprint| state.history_fingerprint == Some(fingerprint));
             let appended = bars.len() >= 2
-                && (bars.len() == state.window_len
-                    || bars.len() == state.window_len.saturating_add(1))
+                && (bars.len() == state.window_len.saturating_add(1)
+                    || (bars.len() == state.window_len
+                        && state.first_bar.as_ref() != bars.first()))
                 && state.last_bar.as_ref() == bars.get(bars.len() - 2)
                 && latest.ts_ns
                     > state
@@ -542,8 +622,33 @@ impl EmaCrossConfig {
                         .as_ref()
                         .map(|bar| bar.ts_ns)
                         .unwrap_or(i64::MIN);
+            let same_timestamp_revision = !same_latest
+                && bars.len() == state.window_len
+                && state.first_bar.as_ref() == bars.first()
+                && state
+                    .last_bar
+                    .as_ref()
+                    .is_some_and(|previous| previous.ts_ns == latest.ts_ns)
+                && if source_update_sequence.is_some() {
+                    matches!(market_update, MarketHistoryUpdate::Unchanged)
+                } else {
+                    state
+                        .history_fingerprint
+                        .zip(state.last_bar.as_ref())
+                        .zip(incoming_fingerprint)
+                        .is_some_and(|((history, previous), incoming)| {
+                            history
+                                .wrapping_sub(bar_fingerprint(previous))
+                                .wrapping_add(bar_fingerprint(latest))
+                                == incoming
+                        })
+                };
             if same_latest && !history_matches {
                 state.rebuild(bars);
+            } else if same_timestamp_revision {
+                if !state.revise_last(latest) {
+                    state.rebuild(bars);
+                }
             } else if !same_latest && appended {
                 let first_changed = state.first_bar.as_ref() != bars.first();
                 let expected_fingerprint = if source_update_sequence.is_none() {
@@ -1029,6 +1134,68 @@ mod tests {
         assert_eq!(actual.previous_slow_ema, expected.previous_slow_ema);
         assert_eq!(actual.fast_ema, expected.fast_ema);
         assert_eq!(actual.slow_ema, expected.slow_ema);
+    }
+
+    #[test]
+    fn hinted_forming_bar_revision_matches_batch_and_preserves_next_append() {
+        let config = EmaCrossConfig {
+            fast_length: 10,
+            slow_length: 30,
+            ..EmaCrossConfig::default()
+        };
+        let mut bars = (0..96)
+            .map(|idx| bar(idx + 1, 100.0 + (idx as f64 * 0.13).sin() * 3.0))
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+        let _ = config.evaluate_streaming_with_market_update(
+            &mut runtime,
+            &bars,
+            None,
+            Some(1),
+            MarketHistoryUpdate::Snapshot,
+        );
+
+        bars.last_mut().expect("latest bar").close += 1.25;
+        let expected_revision = config.evaluate(&bars, None);
+        let actual_revision = config.evaluate_streaming_with_market_update(
+            &mut runtime,
+            &bars,
+            None,
+            Some(2),
+            MarketHistoryUpdate::Unchanged,
+        );
+        assert_eq!(actual_revision.signal, expected_revision.signal);
+        assert_eq!(
+            actual_revision.previous_fast_ema,
+            expected_revision.previous_fast_ema
+        );
+        assert_eq!(
+            actual_revision.previous_slow_ema,
+            expected_revision.previous_slow_ema
+        );
+        assert_eq!(actual_revision.fast_ema, expected_revision.fast_ema);
+        assert_eq!(actual_revision.slow_ema, expected_revision.slow_ema);
+
+        bars.push(bar(97, 101.0));
+        let expected_append = config.evaluate(&bars, None);
+        let actual_append = config.evaluate_streaming_with_market_update(
+            &mut runtime,
+            &bars,
+            None,
+            Some(3),
+            MarketHistoryUpdate::Append,
+        );
+        assert_eq!(actual_append.signal, expected_append.signal);
+        assert_eq!(
+            actual_append.previous_fast_ema,
+            expected_append.previous_fast_ema
+        );
+        assert_eq!(
+            actual_append.previous_slow_ema,
+            expected_append.previous_slow_ema
+        );
+        assert_eq!(actual_append.fast_ema, expected_append.fast_ema);
+        assert_eq!(actual_append.slow_ema, expected_append.slow_ema);
     }
 
     #[test]

@@ -64,6 +64,8 @@ pub(crate) struct EngineSummary {
     strategy_kind: Option<StrategyKind>,
     native_strategy: Option<NativeStrategyKind>,
     strategy_armed: Option<bool>,
+    bar_type: Option<BarType>,
+    candle_mode: Option<CandleMode>,
     latency: LatencySnapshot,
     latest_status: Option<String>,
     latest_error: Option<String>,
@@ -94,6 +96,8 @@ impl EngineSummary {
             strategy_kind: None,
             native_strategy: None,
             strategy_armed: None,
+            bar_type: None,
+            candle_mode: None,
             latency: LatencySnapshot::default(),
             latest_status: None,
             latest_error: None,
@@ -120,6 +124,8 @@ impl EngineSummary {
             strategy_kind: None,
             native_strategy: None,
             strategy_armed: None,
+            bar_type: None,
+            candle_mode: None,
             latency: LatencySnapshot::default(),
             latest_status: None,
             latest_error: None,
@@ -202,6 +208,9 @@ impl EngineSummary {
                 if !snapshot.status.is_empty() {
                     self.latest_status = Some(snapshot.status.clone());
                 }
+                if snapshot.contract_id.is_some() || !snapshot.bars.is_empty() {
+                    self.candle_mode = Some(snapshot.candle_mode);
+                }
             }
             ServiceEvent::TradeMarkersUpdated(_) => {}
             ServiceEvent::EngineHistoryUpdated(_) => {}
@@ -212,6 +221,12 @@ impl EngineSummary {
                 self.strategy_kind = Some(snapshot.config.kind);
                 self.native_strategy = Some(snapshot.config.native_strategy);
                 self.strategy_armed = Some(snapshot.runtime.armed);
+                if let Some(bar_type) = snapshot.bar_type {
+                    self.bar_type = Some(bar_type);
+                }
+                if let Some(candle_mode) = snapshot.candle_mode {
+                    self.candle_mode = Some(candle_mode);
+                }
                 self.selected_account_id = snapshot.selected_account_id;
                 self.sync_selected_account_name();
                 if let Some(name) = &snapshot.selected_contract_name {
@@ -316,6 +331,18 @@ impl EngineSummary {
             Some(false) => format!("{strategy} idle"),
             None => strategy,
         }
+    }
+
+    pub(crate) fn strategy_is_armed(&self) -> bool {
+        self.strategy_armed == Some(true)
+    }
+
+    pub(crate) fn bar_type(&self) -> Option<BarType> {
+        self.bar_type
+    }
+
+    pub(crate) fn candle_mode(&self) -> Option<CandleMode> {
+        self.candle_mode
     }
 
     pub(crate) fn latency_label(&self) -> String {

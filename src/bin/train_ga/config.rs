@@ -77,6 +77,16 @@ pub struct CandidateConfig {
     pub max_flat_hold_bars: usize,
 }
 
+/// Resolve the requested evaluation-window cap without silently dropping the
+/// tail of a walk-forward split. Zero is the explicit "all windows" form.
+pub(crate) fn evaluation_window_count(total: usize, requested: usize) -> usize {
+    if requested == 0 {
+        total
+    } else {
+        requested.min(total)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_candidate_config(device: ExecutionTarget) -> CandidateConfig {
     CandidateConfig {
@@ -113,5 +123,22 @@ pub(crate) fn test_candidate_config(device: ExecutionTarget) -> CandidateConfig 
         flat_hold_penalty: 0.0,
         flat_hold_penalty_growth: 0.0,
         max_flat_hold_bars: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::evaluation_window_count;
+
+    #[test]
+    fn zero_evaluation_cap_scores_all_windows() {
+        assert_eq!(evaluation_window_count(0, 0), 0);
+        assert_eq!(evaluation_window_count(7, 0), 7);
+    }
+
+    #[test]
+    fn nonzero_evaluation_cap_is_clamped() {
+        assert_eq!(evaluation_window_count(7, 3), 3);
+        assert_eq!(evaluation_window_count(7, 99), 7);
     }
 }

@@ -1,9 +1,10 @@
 <script lang="ts">
-	import { BrainCircuit, Network } from 'lucide-svelte';
+	import { BrainCircuit, Network, Sparkles } from 'lucide-svelte';
+	import RlvrTrainingPanel from '$lib/components/training/RlvrTrainingPanel.svelte';
 	import SupervisedTrainingPanel from '$lib/components/training/SupervisedTrainingPanel.svelte';
 	import LegacyTrainingPanel from './_components/LegacyTrainingPanel.svelte';
 
-	type WorkspaceMode = 'legacy' | 'supervised';
+	type WorkspaceMode = 'legacy' | 'supervised' | 'rlvr';
 	let workspaceMode = $state<WorkspaceMode>('legacy');
 	let legacyParamsCollapsed = $state(false);
 </script>
@@ -25,7 +26,7 @@
 	>
 		<div>
 			<div class="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Midas training</div>
-			<p class="mt-0.5 text-xs text-muted-foreground">Choose the established GA/RL runner or the supervised event workflow.</p>
+			<p class="mt-0.5 text-xs text-muted-foreground">Choose legacy GA/RL, supervised events, or the exact-reward RLVR gate.</p>
 		</div>
 		<nav class="flex rounded-lg border bg-card p-1 shadow-xs" aria-label="Training workflow">
 			<button
@@ -48,11 +49,23 @@
 			>
 				<BrainCircuit size={14} /> Supervised
 			</button>
+			<button
+				type="button"
+				onclick={() => (workspaceMode = 'rlvr')}
+				aria-pressed={workspaceMode === 'rlvr'}
+				class:bg-foreground={workspaceMode === 'rlvr'}
+				class:text-background={workspaceMode === 'rlvr'}
+				class="inline-flex min-h-10 items-center gap-1.5 rounded-md px-3 text-xs font-semibold transition-colors hover:bg-muted"
+			>
+				<Sparkles size={14} /> RLVR
+			</button>
 		</nav>
 	</header>
 
 	{#if workspaceMode === 'supervised'}
 		<SupervisedTrainingPanel />
+	{:else if workspaceMode === 'rlvr'}
+		<RlvrTrainingPanel />
 	{:else}
 		<LegacyTrainingPanel bind:paramsCollapsed={legacyParamsCollapsed} />
 	{/if}

@@ -128,6 +128,38 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
 }
 
 #[test]
+fn guarded_ema_rechecks_same_timestamp_range_correction_without_error() {
+    let mut session = test_session();
+    let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::Guarded;
+    session.execution_config.native_ema.fast_length = 2;
+    session.execution_config.native_ema.slow_length = 4;
+    session.execution_runtime.armed = true;
+    session.execution_runtime.last_closed_bar_ts = Some(7);
+    // The timestamp is unchanged but the range bar was corrected.
+    session.execution_runtime.last_closed_bar_fingerprint = Some(0);
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+            volume: None,
+        })
+        .collect();
+
+    maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("same-timestamp range correction should reevaluate the last bar");
+}
+
+#[test]
 fn guarded_closed_bar_blocks_repeat_flat_entry_side_until_opposite_dispatch() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -2,6 +2,23 @@ use super::super::*;
 use super::support::*;
 
 #[test]
+fn quiet_mode_suppresses_routine_strategy_status_rows() {
+    let mut session = test_session();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    session.cfg.log_mode = crate::config::LogMode::Quiet;
+
+    emit_operational_status(&event_tx, &session, || "routine strategy row".to_string());
+    assert!(event_rx.try_recv().is_err());
+
+    session.cfg.log_mode = crate::config::LogMode::Default;
+    emit_operational_status(&event_tx, &session, || "routine strategy row".to_string());
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(ServiceEvent::Status(message)) if message == "routine strategy row"
+    ));
+}
+
+#[test]
 fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();

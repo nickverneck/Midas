@@ -78,6 +78,11 @@ impl App {
     pub(in crate::app) fn selected_session_stats_lines(&self) -> Vec<Line<'static>> {
         if let Some(history) = self.engine_history.as_ref() {
             let net_pnl = history.realized_pnl + history.unrealized_pnl;
+            let elapsed_hours = engine_history_elapsed_hours(history);
+            let net_pnl_per_hour = elapsed_hours.map(|hours| net_pnl / hours);
+            let trade_pnl_per_hour =
+                elapsed_hours.map(|hours| (history.realized_pnl + history.fees) / hours);
+            let fees_per_hour = elapsed_hours.map(|hours| -history.fees / hours);
             return vec![
                 Line::from(format!(
                     "Engine run: {} on {}",
@@ -102,8 +107,39 @@ impl App {
                 ]),
                 Line::from(vec![
                     Span::raw("Net: "),
-                    Span::styled(format_signed_money(Some(net_pnl)), pnl_style(Some(net_pnl))),
-                    Span::raw(format!("  Fees: -{:.2}", history.fees)),
+                    Span::styled(
+                        format_signed_money(Some(net_pnl)),
+                        net_pnl_style(Some(net_pnl)),
+                    ),
+                    Span::raw("  Fees: "),
+                    Span::styled(
+                        format_signed_money(Some(-history.fees)),
+                        pnl_style(Some(-history.fees)),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("Trade: "),
+                    Span::styled(
+                        format_signed_money(Some(history.realized_pnl + history.fees)),
+                        pnl_style(Some(history.realized_pnl + history.fees)),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("PnL/H: Net "),
+                    Span::styled(
+                        format_money_per_hour(net_pnl_per_hour),
+                        net_pnl_style(net_pnl_per_hour),
+                    ),
+                    Span::raw("  Trade "),
+                    Span::styled(
+                        format_money_per_hour(trade_pnl_per_hour),
+                        pnl_style(trade_pnl_per_hour),
+                    ),
+                    Span::raw("  Fees "),
+                    Span::styled(
+                        format_money_per_hour(fees_per_hour),
+                        pnl_style(fees_per_hour),
+                    ),
                 ]),
                 Line::from(format!(
                     "Fills: {}  Wins: {}  Losses: {}",
@@ -155,7 +191,7 @@ impl App {
                 Span::raw("Session PnL: "),
                 Span::styled(
                     format_signed_money(Some(stats.session_pnl())),
-                    pnl_style(Some(stats.session_pnl())),
+                    net_pnl_style(Some(stats.session_pnl())),
                 ),
             ]),
             self.session_stats_trade_fee_summary_line(stats),
@@ -163,7 +199,7 @@ impl App {
                 Span::raw("PnL/H: Net "),
                 Span::styled(
                     format_money_per_hour(stats.session_pnl_per_hour()),
-                    pnl_style(stats.session_pnl_per_hour()),
+                    net_pnl_style(stats.session_pnl_per_hour()),
                 ),
                 Span::raw("  Trade "),
                 Span::styled(
@@ -234,31 +270,43 @@ impl App {
 
     pub(in crate::app) fn session_stats_event_lines(&self, limit: usize) -> Vec<Line<'static>> {
         if let Some(history) = self.engine_history.as_ref() {
+            if limit == 0 {
+                return Vec::new();
+            }
             if history.fills.is_empty() {
                 return vec![Line::from(
                     "No broker-attributed fills for this engine run yet.",
                 )];
             }
-            return history
-                .fills
-                .iter()
-                .rev()
-                .take(limit)
-                .map(|fill| {
-                    let side = match fill.side {
-                        TradeMarkerSide::Buy => "BUY",
-                        TradeMarkerSide::Sell => "SELL",
-                    };
-                    Line::from(format!(
-                        "{side} {} @ {:.2} | pnl {} | fill {} order {}",
-                        fill.qty,
-                        fill.price,
+
+            let hourly_lines = engine_history_hourly_lines(history);
+            // Keep at least one recent fill visible even when a small panel
+            // cannot fit every active hour. The hourly header is retained and
+            // the most recent hourly rows win when the block must be trimmed.
+            let hourly_capacity = limit.saturating_sub(2);
+            let mut lines = trim_engine_history_hourly_lines(hourly_lines, hourly_capacity);
+            if !lines.is_empty() && lines.len() < limit {
+                lines.push(Line::from(""));
+            }
+            let fill_limit = limit.saturating_sub(lines.len());
+            let fill_lines = history.fills.iter().rev().take(fill_limit).map(|fill| {
+                let side = match fill.side {
+                    TradeMarkerSide::Buy => "BUY",
+                    TradeMarkerSide::Sell => "SELL",
+                };
+                Line::from(vec![
+                    Span::styled(side, engine_fill_side_style(fill.side)),
+                    Span::raw(format!(" {} @ {:.2} | pnl ", fill.qty, fill.price)),
+                    Span::styled(
                         format_signed_money(Some(fill.realized_pnl)),
-                        fill.fill_id,
-                        fill.order_id
-                    ))
-                })
-                .collect();
+                        pnl_style(Some(fill.realized_pnl)),
+                    ),
+                    Span::raw(format!(" | fill {} order {}", fill.fill_id, fill.order_id)),
+                ])
+            });
+            lines.extend(fill_lines);
+            lines.truncate(limit);
+            return lines;
         }
         if !self.session_stats.enabled {
             return vec![Line::from(
@@ -417,38 +465,137 @@ fn session_trade_side_style(side: SessionTradeSide) -> Style {
     }
 }
 
+fn net_pnl_style(value: Option<f64>) -> Style {
+    pnl_style(value).add_modifier(Modifier::BOLD)
+}
+
+fn engine_fill_side_style(side: TradeMarkerSide) -> Style {
+    match side {
+        TradeMarkerSide::Buy => Style::default().fg(Color::Cyan),
+        TradeMarkerSide::Sell => Style::default().fg(Color::Magenta),
+    }
+}
+
+fn engine_history_fill_hour(ts_ns: i64) -> usize {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(ts_ns)
+        .with_timezone(&chrono::Local)
+        .format("%H")
+        .to_string()
+        .parse::<usize>()
+        .unwrap_or_default()
+        .min(23)
+}
+
+fn engine_history_elapsed_hours(history: &EngineHistorySnapshot) -> Option<f64> {
+    let latest_fill_at = history
+        .fills
+        .iter()
+        .map(|fill| chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(fill.ts_ns))
+        .max();
+    let end_at = history
+        .updated_at_utc
+        .or(latest_fill_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let elapsed_ms = end_at
+        .signed_duration_since(history.started_at_utc)
+        .num_milliseconds();
+    (elapsed_ms > 0).then_some(elapsed_ms as f64 / 3_600_000.0)
+}
+
+fn engine_history_hourly_lines(history: &EngineHistorySnapshot) -> Vec<Line<'static>> {
+    let mut buckets = [(0.0_f64, 0_usize); 24];
+    for fill in &history.fills {
+        let bucket = &mut buckets[engine_history_fill_hour(fill.ts_ns)];
+        bucket.0 += fill.realized_pnl;
+        bucket.1 += 1;
+    }
+
+    let mut lines = vec![Line::from("Hourly Trade PnL/H (local, net of fees)")];
+    lines.extend(
+        buckets
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (_, fills))| *fills > 0)
+            .map(|(hour, (pnl, fills))| {
+                Line::from(vec![
+                    Span::raw(format!("{hour:02}:00 ")),
+                    Span::styled(format_money_per_hour(Some(pnl)), pnl_style(Some(pnl))),
+                    Span::raw(format!(" ({fills} fills)")),
+                ])
+            }),
+    );
+    lines
+}
+
+fn trim_engine_history_hourly_lines(
+    mut lines: Vec<Line<'static>>,
+    capacity: usize,
+) -> Vec<Line<'static>> {
+    if capacity == 0 {
+        return Vec::new();
+    }
+    if lines.len() <= capacity {
+        return lines;
+    }
+    if capacity == 1 {
+        lines.truncate(1);
+        return lines;
+    }
+
+    let header = lines.remove(0);
+    let rows_to_keep = capacity - 1;
+    let row_start = lines.len().saturating_sub(rows_to_keep);
+    let mut trimmed = vec![header];
+    trimmed.extend(lines.into_iter().skip(row_start));
+    trimmed
+}
+
 fn hourly_session_stats_lines(stats: &AccountSessionStats, show_fees: bool) -> Vec<Line<'static>> {
     let hourly_stats = stats.hourly_stats();
     if hourly_stats.is_empty() {
         return Vec::new();
     }
 
-    let mut lines = vec![Line::from("Hourly Trade PnL/H (local)")];
+    let header = if show_fees {
+        "Hourly PnL/H (local): Net | Trade | Fees"
+    } else {
+        "Hourly PnL/H (local): Net | Trade"
+    };
+    let mut lines = vec![Line::from(header)];
     lines.extend(hourly_stats.into_iter().map(|(hour, hourly)| {
-        Line::from(vec![
-            Span::raw(format!("{hour:02}:00 ")),
+        let mut spans = vec![
+            Span::raw(format!("{hour:02}:00 Net ")),
+            Span::styled(
+                format_money_per_hour(Some(hourly.raw_pnl)),
+                net_pnl_style(Some(hourly.raw_pnl)),
+            ),
+            Span::raw(" Trade "),
             Span::styled(
                 format_money_per_hour(Some(hourly.trade_pnl)),
                 pnl_style(Some(hourly.trade_pnl)),
             ),
-            if show_fees {
+        ];
+        if show_fees {
+            spans.extend([
+                Span::raw(" Fees "),
+                Span::styled(
+                    format_money_per_hour(Some(hourly.fees)),
+                    pnl_style(Some(hourly.fees)),
+                ),
                 Span::raw(format!(
-                    " net {} fees {} ({}/{}, {} events)",
-                    format_signed_money(Some(hourly.raw_pnl)),
-                    format_signed_money(Some(hourly.fees)),
-                    hourly.wins,
-                    hourly.losses,
-                    hourly.events
-                ))
-            } else {
-                Span::raw(format!(
-                    " ({}/{}, {} trade events)",
-                    hourly.wins,
-                    hourly.losses,
-                    hourly.wins + hourly.losses
-                ))
-            },
-        ])
+                    " | W/L {}/{} | {} events",
+                    hourly.wins, hourly.losses, hourly.events
+                )),
+            ]);
+        } else {
+            spans.push(Span::raw(format!(
+                " | W/L {}/{} | {} trade events",
+                hourly.wins,
+                hourly.losses,
+                hourly.wins + hourly.losses
+            )));
+        }
+        Line::from(spans)
     }));
     lines
 }

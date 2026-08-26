@@ -125,6 +125,12 @@ fn login_log_mode_toggle_uses_arrow_keys() {
 
     app.handle_login_key(key(KeyCode::Left), &cmd_tx);
     assert_eq!(app.form.log_mode, LogMode::Default);
+
+    app.handle_login_key(key(KeyCode::Left), &cmd_tx);
+    assert_eq!(app.form.log_mode, LogMode::Quiet);
+
+    app.handle_login_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(app.form.log_mode, LogMode::Default);
 }
 
 #[test]

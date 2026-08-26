@@ -7,6 +7,7 @@ use crate::broker::{
 pub(crate) enum InternalEvent {
     UserEntities(Vec<EntityEnvelope>),
     SnapshotsBuilt {
+        generation: u64,
         revision: u64,
         snapshots: Vec<AccountSnapshot>,
     },

@@ -93,12 +93,13 @@
 		"selection-train-weight": 0.3,
 		"selection-eval-weight": 0.7,
 		"selection-gap-penalty": 0.2,
+		"selection-use-eval": true,
 		"elite-frac": 0.33,
 		"mutation-sigma": 0.05,
 		"init-sigma": 0.5,
 		hidden: 64,
 		layers: 2,
-		"eval-windows": 2,
+		"eval-windows": 0,
 		"w-pnl": 1.0,
 		"w-sortino": 1.0,
 		"w-mdd": 0.5,
@@ -599,6 +600,9 @@
 	const buildGaParams = () => {
 		const params = { ...gaParams } as Record<string, unknown>;
 		normalizeBarSelection(params);
+		if (params["selection-use-eval"] === false) {
+			params["train-only-selection"] = true;
+		}
 		if (gaDataMode === "full") {
 			params["full-file"] = true;
 		} else {

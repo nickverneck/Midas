@@ -181,6 +181,8 @@ struct AccountSessionStats {
     flat_side: SessionSideDeltaStats,
     unknown_side: SessionSideDeltaStats,
     events: Vec<SessionBalanceEvent>,
+    trade_pnl_ex_fees: f64,
+    hourly: [SessionHourlyDeltaStats; 24],
 }
 
 impl AccountSessionStats {
@@ -226,6 +228,8 @@ impl AccountSessionStats {
             flat_side: SessionSideDeltaStats::default(),
             unknown_side: SessionSideDeltaStats::default(),
             events: Vec::new(),
+            trade_pnl_ex_fees: 0.0,
+            hourly: [SessionHourlyDeltaStats::default(); 24],
         }
     }
 
@@ -301,7 +305,7 @@ impl AccountSessionStats {
         self.last_delta = Some(delta);
         self.last_trade_delta = Some(classification.trade_delta);
         self.last_position_side = current_position_side;
-        self.events.push(SessionBalanceEvent {
+        let event = SessionBalanceEvent {
             recorded_at_utc: captured_at_utc,
             source,
             side,
@@ -313,7 +317,10 @@ impl AccountSessionStats {
             delta,
             fee_delta: classification.fee_delta,
             trade_delta: classification.trade_delta,
-        });
+        };
+        self.trade_pnl_ex_fees += event.trade_delta;
+        self.hourly[session_stats_local_hour(&event.recorded_at_utc)].record(&event);
+        self.events.push(event);
 
         if classification.fee_delta.abs() >= SESSION_STATS_DELTA_EPSILON {
             self.fee_events += 1;
@@ -352,7 +359,7 @@ impl AccountSessionStats {
     }
 
     fn trade_pnl_ex_fees(&self) -> f64 {
-        self.events.iter().map(|event| event.trade_delta).sum()
+        self.trade_pnl_ex_fees
     }
 
     fn elapsed_hours(&self) -> Option<f64> {
@@ -373,19 +380,7 @@ impl AccountSessionStats {
     }
 
     fn hourly_stats(&self) -> Vec<(usize, SessionHourlyDeltaStats)> {
-        let mut buckets = [SessionHourlyDeltaStats::default(); 24];
-        for event in &self.events {
-            let hour = event
-                .recorded_at_utc
-                .with_timezone(&chrono::Local)
-                .format("%H")
-                .to_string()
-                .parse::<usize>()
-                .unwrap_or(0)
-                .min(23);
-            buckets[hour].record(event);
-        }
-        buckets
+        self.hourly
             .into_iter()
             .enumerate()
             .filter(|(_, stats)| stats.events > 0)
@@ -729,6 +724,16 @@ fn format_money_per_hour(value: Option<f64>) -> String {
     value
         .map(|value| format!("{}/h", format_signed_money(Some(value))))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn session_stats_local_hour(value: &chrono::DateTime<chrono::Utc>) -> usize {
+    value
+        .with_timezone(&chrono::Local)
+        .format("%H")
+        .to_string()
+        .parse::<usize>()
+        .unwrap_or(0)
+        .min(23)
 }
 
 fn format_session_stats_timestamp(

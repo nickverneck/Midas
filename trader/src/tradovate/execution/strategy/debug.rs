@@ -1,6 +1,35 @@
 use super::*;
 use crate::strategy_debug::{StrategyDecisionDebug, format_strategy_decision};
 
+/// Emit a diagnostic only when the producer-side log policy allows it. The
+/// closure is intentional: Quiet mode must avoid formatting and allocating
+/// the message before it reaches the event channel.
+pub(crate) fn emit_debug_log(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: &SessionState,
+    message: impl FnOnce() -> String,
+) {
+    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+        return;
+    }
+    let _ = event_tx.send(ServiceEvent::DebugLog(message()));
+}
+
+/// Routine strategy status rows are useful in Default/Debug, but they are
+/// not required to execute or reconcile an order.  Quiet mode drops them at
+/// the producer so they do not allocate, traverse the IPC queue, or become
+/// TUI log entries during high-frequency range-bar runs.
+pub(crate) fn emit_operational_status(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: &SessionState,
+    message: impl FnOnce() -> String,
+) {
+    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+        return;
+    }
+    let _ = event_tx.send(ServiceEvent::Status(message()));
+}
+
 /// Append one structured strategy decision row when replay diagnostics are
 /// explicitly enabled. The helper is deliberately a no-op for live sessions
 /// and for the default replay configuration.
@@ -103,6 +132,9 @@ fn decision_path(session: &SessionState) -> String {
 }
 
 pub(super) fn guarded_strategy_eval_context(session: &SessionState, actual_qty: i32) -> String {
+    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+        return "quiet diagnostics disabled".to_string();
+    }
     let mut context = execution_observability_context(session);
     if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
         context.push_str(" | ");
@@ -196,6 +228,9 @@ pub(super) fn emit_guarded_strategy_eval_debug(
     target_qty: Option<i32>,
     debug_summary: &str,
 ) {
+    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+        return;
+    }
     let legacy = format!(
         "strategy eval | {} | {decision} | signal {} | bar_ts {} | actual_qty {} | effective_qty {} | target_qty {}",
         active_native_slug(session),

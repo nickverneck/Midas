@@ -32,80 +32,135 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         return Ok(());
     };
 
+    // A range-bar replacement may briefly leave the timestamp visible before
+    // the retained strategy slice is complete. Defer evaluation; the next
+    // market update will retry without emitting a spurious error.
+    if signal_evaluation_bars(session).is_empty() {
+        let next_summary = format!(
+            "HMA Direct {} waiting for a complete market snapshot.",
+            active_native_label(session)
+        );
+        emit_execution_transition_debug(
+            event_tx,
+            session,
+            &next_summary,
+            "hma direct market snapshot wait",
+        );
+        session.execution_runtime.last_summary = next_summary;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
+        let latest_fingerprint = latest_strategy_bar_fingerprint(session);
         if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
-            let gate_detail = format!(
-                "hma direct gate | closed-bar timing waiting for new signal bar | last_bar_ts {} | {}",
-                last_strategy_ts,
-                hma_cross_market_debug(session, actual_qty)
+            let corrected = matches!(
+                (
+                    session.execution_runtime.last_closed_bar_fingerprint,
+                    latest_fingerprint,
+                ),
+                (Some(previous), Some(latest)) if previous != latest
             );
-            let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-                session,
-                TradovateStrategyDecisionDebug {
-                    path: "hma direct",
-                    decision: "blocked",
-                    signal: None,
-                    bar_ts: Some(last_strategy_ts),
-                    actual_qty,
-                    effective_qty: actual_qty,
-                    target_qty: None,
-                    strategy_detail: "n/a",
-                    gate_detail,
-                    fingerprint: latest_strategy_bar_fingerprint(session),
-                },
-            )));
-            return Ok(());
+            if corrected {
+                emit_debug_log(event_tx, session, || {
+                    format!(
+                        "hma direct closed-bar revision | same timestamp fingerprint changed | bar_ts {} | previous_fingerprint {:?} | latest_fingerprint {:?}",
+                        last_strategy_ts,
+                        session.execution_runtime.last_closed_bar_fingerprint,
+                        latest_fingerprint,
+                    )
+                });
+            } else {
+                let gate_detail = format!(
+                    "hma direct gate | closed-bar timing waiting for new signal bar | last_bar_ts {} | {}",
+                    last_strategy_ts,
+                    hma_cross_market_debug(session, actual_qty)
+                );
+                emit_debug_log(event_tx, session, || {
+                    format_tradovate_strategy_decision(
+                        session,
+                        TradovateStrategyDecisionDebug {
+                            path: "hma direct",
+                            decision: "blocked",
+                            signal: None,
+                            bar_ts: Some(last_strategy_ts),
+                            actual_qty,
+                            effective_qty: actual_qty,
+                            target_qty: None,
+                            strategy_detail: "n/a",
+                            gate_detail,
+                            fingerprint: latest_strategy_bar_fingerprint(session),
+                        },
+                    )
+                });
+                return Ok(());
+            }
         }
-        session.execution_runtime.last_closed_bar_fingerprint =
-            latest_strategy_bar_fingerprint(session);
+        session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
     }
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let actual_entry = selected_market_entry_price(session);
     sync_active_execution_position(session, actual_qty, actual_entry);
 
-    let bars = signal_evaluation_bars(session).to_vec();
-    if bars.is_empty() {
+    let current_side = side_from_signed_qty(actual_qty);
+    if signal_evaluation_bars(session).is_empty() {
         bail!("latest strategy bar disappeared during HMA direct evaluation");
     }
-    let signal_bar = bars
-        .last()
-        .expect("checked non-empty strategy bars")
-        .clone();
-    let current_side = side_from_signed_qty(actual_qty);
-    let (signal, strategy_summary, debug_summary) = match session.execution_config.native_strategy {
-        NativeStrategyKind::HmaCross => {
-            let evaluation = session
-                .execution_config
-                .native_hma_cross
-                .evaluate_current_cross(
-                    &mut session.execution_runtime.hma_cross_execution,
-                    &bars,
+    // Move the mutable indicator runtimes out before borrowing the retained
+    // market slice. This lets the direct path evaluate that slice in place;
+    // `evaluate_current_cross` still selects Legacy or Incremental according
+    // to the persisted HMA config.
+    let native_strategy = session.execution_config.native_strategy;
+    let hma_config = session.execution_config.native_hma_cross.clone();
+    let volume_hma_config = session.execution_config.native_volume_hma_cross.clone();
+    let include_debug = session.cfg.log_mode != crate::config::LogMode::Quiet;
+    let mut hma_runtime = std::mem::take(&mut session.execution_runtime.hma_cross_execution);
+    let mut volume_hma_runtime =
+        std::mem::take(&mut session.execution_runtime.volume_hma_cross_execution);
+    let evaluation_result = {
+        let bars = signal_evaluation_bars(session);
+        let signal_bar = bars
+            .last()
+            .expect("checked non-empty strategy bars")
+            .clone();
+        let evaluation = match native_strategy {
+            NativeStrategyKind::HmaCross => {
+                let evaluation =
+                    hma_config.evaluate_current_cross(&mut hma_runtime, bars, current_side);
+                (
+                    evaluation.signal,
+                    evaluation.summary(),
+                    if include_debug {
+                        evaluation.debug_summary()
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                let evaluation = volume_hma_config.evaluate_current_cross(
+                    &mut volume_hma_runtime,
+                    bars,
                     current_side,
                 );
-            (
-                evaluation.signal,
-                evaluation.summary(),
-                evaluation.debug_summary(),
-            )
-        }
-        NativeStrategyKind::VolumeAdaptiveHmaCross => {
-            let evaluation = session
-                .execution_config
-                .native_volume_hma_cross
-                .evaluate_current_cross(
-                    &mut session.execution_runtime.volume_hma_cross_execution,
-                    &bars,
-                    current_side,
-                );
-            (
-                evaluation.signal(),
-                evaluation.summary(),
-                evaluation.debug_summary(),
-            )
-        }
-        _ => unreachable!("unsupported strategy passed HMA direct guard"),
+                (
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    if include_debug {
+                        evaluation.debug_summary()
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            _ => unreachable!("unsupported strategy passed HMA direct guard"),
+        };
+        (signal_bar, evaluation.0, evaluation.1, evaluation.2)
     };
+    session.execution_runtime.hma_cross_execution = hma_runtime;
+    session.execution_runtime.volume_hma_cross_execution = volume_hma_runtime;
+    let (signal_bar, signal, strategy_summary, debug_summary) = evaluation_result;
     let summary = format!(
         "{} | {}",
         strategy_summary,
@@ -137,21 +192,23 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "hma direct",
-                decision: "no target",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: None,
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "hma direct",
+                    decision: "no target",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: None,
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     };
@@ -180,21 +237,23 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "hma direct",
-                decision: "target already actual",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: Some(target_qty),
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "hma direct",
+                    decision: "target already actual",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -228,21 +287,23 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "hma direct",
-                decision: "closed-bar already dispatched",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: Some(target_qty),
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "hma direct",
+                    decision: "closed-bar already dispatched",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -275,21 +336,23 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "hma direct",
-                decision: "flat entry side already consumed",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: Some(target_qty),
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "hma direct",
+                    decision: "flat entry side already consumed",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -369,34 +432,45 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         Some(order_qty),
         &debug_summary,
     );
-    let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-        session,
-        TradovateStrategyDecisionDebug {
-            path: "hma direct",
-            decision: "dispatching",
-            signal: Some(signal),
-            bar_ts: Some(signal_bar.ts_ns),
+    emit_debug_log(event_tx, session, || {
+        format_tradovate_strategy_decision(
+            session,
+            TradovateStrategyDecisionDebug {
+                path: "hma direct",
+                decision: "dispatching",
+                signal: Some(signal),
+                bar_ts: Some(signal_bar.ts_ns),
+                actual_qty,
+                effective_qty: actual_qty,
+                target_qty: Some(target_qty),
+                strategy_detail: &debug_summary,
+                gate_detail,
+                fingerprint: latest_strategy_bar_fingerprint(session),
+            },
+        )
+    });
+    emit_operational_status(event_tx, session, || {
+        format!(
+            "HMA direct {} signal: {} {} (qty {} -> {})",
+            active_native_slug(session),
+            order_action,
+            order_qty,
             actual_qty,
-            effective_qty: actual_qty,
-            target_qty: Some(target_qty),
-            strategy_detail: &debug_summary,
-            gate_detail,
-            fingerprint: latest_strategy_bar_fingerprint(session),
-        },
-    )));
-    let _ = event_tx.send(ServiceEvent::Status(format!(
-        "HMA direct {} signal: {} {} (qty {} -> {})",
-        active_native_slug(session),
-        order_action,
-        order_qty,
-        actual_qty,
-        target_qty
-    )));
+            target_qty
+        )
+    });
     emit_execution_state(event_tx, session);
     Ok(())
 }
 
 pub(crate) fn hma_cross_market_debug(session: &SessionState, actual_qty: i32) -> String {
+    // The full closed/forming preview is deliberately reserved for Debug.
+    // Default mode still emits the compact decision event for compatibility,
+    // but must not pay for a second legacy HMA calculation that the TUI will
+    // discard. Quiet mode additionally suppresses the event at the producer.
+    if session.cfg.log_mode != crate::config::LogMode::Debug {
+        return "diagnostics disabled".to_string();
+    }
     let closed_len = effective_closed_bar_len(session);
     let market_len = session.market.bars.len();
     let closed_ts = closed_bars(session).last().map(|bar| bar.ts_ns);

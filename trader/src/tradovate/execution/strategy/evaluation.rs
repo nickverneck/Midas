@@ -618,10 +618,8 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
 }
 
 /// Evaluate an incremental HMA crossover directly against the retained market
-/// slice.  Replay normally calls the generic strategy helper with a cloned
-/// bar vector; that clone is inexpensive for a small live window but becomes
-/// quadratic over a month of one-minute bars.  Keeping this narrow helper
-/// replay-only preserves the existing dispatch and legacy evaluator behavior.
+/// slice. Live and streaming-replay callers use this to avoid cloning the
+/// retained bar window; legacy replay still uses the reference evaluator.
 pub(crate) fn evaluate_incremental_hma_cross_since(
     config: &HmaCrossConfig,
     runtime: &mut HmaCrossExecutionState,
@@ -629,6 +627,7 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
     bars: &[Bar],
     current_qty: i32,
     after_ts: Option<i64>,
+    include_debug: bool,
 ) -> (Bar, StrategySignal, String, String) {
     let current_side = side_from_signed_qty(current_qty);
     if signal_timing == NativeSignalTiming::LiveBar {
@@ -641,7 +640,11 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
             signal_bar,
             evaluation.signal,
             evaluation.summary(),
-            evaluation.debug_summary(),
+            if include_debug {
+                evaluation.debug_summary()
+            } else {
+                String::new()
+            },
         );
     }
 
@@ -655,7 +658,11 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
             bars[idx].clone(),
             evaluation.signal,
             evaluation.summary(),
-            evaluation.debug_summary(),
+            if include_debug {
+                evaluation.debug_summary()
+            } else {
+                String::new()
+            },
         );
         if candidate.1 != StrategySignal::Hold || latest.is_none() {
             latest = Some(candidate);

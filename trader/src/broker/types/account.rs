@@ -26,6 +26,10 @@ pub struct EngineHistoryFill {
 pub struct EngineHistorySnapshot {
     pub run_id: String,
     pub started_at_utc: DateTime<Utc>,
+    /// Last broker/market refresh used to build this snapshot. Optional for
+    /// compatibility with older in-memory/replayed snapshots.
+    #[serde(default)]
+    pub updated_at_utc: Option<DateTime<Utc>>,
     pub account_id: i64,
     pub account_name: String,
     pub contract_id: i64,

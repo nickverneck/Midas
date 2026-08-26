@@ -1,7 +1,11 @@
 use super::debug::{
-    debug_signal_latency_suffix, emit_debug_logs_from_latency_delta, format_debug_latency_ms,
+    debug_signal_latency_suffix, emit_debug_logs_from_latency_delta, emit_service_debug_log,
+    emit_service_operational_status, format_debug_latency_ms,
 };
 use super::*;
+
+const SNAPSHOT_IN_FLIGHT_MASK: u64 = 1 << 63;
+const SNAPSHOT_REVISION_MASK: u64 = !SNAPSHOT_IN_FLIGHT_MASK;
 
 pub(super) async fn handle_internal(
     internal: InternalEvent,
@@ -15,11 +19,26 @@ pub(super) async fn handle_internal(
             handle_user_entities(entities, state, event_tx, internal_tx)?
         }
         InternalEvent::SnapshotsBuilt {
+            generation,
             revision,
             snapshots,
         } => {
-            if revision == state.snapshot_revision && state.session.is_some() {
+            if generation != state.snapshot_generation {
+                // A detached build from a previous connection/replay session
+                // must never clear the current in-flight marker or publish
+                // stale account state.
+                return Ok(());
+            }
+            let current_revision = state.snapshot_revision & SNAPSHOT_REVISION_MASK;
+            // Clear the in-flight marker before deciding whether this result
+            // is current. A newer request may have arrived while the worker
+            // was cloning/building; in that case request_snapshot_refresh
+            // starts exactly one replacement build from current state.
+            state.snapshot_revision = current_revision;
+            if revision == current_revision && state.session.is_some() {
                 let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
+            } else if revision != current_revision && state.session.is_some() {
+                request_snapshot_refresh(state, &internal_tx);
             }
         }
         InternalEvent::RestLatencyMeasured(rest_rtt_ms) => {
@@ -240,13 +259,15 @@ fn handle_user_entities(
             );
             session.execution_runtime.last_summary = summary.clone();
             let _ = event_tx.send(ServiceEvent::Status(summary));
-            let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-                "replay protected exit settlement | reason {} | strategy {} | account {} | contract {} | lifecycle tracker and pending target released",
-                settlement.reason,
-                settlement.order_strategy_id,
-                settlement.account_id,
-                settlement.contract_id,
-            )));
+            emit_service_debug_log(event_tx, Some(session), || {
+                format!(
+                    "replay protected exit settlement | reason {} | strategy {} | account {} | contract {} | lifecycle tracker and pending target released",
+                    settlement.reason,
+                    settlement.order_strategy_id,
+                    settlement.account_id,
+                    settlement.contract_id,
+                )
+            });
             emit_execution_state(event_tx, session);
         }
         let broker_rejections = collect_new_broker_rejections(session);
@@ -262,8 +283,9 @@ fn handle_user_entities(
                 if record_trade_marker(session, marker) {
                     trade_markers_changed = true;
                     if let Some(detail) = fill_detail {
-                        let _ = event_tx
-                            .send(ServiceEvent::DebugLog(format!("fill detail | {detail}")));
+                        emit_service_debug_log(event_tx, Some(session), || {
+                            format!("fill detail | {detail}")
+                        });
                     }
                 }
             }
@@ -519,7 +541,7 @@ pub(super) fn apply_broker_rejection(
         session.execution_runtime.last_summary = rejection.message.clone();
         emit_execution_state(event_tx, session);
     }
-    let _ = event_tx.send(ServiceEvent::DebugLog(rejection.debug));
+    emit_service_debug_log(event_tx, Some(session), || rejection.debug);
     if rejection.matches_selected_instrument || rejection.affects_active_submission {
         let _ = event_tx.send(ServiceEvent::BrokerRejection(rejection.message));
     }
@@ -630,15 +652,17 @@ pub(super) fn handle_broker_order_ack(
     }
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
-    let debug_message = format!(
-        "submit {}{} | endpoint {} | {}",
-        format_debug_latency_ms(ack.submit_rtt_ms),
-        debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
-        ack.endpoint,
-        ack.message
-    );
-    let _ = event_tx.send(ServiceEvent::Status(ack.message));
-    let _ = event_tx.send(ServiceEvent::DebugLog(debug_message));
+    let ack_message = ack.message.clone();
+    emit_service_operational_status(event_tx, state.session.as_ref(), || ack.message);
+    emit_service_debug_log(event_tx, state.session.as_ref(), || {
+        format!(
+            "submit {}{} | endpoint {} | {}",
+            format_debug_latency_ms(ack.submit_rtt_ms),
+            debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+            ack.endpoint,
+            ack_message
+        )
+    });
     let _ = event_tx.send(ServiceEvent::Latency(state.latency));
     schedule_pending_target_watchdog(internal_tx);
 }
@@ -683,18 +707,22 @@ fn handle_broker_order_failed(
         observability_context = Some(execution_observability_context(session));
     }
 
-    let debug_message =
-        format_broker_order_failure_debug(&failure, observability_context.as_deref());
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | {debug_message}"
-        )));
+        emit_service_debug_log(event_tx, state.session.as_ref(), || {
+            format!(
+                "submit stale | {}",
+                format_broker_order_failure_debug(&failure, observability_context.as_deref())
+            )
+        });
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | {debug_message}"
-        )));
+        emit_service_debug_log(event_tx, state.session.as_ref(), || {
+            format!(
+                "submit failed | {}",
+                format_broker_order_failure_debug(&failure, observability_context.as_deref())
+            )
+        });
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
 
@@ -745,15 +773,17 @@ fn handle_order_strategy_ack(
     }
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
-    let debug_message = format!(
-        "submit {}{} | endpoint {} | {}",
-        format_debug_latency_ms(ack.submit_rtt_ms),
-        debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
-        ack.endpoint,
-        ack.message
-    );
-    let _ = event_tx.send(ServiceEvent::Status(ack.message));
-    let _ = event_tx.send(ServiceEvent::DebugLog(debug_message));
+    let ack_message = ack.message.clone();
+    emit_service_operational_status(event_tx, state.session.as_ref(), || ack.message);
+    emit_service_debug_log(event_tx, state.session.as_ref(), || {
+        format!(
+            "submit {}{} | endpoint {} | {}",
+            format_debug_latency_ms(ack.submit_rtt_ms),
+            debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
+            ack.endpoint,
+            ack_message
+        )
+    });
     let _ = event_tx.send(ServiceEvent::Latency(state.latency));
     schedule_pending_target_watchdog(internal_tx);
 }
@@ -796,18 +826,22 @@ fn handle_order_strategy_failed(
         observability_context = Some(execution_observability_context(session));
     }
 
-    let debug_message =
-        format_order_strategy_failure_debug(&failure, observability_context.as_deref());
     if stale_interrupt_recovered {
         request_snapshot_refresh(state, &internal_tx);
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit stale | {debug_message}"
-        )));
+        emit_service_debug_log(event_tx, state.session.as_ref(), || {
+            format!(
+                "submit stale | {}",
+                format_order_strategy_failure_debug(&failure, observability_context.as_deref())
+            )
+        });
         let _ = event_tx.send(ServiceEvent::Status(failure.message));
     } else {
-        let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-            "submit failed | {debug_message}"
-        )));
+        emit_service_debug_log(event_tx, state.session.as_ref(), || {
+            format!(
+                "submit failed | {}",
+                format_order_strategy_failure_debug(&failure, observability_context.as_deref())
+            )
+        });
         let _ = event_tx.send(ServiceEvent::Error(failure.message));
     }
 
@@ -858,10 +892,9 @@ fn handle_protection_sync_applied(
     if let Some(message) = ack.message {
         let _ = event_tx.send(ServiceEvent::Status(message));
     }
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "protection sync applied | endpoint {}",
-        ack.endpoint
-    )));
+    emit_service_debug_log(event_tx, state.session.as_ref(), || {
+        format!("protection sync applied | endpoint {}", ack.endpoint)
+    });
     Ok(())
 }
 
@@ -882,10 +915,12 @@ fn handle_protection_sync_failed(
         }
     }
     request_snapshot_refresh(state, &internal_tx);
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "protection sync failed | endpoint {} | {}",
-        failure.endpoint, failure.message
-    )));
+    emit_service_debug_log(event_tx, state.session.as_ref(), || {
+        format!(
+            "protection sync failed | endpoint {} | {}",
+            failure.endpoint, failure.message
+        )
+    });
     let _ = event_tx.send(ServiceEvent::Error(failure.message));
     Ok(())
 }
@@ -900,6 +935,11 @@ fn handle_pending_target_watchdog(
     let Some(pending) = session.execution_runtime.pending_target_qty else {
         return Ok(());
     };
+    // A staged reversal uses target 0 for its flatten leg. Never clear that
+    // lifecycle on a wall-clock timeout: an absent user-stream update does
+    // not prove that the broker-owned strategy/flatten is gone, and forgetting
+    // it could allow a duplicate order. Only an authoritative broker event
+    // or an explicit user reconciliation may release this state.
     if pending == 0 || selected_contract_has_live_broker_path(session) {
         return Ok(());
     }

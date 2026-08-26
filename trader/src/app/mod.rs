@@ -72,6 +72,11 @@ pub struct App {
     pending_engine_selection_action: Option<EngineSelectionAction>,
     engine_socket_path: Option<PathBuf>,
     active_engine_key: Option<EngineKey>,
+    /// True only while the active engine's initial state is being restored.
+    /// The first execution snapshot consumes this flag so later strategy
+    /// updates cannot unexpectedly navigate away from a screen the user
+    /// selected intentionally.
+    resume_dashboard_pending: bool,
     pub should_quit: bool,
     status: String,
     accounts: Vec<AccountInfo>,

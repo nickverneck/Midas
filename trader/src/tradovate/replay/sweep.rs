@@ -457,9 +457,23 @@ impl ReplaySweepSpec {
         }
         validate_output_formats(&self.output_formats)?;
 
+        let base_strategy_encoded =
+            serde_json::to_value(&self.base_strategy).context("serialize base strategy")?;
+        let base_markov_encoded = serde_json::to_value(&self.replay_markov_orientation_gate)
+            .context("serialize base replay Markov gate")?;
         let mut parameter_paths = BTreeSet::new();
         for parameter in &self.parameters {
             validate_parameter_path(&parameter.path)?;
+            let base_value = if is_markov_parameter_path(&parameter.path) {
+                value_at_path(
+                    &base_markov_encoded,
+                    parameter
+                        .path
+                        .trim_start_matches("replay_markov_orientation_gate."),
+                )?
+            } else {
+                value_at_path(&base_strategy_encoded, &parameter.path)?
+            };
             if !parameter_paths.insert(parameter.path.clone()) {
                 bail!("duplicate sweep parameter path: {}", parameter.path);
             }
@@ -483,6 +497,7 @@ impl ReplaySweepSpec {
                 }
                 unique_values.push(value);
             }
+            let _ = base_value;
         }
         for constraint in &self.constraints {
             let (left, right) = constraint.paths();
@@ -490,6 +505,11 @@ impl ReplaySweepSpec {
                 .with_context(|| format!("validate constraint left path {left}"))?;
             validate_parameter_path(right)
                 .with_context(|| format!("validate constraint right path {right}"))?;
+            if is_markov_parameter_path(left) || is_markov_parameter_path(right) {
+                bail!(
+                    "replay Markov gate paths are sweepable but cannot be used in strategy constraints"
+                );
+            }
         }
 
         let combinations = self.combination_count()?;
@@ -705,6 +725,8 @@ impl ReplaySweepSpec {
         let combinations = cartesian_values(&self.parameters);
         let base_encoded = serde_json::to_value(&self.base_strategy)
             .context("serialize base strategy for sweep expansion")?;
+        let base_markov_encoded = serde_json::to_value(&self.replay_markov_orientation_gate)
+            .context("serialize base replay Markov gate for sweep expansion")?;
         let mut children = Vec::with_capacity(combinations.len());
 
         for (run_index, values) in combinations.into_iter().enumerate() {
@@ -716,6 +738,11 @@ impl ReplaySweepSpec {
                 .collect::<BTreeMap<_, _>>();
             let resolved_strategy = resolve_strategy(&self.base_strategy, &parameter_values)
                 .with_context(|| format!("resolve sweep child {}", run_index + 1))?;
+            let resolved_markov_orientation_gate = resolve_markov_orientation_gate(
+                &self.replay_markov_orientation_gate,
+                &parameter_values,
+            )
+            .with_context(|| format!("resolve replay Markov gate child {}", run_index + 1))?;
             for constraint in &self.constraints {
                 if !constraint.evaluate(&resolved_strategy)? {
                     let (left, right) = constraint.paths();
@@ -729,18 +756,29 @@ impl ReplaySweepSpec {
 
             let resolved_encoded = serde_json::to_value(&resolved_strategy)
                 .context("serialize resolved child strategy")?;
+            let resolved_markov_encoded = serde_json::to_value(&resolved_markov_orientation_gate)
+                .context("serialize resolved replay Markov gate")?;
             let mut overrides = BTreeMap::new();
             for (path, value) in &parameter_values {
-                let base_value = value_at_path(&base_encoded, path)
-                    .with_context(|| format!("base strategy parameter path {path}"))?;
+                let (base_root, resolved_root, local_path) = if is_markov_parameter_path(path) {
+                    (
+                        &base_markov_encoded,
+                        &resolved_markov_encoded,
+                        path.trim_start_matches("replay_markov_orientation_gate."),
+                    )
+                } else {
+                    (&base_encoded, &resolved_encoded, path.as_str())
+                };
+                let base_value = value_at_path(base_root, local_path)
+                    .with_context(|| format!("base parameter path {path}"))?;
                 if base_value != value {
                     overrides.insert(path.clone(), value.clone());
                 }
                 // The resolver already deserialized this field, but checking
                 // the path here catches future allow-list/config drift before
                 // a runner is allowed to start.
-                let _ = value_at_path(&resolved_encoded, path)
-                    .with_context(|| format!("resolved strategy parameter path {path}"))?;
+                let _ = value_at_path(resolved_root, local_path)
+                    .with_context(|| format!("resolved parameter path {path}"))?;
             }
 
             children.push(ReplaySweepChildSpec {
@@ -762,7 +800,7 @@ impl ReplaySweepSpec {
                 fee_scenarios: self.fee_scenarios.clone(),
                 initial_capital: self.initial_capital,
                 margin: self.margin.clone(),
-                replay_markov_orientation_gate: self.replay_markov_orientation_gate.clone(),
+                replay_markov_orientation_gate: resolved_markov_orientation_gate,
             });
         }
         Ok(children)
@@ -1118,6 +1156,10 @@ fn validate_volume_adaptive_hma_cross(config: &VolumeAdaptiveHmaCrossConfig) -> 
         .map_err(|error| anyhow::anyhow!("volume-adaptive HMA {error}"))?;
     validate_ema_orientation_gate(&config.ema_gate)
         .map_err(|error| anyhow::anyhow!("volume-adaptive HMA {error}"))?;
+    config
+        .adaptive_gate
+        .validate()
+        .map_err(|error| anyhow::anyhow!("volume-adaptive HMA {error}"))?;
     Ok(())
 }
 
@@ -1213,6 +1255,69 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_volume_hma_cross.ema_gate.enabled",
     "native_volume_hma_cross.ema_gate.ema_length",
     "native_volume_hma_cross.ema_gate.invert_when_above",
+    "native_volume_hma_cross.adaptive_gate.enabled",
+    "native_volume_hma_cross.adaptive_gate.combine",
+    "native_volume_hma_cross.adaptive_gate.minimum_feature_votes",
+    "native_volume_hma_cross.adaptive_gate.invert_confirmation_bars",
+    "native_volume_hma_cross.adaptive_gate.normal_confirmation_bars",
+    "native_volume_hma_cross.adaptive_gate.hold_on_missing_features",
+    "native_volume_hma_cross.adaptive_gate.hold_during_dwell",
+    "native_volume_hma_cross.adaptive_gate.reset_on_missing_features",
+    "native_volume_hma_cross.adaptive_gate.use_relative_volume",
+    "native_volume_hma_cross.adaptive_gate.volume_lookback_bars",
+    "native_volume_hma_cross.adaptive_gate.invert_below_relative_volume",
+    "native_volume_hma_cross.adaptive_gate.invert_above_relative_volume",
+    "native_volume_hma_cross.adaptive_gate.use_atr_ratio",
+    "native_volume_hma_cross.adaptive_gate.atr_length",
+    "native_volume_hma_cross.adaptive_gate.atr_lookback_bars",
+    "native_volume_hma_cross.adaptive_gate.invert_below_atr_ratio",
+    "native_volume_hma_cross.adaptive_gate.invert_above_atr_ratio",
+    "native_volume_hma_cross.adaptive_gate.use_choppiness",
+    "native_volume_hma_cross.adaptive_gate.choppiness_length",
+    "native_volume_hma_cross.adaptive_gate.invert_below_choppiness",
+    "native_volume_hma_cross.adaptive_gate.invert_above_choppiness",
+    "native_volume_hma_cross.adaptive_gate.use_directional_return",
+    "native_volume_hma_cross.adaptive_gate.directional_return_length",
+    "native_volume_hma_cross.adaptive_gate.invert_when_aligned_return_below",
+    "native_volume_hma_cross.adaptive_gate.invert_when_aligned_return_above",
+    "native_volume_hma_cross.adaptive_gate.use_adx",
+    "native_volume_hma_cross.adaptive_gate.adx_length",
+    "native_volume_hma_cross.adaptive_gate.invert_below_adx",
+    "native_volume_hma_cross.adaptive_gate.invert_above_adx",
+    "native_volume_hma_cross.adaptive_gate.use_di_imbalance",
+    "native_volume_hma_cross.adaptive_gate.invert_when_di_imbalance_below",
+    "native_volume_hma_cross.adaptive_gate.invert_when_di_imbalance_above",
+    "native_volume_hma_cross.adaptive_gate.use_ema_spread",
+    "native_volume_hma_cross.adaptive_gate.invert_when_normalized_spread_below",
+    "native_volume_hma_cross.adaptive_gate.invert_when_normalized_spread_above",
+    "native_volume_hma_cross.adaptive_gate.use_ema_slope",
+    "native_volume_hma_cross.adaptive_gate.ema_slope_lookback",
+    "native_volume_hma_cross.adaptive_gate.invert_when_normalized_slope_below",
+    "native_volume_hma_cross.adaptive_gate.invert_when_normalized_slope_above",
+    "native_volume_hma_cross.adaptive_gate.use_directional_ema_gap",
+    "native_volume_hma_cross.adaptive_gate.directional_ema_length",
+    "native_volume_hma_cross.adaptive_gate.directional_gap_lookback_bars",
+    "native_volume_hma_cross.adaptive_gate.invert_when_bullish_gap_below",
+    "native_volume_hma_cross.adaptive_gate.invert_when_bullish_gap_above",
+    "native_volume_hma_cross.adaptive_gate.invert_when_bearish_gap_below",
+    "native_volume_hma_cross.adaptive_gate.invert_when_bearish_gap_above",
+    "native_volume_hma_cross.adaptive_gate.use_session_window",
+    "native_volume_hma_cross.adaptive_gate.session_start_minute_et",
+    "native_volume_hma_cross.adaptive_gate.session_end_minute_et",
+    "native_volume_hma_cross.adaptive_gate.invert_inside_session_window",
+    "native_volume_hma_cross.adaptive_gate.session_weekdays_mask",
+    "native_volume_hma_cross.adaptive_gate.use_higher_timeframe_context",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_average_kind",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_minutes",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_fast_length",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_slow_length",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_atr_length",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_slope_lookback",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_persistence_bars",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_spread_atr_floor",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_spread_atr_ceiling",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_slope_atr_floor",
+    "native_volume_hma_cross.adaptive_gate.higher_timeframe_conflict_action",
     "native_volume_ema_cross.fast_length",
     "native_volume_ema_cross.slow_length",
     "native_volume_ema_cross.inverted",
@@ -1291,6 +1396,19 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_adx.trail_trigger_ticks",
     "native_adx.trail_offset_ticks",
     "order_qty",
+    "replay_markov_orientation_gate.enabled",
+    "replay_markov_orientation_gate.score_window_outcomes",
+    "replay_markov_orientation_gate.minimum_completed_outcomes",
+    "replay_markov_orientation_gate.score_margin_ticks",
+    "replay_markov_orientation_gate.max_abs_outcome_ticks",
+    "replay_markov_orientation_gate.outcome_decay",
+    "replay_markov_orientation_gate.confirmation_events",
+    "replay_markov_orientation_gate.minimum_dwell_events",
+    "replay_markov_orientation_gate.reset_after_gap_minutes",
+    "replay_markov_orientation_gate.efficiency_lookback_bars",
+    "replay_markov_orientation_gate.neutral_below_efficiency_ratio",
+    "replay_markov_orientation_gate.normal_override_above_efficiency_ratio",
+    "replay_markov_orientation_gate.neutral_action",
 ];
 
 fn validate_parameter_path(path: &str) -> Result<()> {
@@ -1300,6 +1418,28 @@ fn validate_parameter_path(path: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn is_markov_parameter_path(path: &str) -> bool {
+    path.starts_with("replay_markov_orientation_gate.")
+}
+
+fn resolve_markov_orientation_gate(
+    base: &ReplayMarkovOrientationGateConfig,
+    values: &BTreeMap<String, Value>,
+) -> Result<ReplayMarkovOrientationGateConfig> {
+    let mut encoded = serde_json::to_value(base).context("serialize replay Markov gate")?;
+    for (path, value) in values {
+        if let Some(local_path) = path.strip_prefix("replay_markov_orientation_gate.") {
+            set_value_at_path(&mut encoded, local_path, value.clone())?;
+        }
+    }
+    let resolved: ReplayMarkovOrientationGateConfig =
+        serde_json::from_value(encoded).context("deserialize replay Markov gate")?;
+    resolved
+        .validate()
+        .map_err(|error| anyhow::anyhow!("replay Markov gate {error}"))?;
+    Ok(resolved)
 }
 
 fn is_scalar_value(value: &Value) -> bool {
@@ -1355,7 +1495,9 @@ fn resolve_strategy(
 ) -> Result<ExecutionStrategyConfig> {
     let mut encoded = serde_json::to_value(base).context("serialize base strategy")?;
     for (path, value) in values {
-        set_value_at_path(&mut encoded, path, value.clone())?;
+        if !is_markov_parameter_path(path) {
+            set_value_at_path(&mut encoded, path, value.clone())?;
+        }
     }
     let resolved = serde_json::from_value(encoded).context("deserialize resolved strategy")?;
     validate_strategy_config(&resolved)?;
@@ -1498,6 +1640,44 @@ mod tests {
                 .unwrap()
                 .margin_per_contract,
             1_500.0
+        );
+    }
+
+    #[test]
+    fn expands_replay_markov_gate_parameters_without_touching_strategy() {
+        let mut spec = sample_spec();
+        spec.execution_mode = ReplaySweepExecutionMode::PreparedCpu;
+        spec.replay_markov_orientation_gate.enabled = true;
+        spec.replay_markov_orientation_gate
+            .minimum_completed_outcomes = 1;
+        spec.parameters = vec![ReplaySweepParameter {
+            path: "replay_markov_orientation_gate.score_window_outcomes".to_string(),
+            values: vec![Value::from(1), Value::from(3)],
+        }];
+        spec.max_runs = 2;
+        spec.parallelism = 1;
+
+        let plan = spec.plan().expect("valid Markov gate grid");
+        assert_eq!(plan.children.len(), 2);
+        assert_eq!(
+            plan.children[0].resolved_strategy.native_ema.fast_length,
+            10
+        );
+        assert_eq!(
+            plan.children[0]
+                .replay_markov_orientation_gate
+                .score_window_outcomes,
+            1
+        );
+        assert_eq!(
+            plan.children[1]
+                .replay_markov_orientation_gate
+                .score_window_outcomes,
+            3
+        );
+        assert_eq!(
+            plan.children[1].overrides["replay_markov_orientation_gate.score_window_outcomes"],
+            Value::from(3)
         );
     }
 

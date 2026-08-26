@@ -29,6 +29,25 @@ pub(crate) fn maybe_run_simple_execution_strategy(
         return Ok(());
     };
 
+    // Range subscriptions can briefly publish a timestamp without a usable
+    // strategy slice while the latest bar is being replaced. Wait for the
+    // next complete update instead of turning that transient into an error.
+    if signal_evaluation_bars(session).is_empty() {
+        let next_summary = format!(
+            "Simple diagnostic {} waiting for a complete market snapshot.",
+            active_native_label(session)
+        );
+        emit_execution_transition_debug(
+            event_tx,
+            session,
+            &next_summary,
+            "simple execution market snapshot wait",
+        );
+        session.execution_runtime.last_summary = next_summary;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
         if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
             let hma_debug =
@@ -46,21 +65,23 @@ pub(crate) fn maybe_run_simple_execution_strategy(
                 last_strategy_ts,
                 hma_debug
             );
-            let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-                session,
-                TradovateStrategyDecisionDebug {
-                    path: "simple diagnostic",
-                    decision: "blocked",
-                    signal: None,
-                    bar_ts: Some(last_strategy_ts),
-                    actual_qty: selected_market_position_qty(session),
-                    effective_qty: selected_market_position_qty(session),
-                    target_qty: None,
-                    strategy_detail: "n/a",
-                    gate_detail,
-                    fingerprint: latest_strategy_bar_fingerprint(session),
-                },
-            )));
+            emit_debug_log(event_tx, session, || {
+                format_tradovate_strategy_decision(
+                    session,
+                    TradovateStrategyDecisionDebug {
+                        path: "simple diagnostic",
+                        decision: "blocked",
+                        signal: None,
+                        bar_ts: Some(last_strategy_ts),
+                        actual_qty: selected_market_position_qty(session),
+                        effective_qty: selected_market_position_qty(session),
+                        target_qty: None,
+                        strategy_detail: "n/a",
+                        gate_detail,
+                        fingerprint: latest_strategy_bar_fingerprint(session),
+                    },
+                )
+            });
             return Ok(());
         }
         session.execution_runtime.last_closed_bar_fingerprint =
@@ -105,21 +126,23 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "simple diagnostic",
-                decision: "no target",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: None,
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "simple diagnostic",
+                    decision: "no target",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: None,
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     };
@@ -147,21 +170,23 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "simple diagnostic",
-                decision: "target already actual",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: Some(target_qty),
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "simple diagnostic",
+                    decision: "target already actual",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -194,21 +219,23 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "simple diagnostic",
-                decision: "closed-bar already dispatched",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: Some(target_qty),
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "simple diagnostic",
+                    decision: "closed-bar already dispatched",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -240,21 +267,23 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             None,
             &debug_summary,
         );
-        let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-            session,
-            TradovateStrategyDecisionDebug {
-                path: "simple diagnostic",
-                decision: "flat entry side already consumed",
-                signal: Some(signal),
-                bar_ts: Some(signal_bar.ts_ns),
-                actual_qty,
-                effective_qty: actual_qty,
-                target_qty: Some(target_qty),
-                strategy_detail: &debug_summary,
-                gate_detail,
-                fingerprint: latest_strategy_bar_fingerprint(session),
-            },
-        )));
+        emit_debug_log(event_tx, session, || {
+            format_tradovate_strategy_decision(
+                session,
+                TradovateStrategyDecisionDebug {
+                    path: "simple diagnostic",
+                    decision: "flat entry side already consumed",
+                    signal: Some(signal),
+                    bar_ts: Some(signal_bar.ts_ns),
+                    actual_qty,
+                    effective_qty: actual_qty,
+                    target_qty: Some(target_qty),
+                    strategy_detail: &debug_summary,
+                    gate_detail,
+                    fingerprint: latest_strategy_bar_fingerprint(session),
+                },
+            )
+        });
         emit_execution_state(event_tx, session);
         return Ok(());
     }
@@ -333,29 +362,33 @@ pub(crate) fn maybe_run_simple_execution_strategy(
         Some(order_qty),
         &debug_summary,
     );
-    let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-        session,
-        TradovateStrategyDecisionDebug {
-            path: "simple diagnostic",
-            decision: "dispatching",
-            signal: Some(signal),
-            bar_ts: Some(signal_bar.ts_ns),
+    emit_debug_log(event_tx, session, || {
+        format_tradovate_strategy_decision(
+            session,
+            TradovateStrategyDecisionDebug {
+                path: "simple diagnostic",
+                decision: "dispatching",
+                signal: Some(signal),
+                bar_ts: Some(signal_bar.ts_ns),
+                actual_qty,
+                effective_qty: actual_qty,
+                target_qty: Some(target_qty),
+                strategy_detail: &debug_summary,
+                gate_detail,
+                fingerprint: latest_strategy_bar_fingerprint(session),
+            },
+        )
+    });
+    emit_operational_status(event_tx, session, || {
+        format!(
+            "Simple strategy {} signal: {} {} (qty {} -> {})",
+            active_native_slug(session),
+            order_action,
+            order_qty,
             actual_qty,
-            effective_qty: actual_qty,
-            target_qty: Some(target_qty),
-            strategy_detail: &debug_summary,
-            gate_detail,
-            fingerprint: latest_strategy_bar_fingerprint(session),
-        },
-    )));
-    let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Simple strategy {} signal: {} {} (qty {} -> {})",
-        active_native_slug(session),
-        order_action,
-        order_qty,
-        actual_qty,
-        target_qty
-    )));
+            target_qty
+        )
+    });
     emit_execution_state(event_tx, session);
     Ok(())
 }

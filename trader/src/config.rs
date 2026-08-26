@@ -95,6 +95,10 @@ impl Default for AuthMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogMode {
+    /// Keep safety-relevant errors, rejections, and socket status while
+    /// suppressing routine strategy/order status rows and diagnostics at the
+    /// producer. This avoids unnecessary IPC/TUI work during fast runs.
+    Quiet,
     Default,
     Debug,
 }
@@ -102,16 +106,30 @@ pub enum LogMode {
 impl LogMode {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Quiet => "Quiet",
             Self::Default => "Default",
             Self::Debug => "Debug",
         }
     }
 
-    pub fn toggle(self) -> Self {
+    pub fn next(self) -> Self {
         match self {
+            Self::Quiet => Self::Default,
             Self::Default => Self::Debug,
+            Self::Debug => Self::Quiet,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Quiet => Self::Debug,
+            Self::Default => Self::Quiet,
             Self::Debug => Self::Default,
         }
+    }
+
+    pub fn toggle(self) -> Self {
+        self.next()
     }
 }
 
@@ -669,6 +687,7 @@ fn parse_auth_mode(raw: &str) -> Result<AuthMode> {
 
 fn parse_log_mode(raw: &str) -> Result<LogMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "quiet" | "silent" | "off" => Ok(LogMode::Quiet),
         "default" | "normal" => Ok(LogMode::Default),
         "debug" | "verbose" => Ok(LogMode::Debug),
         other => bail!("invalid log mode `{other}`"),

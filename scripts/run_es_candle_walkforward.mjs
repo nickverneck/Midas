@@ -414,8 +414,10 @@ const main = () => {
   gaFold.params['selection-gap-penalty'] = args.selectionGapPenalty;
   if (args.selectionUseEval) {
     gaFold.params['selection-use-eval'] = true;
+    delete gaFold.params['train-only-selection'];
   } else {
     delete gaFold.params['selection-use-eval'];
+    gaFold.params['train-only-selection'] = true;
   }
   rlFold.params.window = args.window;
   rlFold.params.step = args.step;

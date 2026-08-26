@@ -14,7 +14,7 @@ mod runtime;
 mod util;
 
 use anyhow::{Context, bail};
-use candle_core::DType;
+use candle_core::{DType, Device};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use midas_env::bars::BarSelection;
 use midas_env::env::{EnvConfig, MarginMode};
@@ -61,8 +61,15 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
     print_device(&device);
 
     let seed = args.seed.unwrap_or_else(|| rand::thread_rng().r#gen());
-    if let Err(err) = device.set_seed(seed) {
-        println!("info: candle backend device seeding unavailable: {err}");
+    if matches!(device, Device::Cpu) && args.dropout > 0.0 {
+        bail!(
+            "Candle CPU deterministic mode requires --dropout 0 because the CPU dropout RNG is not seedable"
+        );
+    }
+    if matches!(device, Device::Cpu) {
+        println!("info: candle CPU uses host-seeded model initialization and StdRng rollouts");
+    } else if let Err(err) = device.set_seed(seed) {
+        println!("info: candle device seeding unavailable: {err}");
     }
     let mut rng = StdRng::seed_from_u64(seed);
 
@@ -201,6 +208,28 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
     let use_grpo = args.algorithm == "grpo";
 
     let mut varmap = VarMap::new();
+    model::initialize_seeded_mlp(
+        &mut varmap,
+        "policy",
+        obs_dim,
+        args.hidden,
+        args.layers,
+        action_dim,
+        &mut rng,
+        &device,
+    )?;
+    if !use_grpo {
+        model::initialize_seeded_mlp(
+            &mut varmap,
+            "value",
+            obs_dim,
+            args.hidden,
+            args.layers,
+            1,
+            &mut rng,
+            &device,
+        )?;
+    }
     let var_builder = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let policy = build_policy(
         var_builder.pp("policy"),
@@ -245,6 +274,8 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
 
     let log_path = args.outdir.join("rl_log.csv");
     common::ensure_csv_header(&log_path, common::RL_LOG_HEADER_V2)?;
+    let mut best_eval_fitness = f64::NEG_INFINITY;
+    let mut best_eval_epoch = None;
 
     let rollout_cfg = RolloutConfig {
         gamma: args.gamma,
@@ -347,7 +378,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     1,
                     &device,
                     &mut rng,
-                    false,
+                    true,
                 )?;
                 eval_metrics.push(summarize_group(&group, args.sortino_annualization));
             } else {
@@ -361,7 +392,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                     false,
                     &device,
                     &mut rng,
-                    false,
+                    true,
                 )?;
                 eval_metrics.push(summarize_batch(&batch, args.sortino_annualization));
             }
@@ -407,6 +438,9 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
             None
         };
 
+        let eval_fitness = (args.w_pnl * eval_summary.pnl)
+            + (args.w_sortino * eval_summary.sortino)
+            - (args.w_mdd * eval_summary.drawdown);
         let fitness_source = if args.fitness_use_eval {
             eval_summary
         } else {
@@ -415,8 +449,33 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         let fitness = (args.w_pnl * fitness_source.pnl) + (args.w_sortino * fitness_source.sortino)
             - (args.w_mdd * fitness_source.drawdown);
 
+        if eval_fitness > best_eval_fitness {
+            best_eval_fitness = eval_fitness;
+            best_eval_epoch = Some(epoch);
+            let best_path = args.outdir.join("best_validation.safetensors");
+            varmap.save(&best_path).with_context(|| {
+                format!("save best validation checkpoint {}", best_path.display())
+            })?;
+            let metadata = serde_json::json!({
+                "epoch": epoch,
+                "eval_fitness": eval_fitness,
+                "eval_pnl": eval_summary.pnl,
+                "eval_sortino": eval_summary.sortino,
+                "eval_drawdown": eval_summary.drawdown,
+                "seed": seed,
+            });
+            std::fs::write(
+                args.outdir.join("best_validation.json"),
+                format!("{}\n", serde_json::to_string_pretty(&metadata)?),
+            )?;
+            println!(
+                "info: new best validation checkpoint epoch {} | eval fitness {:.4} | pnl {:.2}",
+                epoch, eval_fitness, eval_summary.pnl
+            );
+        }
+
         println!(
-            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | eval conf {:.3} | fitness {:.4} | time {}",
+            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | eval conf {:.3} | eval fitness {:.4} | fitness {:.4} | time {}",
             epoch,
             train_summary.ret_mean,
             train_summary.pnl,
@@ -424,6 +483,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
             eval_summary.sortino,
             eval_summary.drawdown,
             eval_summary.mean_max_prob,
+            eval_fitness,
             fitness,
             format_duration(epoch_start.elapsed())
         );
@@ -483,6 +543,20 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         }
     }
 
+    if best_eval_epoch.is_some() {
+        let best_path = args.outdir.join("best_validation.safetensors");
+        load_checkpoint(&mut varmap, &best_path).with_context(|| {
+            format!(
+                "reload best Candle validation checkpoint before test {}",
+                best_path.display()
+            )
+        })?;
+        println!(
+            "info: reloaded best validation checkpoint before test/final save ({})",
+            best_path.display()
+        );
+    }
+
     let eval_count = args.eval_windows.min(windows_test.len()).max(1);
     let mut test_metrics = Vec::with_capacity(eval_count);
     for window in windows_test.iter().take(eval_count) {
@@ -497,7 +571,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                 1,
                 &device,
                 &mut rng,
-                false,
+                true,
             )?;
             test_metrics.push(summarize_group(&group, args.sortino_annualization));
         } else {
@@ -511,7 +585,7 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
                 false,
                 &device,
                 &mut rng,
-                false,
+                true,
             )?;
             test_metrics.push(summarize_batch(&batch, args.sortino_annualization));
         }
@@ -521,6 +595,12 @@ pub fn run(args: Args, mut stack: ml::ResolvedTrainingStack) -> anyhow::Result<(
         "test | ret {:.4} | pnl {:.4} | sortino {:.4} | mdd {:.4}",
         test_summary.ret_mean, test_summary.pnl, test_summary.sortino, test_summary.drawdown
     );
+    if let Some(epoch) = best_eval_epoch {
+        println!(
+            "best validation checkpoint: epoch {} | eval fitness {:.4}",
+            epoch, best_eval_fitness
+        );
+    }
     println!(
         "total training time: {}",
         format_duration(training_start.elapsed())

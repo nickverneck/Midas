@@ -630,6 +630,110 @@ fn active_engine_events_preserve_detail_behavior() {
 }
 
 #[test]
+fn attaching_to_armed_engine_restores_dashboard_and_market_selection() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    let socket = PathBuf::from("/tmp/trader-engine-10.sock");
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    // The engine overview observer normally receives this before the user
+    // presses Enter, which lets attach skip the login/selection workflow.
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        false,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            runtime: ExecutionRuntimeSnapshot {
+                armed: true,
+                last_summary: "armed and tracking".to_string(),
+                ..ExecutionRuntimeSnapshot::default()
+            },
+            bar_type: Some(BarType::range(1)),
+            candle_mode: Some(CandleMode::Standard),
+            ..ExecutionStateSnapshot::default()
+        }),
+        false,
+        &cmd_tx,
+    );
+
+    app.enter_engine_session_for_key(key, socket);
+
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert_eq!(app.focus, Focus::AccountList);
+    assert_eq!(app.bar_type, BarType::range(1));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn attach_falls_back_to_dashboard_when_armed_state_arrives_after_connect() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.enter_engine_session_for_key(key.clone(), PathBuf::from("/tmp/trader-engine-10.sock"));
+
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        true,
+        &cmd_tx,
+    );
+    assert_eq!(app.screen, Screen::Selection);
+
+    app.handle_engine_service_event(
+        key,
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            runtime: ExecutionRuntimeSnapshot {
+                armed: true,
+                ..ExecutionRuntimeSnapshot::default()
+            },
+            bar_type: Some(BarType::range(10)),
+            candle_mode: Some(CandleMode::Standard),
+            ..ExecutionStateSnapshot::default()
+        }),
+        true,
+        &cmd_tx,
+    );
+
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert_eq!(app.bar_type, BarType::range(10));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn attached_minute_engine_renders_observed_candle_mode() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.enter_engine_session_for_key(key.clone(), PathBuf::from("/tmp/trader-engine-10.sock"));
+
+    app.handle_engine_service_event(
+        key,
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            runtime: ExecutionRuntimeSnapshot {
+                armed: true,
+                ..ExecutionRuntimeSnapshot::default()
+            },
+            bar_type: Some(BarType::minute(1)),
+            candle_mode: Some(CandleMode::HeikinAshi),
+            ..ExecutionStateSnapshot::default()
+        }),
+        true,
+        &cmd_tx,
+    );
+
+    let dashboard = rendered_text(app.dashboard_summary_lines());
+    assert!(dashboard.iter().any(|line| line == "Bar Type: 1 Min"));
+    assert!(dashboard.iter().any(|line| line == "Candles: Heikin Ashi"));
+}
+
+#[test]
 fn active_engine_header_label_includes_identity_state_and_other_count() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();

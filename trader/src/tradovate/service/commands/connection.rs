@@ -264,6 +264,8 @@ async fn reset_state_for_new_session(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
 ) {
     shutdown_tasks(state).await;
+    state.snapshot_generation = state.snapshot_generation.wrapping_add(1);
+    state.snapshot_revision = 0;
     state.latency = LatencySnapshot::default();
     state.replay_speed = ReplaySpeed::default();
     state.replay_execution_ledger = replay::ReplayExecutionLedgerState::default();

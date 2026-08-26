@@ -33,7 +33,11 @@ impl App {
     pub(in crate::app) fn render_session_stats_screen(&self, frame: &mut Frame<'_>, area: Rect) {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints(if area.width < 100 {
+                [Constraint::Percentage(50), Constraint::Percentage(50)]
+            } else {
+                [Constraint::Percentage(40), Constraint::Percentage(60)]
+            })
             .split(area);
 
         let left = Layout::default()
@@ -55,13 +59,16 @@ impl App {
             .wrap(Wrap { trim: true });
         frame.render_widget(account, left[1]);
 
-        let events = Paragraph::new(self.session_stats_event_lines(area.height as usize))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Recent Balance Delta Events"),
-            )
-            .wrap(Wrap { trim: true });
+        let events =
+            Paragraph::new(self.session_stats_event_lines(area.height.saturating_sub(2) as usize))
+                .block(Block::default().borders(Borders::ALL).title(
+                    if self.engine_history.is_some() {
+                        "Recent Engine Fills"
+                    } else {
+                        "Recent Balance Delta Events"
+                    },
+                ))
+                .wrap(Wrap { trim: true });
         frame.render_widget(events, columns[1]);
     }
 }

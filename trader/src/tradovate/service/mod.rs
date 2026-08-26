@@ -36,6 +36,7 @@ pub async fn service_loop(
         replay_lookup_job: None,
         replay_download_job: None,
         latency: LatencySnapshot::default(),
+        snapshot_generation: 0,
         snapshot_revision: 0,
     };
     let mut maintenance_tick =

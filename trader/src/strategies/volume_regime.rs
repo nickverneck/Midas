@@ -94,6 +94,10 @@ pub struct VolumeAdaptiveHmaCrossConfig {
     pub volume_regime: VolumeRegimeConfig,
     #[serde(default)]
     pub ema_gate: EmaOrientationGateConfig,
+    /// Optional multi-feature causal orientation layer. Disabled by default
+    /// so existing HMA configurations retain their exact behavior.
+    #[serde(default)]
+    pub adaptive_gate: RegimeAdaptiveGateConfig,
 }
 
 /// Separate native strategy that wraps the existing EMA crossover with the
@@ -131,6 +135,7 @@ impl Default for VolumeAdaptiveHmaCrossConfig {
             hma_cross: HmaCrossConfig::default(),
             volume_regime: VolumeRegimeConfig::default(),
             ema_gate: EmaOrientationGateConfig::default(),
+            adaptive_gate: RegimeAdaptiveGateConfig::default(),
         }
     }
 }
@@ -143,6 +148,7 @@ pub struct VolumeAdaptiveHmaCrossEvaluation {
     pub ema_value: Option<f64>,
     pub ema_inverted: bool,
     pub ema_ready: bool,
+    pub adaptive_gate: RegimeAdaptiveGateEvaluation,
 }
 
 impl VolumeAdaptiveHmaCrossEvaluation {
@@ -152,7 +158,7 @@ impl VolumeAdaptiveHmaCrossEvaluation {
 
     pub fn summary(&self) -> String {
         format!(
-            "{} | Relative volume: {} | Volume gate: {} | EMA gate: {}",
+            "{} | Relative volume: {} | Volume gate: {} | EMA gate: {} | {}",
             self.hma.summary(),
             format_ratio(self.relative_volume),
             if self.volume_inverted {
@@ -167,12 +173,13 @@ impl VolumeAdaptiveHmaCrossEvaluation {
             } else {
                 "warming_up"
             },
+            self.adaptive_gate.summary(),
         )
     }
 
     pub fn debug_summary(&self) -> String {
         format!(
-            "{} | relative_volume={} | volume_gate_inverted={} | ema={} | ema_gate_inverted={} | ema_ready={}",
+            "{} | relative_volume={} | volume_gate_inverted={} | ema={} | ema_gate_inverted={} | ema_ready={} | {}",
             self.hma.debug_summary(),
             format_ratio(self.relative_volume),
             self.volume_inverted,
@@ -181,12 +188,13 @@ impl VolumeAdaptiveHmaCrossEvaluation {
                 .unwrap_or_else(|| "n/a".to_string()),
             self.ema_inverted,
             self.ema_ready,
+            self.adaptive_gate.summary(),
         )
     }
 
     pub fn gate_summary(&self) -> String {
         format!(
-            "relative_volume={} volume_gate_inverted={} ema={} ema_gate_inverted={} ema_ready={}",
+            "relative_volume={} volume_gate_inverted={} ema={} ema_gate_inverted={} ema_ready={} | {}",
             format_ratio(self.relative_volume),
             self.volume_inverted,
             self.ema_value
@@ -194,6 +202,7 @@ impl VolumeAdaptiveHmaCrossEvaluation {
                 .unwrap_or_else(|| "n/a".to_string()),
             self.ema_inverted,
             self.ema_ready,
+            self.adaptive_gate.summary(),
         )
     }
 }
@@ -208,6 +217,10 @@ impl VolumeAdaptiveHmaCrossConfig {
             .warmup_bars()
             .max(self.volume_regime.warmup_bars())
             .max(self.ema_gate.warmup_bars())
+            .max(
+                self.adaptive_gate
+                    .warmup_bars(self.hma_cross.fast_length, self.hma_cross.slow_length),
+            )
     }
 
     pub fn evaluate(
@@ -215,10 +228,20 @@ impl VolumeAdaptiveHmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> VolumeAdaptiveHmaCrossEvaluation {
-        let (effective, relative_volume, volume_inverted, ema_gate) = self.effective_hma(bars);
+        if self.adaptive_gate.enabled {
+            let base = self.hma_cross.evaluate(bars, current_side);
+            if !base.raw_buy_signal && !base.raw_sell_signal {
+                return self.wrap_without_adaptive(base, bars);
+            }
+        }
+        let (effective, relative_volume, volume_inverted, ema_gate, adaptive_gate) =
+            self.effective_hma(bars);
         let mut hma = effective.evaluate(bars, current_side);
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_hma(&mut hma);
+        }
+        if adaptive_gate.should_hold() {
+            hold_for_adaptive_gate_hma(&mut hma, adaptive_gate.hold_reason);
         }
         VolumeAdaptiveHmaCrossEvaluation {
             hma,
@@ -227,6 +250,7 @@ impl VolumeAdaptiveHmaCrossConfig {
             ema_value: ema_gate.ema,
             ema_inverted: ema_gate.inverted,
             ema_ready: ema_gate.ready,
+            adaptive_gate,
         }
     }
 
@@ -236,10 +260,27 @@ impl VolumeAdaptiveHmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> VolumeAdaptiveHmaCrossEvaluation {
-        let (effective, relative_volume, volume_inverted, ema_gate) = self.effective_hma(bars);
+        if self.adaptive_gate.enabled {
+            // Probe on a clone so the wrapper can preserve the stateful HMA
+            // side tracker on non-crossing bars without advancing it twice
+            // on a real cross.
+            let mut probe_runtime = runtime.clone();
+            let base =
+                self.hma_cross
+                    .evaluate_current_cross(&mut probe_runtime, bars, current_side);
+            if !base.raw_buy_signal && !base.raw_sell_signal {
+                *runtime = probe_runtime;
+                return self.wrap_without_adaptive(base, bars);
+            }
+        }
+        let (effective, relative_volume, volume_inverted, ema_gate, adaptive_gate) =
+            self.effective_hma(bars);
         let mut hma = effective.evaluate_current_cross(runtime, bars, current_side);
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_hma(&mut hma);
+        }
+        if adaptive_gate.should_hold() {
+            hold_for_adaptive_gate_hma(&mut hma, adaptive_gate.hold_reason);
         }
         VolumeAdaptiveHmaCrossEvaluation {
             hma,
@@ -248,6 +289,7 @@ impl VolumeAdaptiveHmaCrossConfig {
             ema_value: ema_gate.ema,
             ema_inverted: ema_gate.inverted,
             ema_ready: ema_gate.ready,
+            adaptive_gate,
         }
     }
 
@@ -292,14 +334,59 @@ impl VolumeAdaptiveHmaCrossConfig {
         Option<f64>,
         bool,
         EmaOrientationGateEvaluation,
+        RegimeAdaptiveGateEvaluation,
     ) {
         let relative_volume = self.volume_regime.relative_volume(bars);
         let volume_inverted = relative_volume
             .is_some_and(|ratio| ratio < self.volume_regime.invert_below_relative_volume);
         let ema_gate = self.ema_gate.evaluate(bars);
+        let adaptive_gate = self.adaptive_gate.evaluate(
+            bars,
+            self.hma_cross.fast_length,
+            self.hma_cross.slow_length,
+        );
         let mut effective = self.hma_cross.clone();
-        effective.inverted ^= volume_inverted ^ ema_gate.inverted;
-        (effective, relative_volume, volume_inverted, ema_gate)
+        effective.inverted ^= volume_inverted ^ ema_gate.inverted ^ adaptive_gate.inverted;
+        (
+            effective,
+            relative_volume,
+            volume_inverted,
+            ema_gate,
+            adaptive_gate,
+        )
+    }
+
+    fn wrap_without_adaptive(
+        &self,
+        mut hma: HmaCrossEvaluation,
+        bars: &[Bar],
+    ) -> VolumeAdaptiveHmaCrossEvaluation {
+        let relative_volume = self.volume_regime.relative_volume(bars);
+        let volume_inverted = relative_volume
+            .is_some_and(|ratio| ratio < self.volume_regime.invert_below_relative_volume);
+        let ema_gate = if self.ema_gate.enabled {
+            self.ema_gate.evaluate(bars)
+        } else {
+            EmaOrientationGateEvaluation::default()
+        };
+        let adaptive_gate = self.adaptive_gate.evaluate(
+            &[],
+            self.hma_cross.fast_length,
+            self.hma_cross.slow_length,
+        );
+        hma.inverted ^= volume_inverted ^ ema_gate.inverted;
+        if self.ema_gate.enabled && !ema_gate.ready {
+            hold_for_ema_gate_hma(&mut hma);
+        }
+        VolumeAdaptiveHmaCrossEvaluation {
+            hma,
+            relative_volume,
+            volume_inverted,
+            ema_value: ema_gate.ema,
+            ema_inverted: ema_gate.inverted,
+            ema_ready: ema_gate.ready,
+            adaptive_gate,
+        }
     }
 }
 
@@ -624,6 +711,13 @@ fn hold_for_ema_gate_ema(evaluation: &mut EmaCrossEvaluation) {
     evaluation.effective_buy_signal = false;
     evaluation.effective_sell_signal = false;
     evaluation.hold_reason = Some("ema_gate_warming_up");
+}
+
+fn hold_for_adaptive_gate_hma(evaluation: &mut HmaCrossEvaluation, reason: Option<&'static str>) {
+    evaluation.signal = StrategySignal::Hold;
+    evaluation.effective_buy_signal = false;
+    evaluation.effective_sell_signal = false;
+    evaluation.hold_reason = Some(reason.unwrap_or("adaptive_gate"));
 }
 
 fn hold_for_adaptive_gate_ema(evaluation: &mut EmaCrossEvaluation, reason: Option<&'static str>) {

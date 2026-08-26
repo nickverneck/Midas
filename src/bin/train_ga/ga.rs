@@ -4,7 +4,7 @@ use crate::actions::{
     POLICY_ACTION_DIM, env_action_for_target, env_action_label, policy_action_label,
     policy_target_position,
 };
-use crate::config::CandidateConfig;
+use crate::config::{CandidateConfig, evaluation_window_count};
 use crate::data::{DataSet, build_observation};
 use crate::metrics::{
     candidate_fitness, compute_sortino, liquidation_cost_components, max_drawdown,
@@ -238,7 +238,8 @@ fn evaluate_candidate_internal(
     let mut flat_hold_penalty_sum = 0.0f64;
     let mut session_close_penalty_sum = 0.0f64;
 
-    for (window_idx, &(start, end)) in windows.iter().take(cfg.eval_windows).enumerate() {
+    let eval_count = evaluation_window_count(windows.len(), cfg.eval_windows);
+    for (window_idx, &(start, end)) in windows.iter().take(eval_count).enumerate() {
         if end <= start + 1 {
             continue;
         }
@@ -642,7 +643,8 @@ pub fn evaluate_candidates_batch(
     let batch_dim = batch as i64;
     let mut obs_device = Tensor::zeros(&[batch_dim, obs_dim], (Kind::Float, device));
 
-    for &(start, end) in windows.iter().take(cfg.eval_windows) {
+    let eval_count = evaluation_window_count(windows.len(), cfg.eval_windows);
+    for &(start, end) in windows.iter().take(eval_count) {
         if end <= start + 1 {
             continue;
         }

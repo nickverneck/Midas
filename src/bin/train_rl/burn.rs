@@ -784,6 +784,8 @@ fn run_inner<B: Backend>(
     let mut policy_optimizer = AdamCheckpoint::new(&policy);
     let mut value_optimizer = value.as_ref().map(AdamCheckpoint::new);
     let mut start_epoch = 0usize;
+    let mut best_eval_fitness = f64::NEG_INFINITY;
+    let mut best_checkpoint: Option<BurnCheckpoint> = None;
 
     if let Some(path) = &args.load_checkpoint {
         let checkpoint = load_checkpoint(path)?;
@@ -892,7 +894,7 @@ fn run_inner<B: Backend>(
             &device,
             &args,
             use_grpo,
-            false,
+            true,
             &mut rng,
         )?;
         let probe_summary = if args.log_interval > 0 && epoch % args.log_interval == 0 {
@@ -921,8 +923,45 @@ fn run_inner<B: Backend>(
         };
         let fitness = args.w_pnl * fitness_source.pnl + args.w_sortino * fitness_source.sortino
             - args.w_mdd * fitness_source.drawdown;
+        let eval_fitness = args.w_pnl * eval_summary.pnl + args.w_sortino * eval_summary.sortino
+            - args.w_mdd * eval_summary.drawdown;
+        if eval_fitness > best_eval_fitness {
+            best_eval_fitness = eval_fitness;
+            best_checkpoint = Some(BurnCheckpoint {
+                format_version: CHECKPOINT_FORMAT_VERSION,
+                backend: stack.backend.as_str().to_string(),
+                algorithm: args.algorithm.clone(),
+                epoch,
+                policy: policy.checkpoint(),
+                value: value.as_ref().map(BurnMlp::checkpoint),
+                policy_optimizer: policy_optimizer.clone(),
+                value_optimizer: value_optimizer.clone(),
+            });
+            let metadata = serde_json::json!({
+                "epoch": epoch,
+                "eval_fitness": eval_fitness,
+                "eval_pnl": eval_summary.pnl,
+                "eval_sortino": eval_summary.sortino,
+                "eval_drawdown": eval_summary.drawdown,
+                "seed": args.seed,
+            });
+            std::fs::write(
+                args.outdir.join("best_validation.json"),
+                format!("{}\n", serde_json::to_string_pretty(&metadata)?),
+            )?;
+            save_checkpoint(
+                &args.outdir.join("best_validation.burn.json"),
+                &stack,
+                &args,
+                epoch,
+                &policy,
+                value.as_ref(),
+                &policy_optimizer,
+                value_optimizer.as_ref(),
+            )?;
+        }
         println!(
-            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | eval conf {:.3} | fitness {:.4} | time {}",
+            "epoch {} | train ret {:.4} | train pnl {:.4} | eval pnl {:.4} | eval sortino {:.4} | eval mdd {:.4} | eval conf {:.3} | eval fitness {:.4} | fitness {:.4} | time {}",
             epoch,
             train_summary.ret_mean,
             train_summary.pnl,
@@ -930,6 +969,7 @@ fn run_inner<B: Backend>(
             eval_summary.sortino,
             eval_summary.drawdown,
             eval_summary.mean_max_prob,
+            eval_fitness,
             fitness,
             format_duration(epoch_start.elapsed())
         );
@@ -996,16 +1036,49 @@ fn run_inner<B: Backend>(
         }
     }
 
+    let (
+        selected_policy,
+        selected_value,
+        selected_policy_optimizer,
+        selected_value_optimizer,
+        selected_epoch,
+    ) = if let Some(checkpoint) = best_checkpoint {
+        let selected_policy = BurnMlp::from_checkpoint(&checkpoint.policy, &device, host_linear)?;
+        let selected_value = checkpoint
+            .value
+            .as_ref()
+            .map(|model| BurnMlp::from_checkpoint(model, &device, host_linear))
+            .transpose()?;
+        println!(
+            "best validation checkpoint: epoch {} | eval fitness {:.4}",
+            checkpoint.epoch, best_eval_fitness
+        );
+        (
+            selected_policy,
+            selected_value,
+            checkpoint.policy_optimizer,
+            checkpoint.value_optimizer,
+            checkpoint.epoch,
+        )
+    } else {
+        (
+            policy,
+            value,
+            policy_optimizer,
+            value_optimizer,
+            total_epochs.saturating_sub(1),
+        )
+    };
     let test_summary = evaluate(
         &test,
         &test_windows,
-        &policy,
-        value.as_ref(),
+        &selected_policy,
+        selected_value.as_ref(),
         &env_cfg,
         &device,
         &args,
         use_grpo,
-        false,
+        true,
         &mut rng,
     )?;
     println!(
@@ -1025,11 +1098,11 @@ fn run_inner<B: Backend>(
         &final_path,
         &stack,
         &args,
-        total_epochs.saturating_sub(1),
-        &policy,
-        value.as_ref(),
-        &policy_optimizer,
-        value_optimizer.as_ref(),
+        selected_epoch,
+        &selected_policy,
+        selected_value.as_ref(),
+        &selected_policy_optimizer,
+        selected_value_optimizer.as_ref(),
     )?;
     println!(
         "Saved final {} checkpoint to {}",
@@ -1860,13 +1933,13 @@ fn grpo_update<B: Backend>(
     let mut total = GrpoLossStats::default();
     for _ in 0..epochs {
         let mut epoch = GrpoLossStats::default();
+        let mut gradients = policy.zero_grad();
         for (rollout_index, rollout) in group.rollouts.iter().enumerate() {
             let count = rollout.observations.len().max(1) as f32;
             let advantage = normalized_advantages
                 .get(rollout_index)
                 .copied()
                 .unwrap_or(0.0);
-            let mut gradients = policy.zero_grad();
             let mut policy_loss = 0.0;
             let mut entropy = 0.0;
             let mut kl = 0.0;
@@ -1922,15 +1995,17 @@ fn grpo_update<B: Backend>(
                 policy.accumulate_backward(&pass.cache, &output_grad, &mut gradients);
                 kl += ((rollout.old_logp[index] as f64 - new_logp as f64).abs()) / count as f64;
             }
-            let grad_norm = policy_grad_norm(&gradients);
-            optimizer.update(policy, &gradients, args.lr, device);
             epoch.policy_loss += policy_loss;
             epoch.entropy += entropy;
             epoch.total_loss += policy_loss - args.ent_coef * entropy;
             epoch.kl_div += kl;
-            epoch.policy_grad_norm += grad_norm;
             epoch.clip_frac += clipped as f64 / count as f64;
         }
+        let group_count = group.rollouts.len().max(1) as f32;
+        scale_grad(&mut gradients, 1.0 / group_count);
+        let grad_norm = policy_grad_norm(&gradients);
+        optimizer.update(policy, &gradients, args.lr, device);
+        epoch.policy_grad_norm = grad_norm;
         let denominator = group.rollouts.len().max(1) as f64;
         total.policy_loss += epoch.policy_loss / denominator;
         total.entropy += epoch.entropy / denominator;
@@ -1963,6 +2038,19 @@ fn policy_grad_norm(grad: &MlpGrad) -> f64 {
         }
     }
     sum.sqrt()
+}
+
+fn scale_grad(grad: &mut MlpGrad, factor: f32) {
+    for layer in &mut grad.weight {
+        for value in layer {
+            *value *= factor;
+        }
+    }
+    for layer in &mut grad.bias {
+        for value in layer {
+            *value *= factor;
+        }
+    }
 }
 
 fn average_ppo_losses(values: &[PpoLossStats]) -> PpoLossStats {

@@ -5,6 +5,8 @@ pub(crate) fn execution_state_snapshot(session: &SessionState) -> ExecutionState
     ExecutionStateSnapshot {
         config: session.execution_config.clone(),
         runtime: session.execution_runtime.snapshot(),
+        bar_type: Some(session.bar_type),
+        candle_mode: Some(session.candle_mode),
         selected_account_id: session.selected_account_id,
         selected_contract_name: session
             .selected_contract
@@ -492,10 +494,12 @@ pub(crate) fn emit_execution_transition_debug(
         return;
     }
 
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "{label} | {next_summary} | {}",
-        execution_observability_context(session)
-    )));
+    emit_debug_log(event_tx, session, || {
+        format!(
+            "{label} | {next_summary} | {}",
+            execution_observability_context(session)
+        )
+    });
 }
 
 pub(crate) fn active_native_slug(session: &SessionState) -> &'static str {

@@ -95,6 +95,8 @@ struct EventDatasetProvenance {
     timestamp_timezone: String,
     index_timestamp_fallback: bool,
     raw_price_scale: Option<f64>,
+    #[serde(default)]
+    tick_size: Option<f64>,
     bar_kind: String,
     bar_value: f64,
     source_row_count: usize,
@@ -385,8 +387,8 @@ struct OptimizerStateArtifact {
 }
 
 impl OptimizerStateArtifact {
-    fn empty(feature_count: usize, learning_rate: f64, weight_decay: f64) -> Self {
-        let weights = 3 * feature_count;
+    fn empty(feature_count: usize, classes: usize, learning_rate: f64, weight_decay: f64) -> Self {
+        let weights = classes * feature_count;
         Self {
             optimizer: "adamw-v1".to_string(),
             step: 0,
@@ -397,17 +399,17 @@ impl OptimizerStateArtifact {
             epsilon: ADAMW_EPSILON,
             weight_first_moment: vec![0.0; weights],
             weight_second_moment: vec![0.0; weights],
-            bias_first_moment: vec![0.0; 3],
-            bias_second_moment: vec![0.0; 3],
+            bias_first_moment: vec![0.0; classes],
+            bias_second_moment: vec![0.0; classes],
         }
     }
 
-    fn validate(&self, feature_count: usize) -> Result<()> {
+    fn validate(&self, feature_count: usize, classes: usize) -> Result<()> {
         if self.optimizer != "adamw-v1"
-            || self.weight_first_moment.len() != 3 * feature_count
-            || self.weight_second_moment.len() != 3 * feature_count
-            || self.bias_first_moment.len() != 3
-            || self.bias_second_moment.len() != 3
+            || self.weight_first_moment.len() != classes * feature_count
+            || self.weight_second_moment.len() != classes * feature_count
+            || self.bias_first_moment.len() != classes
+            || self.bias_second_moment.len() != classes
             || self.step == 0
         {
             bail!("optimizer state shape or schema does not match the supervised policy");
@@ -749,6 +751,15 @@ struct SplitMetrics {
     always_skip_pnl: f64,
     always_invert_pnl: f64,
     oracle_regret: f64,
+    confidence_threshold: f64,
+    accepted_events: usize,
+    abstained_events: usize,
+    fallback_events: usize,
+    normal_actions: usize,
+    skip_actions: usize,
+    invert_actions: usize,
+    coverage: f64,
+    mean_confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -764,6 +775,9 @@ struct TrainingMetrics {
     seed: u64,
     feature_count: usize,
     feature_names: Vec<String>,
+    pnl_currency: &'static str,
+    contract_multiplier: f64,
+    round_trip_cost: f64,
     source_hash_sha256: String,
     dataset_fingerprint_sha256: String,
     leakage_check: &'static str,
@@ -796,8 +810,13 @@ struct EvaluationMetrics {
     policy_schema: &'static str,
     input: String,
     policy: String,
+    evaluated_split: String,
     feature_count: usize,
+    pnl_currency: &'static str,
+    contract_multiplier: f64,
+    round_trip_cost: f64,
     leakage_check: &'static str,
+    confidence_fallback: String,
     all: SplitMetrics,
 }
 
@@ -824,12 +843,14 @@ fn build_policy(
         means: means.to_vec(),
         scales: scales.to_vec(),
         weights,
-        class_names: vec![
-            "normal".to_string(),
-            "skip".to_string(),
-            "invert".to_string(),
-        ],
-        classes: 3,
+        class_names: dataset
+            .config
+            .label_mode
+            .class_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+        classes: dataset.config.label_mode.class_count(),
         feature_count: dataset.feature_names.len(),
         source_hash_sha256: dataset.source_hash.clone(),
         dataset_fingerprint_sha256: dataset.dataset_fingerprint.clone(),
@@ -897,6 +918,7 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         .map(|policy| (policy.means.clone(), policy.scales.clone()))
         .unwrap_or_else(|| fit_scaler(&dataset.rows, &train_indices, dataset.feature_names.len()));
     let feature_count = dataset.feature_names.len();
+    let classes = dataset.config.label_mode.class_count();
     let start_epoch = resumed
         .as_ref()
         .map(|policy| policy.training_epochs)
@@ -907,7 +929,7 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         .as_ref()
         .and_then(|policy| policy.optimizer_state.clone());
     if let Some(state) = &resumed_optimizer_state {
-        state.validate(feature_count)?;
+        state.validate(feature_count, classes)?;
         if (state.learning_rate - args.learning_rate).abs() > 1e-15
             || (state.weight_decay - args.l2).abs() > 1e-15
         {
@@ -1062,6 +1084,9 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         seed: training_seed,
         feature_count: policy.feature_count,
         feature_names: policy.feature_names.clone(),
+        pnl_currency: "USD",
+        contract_multiplier: dataset.config.contract_multiplier,
+        round_trip_cost: dataset.config.round_trip_cost,
         source_hash_sha256: dataset.source_hash.clone(),
         dataset_fingerprint_sha256: dataset.dataset_fingerprint.clone(),
         leakage_check: "passed",
@@ -1090,7 +1115,41 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
     Ok(())
 }
 
+fn evaluation_indices(
+    dataset: &TrainingDataset,
+    policy: &PolicyArtifact,
+    split: &str,
+) -> Result<(Vec<usize>, String)> {
+    if split == "all" {
+        return Ok(((0..dataset.rows.len()).collect(), "all".to_string()));
+    }
+    let provenance = policy
+        .split_provenance
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("policy has no recorded session split; use --split all"))?;
+    let session_ids = match split {
+        "train" => &provenance.train_session_ids,
+        "validation" => &provenance.validation_session_ids,
+        "holdout" => &provenance.holdout_session_ids,
+        other => bail!("unknown evaluation split `{other}`"),
+    };
+    let sessions = session_ids.iter().collect::<BTreeSet<_>>();
+    let indices = dataset
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| sessions.contains(&row.session_id).then_some(index))
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        bail!("evaluation split `{split}` has no rows in the input dataset");
+    }
+    Ok((indices, split.to_string()))
+}
+
 pub fn run_evaluate(args: EvaluateArgs) -> Result<()> {
+    if !args.confidence_threshold.is_finite() || !(0.0..=1.0).contains(&args.confidence_threshold) {
+        bail!("confidence_threshold must be finite and within 0..=1");
+    }
     let dataset = load_training_dataset(
         &args.input,
         args.source_root.as_deref(),
@@ -1105,15 +1164,33 @@ pub fn run_evaluate(args: EvaluateArgs) -> Result<()> {
     // policy must still match the dataset schema, feature order, and causal
     // config, but provenance hashes are expected to differ across windows.
     validate_policy(&policy, &dataset, false)?;
-    let indices = (0..dataset.rows.len()).collect::<Vec<_>>();
-    let all = metrics_for("all", &dataset, &indices, &policy);
+    let (indices, evaluated_split) = evaluation_indices(&dataset, &policy, &args.split)?;
+    let confidence_fallback = match args.confidence_fallback.as_str() {
+        "hold" => None,
+        "normal" => Some(1_i8),
+        "invert" => Some(-1_i8),
+        other => bail!("unknown confidence fallback `{other}`"),
+    };
+    let all = metrics_for_with_confidence_threshold(
+        &evaluated_split,
+        &dataset,
+        &indices,
+        &policy,
+        args.confidence_threshold,
+        confidence_fallback,
+    );
     let metrics = EvaluationMetrics {
         schema_version: "supervised-evaluation-v1",
         policy_schema: POLICY_SCHEMA,
         input: args.input.display().to_string(),
         policy: args.policy.display().to_string(),
+        evaluated_split,
         feature_count: dataset.feature_names.len(),
+        pnl_currency: "USD",
+        contract_multiplier: dataset.config.contract_multiplier,
+        round_trip_cost: dataset.config.round_trip_cost,
         leakage_check: "passed",
+        confidence_fallback: args.confidence_fallback,
         all,
     };
     if let Some(out) = args.metrics.or(args.out) {
@@ -1528,6 +1605,7 @@ fn validate_recomputed_dataset_integrity(
         &config.bar_kind,
         config.bar_value,
         provenance.raw_price_scale,
+        provenance.tick_size,
     )
     .with_context(|| {
         format!(
@@ -1634,6 +1712,37 @@ fn load_training_dataset(
     if config.feature_names() != feature_names {
         bail!("dataset feature_schema does not match the ordered feature registry");
     }
+    // PnL metrics must carry their unit metadata in the parquet itself. This
+    // deliberately rejects pre-unit-fix artifacts instead of allowing a raw
+    // price-unit result to enter a training report that calls it USD.
+    if df.column("pnl_currency").is_err()
+        || df.column("contract_multiplier").is_err()
+        || df.column("round_trip_cost").is_err()
+    {
+        bail!(
+            "supervised dataset lacks PnL unit metadata; it was prepared by an older raw-unit pipeline and must be re-prepared"
+        );
+    }
+    let pnl_currency = required_consistent_string_column(&df, "pnl_currency")?;
+    if pnl_currency != "USD" {
+        bail!("unsupported supervised PnL currency `{pnl_currency}`; expected USD");
+    }
+    let stored_contract_multiplier = required_consistent_f64_column(&df, "contract_multiplier")?;
+    if (stored_contract_multiplier - config.contract_multiplier).abs() > 1e-9 {
+        bail!(
+            "dataset contract_multiplier {} disagrees with config_json {}; re-prepare the dataset",
+            stored_contract_multiplier,
+            config.contract_multiplier
+        );
+    }
+    let stored_round_trip_cost = required_consistent_f64_column(&df, "round_trip_cost")?;
+    if (stored_round_trip_cost - config.round_trip_cost).abs() > 1e-9 {
+        bail!(
+            "dataset round_trip_cost {} disagrees with config_json {}; re-prepare the dataset",
+            stored_round_trip_cost,
+            config.round_trip_cost
+        );
+    }
     let leakage_check = required_consistent_string_column(&df, "leakage_check")?;
     if leakage_check != "passed" {
         bail!(
@@ -1733,8 +1842,11 @@ fn load_training_dataset(
         if features.iter().any(|value| !value.is_finite()) {
             bail!("non-finite training feature at row {index}");
         }
-        if ![-1, 0, 1].contains(&label_action[index]) {
-            bail!("label_action at row {index} must be -1, 0, or 1");
+        if config.label_mode.class_index(label_action[index]).is_none() {
+            if config.label_mode.includes_skip() {
+                bail!("label_action at row {index} must be -1, 0, or 1");
+            }
+            bail!("label_action at row {index} must be -1 or 1 for normal-invert mode");
         }
         if ![-1, 1].contains(&raw_direction[index]) {
             bail!("raw_direction at row {index} must be -1 or 1");
@@ -1791,16 +1903,19 @@ fn validate_policy(
     if policy.feature_count != dataset.feature_names.len() {
         bail!("policy feature_count does not match dataset feature_schema");
     }
-    if policy.classes != 3
-        || policy.class_names
-            != vec![
-                "normal".to_string(),
-                "skip".to_string(),
-                "invert".to_string(),
-            ]
+    let expected_class_names = dataset
+        .config
+        .label_mode
+        .class_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    let expected_classes = expected_class_names.len();
+    if policy.classes != expected_classes
+        || policy.class_names != expected_class_names
         || policy.means.len() != policy.feature_count
         || policy.scales.len() != policy.feature_count
-        || policy.weights.len() != 3 * (policy.feature_count + 1)
+        || policy.weights.len() != expected_classes * (policy.feature_count + 1)
     {
         bail!("policy class, scaler, or weight shape does not match dataset");
     }
@@ -1824,7 +1939,7 @@ fn validate_policy(
         if policy.backend == "cpu-linear" {
             bail!("cpu-linear policies cannot carry AdamW optimizer state");
         }
-        optimizer_state.validate(policy.feature_count)?;
+        optimizer_state.validate(policy.feature_count, policy.classes)?;
         if policy.training_epochs != optimizer_state.step {
             bail!(
                 "policy training_epochs ({}) does not match optimizer step ({})",
@@ -1895,7 +2010,7 @@ fn validate_resume_compatibility(
                     "{requested_backend} resume policy is missing AdamW optimizer state; refusing to reset optimizer provenance"
                 )
             })?;
-            optimizer_state.validate(policy.feature_count)?;
+            optimizer_state.validate(policy.feature_count, policy.classes)?;
             if optimizer_state.step != policy.training_epochs {
                 bail!(
                     "resume policy training_epochs ({}) does not match AdamW optimizer step ({})",
@@ -2312,13 +2427,9 @@ fn fit_scaler(
     (means, scales)
 }
 
-fn class_index(label: i8) -> usize {
-    match label {
-        1 => 0,
-        0 => 1,
-        -1 => 2,
-        _ => 1,
-    }
+fn class_index(label: i8, mode: midas_env::supervised::LabelMode) -> usize {
+    mode.class_index(label)
+        .unwrap_or_else(|| unreachable!("validated label {label} is not valid for {mode}"))
 }
 
 fn scaled_features(row: &TrainingRow, means: &[f64], scales: &[f64]) -> Vec<f64> {
@@ -2372,11 +2483,11 @@ fn splitmix64_next(state: &mut u64) -> u64 {
 /// CPU backend intentionally has no seedable RNG, so relying on backend
 /// initialization would make `--seed` ineffective there. Explicit host-side
 /// initialization keeps Burn, Candle, and the reference path comparable.
-fn deterministic_initial_weights(feature_count: usize, seed: u64) -> Vec<f64> {
+fn deterministic_initial_weights(feature_count: usize, classes: usize, seed: u64) -> Vec<f64> {
     let stride = feature_count + 1;
     let mut state = seed;
-    let mut weights = vec![0.0; 3 * stride];
-    for class in 0..3 {
+    let mut weights = vec![0.0; classes * stride];
+    for class in 0..classes {
         let offset = class * stride;
         for feature in 0..feature_count {
             let unit = splitmix64_next(&mut state) as f64 / u64::MAX as f64;
@@ -2412,11 +2523,13 @@ fn train_linear_model(
     if !learning_rate.is_finite() || learning_rate <= 0.0 || !l2.is_finite() || l2 < 0.0 {
         bail!("learning_rate must be positive and l2 must be non-negative");
     }
-    let classes = 3;
+    let classes = dataset.config.label_mode.class_count();
     let stride = dataset.feature_names.len() + 1;
     let mut weights = initial_weights
         .map(|weights| weights.to_vec())
-        .unwrap_or_else(|| deterministic_initial_weights(dataset.feature_names.len(), seed));
+        .unwrap_or_else(|| {
+            deterministic_initial_weights(dataset.feature_names.len(), classes, seed)
+        });
     if weights.len() != classes * stride {
         bail!("resume policy weight shape does not match feature count");
     }
@@ -2426,7 +2539,7 @@ fn train_linear_model(
             let row = &dataset.rows[*index];
             let input = scaled_features(row, means, scales);
             let probabilities = softmax(&logits(&weights, &input, classes));
-            let target = class_index(row.label_action);
+            let target = class_index(row.label_action, dataset.config.label_mode);
             for class in 0..classes {
                 let error = probabilities[class] - if class == target { 1.0 } else { 0.0 };
                 let offset = class * stride;
@@ -2467,6 +2580,7 @@ fn train_candle_model(
     checkpoint_callback: &mut CheckpointCallback<'_>,
 ) -> Result<(Vec<f64>, &'static str, OptimizerStateArtifact)> {
     let feature_count = dataset.feature_names.len();
+    let classes = dataset.config.label_mode.class_count();
     if train_indices.is_empty() {
         bail!("training split is empty");
     }
@@ -2474,16 +2588,23 @@ fn train_candle_model(
         bail!("learning_rate must be positive and l2 must be non-negative");
     }
 
-    let mut optimizer_state = initial_optimizer_state
-        .cloned()
-        .unwrap_or_else(|| OptimizerStateArtifact::empty(feature_count, learning_rate, l2));
-    optimizer_state.validate(feature_count).or_else(|error| {
-        if initial_optimizer_state.is_some() {
-            Err(error)
-        } else {
-            Ok(())
-        }
-    })?;
+    let mut optimizer_state = initial_optimizer_state.cloned().unwrap_or_else(|| {
+        OptimizerStateArtifact::empty(
+            feature_count,
+            dataset.config.label_mode.class_count(),
+            learning_rate,
+            l2,
+        )
+    });
+    optimizer_state
+        .validate(feature_count, dataset.config.label_mode.class_count())
+        .or_else(|error| {
+            if initial_optimizer_state.is_some() {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        })?;
 
     // Candle's CPU backend intentionally cannot seed its RNG. Seed before
     // construction where supported, then overwrite the initializer with the
@@ -2492,18 +2613,18 @@ fn train_candle_model(
     let _ = device.set_seed(seed);
     let mut varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-    let classifier = linear(feature_count, 3, vb.pp("classifier"))?;
+    let classifier = linear(feature_count, classes, vb.pp("classifier"))?;
 
     let policy_weights = initial_weights
         .map(|weights| weights.to_vec())
-        .unwrap_or_else(|| deterministic_initial_weights(feature_count, seed));
+        .unwrap_or_else(|| deterministic_initial_weights(feature_count, classes, seed));
     let stride = feature_count + 1;
-    if policy_weights.len() != 3 * stride {
+    if policy_weights.len() != classes * stride {
         bail!("resume policy weight shape does not match feature count");
     }
-    let mut weights = Vec::with_capacity(3 * feature_count);
-    let mut biases = Vec::with_capacity(3);
-    for class in 0..3 {
+    let mut weights = Vec::with_capacity(classes * feature_count);
+    let mut biases = Vec::with_capacity(classes);
+    for class in 0..classes {
         let offset = class * stride;
         weights.extend(
             policy_weights[offset..offset + feature_count]
@@ -2514,9 +2635,12 @@ fn train_candle_model(
     }
     varmap.set_one(
         "classifier.weight",
-        Tensor::from_vec(weights, (3, feature_count), &device)?,
+        Tensor::from_vec(weights, (classes, feature_count), &device)?,
     )?;
-    varmap.set_one("classifier.bias", Tensor::from_vec(biases, 3, &device)?)?;
+    varmap.set_one(
+        "classifier.bias",
+        Tensor::from_vec(biases, classes, &device)?,
+    )?;
 
     let (weight_var, bias_var) = {
         let data = varmap.data().lock().unwrap();
@@ -2535,7 +2659,7 @@ fn train_candle_model(
             .iter()
             .map(|value| *value as f32)
             .collect::<Vec<_>>(),
-        (3, feature_count),
+        (classes, feature_count),
         &device,
     )?;
     let mut weight_second_moment = Tensor::from_vec(
@@ -2544,7 +2668,7 @@ fn train_candle_model(
             .iter()
             .map(|value| *value as f32)
             .collect::<Vec<_>>(),
-        (3, feature_count),
+        (classes, feature_count),
         &device,
     )?;
     let mut bias_first_moment = Tensor::from_vec(
@@ -2553,7 +2677,7 @@ fn train_candle_model(
             .iter()
             .map(|value| *value as f32)
             .collect::<Vec<_>>(),
-        3,
+        classes,
         &device,
     )?;
     let mut bias_second_moment = Tensor::from_vec(
@@ -2562,7 +2686,7 @@ fn train_candle_model(
             .iter()
             .map(|value| *value as f32)
             .collect::<Vec<_>>(),
-        3,
+        classes,
         &device,
     )?;
 
@@ -2575,7 +2699,7 @@ fn train_candle_model(
                 .into_iter()
                 .map(|value| value as f32),
         );
-        targets.push(class_index(row.label_action) as u32);
+        targets.push(class_index(row.label_action, dataset.config.label_mode) as u32);
     }
     let inputs = Tensor::from_vec(features, (train_indices.len(), feature_count), &device)?;
     let targets = Tensor::from_vec(targets, train_indices.len(), &device)?;
@@ -2620,7 +2744,7 @@ fn train_candle_model(
 
         let absolute_epoch = start_epoch + local_epoch + 1;
         if checkpoint_due(checkpoint_every, absolute_epoch, final_epoch) {
-            let packed = candle_policy_weights(&classifier, feature_count)?;
+            let packed = candle_policy_weights(&classifier, feature_count, classes)?;
             let mut checkpoint_optimizer_state = optimizer_state.clone();
             checkpoint_optimizer_state.weight_first_moment = weight_first_moment
                 .to_vec2::<f32>()?
@@ -2653,7 +2777,7 @@ fn train_candle_model(
         }
     }
 
-    let packed = candle_policy_weights(&classifier, feature_count)?;
+    let packed = candle_policy_weights(&classifier, feature_count, classes)?;
     optimizer_state.weight_first_moment = weight_first_moment
         .to_vec2::<f32>()?
         .into_iter()
@@ -2680,7 +2804,11 @@ fn train_candle_model(
 }
 
 #[cfg(feature = "backend-candle")]
-fn candle_policy_weights(classifier: &candle_nn::Linear, feature_count: usize) -> Result<Vec<f64>> {
+fn candle_policy_weights(
+    classifier: &candle_nn::Linear,
+    feature_count: usize,
+    classes: usize,
+) -> Result<Vec<f64>> {
     let weight = classifier
         .weight()
         .to_vec2::<f32>()
@@ -2690,11 +2818,11 @@ fn candle_policy_weights(classifier: &candle_nn::Linear, feature_count: usize) -
         .context("Candle classifier is missing a bias")?
         .to_vec1::<f32>()
         .context("read Candle classifier bias")?;
-    if weight.len() != 3 || weight.iter().any(|row| row.len() != feature_count) {
+    if weight.len() != classes || weight.iter().any(|row| row.len() != feature_count) {
         bail!("Candle classifier weight shape does not match feature count");
     }
-    let mut packed = Vec::with_capacity(3 * (feature_count + 1));
-    for class in 0..3 {
+    let mut packed = Vec::with_capacity(classes * (feature_count + 1));
+    for class in 0..classes {
         packed.extend(weight[class].iter().map(|value| *value as f64));
         packed.push(bias[class] as f64);
     }
@@ -2975,6 +3103,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
     checkpoint_callback: &mut CheckpointCallback<'_>,
 ) -> Result<(Vec<f64>, &'static str, OptimizerStateArtifact)> {
     let feature_count = dataset.feature_names.len();
+    let classes = dataset.config.label_mode.class_count();
     if train_indices.is_empty() {
         bail!("training split is empty");
     }
@@ -2982,16 +3111,18 @@ fn train_burn_model_on<B: AutodiffBackend>(
         bail!("learning_rate must be positive and l2 must be non-negative");
     }
 
-    let mut optimizer_state = initial_optimizer_state
-        .cloned()
-        .unwrap_or_else(|| OptimizerStateArtifact::empty(feature_count, learning_rate, l2));
-    optimizer_state.validate(feature_count).or_else(|error| {
-        if initial_optimizer_state.is_some() {
-            Err(error)
-        } else {
-            Ok(())
-        }
-    })?;
+    let mut optimizer_state = initial_optimizer_state.cloned().unwrap_or_else(|| {
+        OptimizerStateArtifact::empty(feature_count, classes, learning_rate, l2)
+    });
+    optimizer_state
+        .validate(feature_count, classes)
+        .or_else(|error| {
+            if initial_optimizer_state.is_some() {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        })?;
 
     // Burn's Linear stores weights as [input, output], while the portable
     // supervised policy stores one [class, input, bias] row at a time. Keep
@@ -3000,40 +3131,44 @@ fn train_burn_model_on<B: AutodiffBackend>(
     // Seed before construction, then use explicit host-generated weights so
     // Candle CPU (whose RNG cannot be seeded) follows the same initialization.
     B::seed(device, seed);
-    let mut classifier: Linear<B> = LinearConfig::new(feature_count, 3).init(device);
+    let mut classifier: Linear<B> = LinearConfig::new(feature_count, classes).init(device);
     let policy_weights = initial_weights
         .map(|weights| weights.to_vec())
-        .unwrap_or_else(|| deterministic_initial_weights(feature_count, seed));
+        .unwrap_or_else(|| deterministic_initial_weights(feature_count, classes, seed));
     let stride = feature_count + 1;
-    if policy_weights.len() != 3 * stride {
+    if policy_weights.len() != classes * stride {
         bail!("resume policy weight shape does not match feature count");
     }
-    let mut burn_weights = vec![0.0_f32; feature_count * 3];
-    let mut biases = vec![0.0_f32; 3];
-    for class in 0..3 {
+    let mut burn_weights = vec![0.0_f32; feature_count * classes];
+    let mut biases = vec![0.0_f32; classes];
+    for class in 0..classes {
         let offset = class * stride;
         biases[class] = policy_weights[offset + feature_count] as f32;
         for feature in 0..feature_count {
-            burn_weights[feature * 3 + class] = policy_weights[offset + feature] as f32;
+            burn_weights[feature * classes + class] = policy_weights[offset + feature] as f32;
         }
     }
-    classifier.weight = Param::from_data(TensorData::new(burn_weights, [feature_count, 3]), device);
-    classifier.bias = Some(Param::from_data(TensorData::new(biases, [3]), device));
+    classifier.weight = Param::from_data(
+        TensorData::new(burn_weights, [feature_count, classes]),
+        device,
+    );
+    classifier.bias = Some(Param::from_data(TensorData::new(biases, [classes]), device));
 
     let canonical_to_burn = |values: &[f64]| {
-        let mut native = vec![0.0_f32; feature_count * 3];
-        for class in 0..3 {
+        let mut native = vec![0.0_f32; feature_count * classes];
+        for class in 0..classes {
             for feature in 0..feature_count {
-                native[feature * 3 + class] = values[class * feature_count + feature] as f32;
+                native[feature * classes + class] = values[class * feature_count + feature] as f32;
             }
         }
         native
     };
     let burn_to_canonical = |values: Vec<f32>| {
-        let mut canonical = vec![0.0_f64; feature_count * 3];
-        for class in 0..3 {
+        let mut canonical = vec![0.0_f64; feature_count * classes];
+        for class in 0..classes {
             for feature in 0..feature_count {
-                canonical[class * feature_count + feature] = values[feature * 3 + class] as f64;
+                canonical[class * feature_count + feature] =
+                    values[feature * classes + class] as f64;
             }
         }
         canonical
@@ -3041,14 +3176,14 @@ fn train_burn_model_on<B: AutodiffBackend>(
     let mut weight_first_moment = BurnTensor::<B, 2>::from_data(
         TensorData::new(
             canonical_to_burn(&optimizer_state.weight_first_moment),
-            [feature_count, 3],
+            [feature_count, classes],
         ),
         device,
     );
     let mut weight_second_moment = BurnTensor::<B, 2>::from_data(
         TensorData::new(
             canonical_to_burn(&optimizer_state.weight_second_moment),
-            [feature_count, 3],
+            [feature_count, classes],
         ),
         device,
     );
@@ -3059,7 +3194,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
                 .iter()
                 .map(|value| *value as f32)
                 .collect::<Vec<_>>(),
-            [3],
+            [classes],
         ),
         device,
     );
@@ -3070,7 +3205,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
                 .iter()
                 .map(|value| *value as f32)
                 .collect::<Vec<_>>(),
-            [3],
+            [classes],
         ),
         device,
     );
@@ -3084,7 +3219,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
                 .into_iter()
                 .map(|value| value as f32),
         );
-        targets.push(class_index(row.label_action) as i32);
+        targets.push(class_index(row.label_action, dataset.config.label_mode) as i32);
     }
     let inputs = BurnTensor::<B, 2>::from_data(
         TensorData::new(features, [train_indices.len(), feature_count]),
@@ -3172,7 +3307,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
 
         let absolute_epoch = start_epoch + local_epoch + 1;
         if checkpoint_due(checkpoint_every, absolute_epoch, final_epoch) {
-            let packed = burn_policy_weights(&classifier, feature_count)?;
+            let packed = burn_policy_weights(&classifier, feature_count, classes)?;
             let mut checkpoint_optimizer_state = optimizer_state.clone();
             checkpoint_optimizer_state.weight_first_moment = burn_to_canonical(
                 weight_first_moment
@@ -3209,7 +3344,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
         }
     }
 
-    let packed = burn_policy_weights(&classifier, feature_count)?;
+    let packed = burn_policy_weights(&classifier, feature_count, classes)?;
     optimizer_state.weight_first_moment = burn_to_canonical(
         weight_first_moment
             .to_data()
@@ -3243,6 +3378,7 @@ fn train_burn_model_on<B: AutodiffBackend>(
 fn burn_policy_weights<B: AutodiffBackend>(
     classifier: &Linear<B>,
     feature_count: usize,
+    classes: usize,
 ) -> Result<Vec<f64>> {
     let weight = classifier
         .weight
@@ -3258,39 +3394,38 @@ fn burn_policy_weights<B: AutodiffBackend>(
         .to_data()
         .to_vec::<f32>()
         .context("read Burn classifier bias")?;
-    if weight.len() != feature_count * 3 || bias.len() != 3 {
+    if weight.len() != feature_count * classes || bias.len() != classes {
         bail!("Burn classifier weight shape does not match feature count");
     }
-    let mut packed = Vec::with_capacity(3 * (feature_count + 1));
-    for class in 0..3 {
+    let mut packed = Vec::with_capacity(classes * (feature_count + 1));
+    for class in 0..classes {
         for feature in 0..feature_count {
-            packed.push(weight[feature * 3 + class] as f64);
+            packed.push(weight[feature * classes + class] as f64);
         }
         packed.push(bias[class] as f64);
     }
     Ok(packed)
 }
 
-fn predicted_class(policy: &PolicyArtifact, row: &TrainingRow) -> usize {
+#[derive(Debug, Clone, Copy)]
+struct Prediction {
+    class: usize,
+    confidence: f64,
+}
+
+fn prediction(policy: &PolicyArtifact, row: &TrainingRow) -> Prediction {
     let input = scaled_features(row, &policy.means, &policy.scales);
     let values = logits(&policy.weights, &input, policy.classes);
-    values
+    let probabilities = softmax(&values);
+    let (class, confidence) = probabilities
         .iter()
         .enumerate()
         .max_by(|(_, left), (_, right)| {
             left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|(index, _)| index)
-        .unwrap_or(1)
-}
-
-fn action_for_class(class: usize, raw_direction: i8, current: i8) -> i8 {
-    match class {
-        0 => raw_direction,
-        1 => current,
-        2 => -raw_direction,
-        _ => current,
-    }
+        .map(|(index, probability)| (index, *probability))
+        .unwrap_or((policy.classes.saturating_sub(1), 0.0));
+    Prediction { class, confidence }
 }
 
 fn transition_cost_for(from: i8, to: i8, config: &SupervisedConfig) -> f64 {
@@ -3300,6 +3435,13 @@ fn transition_cost_for(from: i8, to: i8, config: &SupervisedConfig) -> f64 {
 #[derive(Debug, Clone, Copy)]
 struct SimulationResult {
     pnl: f64,
+    accepted_events: usize,
+    abstained_events: usize,
+    fallback_events: usize,
+    normal_actions: usize,
+    skip_actions: usize,
+    invert_actions: usize,
+    confidence_sum: f64,
 }
 
 fn simulate(
@@ -3307,20 +3449,75 @@ fn simulate(
     indices: &[usize],
     config: &SupervisedConfig,
     policy: Option<&PolicyArtifact>,
-    fixed_class: Option<usize>,
+    fixed_action: Option<i8>,
+) -> SimulationResult {
+    simulate_with_confidence_threshold(rows, indices, config, policy, fixed_action, 0.0, None)
+}
+
+fn simulate_with_confidence_threshold(
+    rows: &[TrainingRow],
+    indices: &[usize],
+    config: &SupervisedConfig,
+    policy: Option<&PolicyArtifact>,
+    fixed_action: Option<i8>,
+    confidence_threshold: f64,
+    confidence_fallback: Option<i8>,
 ) -> SimulationResult {
     let mut pnl = 0.0;
     let mut current_session = None::<&str>;
     let mut position = 0_i8;
+    let mut accepted_events = 0usize;
+    let mut abstained_events = 0usize;
+    let mut fallback_events = 0usize;
+    let mut normal_actions = 0usize;
+    let mut skip_actions = 0usize;
+    let mut invert_actions = 0usize;
+    let mut confidence_sum = 0.0;
     for index in indices {
         let row = &rows[*index];
         if current_session != Some(row.session_id.as_str()) {
             current_session = Some(row.session_id.as_str());
             position = 0;
         }
-        let class =
-            fixed_class.unwrap_or_else(|| predicted_class(policy.expect("policy required"), row));
-        let next = action_for_class(class, row.raw_direction, position);
+        let next = if let Some(action) = fixed_action {
+            accepted_events += 1;
+            match action {
+                1 => normal_actions += 1,
+                0 => skip_actions += 1,
+                -1 => invert_actions += 1,
+                _ => {}
+            }
+            target_position_for_action(position, row.raw_direction, action)
+        } else {
+            let policy = policy.expect("policy required");
+            let predicted = prediction(policy, row);
+            confidence_sum += predicted.confidence;
+            if confidence_threshold > 0.0 && predicted.confidence < confidence_threshold {
+                abstained_events += 1;
+                if let Some(action) = confidence_fallback {
+                    fallback_events += 1;
+                    match action {
+                        1 => normal_actions += 1,
+                        -1 => invert_actions += 1,
+                        _ => {}
+                    }
+                    target_position_for_action(position, row.raw_direction, action)
+                } else {
+                    position
+                }
+            } else {
+                accepted_events += 1;
+                match predicted.class {
+                    0 => normal_actions += 1,
+                    1 if config.label_mode.includes_skip() => skip_actions += 1,
+                    _ => invert_actions += 1,
+                }
+                config
+                    .label_mode
+                    .action_for_class(predicted.class, row.raw_direction, position)
+                    .unwrap_or(position)
+            }
+        };
         pnl += next as f64
             * (row.interval_end_price - row.decision_price)
             * config.contract_multiplier;
@@ -3331,7 +3528,25 @@ fn simulate(
             position = 0;
         }
     }
-    SimulationResult { pnl }
+    SimulationResult {
+        pnl,
+        accepted_events,
+        abstained_events,
+        fallback_events,
+        normal_actions,
+        skip_actions,
+        invert_actions,
+        confidence_sum,
+    }
+}
+
+fn target_position_for_action(current: i8, raw_direction: i8, action: i8) -> i8 {
+    match action {
+        1 => raw_direction,
+        -1 => -raw_direction,
+        _ => current,
+    }
+    .clamp(-1, 1)
 }
 
 fn metrics_for(
@@ -3340,13 +3555,25 @@ fn metrics_for(
     indices: &[usize],
     policy: &PolicyArtifact,
 ) -> SplitMetrics {
-    let mut confusion = [[0usize; 3]; 3];
+    metrics_for_with_confidence_threshold(name, dataset, indices, policy, 0.0, None)
+}
+
+fn metrics_for_with_confidence_threshold(
+    name: &str,
+    dataset: &TrainingDataset,
+    indices: &[usize],
+    policy: &PolicyArtifact,
+    confidence_threshold: f64,
+    confidence_fallback: Option<i8>,
+) -> SplitMetrics {
+    let classes = policy.classes;
+    let mut confusion = vec![vec![0usize; classes]; classes];
     let mut cross_entropy = 0.0;
     for index in indices {
         let row = &dataset.rows[*index];
         let input = scaled_features(row, &policy.means, &policy.scales);
-        let probabilities = softmax(&logits(&policy.weights, &input, 3));
-        let target = class_index(row.label_action);
+        let probabilities = softmax(&logits(&policy.weights, &input, classes));
+        let target = class_index(row.label_action, dataset.config.label_mode);
         let predicted = probabilities
             .iter()
             .enumerate()
@@ -3354,7 +3581,7 @@ fn metrics_for(
                 left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(class, _)| class)
-            .unwrap_or(1);
+            .unwrap_or_else(|| classes.saturating_sub(1));
         confusion[target][predicted] += 1;
         cross_entropy -= probabilities[target].max(1e-12).ln();
     }
@@ -3362,13 +3589,22 @@ fn metrics_for(
     let accuracy = if rows == 0 {
         0.0
     } else {
-        (0..3).map(|class| confusion[class][class]).sum::<usize>() as f64 / rows as f64
+        (0..classes)
+            .map(|class| confusion[class][class])
+            .sum::<usize>() as f64
+            / rows as f64
     };
-    let macro_f1 = (0..3)
+    let macro_f1 = (0..classes)
         .map(|class| {
             let tp = confusion[class][class] as f64;
-            let fp = (0..3).map(|other| confusion[other][class]).sum::<usize>() as f64 - tp;
-            let fn_ = (0..3).map(|other| confusion[class][other]).sum::<usize>() as f64 - tp;
+            let fp = (0..classes)
+                .map(|other| confusion[other][class])
+                .sum::<usize>() as f64
+                - tp;
+            let fn_ = (0..classes)
+                .map(|other| confusion[class][other])
+                .sum::<usize>() as f64
+                - tp;
             if tp == 0.0 || 2.0 * tp + fp + fn_ == 0.0 {
                 0.0
             } else {
@@ -3376,12 +3612,20 @@ fn metrics_for(
             }
         })
         .sum::<f64>()
-        / 3.0;
-    let predicted = simulate(&dataset.rows, indices, &dataset.config, Some(policy), None);
+        / classes as f64;
+    let predicted = simulate_with_confidence_threshold(
+        &dataset.rows,
+        indices,
+        &dataset.config,
+        Some(policy),
+        None,
+        confidence_threshold,
+        confidence_fallback,
+    );
     let oracle = simulate_labels(&dataset.rows, indices, &dataset.config);
-    let normal = simulate(&dataset.rows, indices, &dataset.config, None, Some(0));
-    let skip = simulate(&dataset.rows, indices, &dataset.config, None, Some(1));
-    let invert = simulate(&dataset.rows, indices, &dataset.config, None, Some(2));
+    let normal = simulate(&dataset.rows, indices, &dataset.config, None, Some(1));
+    let skip = simulate(&dataset.rows, indices, &dataset.config, None, Some(0));
+    let invert = simulate(&dataset.rows, indices, &dataset.config, None, Some(-1));
     SplitMetrics {
         split: name.to_string(),
         rows,
@@ -3403,6 +3647,23 @@ fn metrics_for(
         always_skip_pnl: skip.pnl,
         always_invert_pnl: invert.pnl,
         oracle_regret: oracle.pnl - predicted.pnl,
+        confidence_threshold,
+        accepted_events: predicted.accepted_events,
+        abstained_events: predicted.abstained_events,
+        fallback_events: predicted.fallback_events,
+        normal_actions: predicted.normal_actions,
+        skip_actions: predicted.skip_actions,
+        invert_actions: predicted.invert_actions,
+        coverage: if rows == 0 {
+            0.0
+        } else {
+            predicted.accepted_events as f64 / rows as f64
+        },
+        mean_confidence: if rows == 0 {
+            0.0
+        } else {
+            predicted.confidence_sum / rows as f64
+        },
     }
 }
 
@@ -3420,7 +3681,14 @@ fn simulate_labels(
             current_session = Some(row.session_id.as_str());
             position = 0;
         }
-        let next = action_for_class(class_index(row.label_action), row.raw_direction, position);
+        let next = config
+            .label_mode
+            .action_for_class(
+                class_index(row.label_action, config.label_mode),
+                row.raw_direction,
+                position,
+            )
+            .unwrap_or(position);
         pnl += next as f64
             * (row.interval_end_price - row.decision_price)
             * config.contract_multiplier;
@@ -3431,7 +3699,16 @@ fn simulate_labels(
             position = 0;
         }
     }
-    SimulationResult { pnl }
+    SimulationResult {
+        pnl,
+        accepted_events: indices.len(),
+        abstained_events: 0,
+        fallback_events: 0,
+        normal_actions: 0,
+        skip_actions: 0,
+        invert_actions: 0,
+        confidence_sum: 0.0,
+    }
 }
 
 #[cfg(test)]
@@ -3442,7 +3719,7 @@ mod tests {
         let optimizer_state = if backend == "cpu-linear" {
             None
         } else {
-            let mut state = OptimizerStateArtifact::empty(1, 0.001, 0.0001);
+            let mut state = OptimizerStateArtifact::empty(1, 3, 0.001, 0.0001);
             state.step = 3;
             Some(state)
         };
@@ -3618,6 +3895,7 @@ mod tests {
             timestamp_timezone: config.session_timezone.clone(),
             index_timestamp_fallback: false,
             raw_price_scale: None,
+            tick_size: None,
             bar_kind: config.bar_kind.clone(),
             bar_value: config.bar_value,
             source_row_count: 10,
@@ -3705,6 +3983,7 @@ mod tests {
             timestamp_timezone: "UTC".to_string(),
             index_timestamp_fallback: false,
             raw_price_scale: None,
+            tick_size: None,
             volume_present: true,
             source_row_count: 6,
         };
@@ -3839,6 +4118,7 @@ mod tests {
             &config.session_timezone,
             &config.bar_kind,
             config.bar_value,
+            None,
             None,
         )
         .unwrap();

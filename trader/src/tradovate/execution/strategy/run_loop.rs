@@ -159,6 +159,26 @@ pub(crate) fn maybe_run_execution_strategy(
         return Ok(());
     };
 
+    // A transient market reset can leave the timestamp accessor populated
+    // while the strategy slice is temporarily empty. Treat that as a normal
+    // wait condition; surfacing it as an error creates noisy Quiet-mode rows
+    // and can obscure the next valid range-bar update.
+    if signal_evaluation_bars(session).is_empty() {
+        let next_summary = format!(
+            "Native {} waiting for a complete market snapshot.",
+            active_native_label(session)
+        );
+        emit_execution_transition_debug(
+            event_tx,
+            session,
+            &next_summary,
+            "execution market snapshot wait",
+        );
+        session.execution_runtime.last_summary = next_summary;
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
     if session.execution_runtime.last_closed_bar_ts.is_none() {
         session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
         session.execution_runtime.last_closed_bar_fingerprint =
@@ -197,21 +217,23 @@ pub(crate) fn maybe_run_execution_strategy(
                     actual_market_qty,
                     guarded_strategy_eval_context(session, actual_market_qty)
                 );
-                let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-                    session,
-                    TradovateStrategyDecisionDebug {
-                        path: "guarded",
-                        decision: "blocked",
-                        signal: None,
-                        bar_ts: Some(last_strategy_ts),
-                        actual_qty: actual_market_qty,
-                        effective_qty: effective_market_position_qty(session),
-                        target_qty: None,
-                        strategy_detail: "n/a",
-                        gate_detail,
-                        fingerprint: latest_fingerprint,
-                    },
-                )));
+                emit_debug_log(event_tx, session, || {
+                    format_tradovate_strategy_decision(
+                        session,
+                        TradovateStrategyDecisionDebug {
+                            path: "guarded",
+                            decision: "blocked",
+                            signal: None,
+                            bar_ts: Some(last_strategy_ts),
+                            actual_qty: actual_market_qty,
+                            effective_qty: effective_market_position_qty(session),
+                            target_qty: None,
+                            strategy_detail: "n/a",
+                            gate_detail,
+                            fingerprint: latest_fingerprint,
+                        },
+                    )
+                });
                 return Ok(());
             }
 
@@ -224,21 +246,23 @@ pub(crate) fn maybe_run_execution_strategy(
                 actual_market_qty,
                 guarded_strategy_eval_context(session, actual_market_qty)
             );
-            let _ = event_tx.send(ServiceEvent::DebugLog(format_tradovate_strategy_decision(
-                session,
-                TradovateStrategyDecisionDebug {
-                    path: "guarded",
-                    decision: "closed-bar revision",
-                    signal: None,
-                    bar_ts: Some(last_strategy_ts),
-                    actual_qty: actual_market_qty,
-                    effective_qty: effective_market_position_qty(session),
-                    target_qty: None,
-                    strategy_detail: "n/a",
-                    gate_detail,
-                    fingerprint: latest_fingerprint,
-                },
-            )));
+            emit_debug_log(event_tx, session, || {
+                format_tradovate_strategy_decision(
+                    session,
+                    TradovateStrategyDecisionDebug {
+                        path: "guarded",
+                        decision: "closed-bar revision",
+                        signal: None,
+                        bar_ts: Some(last_strategy_ts),
+                        actual_qty: actual_market_qty,
+                        effective_qty: effective_market_position_qty(session),
+                        target_qty: None,
+                        strategy_detail: "n/a",
+                        gate_detail,
+                        fingerprint: latest_fingerprint,
+                    },
+                )
+            });
         }
         session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
     }
@@ -246,15 +270,16 @@ pub(crate) fn maybe_run_execution_strategy(
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
-    let (signal_bar, signal, summary, debug_summary) = if session.replay_enabled
-        && session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming
-        && session.execution_config.native_strategy == NativeStrategyKind::EmaCross
+    let (signal_bar, signal, summary, debug_summary) = if session.execution_config.native_strategy
+        == NativeStrategyKind::EmaCross
+        && (!session.replay_enabled
+            || session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming)
     {
         // The streaming EMA evaluator only needs the immutable bar slice and
-        // its recursive runtime. Temporarily moving that runtime out lets us
-        // borrow the market bars directly instead of cloning the 4,096-bar
-        // signal window on every replay update. The runtime is restored before
-        // any order/protection work observes it.
+        // its recursive runtime. Use it for live execution as well as replay
+        // streaming; the legacy replay mode remains available for baseline
+        // comparisons. Temporarily moving the runtime out lets us borrow the
+        // market bars directly instead of cloning the retained signal window.
         let config = session.execution_config.native_ema.clone();
         let source_update_sequence = session.execution_runtime.market_update_sequence;
         let market_update = session.execution_runtime.market_update_kind;
@@ -281,13 +306,22 @@ pub(crate) fn maybe_run_execution_strategy(
                     signal_bar,
                     evaluation.signal,
                     evaluation.summary(),
-                    evaluation.debug_summary(),
+                    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+                        String::new()
+                    } else {
+                        evaluation.debug_summary()
+                    },
                 )
             } else {
                 // Preserve the legacy closed-bar behavior when several bars
                 // arrived while an order/protection/session gate was active:
                 // evaluate each newly eligible bar and retain the latest
                 // actionable signal. The common one-bar case remains O(1).
+                // Use the first bar strictly after the prior timestamp.  A
+                // range-bar correction can reuse the same timestamp; in that
+                // case there is no newer bar and we must reevaluate the last
+                // bar rather than creating an empty `start_idx..bars.len()`
+                // range and reporting that the bar disappeared.
                 let start_idx = previous_strategy_ts
                     .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
                     .unwrap_or_else(|| bars.len().saturating_sub(1));
@@ -307,7 +341,11 @@ pub(crate) fn maybe_run_execution_strategy(
                         signal_bar,
                         evaluation.signal,
                         evaluation.summary(),
-                        evaluation.debug_summary(),
+                        if session.cfg.log_mode == crate::config::LogMode::Quiet {
+                            String::new()
+                        } else {
+                            evaluation.debug_summary()
+                        },
                     );
                     if candidate.1 != StrategySignal::Hold || latest.is_none() {
                         latest = Some(candidate);
@@ -318,16 +356,92 @@ pub(crate) fn maybe_run_execution_strategy(
         };
         session.execution_runtime.ema_execution = ema_runtime;
         result
-    } else if session.replay_enabled
-        && session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming
+    } else if session.execution_config.native_strategy == NativeStrategyKind::VolumeAdaptiveEmaCross
+        && (!session.replay_enabled
+            || session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming)
+    {
+        let config = session.execution_config.native_volume_ema_cross.clone();
+        let source_update_sequence = session.execution_runtime.market_update_sequence;
+        let market_update = session.execution_runtime.market_update_kind;
+        let mut ema_runtime =
+            std::mem::take(&mut session.execution_runtime.volume_ema_cross_execution);
+        let result = {
+            let bars = signal_evaluation_bars(session);
+            if bars.is_empty() {
+                bail!("latest strategy bar disappeared during strategy evaluation");
+            }
+            let current_side = side_from_signed_qty(current_qty);
+            if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
+                let signal_bar = bars
+                    .last()
+                    .cloned()
+                    .context("latest strategy bar disappeared during strategy evaluation")?;
+                let evaluation = config.evaluate_streaming_with_market_update(
+                    &mut ema_runtime,
+                    bars,
+                    current_side,
+                    source_update_sequence,
+                    market_update,
+                );
+                (
+                    signal_bar,
+                    evaluation.signal(),
+                    evaluation.summary(),
+                    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+                        String::new()
+                    } else {
+                        evaluation.debug_summary()
+                    },
+                )
+            } else {
+                // See the EMA path above: range-bar corrections may keep the
+                // timestamp unchanged, so the corrected last bar remains the
+                // only eligible evaluation target.
+                let start_idx = previous_strategy_ts
+                    .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
+                    .unwrap_or_else(|| bars.len().saturating_sub(1));
+                let mut latest = None;
+                for idx in start_idx..bars.len() {
+                    let signal_bar = bars[idx].clone();
+                    let evaluation = config.evaluate_streaming_with_market_update(
+                        &mut ema_runtime,
+                        &bars[..=idx],
+                        current_side,
+                        (idx + 1 == bars.len())
+                            .then_some(source_update_sequence)
+                            .flatten(),
+                        market_update,
+                    );
+                    let candidate = (
+                        signal_bar,
+                        evaluation.signal(),
+                        evaluation.summary(),
+                        if session.cfg.log_mode == crate::config::LogMode::Quiet {
+                            String::new()
+                        } else {
+                            evaluation.debug_summary()
+                        },
+                    );
+                    if candidate.1 != StrategySignal::Hold || latest.is_none() {
+                        latest = Some(candidate);
+                    }
+                }
+                latest.context("latest strategy bar disappeared during strategy evaluation")?
+            }
+        };
+        session.execution_runtime.volume_ema_cross_execution = ema_runtime;
+        result
+    } else if (!session.replay_enabled
+        || session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming)
         && session.execution_config.native_strategy == NativeStrategyKind::HmaCross
         && session.execution_config.native_hma_cross.calculation_mode
             == crate::strategies::hma_cross::HmaCalculationMode::Incremental
     {
-        // Keep the incremental HMA path on the retained market slice.  The
-        // generic branch clones the full one-minute history for every bar,
-        // which dominates month-long replay runtime even when the indicator
-        // itself is O(1) per append.
+        // Keep the incremental HMA path on the retained market slice for live
+        // execution and streaming replay. The generic branch clones the full
+        // retained history for every eligible bar, even though the indicator
+        // itself only needs its bounded rolling suffix. Legacy mode remains
+        // below as the exact reference path.
         let config = session.execution_config.native_hma_cross.clone();
         let mut hma_runtime = std::mem::take(&mut session.execution_runtime.hma_cross_execution);
         let result = {
@@ -342,6 +456,7 @@ pub(crate) fn maybe_run_execution_strategy(
                 bars,
                 current_qty,
                 previous_strategy_ts,
+                session.cfg.log_mode != crate::config::LogMode::Quiet,
             )
         };
         session.execution_runtime.hma_cross_execution = hma_runtime;
@@ -646,14 +761,16 @@ pub(crate) fn maybe_run_execution_strategy(
         &debug_summary,
     );
 
-    let _ = event_tx.send(ServiceEvent::Status(format!(
-        "Strategy {} signal: {} on {} (qty {} -> {})",
-        active_native_slug(session),
-        signal.label(),
-        active_signal_timing_label(session),
-        current_qty,
-        target_qty
-    )));
+    emit_operational_status(event_tx, session, || {
+        format!(
+            "Strategy {} signal: {} on {} (qty {} -> {})",
+            active_native_slug(session),
+            signal.label(),
+            active_signal_timing_label(session),
+            current_qty,
+            target_qty
+        )
+    });
 
     if current_qty != 0 && !native_order_strategy_enabled(session) {
         sync_native_protection(
@@ -688,10 +805,9 @@ pub(crate) fn maybe_run_execution_strategy(
             target_qty
         ),
     };
-    let _ = event_tx.send(ServiceEvent::DebugLog(format!(
-        "signal | {} | {}",
-        signal_context.description, summary
-    )));
+    emit_debug_log(event_tx, session, || {
+        format!("signal | {} | {}", signal_context.description, summary)
+    });
     session.pending_signal_context = Some(signal_context);
     let dispatch_outcome =
         match dispatch_target_position_order(session, broker_tx, target_qty, true, &reason) {

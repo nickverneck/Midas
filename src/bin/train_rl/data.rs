@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use midas_env::bars::{BarInput, BarSelection, PreparedBars, prepare_bars};
-use polars::prelude::{AnyValue, DataFrame, SerReader, Series};
+use polars::prelude::{AnyValue, DataFrame, SerReader, Series, TimeUnit};
 
 #[allow(dead_code)]
 pub const OBSERVATION_SCHEMA_LEGACY: &str = "rl-legacy-v1";
@@ -107,10 +107,10 @@ pub fn load_dataset_with_schema_and_bars(
         .ok()
         .map(|c| series_to_f64(c.as_materialized_series()))
         .transpose()?;
-    let datetime_ns: Option<Vec<i64>> = df
-        .column("date")
-        .ok()
-        .map(|c| series_to_i64(c.as_materialized_series()))
+    let datetime_ns: Option<Vec<i64>> = ["ts_ns", "timestamp_ns", "date", "timestamp"]
+        .iter()
+        .find_map(|name| df.column(name).ok())
+        .map(|column| series_to_i64(column.as_materialized_series()))
         .transpose()?;
     let session_open_from_df: Option<Vec<bool>> = df
         .column("session_open")
@@ -173,28 +173,58 @@ pub fn load_dataset_with_schema_and_bars(
         margin_ok: prepared_margin_ok,
     } = prepared;
 
-    let feats = midas_env::features::compute_features_ohlcv(
-        &signal_close,
-        Some(&signal_high),
-        Some(&signal_low),
-        volume.as_deref(),
-    );
-    let feature_cols = match observation_schema {
-        ObservationSchema::LegacyV1 => ordered_feature_cols_legacy(
-            feats,
-            &signal_open,
+    let feature_cols = if bar_selection == BarSelection::default() {
+        if let Some(precomputed) = precomputed_feature_cols(&df)? {
+            precomputed
+        } else {
+            let feats = midas_env::features::compute_features_ohlcv(
+                &signal_close,
+                Some(&signal_high),
+                Some(&signal_low),
+                volume.as_deref(),
+            );
+            match observation_schema {
+                ObservationSchema::LegacyV1 => ordered_feature_cols_legacy(
+                    feats,
+                    &signal_open,
+                    &signal_close,
+                    &signal_high,
+                    &signal_low,
+                )?,
+                ObservationSchema::NormalizedV2 => ordered_feature_cols_normalized(
+                    feats,
+                    &signal_open,
+                    &signal_close,
+                    &signal_high,
+                    &signal_low,
+                    volume.as_deref(),
+                )?,
+            }
+        }
+    } else {
+        let feats = midas_env::features::compute_features_ohlcv(
             &signal_close,
-            &signal_high,
-            &signal_low,
-        )?,
-        ObservationSchema::NormalizedV2 => ordered_feature_cols_normalized(
-            feats,
-            &signal_open,
-            &signal_close,
-            &signal_high,
-            &signal_low,
+            Some(&signal_high),
+            Some(&signal_low),
             volume.as_deref(),
-        )?,
+        );
+        match observation_schema {
+            ObservationSchema::LegacyV1 => ordered_feature_cols_legacy(
+                feats,
+                &signal_open,
+                &signal_close,
+                &signal_high,
+                &signal_low,
+            )?,
+            ObservationSchema::NormalizedV2 => ordered_feature_cols_normalized(
+                feats,
+                &signal_open,
+                &signal_close,
+                &signal_high,
+                &signal_low,
+                volume.as_deref(),
+            )?,
+        }
     };
 
     let session_open = prepared_session_open.or_else(|| {
@@ -237,7 +267,7 @@ pub fn load_dataset_with_schema_and_bars(
 }
 
 fn extract_symbol(df: &DataFrame) -> Result<String> {
-    let symbol = match df.column("symbol") {
+    let symbol = match df.column("symbol").or_else(|_| df.column("instrument")) {
         Ok(column) => match column.get(0)? {
             AnyValue::String(s) => s.to_string(),
             _ => "UNKNOWN".to_string(),
@@ -245,6 +275,62 @@ fn extract_symbol(df: &DataFrame) -> Result<String> {
         Err(_) => "UNKNOWN".to_string(),
     };
     Ok(symbol)
+}
+
+/// Read the ordered causal feature registry emitted by the dense training
+/// parquet. Legacy OHLCV files return `None` and keep the native RL feature
+/// bank. The default price-action/OHLC path is the only path that can reuse
+/// precomputed features without changing their meaning.
+fn precomputed_feature_cols(df: &DataFrame) -> Result<Option<Vec<Vec<f64>>>> {
+    let Some(schema_column) = df.column("schema_version").ok() else {
+        return Ok(None);
+    };
+    let schema = schema_column
+        .as_materialized_series()
+        .str()?
+        .get(0)
+        .unwrap_or_default();
+    if schema != "training-bar-v1" {
+        return Ok(None);
+    }
+    let feature_schema = df
+        .column("feature_schema")
+        .context("training bar dataset is missing feature_schema")?
+        .as_materialized_series()
+        .str()?
+        .get(0)
+        .ok_or_else(|| anyhow::anyhow!("training bar feature_schema is empty"))?;
+    let names = feature_schema
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        anyhow::bail!("training bar feature_schema contains no features");
+    }
+    let forbidden = [
+        "label_action",
+        "label_name",
+        "oracle_value",
+        "oracle_position_before",
+        "oracle_position_after",
+        "action_value_normal",
+        "action_value_skip",
+        "action_value_invert",
+    ];
+    if names.iter().any(|name| forbidden.contains(name)) {
+        anyhow::bail!("training bar feature_schema contains a label/future column");
+    }
+    names
+        .iter()
+        .map(|name| {
+            let column = df
+                .column(name)
+                .with_context(|| format!("training bar feature `{name}` is missing"))?;
+            series_to_f64(column.as_materialized_series())
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
 }
 
 #[allow(dead_code)]
@@ -862,19 +948,30 @@ fn series_to_f64(series: &Series) -> Result<Vec<f64>> {
 }
 
 fn series_to_i64(series: &Series) -> Result<Vec<i64>> {
-    let out = series
+    series
         .iter()
-        .map(|v| match v {
-            AnyValue::Datetime(v, _, _) => v,
-            AnyValue::DatetimeOwned(v, _, _) => v,
-            AnyValue::Int64(v) => v,
-            AnyValue::Int32(v) => v as i64,
-            AnyValue::UInt64(v) => v as i64,
-            AnyValue::UInt32(v) => v as i64,
-            _ => 0_i64,
+        .enumerate()
+        .map(|(index, value)| match value {
+            AnyValue::Datetime(value, unit, _) => Ok(datetime_to_ns(value, unit)),
+            AnyValue::DatetimeOwned(value, unit, _) => Ok(datetime_to_ns(value, unit)),
+            AnyValue::Int64(value) => Ok(value),
+            AnyValue::Int32(value) => Ok(value as i64),
+            AnyValue::UInt64(value) => i64::try_from(value)
+                .with_context(|| format!("timestamp at row {index} does not fit in i64")),
+            AnyValue::UInt32(value) => Ok(value as i64),
+            other => anyhow::bail!(
+                "unsupported timestamp value at row {index}: {other:?}; expected ts_ns/date/timestamp to be integer or datetime"
+            ),
         })
-        .collect();
-    Ok(out)
+        .collect()
+}
+
+fn datetime_to_ns(value: i64, unit: TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Nanoseconds => value,
+        TimeUnit::Microseconds => value.saturating_mul(1_000),
+        TimeUnit::Milliseconds => value.saturating_mul(1_000_000),
+    }
 }
 
 fn series_to_bool(series: &Series) -> Result<Vec<bool>> {

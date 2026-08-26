@@ -1,3 +1,4 @@
+use crate::broker::{BarType, CandleMode};
 use crate::strategies::adx::AdxConfig;
 use crate::strategies::ema_cross::EmaCrossConfig;
 use crate::strategies::heikin_ashi::HeikinAshiConfig;
@@ -562,6 +563,13 @@ pub struct ExecutionRuntimeSnapshot {
 pub struct ExecutionStateSnapshot {
     pub config: ExecutionStrategyConfig,
     pub runtime: ExecutionRuntimeSnapshot,
+    /// The market shape currently owned by the engine. These are optional so
+    /// a newer TUI can still attach to an older engine without replacing a
+    /// known selection with the minute/OHLC defaults.
+    #[serde(default)]
+    pub bar_type: Option<BarType>,
+    #[serde(default)]
+    pub candle_mode: Option<CandleMode>,
     #[serde(default)]
     pub selected_account_id: Option<i64>,
     #[serde(default)]
@@ -581,6 +589,8 @@ impl Default for ExecutionStateSnapshot {
         Self {
             config: ExecutionStrategyConfig::default(),
             runtime: ExecutionRuntimeSnapshot::default(),
+            bar_type: None,
+            candle_mode: None,
             selected_account_id: None,
             selected_contract_name: None,
             market_position_qty: 0,

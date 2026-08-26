@@ -17,6 +17,16 @@ bar_value: 1
 contract_multiplier: 100
 round_trip_cost: 3.10
 include_raw_direction: true
+# label_mode: normal-invert # normal/reverse only; skip remains audit-only
+
+# Causal context features used by the normalized-regime experiment. The CLI
+# also accepts the same object through --derived-features.
+derived_features:
+  include_time_cycle: true
+  atr_ratio_slow_period: 100
+  cross_lookbacks: [5, 10, 30, 60]
+  context_cross_lookbacks: [60, 120, 240, 480]
+  range_lookbacks: [20, 60]
 
 # Removing a feature object removes its value/delta columns from the model
 # schema. Every value and delta is calculated at or before the crossover bar.
@@ -27,58 +37,67 @@ features:
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: ema
     period: 30
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: ema
     period: 210
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: ema
     period: 240
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: hma
     period: 10
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: hma
     period: 30
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: kama
     period: 30
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: alma
     period: 30
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: sma
     period: 30
     lookbacks: [1, 3, 5]
     include_value: true
     include_delta: true
     normalize_by_atr: true
+    normalize_value_by_atr: true
   - indicator: atr
     period: 14
     lookbacks: [1, 3, 5]
-    include_value: true
+    include_value: false
     include_delta: true
     normalize_by_atr: true
   - indicator: adx

@@ -6,13 +6,17 @@
 //! same CLI so a prepared artifact has a stable entry point for the web UI.
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc,
+};
 use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
 use midas_env::ml::{self, TrainerKind};
 use midas_env::supervised::{
-    IndicatorKind, SUPERVISED_DATASET_SCHEMA, SUPERVISED_LABEL_SCHEMA, SupervisedBars,
-    SupervisedConfig, SupervisedEvent, prepare_events,
+    IndicatorKind, LabelMode, SUPERVISED_DATASET_SCHEMA, SUPERVISED_LABEL_SCHEMA,
+    SupervisedBarFeatureRow, SupervisedBars, SupervisedConfig, SupervisedEvent,
+    TRAINING_BAR_DATASET_SCHEMA, prepare_bar_features, prepare_events,
+    standard_contract_multiplier, standard_tick_size,
 };
 use polars::prelude::{
     CsvReader, DataFrame, DataType, NamedFrom, ParquetReader, ParquetWriter, SerReader, Series,
@@ -21,6 +25,7 @@ use polars::prelude::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -65,6 +70,11 @@ struct PrepareArgs {
     /// Output supervised-event parquet.
     #[arg(long)]
     output: PathBuf,
+    /// Optional dense bar-level parquet shared by supervised, GA, and RL.
+    /// The file retains every source bar, causal features, and nullable event
+    /// labels/audit columns. The sparse event parquet remains at --output.
+    #[arg(long, value_name = "PATH")]
+    bar_output: Option<PathBuf>,
     #[arg(long, default_value = "UNKNOWN")]
     instrument: String,
     #[arg(long, default_value = "UNKNOWN")]
@@ -88,6 +98,9 @@ struct PrepareArgs {
     /// JSON or YAML array of FeatureSpec objects.
     #[arg(long)]
     features: Option<String>,
+    /// JSON or YAML DerivedFeatureConfig object.
+    #[arg(long)]
+    derived_features: Option<String>,
     #[arg(long)]
     session_timezone: Option<String>,
     #[arg(long)]
@@ -105,6 +118,11 @@ struct PrepareArgs {
     /// Total cost of a round trip; entries/exits charge half.
     #[arg(long, alias = "cost-pnl")]
     round_trip_cost: Option<f64>,
+    /// Hindsight target actions: normal-skip-invert (default) or
+    /// normal-invert. The latter is also accepted as normal-reverse and
+    /// excludes skip from label selection while retaining its audit value.
+    #[arg(long)]
+    label_mode: Option<String>,
     /// Unit for a numeric timestamp/date column: ns, us, ms, or s.
     #[arg(long)]
     timestamp_unit: Option<String>,
@@ -115,6 +133,10 @@ struct PrepareArgs {
     /// When omitted, the loader uses a conservative magnitude-based auto mode.
     #[arg(long)]
     databento_price_scale: Option<f64>,
+    /// Minimum price increment used by raw-trade range aggregation. When
+    /// omitted, common GC/ES/NQ contracts are inferred from instrument/contract.
+    #[arg(long)]
+    tick_size: Option<f64>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -170,6 +192,19 @@ struct EvaluateArgs {
     /// Optional JSON metrics output path.
     #[arg(long)]
     metrics: Option<PathBuf>,
+    /// Abstain and hold the current position when the model's maximum class
+    /// probability is below this threshold. Zero disables confidence gating.
+    #[arg(long, default_value_t = 0.0)]
+    confidence_threshold: f64,
+    /// Action to use when confidence is below the threshold. `hold` preserves
+    /// the original abstention behavior; `normal` or `invert` provide a
+    /// directional default for an exception-gate experiment.
+    #[arg(long, default_value = "hold", value_parser = ["hold", "normal", "invert"])]
+    confidence_fallback: String,
+    /// Session split to evaluate. Uses the policy's recorded chronological
+    /// split boundaries; `all` evaluates every row in the input artifact.
+    #[arg(long, default_value = "all", value_parser = ["all", "train", "validation", "holdout"])]
+    split: String,
     /// Trusted root used when regenerating the original source behind an
     /// event parquet. Defaults to the current working directory.
     #[arg(long, value_name = "DIR")]
@@ -193,7 +228,9 @@ struct ProbeArgs {
 struct PrepareSummary {
     schema_version: &'static str,
     label_schema: &'static str,
+    label_mode: String,
     output: String,
+    bar_output: Option<String>,
     input: String,
     source_hash_sha256: String,
     dataset_fingerprint_sha256: String,
@@ -207,8 +244,14 @@ struct PrepareSummary {
     timestamp_timezone: String,
     index_timestamp_fallback: bool,
     raw_price_scale: Option<f64>,
+    tick_size: Option<f64>,
+    bar_rows: Option<usize>,
     bar_kind: String,
     bar_value: f64,
+    pnl_currency: &'static str,
+    contract_multiplier: f64,
+    round_trip_cost: f64,
+    contract_multiplier_source: &'static str,
     leakage_check: &'static str,
 }
 
@@ -220,6 +263,7 @@ struct LoadedSource {
     timestamp_timezone: String,
     index_timestamp_fallback: bool,
     raw_price_scale: Option<f64>,
+    tick_size: Option<f64>,
     volume_present: bool,
     source_row_count: usize,
 }
@@ -236,14 +280,41 @@ fn main() -> Result<()> {
 
 fn prepare(args: PrepareArgs) -> Result<()> {
     refuse_input_output_alias(&args.input, &args.output)?;
-    let mut config = if let Some(path) = &args.config {
+    if let Some(bar_output) = &args.bar_output {
+        refuse_input_output_alias(&args.input, bar_output)?;
+        if bar_output == &args.output {
+            bail!("--bar-output must be different from --output");
+        }
+    }
+    let (mut config, config_has_explicit_multiplier) = if let Some(path) = &args.config {
         read_config(path)?
     } else {
-        SupervisedConfig::default()
+        (SupervisedConfig::default(), false)
     };
     apply_overrides(&mut config, &args)?;
+    let contract_multiplier_source = if args.contract_multiplier.is_some() {
+        "cli"
+    } else if config_has_explicit_multiplier {
+        "config"
+    } else {
+        config.contract_multiplier = standard_contract_multiplier(&args.instrument, &args.contract)
+            .ok_or_else(|| anyhow::anyhow!(
+                "no contract_multiplier supplied and instrument/contract {:?}/{:?} is not recognized; pass --contract-multiplier explicitly instead of producing raw price-unit PnL",
+                args.instrument,
+                args.contract,
+            ))?;
+        "instrument-default"
+    };
     config.validate()?;
 
+    let tick_size = args
+        .tick_size
+        .or_else(|| standard_tick_size(&args.instrument, &args.contract));
+    if let Some(tick_size) = tick_size {
+        if !tick_size.is_finite() || tick_size <= 0.0 {
+            bail!("tick_size must be finite and positive");
+        }
+    }
     let loaded = load_source(
         &args.input,
         args.timestamp_unit.as_deref(),
@@ -252,6 +323,7 @@ fn prepare(args: PrepareArgs) -> Result<()> {
         &config.bar_kind,
         config.bar_value,
         args.databento_price_scale,
+        tick_size,
     )?;
     if config
         .features
@@ -281,10 +353,29 @@ fn prepare(args: PrepareArgs) -> Result<()> {
         &config,
         &events,
     )?;
+    let bar_rows = if let Some(bar_output) = &args.bar_output {
+        write_training_bar_dataset(
+            bar_output,
+            &args.input,
+            &args.instrument,
+            &args.contract,
+            &loaded,
+            &config,
+            &events,
+        )?;
+        Some(loaded.bars.close.len())
+    } else {
+        None
+    };
     let summary = PrepareSummary {
         schema_version: SUPERVISED_DATASET_SCHEMA,
         label_schema: SUPERVISED_LABEL_SCHEMA,
+        label_mode: config.label_mode.to_string(),
         output: args.output.display().to_string(),
+        bar_output: args
+            .bar_output
+            .as_ref()
+            .map(|path| path.display().to_string()),
         input: args.input.display().to_string(),
         source_hash_sha256: sha256_file(&args.input)?,
         dataset_fingerprint_sha256: dataset_fingerprint(&args.input, &loaded, &config, &events)?,
@@ -302,8 +393,14 @@ fn prepare(args: PrepareArgs) -> Result<()> {
         timestamp_timezone: loaded.timestamp_timezone,
         index_timestamp_fallback: loaded.index_timestamp_fallback,
         raw_price_scale: loaded.raw_price_scale,
+        tick_size: loaded.tick_size,
+        bar_rows,
         bar_kind: config.bar_kind,
         bar_value: config.bar_value,
+        pnl_currency: "USD",
+        contract_multiplier: config.contract_multiplier,
+        round_trip_cost: config.round_trip_cost,
+        contract_multiplier_source,
         leakage_check: "passed",
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -387,7 +484,7 @@ fn same_file_identity(input: &std::fs::Metadata, output: &std::fs::Metadata) -> 
     }
 }
 
-fn read_config(path: &Path) -> Result<SupervisedConfig> {
+fn read_config(path: &Path) -> Result<(SupervisedConfig, bool)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read supervised config {}", path.display()))?;
     let extension = path
@@ -411,7 +508,9 @@ fn read_config(path: &Path) -> Result<SupervisedConfig> {
         .or_else(|| value.get("config"))
         .cloned()
         .unwrap_or(value);
-    serde_json::from_value(value).context("decode supervised config")
+    let has_explicit_multiplier = value.get("contract_multiplier").is_some();
+    let config = serde_json::from_value(value).context("decode supervised config")?;
+    Ok((config, has_explicit_multiplier))
 }
 
 fn apply_overrides(config: &mut SupervisedConfig, args: &PrepareArgs) -> Result<()> {
@@ -442,6 +541,10 @@ fn apply_overrides(config: &mut SupervisedConfig, args: &PrepareArgs) -> Result<
     if let Some(value) = &args.features {
         config.features = parse_value(value).context("parse --features FeatureSpec array")?;
     }
+    if let Some(value) = &args.derived_features {
+        config.derived_features =
+            parse_value(value).context("parse --derived-features configuration")?;
+    }
     if let Some(value) = &args.session_timezone {
         config.session_timezone = value.clone();
     }
@@ -463,6 +566,9 @@ fn apply_overrides(config: &mut SupervisedConfig, args: &PrepareArgs) -> Result<
     if let Some(value) = args.round_trip_cost {
         config.round_trip_cost = value;
     }
+    if let Some(value) = &args.label_mode {
+        config.label_mode = value.parse::<LabelMode>()?;
+    }
     Ok(())
 }
 
@@ -481,6 +587,7 @@ fn load_source(
     bar_kind: &str,
     bar_value: f64,
     databento_price_scale: Option<f64>,
+    tick_size: Option<f64>,
 ) -> Result<LoadedSource> {
     if path
         .extension()
@@ -488,7 +595,7 @@ fn load_source(
         .is_some_and(|value| value.eq_ignore_ascii_case("txt"))
         && looks_like_ninja_last(path)?
     {
-        return load_ninja_last_text(path, timezone_name, bar_kind, bar_value);
+        return load_ninja_last_text(path, timezone_name, bar_kind, bar_value, tick_size);
     }
     let file = File::open(path).with_context(|| format!("open source {}", path.display()))?;
     let extension = path
@@ -512,9 +619,16 @@ fn load_source(
             bar_kind,
             bar_value,
             databento_price_scale,
+            tick_size,
         );
     }
-    load_dataframe(&df, timestamp_unit, allow_index_timestamps, timezone_name)
+    load_dataframe(
+        &df,
+        timestamp_unit,
+        allow_index_timestamps,
+        timezone_name,
+        tick_size,
+    )
 }
 
 fn aggregate_databento_trades(
@@ -525,16 +639,20 @@ fn aggregate_databento_trades(
     bar_kind: &str,
     bar_value: f64,
     databento_price_scale: Option<f64>,
+    tick_size: Option<f64>,
 ) -> Result<LoadedSource> {
     let kind = bar_kind.to_ascii_lowercase();
     let seconds = match kind.as_str() {
         "minute" | "minutes" | "1m" => 60.0 * bar_value,
         "second" | "seconds" | "1s" => bar_value,
-        _ => bail!(
-            "raw Databento trade parquet currently derives only minute/second bars; use an existing pre-aggregated {bar_kind} file or Trader's raw replay aggregator"
-        ),
+        "range" => 0.0,
+        "tick" | "ticks" => 0.0,
+        "volume" => 0.0,
+        _ => bail!("unsupported raw Databento bar kind `{bar_kind}`"),
     };
-    if !seconds.is_finite() || seconds <= 0.0 {
+    if !matches!(kind.as_str(), "range" | "tick" | "ticks" | "volume")
+        && (!seconds.is_finite() || seconds <= 0.0)
+    {
         bail!("raw trade bar value must be positive");
     }
     let (prices, raw_price_scale) = databento_price_column(df, databento_price_scale)?;
@@ -551,6 +669,141 @@ fn aggregate_databento_trades(
         )?;
     if timestamps.windows(2).any(|window| window[1] < window[0]) {
         bail!("raw Databento timestamps must be non-decreasing");
+    }
+    if matches!(kind.as_str(), "range") {
+        let tick_size = tick_size.ok_or_else(|| {
+            anyhow::anyhow!(
+                "raw range aggregation requires --tick-size or a recognized GC/ES/NQ instrument/contract"
+            )
+        })?;
+        let bars = aggregate_range_trades(&timestamps, &prices, &sizes, tick_size, bar_value)?;
+        if bars.len() < 2 {
+            bail!("raw Databento source produced fewer than two range bars");
+        }
+        return Ok(LoadedSource {
+            bars: SupervisedBars {
+                timestamp_ns: bars.iter().map(|row| row.0).collect(),
+                open: bars.iter().map(|row| row.1).collect(),
+                high: bars.iter().map(|row| row.2).collect(),
+                low: bars.iter().map(|row| row.3).collect(),
+                close: bars.iter().map(|row| row.4).collect(),
+                volume: bars.iter().map(|row| row.5).collect(),
+            },
+            timestamp_source: format!("databento_{timestamp_source}_range_ticks"),
+            timestamp_unit,
+            timestamp_timezone: timezone_name.to_string(),
+            index_timestamp_fallback,
+            raw_price_scale: Some(raw_price_scale),
+            tick_size: Some(tick_size),
+            volume_present: size_present,
+            source_row_count: df.height(),
+        });
+    }
+    if matches!(kind.as_str(), "tick" | "ticks") {
+        let ticks_per_bar = bar_value.round();
+        if !bar_value.is_finite() || bar_value <= 0.0 || (ticks_per_bar - bar_value).abs() > 1e-9 {
+            bail!("raw tick bars require a positive integer --bar-value");
+        }
+        let ticks_per_bar = ticks_per_bar as usize;
+        let mut rows: Vec<(i64, f64, f64, f64, f64, f64)> = Vec::new();
+        for (index, ((timestamp, price), size)) in timestamps
+            .iter()
+            .zip(prices.iter())
+            .zip(sizes.iter())
+            .enumerate()
+        {
+            let bar_index = index / ticks_per_bar;
+            if let Some(last) = rows.get_mut(bar_index) {
+                last.2 = last.2.max(*price);
+                last.3 = last.3.min(*price);
+                last.4 = *price;
+                last.5 += *size;
+            } else {
+                rows.push((*timestamp, *price, *price, *price, *price, *size));
+            }
+        }
+        make_timestamps_strictly_increasing(&mut rows);
+        if rows.len() < 2 {
+            bail!("raw Databento source produced fewer than two tick bars");
+        }
+        return Ok(LoadedSource {
+            bars: SupervisedBars {
+                timestamp_ns: rows.iter().map(|row| row.0).collect(),
+                open: rows.iter().map(|row| row.1).collect(),
+                high: rows.iter().map(|row| row.2).collect(),
+                low: rows.iter().map(|row| row.3).collect(),
+                close: rows.iter().map(|row| row.4).collect(),
+                volume: rows.iter().map(|row| row.5).collect(),
+            },
+            timestamp_source: format!("databento_{timestamp_source}_tick_count"),
+            timestamp_unit,
+            timestamp_timezone: timezone_name.to_string(),
+            index_timestamp_fallback,
+            raw_price_scale: Some(raw_price_scale),
+            tick_size,
+            volume_present: size_present,
+            source_row_count: df.height(),
+        });
+    }
+    if kind == "volume" {
+        if !bar_value.is_finite() || bar_value <= 0.0 {
+            bail!("raw volume bars require a positive --bar-value");
+        }
+        if !size_present {
+            bail!("raw volume bars require a size column");
+        }
+        let mut rows: Vec<(i64, f64, f64, f64, f64, f64)> = Vec::new();
+        let mut current: Option<(i64, f64, f64, f64, f64, f64)> = None;
+        let mut current_volume = 0.0;
+        for ((timestamp, price), size) in timestamps.iter().zip(prices.iter()).zip(sizes.iter()) {
+            let mut remaining = size.max(0.0);
+            while remaining > 0.0 {
+                if current.is_none() {
+                    current = Some((*timestamp, *price, *price, *price, *price, 0.0));
+                    current_volume = 0.0;
+                }
+                let capacity = (bar_value - current_volume).max(0.0);
+                let consumed = remaining.min(capacity.max(f64::EPSILON));
+                if let Some(bar) = current.as_mut() {
+                    bar.2 = bar.2.max(*price);
+                    bar.3 = bar.3.min(*price);
+                    bar.4 = *price;
+                    bar.5 += consumed;
+                    bar.0 = *timestamp;
+                }
+                current_volume += consumed;
+                remaining -= consumed;
+                if current_volume >= bar_value - 1e-9 {
+                    rows.push(current.take().expect("volume bar exists"));
+                    current_volume = 0.0;
+                }
+            }
+        }
+        if let Some(bar) = current {
+            rows.push(bar);
+        }
+        make_timestamps_strictly_increasing(&mut rows);
+        if rows.len() < 2 {
+            bail!("raw Databento source produced fewer than two volume bars");
+        }
+        return Ok(LoadedSource {
+            bars: SupervisedBars {
+                timestamp_ns: rows.iter().map(|row| row.0).collect(),
+                open: rows.iter().map(|row| row.1).collect(),
+                high: rows.iter().map(|row| row.2).collect(),
+                low: rows.iter().map(|row| row.3).collect(),
+                close: rows.iter().map(|row| row.4).collect(),
+                volume: rows.iter().map(|row| row.5).collect(),
+            },
+            timestamp_source: format!("databento_{timestamp_source}_volume"),
+            timestamp_unit,
+            timestamp_timezone: timezone_name.to_string(),
+            index_timestamp_fallback,
+            raw_price_scale: Some(raw_price_scale),
+            tick_size,
+            volume_present: true,
+            source_row_count: df.height(),
+        });
     }
     let interval_ns = (seconds * 1_000_000_000.0).round();
     if interval_ns < 1.0 || interval_ns > i64::MAX as f64 {
@@ -591,9 +844,113 @@ fn aggregate_databento_trades(
         timestamp_timezone: timezone_name.to_string(),
         index_timestamp_fallback,
         raw_price_scale: Some(raw_price_scale),
+        tick_size,
         volume_present: size_present,
         source_row_count: df.height(),
     })
+}
+
+/// Derive range bars from an ordered raw trade stream.  This mirrors Trader's
+/// boundary state machine: a source trade can complete multiple bars, each
+/// synthetic boundary close is emitted in order, and the final unfinished bar
+/// is retained.  `bar_value` is a tick count; volume from the boundary trade
+/// is assigned once to the first bar it completes and subsequent synthetic
+/// bars receive zero volume.
+fn aggregate_range_trades(
+    timestamps: &[i64],
+    prices: &[f64],
+    sizes: &[f64],
+    tick_size: f64,
+    bar_value: f64,
+) -> Result<Vec<(i64, f64, f64, f64, f64, f64)>> {
+    if !tick_size.is_finite() || tick_size <= 0.0 {
+        bail!("range tick_size must be finite and positive");
+    }
+    if !bar_value.is_finite() || bar_value <= 0.0 {
+        bail!("range bar_value must be finite and positive");
+    }
+    if timestamps.len() != prices.len() || prices.len() != sizes.len() {
+        bail!("raw range columns have inconsistent lengths");
+    }
+    let range_size = tick_size * bar_value;
+    if !range_size.is_finite() || range_size <= 0.0 {
+        bail!("range size is outside the supported numeric range");
+    }
+
+    // (timestamp, open, high, low, close, volume)
+    let mut output = Vec::new();
+    let mut current: Option<(i64, f64, f64, f64, f64, f64)> = None;
+    const EPSILON: f64 = 1e-9;
+    for ((timestamp, price), size) in timestamps.iter().zip(prices).zip(sizes) {
+        if !price.is_finite() || *timestamp == i64::MIN {
+            bail!("raw range trade contains an invalid timestamp or price");
+        }
+        let size = if size.is_finite() && *size >= 0.0 {
+            *size
+        } else {
+            0.0
+        };
+        let mut current_bar = current
+            .take()
+            .unwrap_or((*timestamp, *price, *price, *price, *price, 0.0));
+        current_bar.5 += size;
+
+        loop {
+            let tentative_high = current_bar.2.max(*price);
+            let tentative_low = current_bar.3.min(*price);
+            let breaks_up =
+                *price > current_bar.2 && (*price - tentative_low) >= range_size - EPSILON;
+            let breaks_down =
+                *price < current_bar.3 && (tentative_high - *price) >= range_size - EPSILON;
+            if breaks_up {
+                let close = tentative_low + range_size;
+                current_bar.2 = close;
+                current_bar.4 = close;
+                current_bar.0 = *timestamp;
+                output.push(current_bar);
+                current_bar = (*timestamp, close, close, close, close, 0.0);
+                if *price <= close + EPSILON {
+                    break;
+                }
+                continue;
+            }
+            if breaks_down {
+                let close = tentative_high - range_size;
+                current_bar.3 = close;
+                current_bar.4 = close;
+                current_bar.0 = *timestamp;
+                output.push(current_bar);
+                current_bar = (*timestamp, close, close, close, close, 0.0);
+                if *price >= close - EPSILON {
+                    break;
+                }
+                continue;
+            }
+            current_bar.2 = tentative_high;
+            current_bar.3 = tentative_low;
+            current_bar.4 = *price;
+            current_bar.0 = *timestamp;
+            break;
+        }
+        current = Some(current_bar);
+    }
+    if let Some(current) = current {
+        output.push(current);
+    }
+    make_timestamps_strictly_increasing(&mut output);
+    Ok(output)
+}
+
+fn make_timestamps_strictly_increasing(rows: &mut [(i64, f64, f64, f64, f64, f64)]) {
+    let mut previous = None;
+    for row in rows {
+        if let Some(last) = previous {
+            if row.0 <= last {
+                row.0 = last.saturating_add(1);
+            }
+        }
+        previous = Some(row.0);
+    }
 }
 
 fn looks_like_ninja_last(path: &Path) -> Result<bool> {
@@ -626,6 +983,7 @@ fn load_ninja_last_text(
     timezone_name: &str,
     bar_kind: &str,
     bar_value: f64,
+    tick_size: Option<f64>,
 ) -> Result<LoadedSource> {
     if !matches!(
         bar_kind.to_ascii_lowercase().as_str(),
@@ -709,6 +1067,7 @@ fn load_ninja_last_text(
         timestamp_timezone: timezone_name.to_string(),
         index_timestamp_fallback: false,
         raw_price_scale: None,
+        tick_size,
         volume_present: false,
         source_row_count: text.lines().filter(|line| !line.trim().is_empty()).count(),
     })
@@ -756,6 +1115,397 @@ fn retain_complete_sessions(
         .into_iter()
         .filter(|event| complete.contains(&event.session_id))
         .collect())
+}
+
+/// Write the dense companion parquet.  It is intentionally self-describing:
+/// GA/RL can load the ordinary OHLCV columns and the ordered feature columns,
+/// while supervised training can use the sparse event parquet emitted by the
+/// same invocation.  Label and counterfactual columns are nullable outside an
+/// event row and are never part of `feature_schema`.
+fn write_training_bar_dataset(
+    output: &Path,
+    input: &Path,
+    instrument: &str,
+    contract: &str,
+    source: &LoadedSource,
+    config: &SupervisedConfig,
+    events: &[SupervisedEvent],
+) -> Result<()> {
+    let rows = prepare_bar_features(&source.bars, config)?;
+    if rows.len() != source.bars.close.len() {
+        bail!("dense feature row count does not match source bars");
+    }
+    let source_hash = sha256_file(input)?;
+    let fingerprint = bar_dataset_fingerprint(input, source, config, &rows)?;
+    let config_json = serde_json::to_string(config)?;
+    let provenance_json = serde_json::json!({
+        "source_path": input.display().to_string(),
+        "timestamp_source": source.timestamp_source,
+        "timestamp_unit": source.timestamp_unit,
+        "timestamp_timezone": source.timestamp_timezone,
+        "index_timestamp_fallback": source.index_timestamp_fallback,
+        "raw_price_scale": source.raw_price_scale,
+        "tick_size": source.tick_size,
+        "bar_kind": config.bar_kind,
+        "bar_value": config.bar_value,
+        "source_row_count": source.source_row_count,
+        "bar_row_count": rows.len(),
+        "source_hash_sha256": source_hash,
+        "dataset_fingerprint_sha256": fingerprint,
+        "range_volume_policy": if config.bar_kind.eq_ignore_ascii_case("range") {
+            "close_tick_once"
+        } else {
+            "native_or_source_volume"
+        },
+    });
+    let event_by_row = events
+        .iter()
+        .map(|event| (event.row_idx, event))
+        .collect::<BTreeMap<_, _>>();
+    let repeated = |value: &str| vec![value.to_string(); rows.len()];
+    let source_size = input.metadata()?.len() as i64;
+    let (session_open, minutes_to_close) = rows
+        .iter()
+        .map(|row| session_context(row.timestamp_ns, config))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .unzip::<bool, f64, Vec<bool>, Vec<f64>>();
+
+    let mut columns = vec![
+        Series::new(
+            "schema_version".into(),
+            repeated(TRAINING_BAR_DATASET_SCHEMA),
+        )
+        .into(),
+        Series::new("dataset_role".into(), repeated("dense_bar_features")).into(),
+        Series::new("label_schema".into(), repeated(SUPERVISED_LABEL_SCHEMA)).into(),
+        Series::new("feature_schema".into(), repeated(&config.feature_schema())).into(),
+        Series::new("config_json".into(), repeated(&config_json)).into(),
+        Series::new("source_path".into(), repeated(&input.display().to_string())).into(),
+        Series::new("source_hash_sha256".into(), repeated(&source_hash)).into(),
+        Series::new("dataset_fingerprint_sha256".into(), repeated(&fingerprint)).into(),
+        Series::new(
+            "source_row_count".into(),
+            vec![source.source_row_count as i64; rows.len()],
+        )
+        .into(),
+        Series::new("source_size_bytes".into(), vec![source_size; rows.len()]).into(),
+        Series::new("bar_row_count".into(), vec![rows.len() as i64; rows.len()]).into(),
+        Series::new("instrument".into(), repeated(instrument)).into(),
+        Series::new("contract".into(), repeated(contract)).into(),
+        Series::new("symbol".into(), repeated(instrument)).into(),
+        Series::new("bar_kind".into(), repeated(&config.bar_kind)).into(),
+        Series::new("bar_value".into(), vec![config.bar_value; rows.len()]).into(),
+        Series::new(
+            "tick_size".into(),
+            vec![source.tick_size.unwrap_or(f64::NAN); rows.len()],
+        )
+        .into(),
+        Series::new("pnl_currency".into(), repeated("USD")).into(),
+        Series::new(
+            "contract_multiplier".into(),
+            vec![config.contract_multiplier; rows.len()],
+        )
+        .into(),
+        Series::new(
+            "round_trip_cost".into(),
+            vec![config.round_trip_cost; rows.len()],
+        )
+        .into(),
+        Series::new(
+            "timestamp_source".into(),
+            repeated(&source.timestamp_source),
+        )
+        .into(),
+        Series::new("timestamp_unit".into(), repeated(&source.timestamp_unit)).into(),
+        Series::new(
+            "timestamp_timezone".into(),
+            repeated(&source.timestamp_timezone),
+        )
+        .into(),
+        Series::new(
+            "provenance_json".into(),
+            repeated(&provenance_json.to_string()),
+        )
+        .into(),
+        Series::new(
+            "index_timestamp_fallback".into(),
+            vec![source.index_timestamp_fallback; rows.len()],
+        )
+        .into(),
+        Series::new(
+            "raw_price_scale".into(),
+            vec![source.raw_price_scale.unwrap_or(1.0); rows.len()],
+        )
+        .into(),
+        Series::new("leakage_check".into(), repeated("passed")).into(),
+        Series::new(
+            "row_idx".into(),
+            rows.iter()
+                .map(|row| row.row_idx as i64)
+                .collect::<Vec<_>>(),
+        )
+        .into(),
+        Series::new(
+            "timestamp_ns".into(),
+            rows.iter().map(|row| row.timestamp_ns).collect::<Vec<_>>(),
+        )
+        .into(),
+        Series::new("open".into(), source.bars.open.clone()).into(),
+        Series::new("high".into(), source.bars.high.clone()).into(),
+        Series::new("low".into(), source.bars.low.clone()).into(),
+        Series::new("close".into(), source.bars.close.clone()).into(),
+        Series::new("volume".into(), source.bars.volume.clone()).into(),
+        Series::new(
+            "session_id".into(),
+            rows.iter()
+                .map(|row| row.session_id.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+        )
+        .into(),
+        Series::new("session_open".into(), session_open).into(),
+        Series::new("minutes_to_close".into(), minutes_to_close).into(),
+        Series::new(
+            "feature_ready".into(),
+            rows.iter().map(|row| row.ready).collect::<Vec<_>>(),
+        )
+        .into(),
+        Series::new(
+            "cross_direction".into(),
+            rows.iter()
+                .map(|row| row.cross_direction.unwrap_or(0) as i32)
+                .collect::<Vec<_>>(),
+        )
+        .into(),
+        Series::new(
+            "is_event".into(),
+            rows.iter()
+                .map(|row| event_by_row.contains_key(&row.row_idx))
+                .collect::<Vec<_>>(),
+        )
+        .into(),
+    ];
+
+    for name in config.feature_names() {
+        columns.push(
+            Series::new(
+                name.clone().into(),
+                rows.iter()
+                    .map(|row| row.features.get(&name).copied().unwrap_or(f64::NAN))
+                    .collect::<Vec<_>>(),
+            )
+            .into(),
+        );
+    }
+
+    let event_ids = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.event_id as i64)
+        })
+        .collect::<Vec<_>>();
+    let session_event_indices = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.session_event_index as i64)
+        })
+        .collect::<Vec<_>>();
+    let entry_rows = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.row_idx.saturating_add(1) as i64)
+        })
+        .collect::<Vec<_>>();
+    let interval_end_rows = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.interval_end_row_idx as i64)
+        })
+        .collect::<Vec<_>>();
+    let terminal = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.terminal_event)
+        })
+        .collect::<Vec<_>>();
+    let decision_prices = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.decision_price)
+        })
+        .collect::<Vec<_>>();
+    let interval_end_prices = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.interval_end_price)
+        })
+        .collect::<Vec<_>>();
+    let action_normal = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.action_value_normal)
+        })
+        .collect::<Vec<_>>();
+    let action_skip = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.action_value_skip)
+        })
+        .collect::<Vec<_>>();
+    let action_invert = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.action_value_invert)
+        })
+        .collect::<Vec<_>>();
+    let labels = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.label_action as i32)
+        })
+        .collect::<Vec<_>>();
+    let label_names = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.label_name.clone())
+        })
+        .collect::<Vec<_>>();
+    let oracle_before = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.oracle_position_before as i32)
+        })
+        .collect::<Vec<_>>();
+    let oracle_after = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.oracle_position_after as i32)
+        })
+        .collect::<Vec<_>>();
+    let oracle_values = rows
+        .iter()
+        .map(|row| {
+            event_by_row
+                .get(&row.row_idx)
+                .map(|event| event.oracle_value)
+        })
+        .collect::<Vec<_>>();
+    columns.extend([
+        Series::new("event_id".into(), event_ids).into(),
+        Series::new("session_event_index".into(), session_event_indices).into(),
+        Series::new("entry_row_idx".into(), entry_rows).into(),
+        Series::new("interval_end_row_idx".into(), interval_end_rows).into(),
+        Series::new("terminal_event".into(), terminal).into(),
+        Series::new("decision_price".into(), decision_prices).into(),
+        Series::new("interval_end_price".into(), interval_end_prices).into(),
+        Series::new("action_value_normal".into(), action_normal).into(),
+        Series::new("action_value_skip".into(), action_skip).into(),
+        Series::new("action_value_invert".into(), action_invert).into(),
+        Series::new("label_action".into(), labels).into(),
+        Series::new("label_name".into(), label_names).into(),
+        Series::new("oracle_position_before".into(), oracle_before).into(),
+        Series::new("oracle_position_after".into(), oracle_after).into(),
+        Series::new("oracle_value".into(), oracle_values).into(),
+    ]);
+
+    let mut frame = DataFrame::new(columns)?;
+    let (temporary_path, temporary_file) = create_unique_output_file(output)?;
+    let mut temporary_output = TemporaryOutput {
+        path: temporary_path,
+        committed: false,
+    };
+    ParquetWriter::new(temporary_file).finish(&mut frame)?;
+    publish_noreplace(&temporary_output.path, output).with_context(|| {
+        format!(
+            "atomically commit training bar dataset {}",
+            output.display()
+        )
+    })?;
+    temporary_output.committed = true;
+    Ok(())
+}
+
+fn session_context(timestamp_ns: i64, config: &SupervisedConfig) -> Result<(bool, f64)> {
+    let timezone = config
+        .session_timezone
+        .parse::<Tz>()
+        .with_context(|| format!("parse timezone {}", config.session_timezone))?;
+    let utc = DateTime::<Utc>::from_timestamp(
+        timestamp_ns.div_euclid(1_000_000_000),
+        timestamp_ns.rem_euclid(1_000_000_000) as u32,
+    )
+    .ok_or_else(|| anyhow::anyhow!("timestamp outside chrono range"))?;
+    let local = utc.with_timezone(&timezone);
+    let start = NaiveTime::from_hms_opt(config.session_start_hour, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("invalid session start hour"))?;
+    let end = NaiveTime::from_hms_opt(config.session_end_hour, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("invalid session end hour"))?;
+    let time = local.time();
+    let open = time >= start || time < end;
+    let seconds = time.num_seconds_from_midnight() as f64;
+    let end_seconds = end.num_seconds_from_midnight() as f64;
+    let minutes = if time < end {
+        (end_seconds - seconds) / 60.0
+    } else if time >= start {
+        (86_400.0 - seconds + end_seconds) / 60.0
+    } else {
+        0.0
+    };
+    Ok((open, minutes.max(0.0)))
+}
+
+fn bar_dataset_fingerprint(
+    input: &Path,
+    source: &LoadedSource,
+    config: &SupervisedConfig,
+    rows: &[SupervisedBarFeatureRow],
+) -> Result<String> {
+    let source_hash = sha256_file(input)?;
+    let mut digest = Sha256::new();
+    digest.update(source_hash.as_bytes());
+    digest.update([0]);
+    digest.update(serde_json::to_vec(config)?);
+    digest.update([0]);
+    digest.update(source.timestamp_source.as_bytes());
+    digest.update([0]);
+    digest.update(source.timestamp_unit.as_bytes());
+    digest.update([0]);
+    digest.update(source.timestamp_timezone.as_bytes());
+    digest.update(source.tick_size.unwrap_or(f64::NAN).to_le_bytes());
+    digest.update((rows.len() as u64).to_le_bytes());
+    for row in rows {
+        digest.update(serde_json::to_vec(row)?);
+        digest.update([0]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn parse_ninja_last_timestamp(
@@ -832,6 +1582,7 @@ fn load_dataframe(
     timestamp_unit: Option<&str>,
     allow_index_timestamps: bool,
     timezone_name: &str,
+    tick_size: Option<f64>,
 ) -> Result<LoadedSource> {
     let open = numeric_column(df, &["open", "o"])?;
     let high = numeric_column(df, &["high", "h"])?;
@@ -864,6 +1615,7 @@ fn load_dataframe(
         timestamp_timezone: timezone_name.to_string(),
         index_timestamp_fallback,
         raw_price_scale: None,
+        tick_size,
         volume_present,
         source_row_count: df.height(),
     })
@@ -955,7 +1707,15 @@ fn timestamp_column(
 ) -> Result<(Vec<i64>, String, String, bool)> {
     let Some(column) = find_column(
         df,
-        &["ts_ns", "ts_event", "timestamp", "date", "datetime", "time"],
+        &[
+            "ts_ns",
+            "timestamp_ns",
+            "ts_event",
+            "timestamp",
+            "date",
+            "datetime",
+            "time",
+        ],
     )?
     else {
         if !allow_index_timestamps {
@@ -1169,6 +1929,7 @@ fn write_dataset(
         "timestamp_timezone": source.timestamp_timezone,
         "index_timestamp_fallback": source.index_timestamp_fallback,
         "raw_price_scale": source.raw_price_scale,
+        "tick_size": source.tick_size,
         "bar_kind": config.bar_kind,
         "bar_value": config.bar_value,
         "source_row_count": source.source_row_count,
@@ -1203,6 +1964,17 @@ fn write_dataset(
         Series::new("contract".into(), repeated(contract)).into(),
         Series::new("bar_kind".into(), repeated(&config.bar_kind)).into(),
         Series::new("bar_value".into(), vec![config.bar_value; events.len()]).into(),
+        Series::new("pnl_currency".into(), repeated("USD")).into(),
+        Series::new(
+            "contract_multiplier".into(),
+            vec![config.contract_multiplier; events.len()],
+        )
+        .into(),
+        Series::new(
+            "round_trip_cost".into(),
+            vec![config.round_trip_cost; events.len()],
+        )
+        .into(),
         Series::new(
             "timestamp_source".into(),
             repeated(&source.timestamp_source),
@@ -1664,6 +2436,27 @@ mod tests {
     }
 
     #[test]
+    fn range_aggregation_emits_replay_style_boundaries() {
+        let rows = aggregate_range_trades(
+            &[1, 2, 3, 4],
+            &[100.0, 100.5, 101.0, 102.5],
+            &[1.0, 1.0, 1.0, 1.0],
+            0.5,
+            2.0,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].1, 100.0);
+        assert_eq!(rows[0].4, 101.0);
+        assert_eq!(rows[0].5, 3.0);
+        assert_eq!(rows[1].4, 102.0);
+        assert_eq!(rows[1].5, 1.0);
+        assert_eq!(rows[2].4, 102.5);
+        assert!(rows.windows(2).all(|window| window[1].0 > window[0].0));
+    }
+
+    #[test]
     fn disambiguates_ninjatrader_fall_back_using_source_order() {
         let timezone = "America/New_York".parse::<Tz>().unwrap();
         let first = parse_ninja_last_timestamp("20261101 015959", timezone, None).unwrap();
@@ -1766,6 +2559,7 @@ mod tests {
             timestamp_timezone: "UTC".to_string(),
             index_timestamp_fallback: false,
             raw_price_scale: None,
+            tick_size: None,
             volume_present: true,
             source_row_count: 2,
         };

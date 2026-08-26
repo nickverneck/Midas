@@ -1,5 +1,27 @@
 use super::*;
 
+pub(super) fn emit_service_debug_log(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: Option<&SessionState>,
+    message: impl FnOnce() -> String,
+) {
+    if session.is_some_and(|session| session.cfg.log_mode == crate::config::LogMode::Quiet) {
+        return;
+    }
+    let _ = event_tx.send(ServiceEvent::DebugLog(message()));
+}
+
+pub(super) fn emit_service_operational_status(
+    event_tx: &UnboundedSender<ServiceEvent>,
+    session: Option<&SessionState>,
+    message: impl FnOnce() -> String,
+) {
+    if session.is_some_and(|session| session.cfg.log_mode == crate::config::LogMode::Quiet) {
+        return;
+    }
+    let _ = event_tx.send(ServiceEvent::Status(message()));
+}
+
 pub(super) fn emit_debug_logs_from_latency_delta(
     event_tx: &UnboundedSender<ServiceEvent>,
     session: &SessionState,
@@ -36,6 +58,9 @@ fn emit_debug_latency_stage(
     previous: Option<u64>,
     current: Option<u64>,
 ) {
+    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+        return;
+    }
     if current.is_none() || previous == current {
         return;
     }

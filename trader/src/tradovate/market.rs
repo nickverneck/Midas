@@ -538,6 +538,14 @@ async fn market_data_worker_inner(
                                         );
                                         series.forming_bar = Some(bar);
                                         live_bars = live_bars.saturating_add(1);
+                                    } else if bar_type.is_range() {
+                                        // Range bars can backtrack in timestamp order. Preserve
+                                        // the packet as a closed correction instead of silently
+                                        // dropping it before the strategy evaluator sees it.
+                                        series.push_closed_bar_capped(
+                                            &bar,
+                                            ENGINE_MARKET_BAR_LIMIT,
+                                        );
                                     }
                                 } else {
                                     series.forming_bar = Some(bar);

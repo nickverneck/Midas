@@ -29,13 +29,14 @@ const GA_PARAMETERS = [
 	'immigrant-frac', 'mutation-sigma', 'init-sigma', 'hidden', 'layers', 'eval-windows', 'save-top-n',
 	'save-every', 'checkpoint-every', 'behavior-every', 'load-checkpoint', 'w-pnl', 'w-sortino', 'w-mdd',
 	'selection-train-weight', 'selection-eval-weight', 'selection-gap-penalty', 'selection-use-eval',
+	'train-only-selection',
 	'sortino-annualization', 'drawdown-penalty', 'drawdown-penalty-growth', 'session-close-penalty',
 	'auto-close-minutes-before-close', 'max-hold-bars-positive', 'max-hold-bars-drawdown',
 	'hold-duration-penalty', 'hold-duration-penalty-growth', 'hold-duration-penalty-positive-scale',
 	'hold-duration-penalty-negative-scale', 'min-hold-bars', 'early-exit-penalty', 'early-flip-penalty',
 	'invalid-revert-penalty', 'invalid-revert-penalty-growth', 'flat-hold-penalty',
 	'flat-hold-penalty-growth', 'max-flat-hold-bars', 'seed', 'disable-margin', 'skip-val-eval',
-	'debug-data', 'ignore-session'
+	'debug-data', 'ignore-session', 'allow-overlapping-splits'
 ] as const;
 
 const RL_PARAMETERS = [
@@ -54,8 +55,8 @@ const RL_PARAMETERS = [
 ] as const;
 
 const BOOLEAN_PARAMETERS = new Set([
-	'full-file', 'windowed', 'globex', 'rth', 'selection-use-eval', 'fitness-use-eval', 'disable-margin',
-	'skip-val-eval', 'debug-data', 'ignore-session'
+	'full-file', 'windowed', 'globex', 'rth', 'selection-use-eval', 'train-only-selection', 'fitness-use-eval', 'disable-margin',
+	'skip-val-eval', 'debug-data', 'ignore-session', 'allow-overlapping-splits'
 ]);
 const PATH_PARAMETERS = new Set([
 	'parquet', 'train-parquet', 'val-parquet', 'test-parquet', 'symbol-config', 'outdir', 'load-checkpoint'

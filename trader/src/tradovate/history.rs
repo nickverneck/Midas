@@ -4,6 +4,7 @@ fn empty_history(run: &EngineRunState) -> EngineHistorySnapshot {
     EngineHistorySnapshot {
         run_id: run.run_id.clone(),
         started_at_utc: run.started_at_utc,
+        updated_at_utc: None,
         account_id: run.account_id,
         account_name: run.account_name.clone(),
         contract_id: run.contract_id,
@@ -78,6 +79,7 @@ pub(super) fn start_engine_run(session: &mut SessionState) -> Result<()> {
         history: EngineHistorySnapshot {
             run_id: String::new(),
             started_at_utc,
+            updated_at_utc: None,
             account_id,
             account_name: String::new(),
             contract_id: contract.id,
@@ -273,13 +275,17 @@ pub(super) fn refresh_engine_history(session: &mut SessionState) {
                 average_entry_price = Some(price);
             }
         }
-        let fee = fill_fee_total(&session.user_store, fill_id);
+        let fee = fill_fee_total(&session.user_store, fill_id, fill);
         total_fees += fee;
+        // Win/loss describes the trade direction before commissions. Fees
+        // belong in net PnL, but must not turn a gross winning exit into a
+        // losing trade and distort the F6 win rate.
+        let gross_fill_realized = fill_realized;
         fill_realized -= fee;
         realized_pnl += fill_realized;
-        if closed_position && fill_realized > 0.005 {
+        if closed_position && gross_fill_realized > 0.005 {
             wins += 1;
-        } else if closed_position && fill_realized < -0.005 {
+        } else if closed_position && gross_fill_realized < -0.005 {
             losses += 1;
         }
         fills.push(EngineHistoryFill {
@@ -303,6 +309,7 @@ pub(super) fn refresh_engine_history(session: &mut SessionState) {
     run.history = EngineHistorySnapshot {
         run_id: run.run_id.clone(),
         started_at_utc: run.started_at_utc,
+        updated_at_utc: Some(Utc::now()),
         account_id: run.account_id,
         account_name: run.account_name.clone(),
         contract_id: run.contract_id,
@@ -332,6 +339,7 @@ pub(super) fn refresh_engine_history_mark(session: &mut SessionState) {
                 * session.market.value_per_point.unwrap_or_default()
         })
         .unwrap_or_default();
+    run.history.updated_at_utc = Some(Utc::now());
 }
 
 fn entity_client_id(entity: &Value) -> Option<&str> {
@@ -351,8 +359,8 @@ fn entity_matches_contract(entity: &Value, contract_id: i64, contract_name: &str
             .is_some_and(|symbol| symbol.eq_ignore_ascii_case(contract_name))
 }
 
-fn fill_fee_total(store: &UserSyncStore, fill_id: i64) -> f64 {
-    store
+fn fill_fee_total(store: &UserSyncStore, fill_id: i64, fill: &Value) -> f64 {
+    let fill_fee = store
         .fill_fees
         .values()
         .filter(|fee| json_i64(fee, "fillId") == Some(fill_id))
@@ -363,5 +371,16 @@ fn fill_fee_total(store: &UserSyncStore, fill_id: i64) -> f64 {
             )
         })
         .map(f64::abs)
-        .sum()
+        .sum::<f64>();
+    if fill_fee > f64::EPSILON {
+        fill_fee
+    } else {
+        pick_number(
+            fill,
+            &["amount", "fee", "commission", "totalFee", "totalFees"],
+        )
+        .map(f64::abs)
+        .filter(|fee| fee.is_finite())
+        .unwrap_or_default()
+    }
 }

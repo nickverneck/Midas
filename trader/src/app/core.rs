@@ -47,6 +47,7 @@ impl App {
             pending_engine_selection_action: None,
             engine_socket_path: None,
             active_engine_key: None,
+            resume_dashboard_pending: false,
             should_quit: false,
             status: "Idle".to_string(),
             accounts: Vec::new(),
@@ -187,6 +188,7 @@ impl App {
         let active_key = engine_key.clone();
         self.active_engine_key = Some(engine_key);
         self.engine_socket_path = Some(socket_path.clone());
+        self.resume_dashboard_pending = mode == EngineCreateMode::Broker;
         if let Some(summary) = self
             .engine_summaries
             .iter_mut()
@@ -197,8 +199,31 @@ impl App {
                 EngineCreateMode::Replay => SessionKind::Replay,
             });
         }
+        let observed_market_selection = self
+            .active_engine_summary()
+            .map(|summary| (summary.bar_type(), summary.candle_mode()));
+        if let Some((bar_type, candle_mode)) = observed_market_selection {
+            if let Some(bar_type) = bar_type {
+                self.bar_type = bar_type;
+            }
+            if let Some(candle_mode) = candle_mode {
+                self.candle_mode = candle_mode;
+            }
+            self.normalize_market_controls_for_broker();
+        }
+        let strategy_already_running = mode == EngineCreateMode::Broker
+            && self
+                .active_engine_summary()
+                .is_some_and(EngineSummary::strategy_is_armed);
         match mode {
-            EngineCreateMode::Broker => self.move_to_initial_broker_screen(),
+            EngineCreateMode::Broker => {
+                self.move_to_initial_broker_screen();
+                if strategy_already_running {
+                    self.screen = Screen::Dashboard;
+                    self.focus = Focus::AccountList;
+                    self.status = "Attached to the running strategy; dashboard restored.".to_string();
+                }
+            }
             EngineCreateMode::Replay => self.move_to_replay_screen(),
         }
         self.push_log(format!(
@@ -211,6 +236,7 @@ impl App {
         let message = message.into();
         self.active_engine_key = None;
         self.engine_socket_path = None;
+        self.resume_dashboard_pending = false;
         self.screen = Screen::EngineSelect;
         self.focus = Focus::EngineList;
         self.pending_engine_create_mode = None;
@@ -357,6 +383,13 @@ impl App {
                 if session_kind == SessionKind::Replay {
                     self.screen = Screen::Strategy;
                     self.focus = Focus::StrategyKind;
+                } else if self.strategy_runtime.armed
+                    || self
+                        .active_engine_summary()
+                        .is_some_and(EngineSummary::strategy_is_armed)
+                {
+                    self.screen = Screen::Dashboard;
+                    self.focus = Focus::AccountList;
                 } else {
                     self.screen = Screen::Selection;
                     self.focus = Focus::AccountList;
@@ -410,6 +443,7 @@ impl App {
                 self.engine_history = None;
                 self.contract_results.clear();
                 self.market = MarketSnapshot::default();
+                self.resume_dashboard_pending = false;
                 self.strategy_runtime = StrategyRuntimeState::default();
                 self.latency = LatencySnapshot::default();
                 self.replay_speed = ReplaySpeed::default();
@@ -455,6 +489,13 @@ impl App {
                 self.latency = snapshot;
             }
             ServiceEvent::ExecutionState(snapshot) => {
+                if let Some(bar_type) = snapshot.bar_type {
+                    self.bar_type = bar_type;
+                }
+                if let Some(candle_mode) = snapshot.candle_mode {
+                    self.candle_mode = candle_mode;
+                }
+                self.normalize_market_controls_for_broker();
                 self.strategy.apply_execution_config(&snapshot.config);
                 self.strategy_runtime.armed = snapshot.runtime.armed;
                 self.strategy_runtime.last_closed_bar_ts = snapshot.runtime.last_closed_bar_ts;
@@ -467,6 +508,17 @@ impl App {
                         .position(|account| account.id == selected_account_id)
                     {
                         self.selected_account = index;
+                    }
+                }
+                let restoring_attached_engine = self.resume_dashboard_pending;
+                self.resume_dashboard_pending = false;
+                if restoring_attached_engine {
+                    if snapshot.runtime.armed {
+                        self.screen = Screen::Dashboard;
+                        self.focus = Focus::AccountList;
+                    } else {
+                        self.screen = Screen::Selection;
+                        self.focus = Focus::AccountList;
                     }
                 }
             }

@@ -1,6 +1,7 @@
 use crate::broker::Bar;
 use crate::strategies::{PositionSide, StrategySignal};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HmaCrossConfig {
@@ -8,11 +9,11 @@ pub struct HmaCrossConfig {
     pub slow_length: usize,
     /// Selects the HMA implementation used by the stateful live/replay path.
     ///
-    /// `Legacy` is deliberately the default so existing strategy files and
-    /// runs retain their exact behaviour.  `Incremental` keeps rolling WMA
-    /// state and is useful for long replays where rebuilding both HMA series
-    /// for every bar is expensive.  The reference `evaluate` method always
-    /// remains available and uses the legacy implementation.
+    /// `Incremental` is the default for live/replay execution. It keeps
+    /// rolling WMA state instead of rebuilding both HMA series for every bar.
+    /// `Legacy` remains available as the exact reference implementation for
+    /// parity checks and old runs that explicitly select it. The stateless
+    /// `evaluate` method always uses the legacy implementation.
     #[serde(default)]
     pub calculation_mode: HmaCalculationMode,
     pub inverted: bool,
@@ -27,8 +28,9 @@ pub struct HmaCrossConfig {
 ///
 /// This is a persisted selector rather than a compile-time switch so a
 /// replay can compare the incremental path with the historical reference
-/// path without changing live execution code.  An omitted field continues to
-/// deserialize as [`Legacy`](Self::Legacy).
+/// path without changing live execution code. An omitted field defaults to
+/// [`Incremental`](Self::Incremental); callers that need the exact historical
+/// implementation can persist [`Legacy`](Self::Legacy) explicitly.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HmaCalculationMode {
@@ -38,7 +40,7 @@ pub enum HmaCalculationMode {
 
 impl Default for HmaCalculationMode {
     fn default() -> Self {
-        Self::Legacy
+        Self::Incremental
     }
 }
 
@@ -63,7 +65,7 @@ impl Default for HmaCrossConfig {
         Self {
             fast_length: 21,
             slow_length: 55,
-            calculation_mode: HmaCalculationMode::Legacy,
+            calculation_mode: HmaCalculationMode::Incremental,
             inverted: false,
             take_profit_ticks: 0.0,
             stop_loss_ticks: 0.0,
@@ -342,15 +344,21 @@ impl RollingWma {
     }
 }
 
-/// Incremental state for both the fast and slow HMA series.  The stored
-/// timestamp/close prefix is also a cheap correction detector: appends are
-/// O(1), while a revised/out-of-order bar rebuilds from the supplied source
-/// bars and therefore remains deterministic.
+/// Incremental state for both the fast and slow HMA series. Only the source
+/// tail needed to produce the previous and current HMA values is retained.
+/// That keeps correction checks bounded even when the engine supplies a
+/// 4,096-bar retained window.
 #[derive(Debug, Clone, Default)]
 struct HmaIncrementalState {
     fast_length: Option<usize>,
     slow_length: Option<usize>,
-    bars: Vec<(i64, f64)>,
+    /// Length of the last source snapshot. This distinguishes a fixed-cap
+    /// one-bar slide from a shortened/replaced range-bar window.
+    window_len: usize,
+    /// Retained source tail used to detect corrections and capped-window
+    /// slides. This is bounded by the longest HMA dependency window, not by
+    /// the engine's retained market window.
+    bars: VecDeque<(i64, u64)>,
     fast: HmaStream,
     slow: HmaStream,
 }
@@ -364,52 +372,139 @@ impl HmaIncrementalState {
     ) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
         let fast_length = fast_length.max(1);
         let slow_length = slow_length.max(1);
+        let cache_capacity = hma_state_cache_capacity(fast_length, slow_length);
         let lengths_changed =
             self.fast_length != Some(fast_length) || self.slow_length != Some(slow_length);
+        let previous_window_len = self.window_len;
 
-        let appended_bar_is_out_of_order = bars
-            .get(self.bars.len())
-            .zip(self.bars.last())
-            .is_some_and(|(next, (previous_ts, _))| next.ts_ns <= *previous_ts);
-        // Appended bars are the hot path during replay/live operation.  The
-        // previous implementation scanned the entire retained prefix on every
-        // append, turning the rolling evaluator into O(N²) over a month of
-        // minute bars.  Verify the cached tail and ordering for append-only
-        // updates; when the length is unchanged, retain the full scan so an
-        // in-place correction anywhere in the window still rebuilds exactly.
-        let append_only_prefix_matches = !lengths_changed
-            && bars.len() > self.bars.len()
-            && !appended_bar_is_out_of_order
+        if lengths_changed || self.bars.is_empty() || bars.len() < previous_window_len {
+            self.rebuild(bars, fast_length, slow_length, cache_capacity);
+            return self.outputs();
+        }
+
+        // A repeated snapshot with the same relevant tail needs no work. A
+        // correction older than this tail cannot affect either current HMA,
+        // so it is intentionally ignored; corrections inside the tail fail
+        // this bounded comparison and take the deterministic rebuild path.
+        let same_tail_matches = bars.len() == previous_window_len
+            && bars
+                .len()
+                .checked_sub(self.bars.len())
+                .is_some_and(|start| self.matches_slice(bars, start));
+        if same_tail_matches {
+            return self.outputs();
+        }
+
+        // The engine's capped window advances from
+        //   [old ... overlap]
+        // to
+        //   [overlap ... new]
+        // on the normal one-bar update. An uncapped append has the same
+        // suffix shape. Compare only the bounded cached suffix, then push the
+        // one new close through both rolling streams. This avoids rebuilding
+        // or scanning the full retained market window.
+        let one_bar_append_matches = bars.len() == previous_window_len.saturating_add(1)
             && self
                 .bars
-                .last()
-                .zip(bars.get(self.bars.len().saturating_sub(1)))
-                .is_some_and(|((ts_ns, close), bar)| {
-                    bar.ts_ns == *ts_ns && bar.close.to_bits() == close.to_bits()
+                .len()
+                .checked_add(1)
+                .and_then(|overlap_len| bars.len().checked_sub(overlap_len))
+                .is_some_and(|start| {
+                    self.matches_slice(bars, start)
+                        && bars
+                            .last()
+                            .zip(self.bars.back())
+                            .is_some_and(|(new_bar, (old_ts, _))| new_bar.ts_ns > *old_ts)
                 });
-        let same_length_prefix_matches = !lengths_changed
-            && bars.len() == self.bars.len()
-            && self.bars.iter().enumerate().all(|(index, (ts_ns, close))| {
-                bars.get(index)
-                    .map(|bar| bar.ts_ns == *ts_ns && bar.close.to_bits() == close.to_bits())
-                    .unwrap_or(false)
-            });
-        let prefix_matches = append_only_prefix_matches || same_length_prefix_matches;
+        let one_bar_slide_matches = bars.len() == previous_window_len
+            && previous_window_len >= cache_capacity
+            && self.matches_slide_overlap(bars, previous_window_len)
+            && bars
+                .last()
+                .zip(self.bars.back())
+                .is_some_and(|(new_bar, (old_ts, _))| new_bar.ts_ns > *old_ts);
+        let one_bar_suffix_matches = one_bar_append_matches || one_bar_slide_matches;
 
-        if !prefix_matches {
-            self.fast_length = Some(fast_length);
-            self.slow_length = Some(slow_length);
-            self.bars.clear();
-            self.fast.reset(fast_length);
-            self.slow.reset(slow_length);
+        if one_bar_suffix_matches {
+            let bar = bars.last().expect("checked non-empty suffix overlap");
+            self.push_cached_bar(bar, cache_capacity);
+            self.window_len = bars.len();
+            return self.outputs();
         }
 
-        for bar in bars.iter().skip(self.bars.len()) {
-            self.bars.push((bar.ts_ns, bar.close));
-            self.fast.push(bar.close);
-            self.slow.push(bar.close);
+        // Corrections in the relevant tail, out-of-order updates, multi-bar
+        // gaps, and snapshots with no provable suffix overlap all rebuild from
+        // the bounded source tail. This cannot mix old rolling state with a
+        // revised window.
+        self.rebuild(bars, fast_length, slow_length, cache_capacity);
+        self.outputs()
+    }
+
+    fn matches_slice(&self, bars: &[Bar], start: usize) -> bool {
+        bars.get(start..start.saturating_add(self.bars.len()))
+            .is_some_and(|candidate| {
+                self.bars
+                    .iter()
+                    .zip(candidate.iter())
+                    .all(|((ts_ns, close), bar)| {
+                        bar.ts_ns == *ts_ns && *close == bar.close.to_bits()
+                    })
+            })
+    }
+
+    fn matches_slide_overlap(&self, bars: &[Bar], previous_len: usize) -> bool {
+        let cache_start = previous_len.saturating_sub(self.bars.len());
+        let overlap_start = cache_start.max(1);
+        let overlap_len = previous_len.saturating_sub(overlap_start);
+        if overlap_len == 0 {
+            return false;
         }
 
+        // For a one-bar slide, old[overlap_start..] appears at
+        // new[overlap_start - 1..]. Only this bounded overlap is inspected;
+        // the retained market window itself is never scanned.
+        (0..overlap_len).all(|offset| {
+            let cached_index = overlap_start - cache_start + offset;
+            let incoming_index = overlap_start - 1 + offset;
+            self.bars
+                .get(cached_index)
+                .zip(bars.get(incoming_index))
+                .is_some_and(|((ts_ns, close), bar)| {
+                    bar.ts_ns == *ts_ns && bar.close.to_bits() == *close
+                })
+        })
+    }
+
+    fn rebuild(
+        &mut self,
+        bars: &[Bar],
+        fast_length: usize,
+        slow_length: usize,
+        cache_capacity: usize,
+    ) {
+        self.fast_length = Some(fast_length);
+        self.slow_length = Some(slow_length);
+        self.window_len = bars.len();
+        self.bars.clear();
+        self.fast.reset(fast_length);
+        self.slow.reset(slow_length);
+
+        let start = bars.len().saturating_sub(cache_capacity);
+        for bar in &bars[start..] {
+            self.push_cached_bar(bar, cache_capacity);
+        }
+    }
+
+    fn push_cached_bar(&mut self, bar: &Bar, cache_capacity: usize) {
+        self.bars.push_back((bar.ts_ns, bar.close.to_bits()));
+        while self.bars.len() > cache_capacity {
+            self.bars.pop_front();
+        }
+        self.fast.push(bar.close);
+        self.slow.push(bar.close);
+    }
+
+    fn outputs(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
         (
             self.fast.previous,
             self.slow.previous,
@@ -851,6 +946,12 @@ pub(crate) fn hma_warmup_bars(length: usize) -> usize {
     length + sqrt_len
 }
 
+fn hma_state_cache_capacity(fast_length: usize, slow_length: usize) -> usize {
+    hma_warmup_bars(fast_length)
+        .max(hma_warmup_bars(slow_length))
+        .saturating_add(1)
+}
+
 pub(crate) fn hma_series(values: &[f64], length: usize) -> Vec<f64> {
     let length = length.max(1);
     let half_length = (length / 2).max(1);
@@ -1173,14 +1274,14 @@ mod tests {
     }
 
     #[test]
-    fn hma_calculation_mode_is_snake_case_and_legacy_by_default() {
+    fn hma_calculation_mode_is_snake_case_and_incremental_by_default() {
         let mut encoded = serde_json::to_value(HmaCrossConfig::default()).unwrap();
         encoded
             .as_object_mut()
             .expect("HMA config serializes as an object")
             .remove("calculation_mode");
         let omitted: HmaCrossConfig = serde_json::from_value(encoded.clone()).unwrap();
-        assert_eq!(omitted.calculation_mode, HmaCalculationMode::Legacy);
+        assert_eq!(omitted.calculation_mode, HmaCalculationMode::Incremental);
 
         encoded["calculation_mode"] = serde_json::Value::String("incremental".to_string());
         let incremental: HmaCrossConfig = serde_json::from_value(encoded).unwrap();
@@ -1188,6 +1289,11 @@ mod tests {
             incremental.calculation_mode,
             HmaCalculationMode::Incremental
         );
+
+        let mut explicit_legacy = serde_json::to_value(HmaCrossConfig::default()).unwrap();
+        explicit_legacy["calculation_mode"] = serde_json::Value::String("legacy".to_string());
+        let legacy: HmaCrossConfig = serde_json::from_value(explicit_legacy).unwrap();
+        assert_eq!(legacy.calculation_mode, HmaCalculationMode::Legacy);
     }
 
     #[test]
@@ -1231,6 +1337,52 @@ mod tests {
     }
 
     #[test]
+    fn incremental_hma_matches_legacy_when_the_retained_window_slides() {
+        let bars = (0..1_200)
+            .map(|index| {
+                let close = 100.0
+                    + (index as f64 * 0.31).sin() * 2.5
+                    + (index as f64 * 0.07).cos() * 0.8
+                    + (index % 17) as f64 * 0.03;
+                bar(index as i64 + 1, close)
+            })
+            .collect::<Vec<_>>();
+        let legacy = HmaCrossConfig {
+            fast_length: 21,
+            slow_length: 55,
+            calculation_mode: HmaCalculationMode::Legacy,
+            ..HmaCrossConfig::default()
+        };
+        let incremental = HmaCrossConfig {
+            calculation_mode: HmaCalculationMode::Incremental,
+            ..legacy.clone()
+        };
+        let window_len = 128;
+        let mut runtime = HmaCrossExecutionState::default();
+
+        for end in window_len..=bars.len() {
+            let window = &bars[end - window_len..end];
+            let expected = legacy.evaluate(window, None);
+            // Call the incremental evaluator directly so the stateful
+            // observed-side edge bookkeeping does not obscure indicator
+            // parity. The rolling HMA state is intentionally reused across
+            // every one-bar suffix slide.
+            let actual = incremental.evaluate_incremental(&mut runtime, window, None);
+            assert_optional_close(actual.previous_fast_hma, expected.previous_fast_hma);
+            assert_optional_close(actual.previous_slow_hma, expected.previous_slow_hma);
+            assert_optional_close(actual.fast_hma, expected.fast_hma);
+            assert_optional_close(actual.slow_hma, expected.slow_hma);
+            assert_eq!(actual.signal, expected.signal, "window ending at {end}");
+            assert_eq!(actual.raw_buy_signal, expected.raw_buy_signal);
+            assert_eq!(actual.raw_sell_signal, expected.raw_sell_signal);
+            assert_eq!(actual.effective_buy_signal, expected.effective_buy_signal);
+            assert_eq!(actual.effective_sell_signal, expected.effective_sell_signal);
+        }
+
+        assert!(runtime.incremental.bars.len() <= hma_state_cache_capacity(21, 55));
+    }
+
+    #[test]
     fn incremental_hma_rebuilds_after_a_bar_correction() {
         let mut bars = (0..120)
             .map(|index| bar(index as i64 + 1, 90.0 + (index as f64 * 0.29).sin()))
@@ -1245,10 +1397,10 @@ mod tests {
         let _ = config.evaluate_current_cross(&mut runtime, &bars, None);
 
         // Revisions are common while a live bar is forming.  The incremental
-        // state detects the changed timestamp/close prefix and deterministically
+        // state detects the changed timestamp/close in the active suffix and deterministically
         // rebuilds, preserving the legacy value rather than mixing old/new
         // windows.
-        bars[41] = bar(42, 97.25);
+        bars[119] = bar(120, 97.25);
         let actual = config.evaluate_current_cross(&mut runtime, &bars, None);
         let expected = HmaCrossConfig {
             calculation_mode: HmaCalculationMode::Legacy,
@@ -1290,6 +1442,70 @@ mod tests {
         assert_optional_close(actual.fast_hma, expected.fast_hma);
         assert_optional_close(actual.slow_hma, expected.slow_hma);
         assert_eq!(actual.signal, expected.signal);
+    }
+
+    #[test]
+    fn incremental_hma_rebuilds_after_a_multi_bar_window_gap() {
+        let bars = (0..140)
+            .map(|index| bar(index as i64 + 1, 102.0 + (index as f64 * 0.23).sin()))
+            .collect::<Vec<_>>();
+        let config = HmaCrossConfig {
+            fast_length: 5,
+            slow_length: 17,
+            calculation_mode: HmaCalculationMode::Incremental,
+            ..HmaCrossConfig::default()
+        };
+        let legacy = HmaCrossConfig {
+            calculation_mode: HmaCalculationMode::Legacy,
+            ..config.clone()
+        };
+        let mut runtime = HmaCrossExecutionState::default();
+        let window_len = 48;
+        let _ = config.evaluate_incremental(&mut runtime, &bars[..window_len], None);
+
+        // Two bars were appended while the caller was away. The old tail is
+        // no longer the new penultimate bar, so the incremental path must
+        // rebuild instead of pretending this was a one-bar slide.
+        let window = &bars[2..window_len + 2];
+        let actual = config.evaluate_incremental(&mut runtime, window, None);
+        let expected = legacy.evaluate(window, None);
+        assert_optional_close(actual.previous_fast_hma, expected.previous_fast_hma);
+        assert_optional_close(actual.previous_slow_hma, expected.previous_slow_hma);
+        assert_optional_close(actual.fast_hma, expected.fast_hma);
+        assert_optional_close(actual.slow_hma, expected.slow_hma);
+        assert_eq!(actual.signal, expected.signal);
+    }
+
+    #[test]
+    fn incremental_hma_rebuilds_when_the_source_window_is_shortened() {
+        let bars = (0..120)
+            .map(|index| bar(index as i64 + 1, 98.0 + (index as f64 * 0.19).cos()))
+            .collect::<Vec<_>>();
+        let config = HmaCrossConfig {
+            fast_length: 6,
+            slow_length: 21,
+            calculation_mode: HmaCalculationMode::Incremental,
+            ..HmaCrossConfig::default()
+        };
+        let legacy = HmaCrossConfig {
+            calculation_mode: HmaCalculationMode::Legacy,
+            ..config.clone()
+        };
+        let mut runtime = HmaCrossExecutionState::default();
+        let _ = config.evaluate_incremental(&mut runtime, &bars[..96], None);
+
+        // A range-bar provider may backtrack and publish a shorter snapshot.
+        // Even if the relevant tail happens to overlap, it must not be
+        // treated as a one-bar append/slide.
+        let window = &bars[32..96];
+        let actual = config.evaluate_incremental(&mut runtime, window, None);
+        let expected = legacy.evaluate(window, None);
+        assert_optional_close(actual.previous_fast_hma, expected.previous_fast_hma);
+        assert_optional_close(actual.previous_slow_hma, expected.previous_slow_hma);
+        assert_optional_close(actual.fast_hma, expected.fast_hma);
+        assert_optional_close(actual.slow_hma, expected.slow_hma);
+        assert_eq!(actual.signal, expected.signal);
+        assert_eq!(runtime.incremental.window_len, window.len());
     }
 
     #[test]

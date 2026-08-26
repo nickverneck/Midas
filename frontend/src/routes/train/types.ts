@@ -98,6 +98,7 @@ export type GaParams = {
 	"selection-train-weight": number;
 	"selection-eval-weight": number;
 	"selection-gap-penalty": number;
+	"selection-use-eval": boolean;
 	"elite-frac": number;
 	"mutation-sigma": number;
 	"init-sigma": number;

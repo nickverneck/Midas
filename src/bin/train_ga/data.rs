@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use midas_env::bars::{BarInput, BarSelection, PreparedBars, prepare_bars};
-use polars::prelude::{AnyValue, DataFrame, SerReader, Series};
+use polars::prelude::{AnyValue, DataFrame, SerReader, Series, TimeUnit};
 
 #[derive(Clone)]
 pub struct DataSet {
@@ -8,8 +8,8 @@ pub struct DataSet {
     pub close: Vec<f64>,
     pub _high: Vec<f64>,
     pub _low: Vec<f64>,
-    signal_open: Vec<f64>,
-    signal_close: Vec<f64>,
+    pub(crate) signal_open: Vec<f64>,
+    pub(crate) signal_close: Vec<f64>,
     pub volume: Option<Vec<f64>>,
     pub datetime_ns: Option<Vec<i64>>,
     pub session_open: Option<Vec<bool>>,
@@ -97,10 +97,10 @@ pub fn load_dataset_with_bars(
         .ok()
         .map(|c| series_to_f64(c.as_materialized_series()))
         .transpose()?;
-    let datetime_ns: Option<Vec<i64>> = df
-        .column("date")
-        .ok()
-        .map(|c| series_to_i64(c.as_materialized_series()))
+    let datetime_ns: Option<Vec<i64>> = ["ts_ns", "timestamp_ns", "date", "timestamp"]
+        .iter()
+        .find_map(|name| df.column(name).ok())
+        .map(|column| series_to_i64(column.as_materialized_series()))
         .transpose()?;
     let session_open_from_df: Option<Vec<bool>> = df
         .column("session_open")
@@ -163,20 +163,41 @@ pub fn load_dataset_with_bars(
         margin_ok: prepared_margin_ok,
     } = prepared;
 
-    let feats = midas_env::features::compute_features_ohlcv(
-        &signal_close,
-        Some(&signal_high),
-        Some(&signal_low),
-        volume.as_deref(),
-    );
-    let feature_cols = ordered_feature_cols(
-        feats,
-        &signal_open,
-        &signal_close,
-        &signal_high,
-        &signal_low,
-        volume.as_deref(),
-    )?;
+    let feature_cols = if bar_selection == BarSelection::default() {
+        if let Some(precomputed) = precomputed_feature_cols(&df)? {
+            precomputed
+        } else {
+            let feats = midas_env::features::compute_features_ohlcv(
+                &signal_close,
+                Some(&signal_high),
+                Some(&signal_low),
+                volume.as_deref(),
+            );
+            ordered_feature_cols(
+                feats,
+                &signal_open,
+                &signal_close,
+                &signal_high,
+                &signal_low,
+                volume.as_deref(),
+            )?
+        }
+    } else {
+        let feats = midas_env::features::compute_features_ohlcv(
+            &signal_close,
+            Some(&signal_high),
+            Some(&signal_low),
+            volume.as_deref(),
+        );
+        ordered_feature_cols(
+            feats,
+            &signal_open,
+            &signal_close,
+            &signal_high,
+            &signal_low,
+            volume.as_deref(),
+        )?
+    };
 
     let session_open = prepared_session_open.or_else(|| {
         datetime_ns
@@ -217,7 +238,7 @@ pub fn load_dataset_with_bars(
 }
 
 fn extract_symbol(df: &DataFrame) -> Result<String> {
-    let symbol = match df.column("symbol") {
+    let symbol = match df.column("symbol").or_else(|_| df.column("instrument")) {
         Ok(column) => match column.get(0)? {
             AnyValue::String(s) => s.to_string(),
             _ => "UNKNOWN".to_string(),
@@ -225,6 +246,63 @@ fn extract_symbol(df: &DataFrame) -> Result<String> {
         Err(_) => "UNKNOWN".to_string(),
     };
     Ok(symbol)
+}
+
+/// Read the ordered causal feature registry emitted by the dense training
+/// parquet.  A missing registry means this is a legacy OHLCV file and the GA
+/// keeps its native feature bank.  Precomputed features are used only for the
+/// default price-action/OHLC path; alternate bar transformations must rebuild
+/// their features after the transformation.
+fn precomputed_feature_cols(df: &DataFrame) -> Result<Option<Vec<Vec<f64>>>> {
+    let Some(schema_column) = df.column("schema_version").ok() else {
+        return Ok(None);
+    };
+    let schema = schema_column
+        .as_materialized_series()
+        .str()?
+        .get(0)
+        .unwrap_or_default();
+    if schema != "training-bar-v1" {
+        return Ok(None);
+    }
+    let feature_schema = df
+        .column("feature_schema")
+        .context("training bar dataset is missing feature_schema")?
+        .as_materialized_series()
+        .str()?
+        .get(0)
+        .ok_or_else(|| anyhow::anyhow!("training bar feature_schema is empty"))?;
+    let names = feature_schema
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        anyhow::bail!("training bar feature_schema contains no features");
+    }
+    let forbidden = [
+        "label_action",
+        "label_name",
+        "oracle_value",
+        "oracle_position_before",
+        "oracle_position_after",
+        "action_value_normal",
+        "action_value_skip",
+        "action_value_invert",
+    ];
+    if names.iter().any(|name| forbidden.contains(name)) {
+        anyhow::bail!("training bar feature_schema contains a label/future column");
+    }
+    names
+        .iter()
+        .map(|name| {
+            let column = df
+                .column(name)
+                .with_context(|| format!("training bar feature `{name}` is missing"))?;
+            series_to_f64(column.as_materialized_series())
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
 }
 
 pub fn dump_dataset_stats(label: &str, data: &DataSet) {
@@ -253,8 +331,13 @@ pub fn dump_dataset_stats(label: &str, data: &DataSet) {
         }
     }
     println!(
-        "info: {label}: close[min={:.6}, max={:.6}], zero_delta={}/{},",
-        min_v, max_v, zero_delta, total
+        "info: {label}: close[min={:.6}, max={:.6}], zero_delta={}/{}, features={}, obs_dim={}",
+        min_v,
+        max_v,
+        zero_delta,
+        total,
+        data.feature_cols.len(),
+        data.obs_dim
     );
 }
 
@@ -483,6 +566,61 @@ fn ordered_feature_cols(
     cols.push(fast_slow_spread_delta);
     cols.push(vwap_dist_delta);
     cols.push(rvol_delta);
+
+    // The native GA feature bank above is intentionally broad, but it did not
+    // contain the specific regime/context geometry used by the supervised
+    // EMA-10/30 experiments.  Keep this extension causal and append it rather
+    // than changing the existing feature order so older policies remain
+    // diagnosable by their recorded observation dimension.
+    let context_periods = [5usize, 10, 30, 60, 120, 210, 240];
+    let context_lookbacks = [1usize, 3, 5, 10, 20];
+    let context_emas: Vec<(usize, Vec<f64>)> = context_periods
+        .iter()
+        .map(|period| (*period, midas_env::features::ema(close, *period)))
+        .collect();
+
+    for (_, ema_values) in &context_emas {
+        cols.push(normalize_level_feature(ema_values, close, &atr_14));
+        for lookback in context_lookbacks {
+            cols.push(normalized_delta_lag(ema_values, &atr_14, lookback));
+        }
+    }
+
+    let ema_10 = &context_emas[1].1;
+    let ema_30 = &context_emas[2].1;
+    let ema_60 = &context_emas[3].1;
+    let ema_120 = &context_emas[4].1;
+    let ema_210 = &context_emas[5].1;
+    let ema_240 = &context_emas[6].1;
+    let trigger_spread = normalized_spread(ema_10, ema_30, &atr_14);
+    let context_spread = normalized_spread(ema_210, ema_240, &atr_14);
+    let medium_spread = normalized_spread(ema_30, ema_210, &atr_14);
+    let fast_context_spread = normalized_spread(ema_60, ema_120, &atr_14);
+    cols.push(trigger_spread.clone());
+    cols.push(first_difference(&trigger_spread));
+    cols.push(context_spread.clone());
+    cols.push(first_difference(&context_spread));
+    cols.push(medium_spread);
+    cols.push(fast_context_spread);
+    cols.push(raw_direction_series(&trigger_spread));
+
+    let (has_previous_cross, bars_since_cross, displacement_since_cross, cross_counts) =
+        crossover_history(ema_10, ema_30, close, &atr_14, &[5, 10, 30, 60]);
+    cols.push(has_previous_cross);
+    cols.push(bars_since_cross);
+    cols.push(displacement_since_cross);
+    cols.extend(cross_counts);
+
+    let (range_width_short, range_position_short) =
+        rolling_range_features(high, low, close, &atr_14, 20);
+    let (range_width_long, range_position_long) =
+        rolling_range_features(high, low, close, &atr_14, 60);
+    cols.push(range_width_short);
+    cols.push(range_position_short);
+    cols.push(range_width_long);
+    cols.push(range_position_long);
+    cols.push(adx_series(high, low, close, 14));
+    cols.push(efficiency_ratio_series(close, 14));
     Ok(cols)
 }
 
@@ -661,6 +799,198 @@ fn first_difference(values: &[f64]) -> Vec<f64> {
     out
 }
 
+fn normalized_delta_lag(values: &[f64], norm: &[f64], lag: usize) -> Vec<f64> {
+    let len = values.len().min(norm.len());
+    let mut out = vec![f64::NAN; len];
+    if lag == 0 {
+        return out;
+    }
+    for i in lag..len {
+        let current = values[i];
+        let prior = values[i - lag];
+        let scale = norm[i] * lag as f64;
+        if current.is_finite() && prior.is_finite() && scale.is_finite() && scale.abs() > 1e-8 {
+            out[i] = (current - prior) / scale;
+        }
+    }
+    out
+}
+
+fn raw_direction_series(spread: &[f64]) -> Vec<f64> {
+    spread
+        .iter()
+        .map(|value| {
+            if value.is_finite() {
+                value.signum()
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
+}
+
+fn crossover_history(
+    fast: &[f64],
+    slow: &[f64],
+    close: &[f64],
+    atr: &[f64],
+    lookbacks: &[usize],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
+    let len = fast.len().min(slow.len()).min(close.len()).min(atr.len());
+    let mut has_previous = vec![0.0; len];
+    let mut bars_since = vec![0.0; len];
+    let mut displacement = vec![0.0; len];
+    let mut counts = lookbacks.iter().map(|_| vec![0.0; len]).collect::<Vec<_>>();
+    let mut cross_indices = Vec::new();
+
+    for i in 1..len {
+        let previous_spread = fast[i - 1] - slow[i - 1];
+        let spread = fast[i] - slow[i];
+        let crossed = previous_spread.is_finite()
+            && spread.is_finite()
+            && ((previous_spread <= 0.0 && spread > 0.0)
+                || (previous_spread >= 0.0 && spread < 0.0));
+        if crossed {
+            cross_indices.push(i);
+        }
+
+        if let Some(&last_cross) = cross_indices.last() {
+            has_previous[i] = 1.0;
+            bars_since[i] = (i - last_cross) as f64;
+            if atr[i].is_finite() && atr[i].abs() > 1e-8 {
+                displacement[i] = (close[i] - close[last_cross]) / atr[i];
+            }
+        }
+        for (slot, lookback) in lookbacks.iter().enumerate() {
+            counts[slot][i] = cross_indices
+                .iter()
+                .rev()
+                .take_while(|&&cross| i.saturating_sub(cross) <= *lookback)
+                .count() as f64;
+        }
+    }
+
+    (has_previous, bars_since, displacement, counts)
+}
+
+fn rolling_range_features(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    atr: &[f64],
+    lookback: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let len = high.len().min(low.len()).min(close.len()).min(atr.len());
+    let mut width = vec![f64::NAN; len];
+    let mut position = vec![f64::NAN; len];
+    if lookback == 0 {
+        return (width, position);
+    }
+    for i in 0..len {
+        let start = i.saturating_add(1).saturating_sub(lookback);
+        let rolling_high = high[start..=i]
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let rolling_low = low[start..=i]
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let range = rolling_high - rolling_low;
+        if !range.is_finite() || !atr[i].is_finite() || atr[i].abs() <= 1e-8 {
+            continue;
+        }
+        width[i] = range / atr[i];
+        position[i] = if range > 1e-8 {
+            ((close[i] - rolling_low) / range).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+    }
+    (width, position)
+}
+
+fn efficiency_ratio_series(close: &[f64], period: usize) -> Vec<f64> {
+    let mut out = vec![f64::NAN; close.len()];
+    if period == 0 {
+        return out;
+    }
+    for i in period..close.len() {
+        let net = (close[i] - close[i - period]).abs();
+        let mut path = 0.0;
+        for j in (i - period + 1)..=i {
+            let current = close[j];
+            let prior = close[j - 1];
+            if current.is_finite() && prior.is_finite() {
+                path += (current - prior).abs();
+            }
+        }
+        if path > 1e-8 && net.is_finite() {
+            out[i] = (net / path).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
+fn adx_series(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let len = high.len().min(low.len()).min(close.len());
+    let mut out = vec![f64::NAN; len];
+    if period == 0 || len < period * 2 {
+        return out;
+    }
+    let mut true_ranges = vec![f64::NAN; len];
+    for i in 0..len {
+        true_ranges[i] = if i == 0 {
+            high[i] - low[i]
+        } else {
+            (high[i] - low[i])
+                .max((high[i] - close[i - 1]).abs())
+                .max((low[i] - close[i - 1]).abs())
+        };
+    }
+    let mut dx = vec![f64::NAN; len];
+    for i in period..len {
+        let start = i + 1 - period;
+        let mut tr_sum = 0.0;
+        let mut plus_sum = 0.0;
+        let mut minus_sum = 0.0;
+        for j in start..=i {
+            tr_sum += true_ranges[j];
+            if j == 0 {
+                continue;
+            }
+            let up = high[j] - high[j - 1];
+            let down = low[j - 1] - low[j];
+            if up > down && up > 0.0 {
+                plus_sum += up;
+            } else if down > up && down > 0.0 {
+                minus_sum += down;
+            }
+        }
+        let denom = plus_sum + minus_sum;
+        if tr_sum > 1e-8 && denom > 1e-8 {
+            let plus_di = 100.0 * plus_sum / tr_sum;
+            let minus_di = 100.0 * minus_sum / tr_sum;
+            dx[i] = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di);
+        }
+    }
+    for i in (period * 2 - 1)..len {
+        let start = i + 1 - period;
+        let values = &dx[start..=i];
+        let finite = values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        if finite.len() == period {
+            out[i] = finite.iter().sum::<f64>() / period as f64;
+        }
+    }
+    out
+}
+
 fn series_to_f64(series: &Series) -> Result<Vec<f64>> {
     let out = series
         .iter()
@@ -678,19 +1008,30 @@ fn series_to_f64(series: &Series) -> Result<Vec<f64>> {
 }
 
 fn series_to_i64(series: &Series) -> Result<Vec<i64>> {
-    let out = series
+    series
         .iter()
-        .map(|v| match v {
-            AnyValue::Datetime(v, _, _) => v,
-            AnyValue::DatetimeOwned(v, _, _) => v,
-            AnyValue::Int64(v) => v,
-            AnyValue::Int32(v) => v as i64,
-            AnyValue::UInt64(v) => v as i64,
-            AnyValue::UInt32(v) => v as i64,
-            _ => 0_i64,
+        .enumerate()
+        .map(|(index, value)| match value {
+            AnyValue::Datetime(value, unit, _) => Ok(datetime_to_ns(value, unit)),
+            AnyValue::DatetimeOwned(value, unit, _) => Ok(datetime_to_ns(value, unit)),
+            AnyValue::Int64(value) => Ok(value),
+            AnyValue::Int32(value) => Ok(value as i64),
+            AnyValue::UInt64(value) => i64::try_from(value)
+                .with_context(|| format!("timestamp at row {index} does not fit in i64")),
+            AnyValue::UInt32(value) => Ok(value as i64),
+            other => anyhow::bail!(
+                "unsupported timestamp value at row {index}: {other:?}; expected ts_ns/date/timestamp to be integer or datetime"
+            ),
         })
-        .collect();
-    Ok(out)
+        .collect()
+}
+
+fn datetime_to_ns(value: i64, unit: TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Nanoseconds => value,
+        TimeUnit::Microseconds => value.saturating_mul(1_000),
+        TimeUnit::Milliseconds => value.saturating_mul(1_000_000),
+    }
 }
 
 fn series_to_bool(series: &Series) -> Result<Vec<bool>> {

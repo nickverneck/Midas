@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use midas_env::env::MarginMode;
 use std::path::{Path, PathBuf};
 
@@ -164,38 +164,58 @@ pub fn print_device(device: &tch::Device) {
 }
 
 pub fn resolve_paths(args: &Args) -> Result<(PathBuf, PathBuf, PathBuf)> {
-    let resolve_path = |path: &Path, fallback: &Path| -> PathBuf {
-        if path.is_dir() {
-            let mut entries: Vec<PathBuf> = path
-                .read_dir()
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|e| e == "parquet").unwrap_or(false))
-                .collect();
-            entries.sort();
-            return entries
-                .first()
-                .cloned()
-                .unwrap_or_else(|| fallback.to_path_buf());
-        }
-        if path.exists() {
-            path.to_path_buf()
-        } else {
-            fallback.to_path_buf()
-        }
-    };
-
     if let Some(p) = &args.parquet {
-        Ok((p.clone(), p.clone(), p.clone()))
+        let path = resolve_required_path(p, "--parquet")?;
+        Ok((path.clone(), path.clone(), path))
     } else {
-        let train = resolve_path(&args.train_parquet, &args.train_parquet);
-        let val = resolve_path(&args.val_parquet, &train);
-        let test = resolve_path(&args.test_parquet, &val);
+        let train = resolve_required_path(&args.train_parquet, "--train-parquet")?;
+        let val = resolve_required_path(&args.val_parquet, "--val-parquet")?;
+        let test = resolve_required_path(&args.test_parquet, "--test-parquet")?;
         Ok((train, val, test))
     }
+}
+
+/// Resolve exactly one parquet file from a CLI path. Older versions silently
+/// fell back from a missing validation/test path to the training path, which
+/// could turn an apparent holdout run into an in-sample run.
+fn resolve_required_path(path: &Path, flag: &str) -> Result<PathBuf> {
+    if path.is_dir() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
+            .with_context(|| format!("read {flag} directory {}", path.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|entry| {
+                entry.is_file()
+                    && entry
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("parquet"))
+            })
+            .collect();
+        entries.sort();
+        match entries.len() {
+            0 => bail!(
+                "{flag} directory {} contains no parquet files; provide a parquet file or a directory with exactly one parquet file",
+                path.display()
+            ),
+            1 => return Ok(entries.remove(0)),
+            count => bail!(
+                "{flag} directory {} contains {count} parquet files; choose one file explicitly so the split is auditable",
+                path.display()
+            ),
+        }
+    }
+
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+
+    if path.exists() {
+        bail!(
+            "{flag} {} exists but is not a regular file or directory",
+            path.display()
+        );
+    }
+
+    bail!("{flag} path {} does not exist", path.display())
 }
 
 pub fn load_symbol_config(path: &Path, symbol: &str) -> Result<(Option<f64>, Option<String>)> {
