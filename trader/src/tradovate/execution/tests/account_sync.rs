@@ -4,7 +4,7 @@ use super::*;
 fn account_sync_waits_when_position_is_temporarily_flat_but_strategy_orders_are_live() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::HmaAngle;
     session.execution_config.native_hma.take_profit_ticks = 30.0;
@@ -100,7 +100,7 @@ fn account_sync_waits_when_position_is_temporarily_flat_but_strategy_orders_are_
 fn account_sync_does_not_disarm_on_transient_oversize_with_live_strategy_path() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.take_profit_ticks = 8.0;
@@ -164,7 +164,7 @@ fn account_sync_does_not_disarm_on_transient_oversize_with_live_strategy_path() 
 fn broker_sync_wait_logs_once_with_observability_context() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;
@@ -256,7 +256,7 @@ fn broker_sync_wait_logs_once_with_observability_context() {
 fn duplicate_symbol_position_record_does_not_trigger_false_drift_disarm() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.order_qty = 1;

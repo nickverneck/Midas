@@ -24,7 +24,7 @@ pub(in crate::app) struct DisplayedAutoTrail {
 impl App {
     pub(in crate::app) fn set_replay_speed(
         &mut self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        cmd_tx: &ServiceCommandSender,
         speed: ReplaySpeed,
     ) {
         if self.session_kind != SessionKind::Replay || self.replay_speed == speed {
@@ -34,7 +34,7 @@ impl App {
         let _ = cmd_tx.send(ServiceCommand::SetReplaySpeed { speed });
     }
 
-    pub(in crate::app) fn sync_selected_account(&self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    pub(in crate::app) fn sync_selected_account(&self, cmd_tx: &ServiceCommandSender) {
         if let Some(account) = self.accounts.get(self.selected_account) {
             let _ = cmd_tx.send(ServiceCommand::SelectAccount {
                 account_id: account.id,

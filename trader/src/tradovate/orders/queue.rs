@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn enqueue_market_order(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     order: PendingMarketOrder,
 ) -> Result<()> {
     let pending_signal = session.pending_signal_context.take();
@@ -33,7 +33,7 @@ pub(crate) fn enqueue_market_order(
 #[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
 pub(super) fn enqueue_liquidation(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     liquidation: PendingLiquidation,
 ) -> Result<()> {
     session.order_submit_in_flight = true;
@@ -54,7 +54,7 @@ pub(super) fn enqueue_liquidation(
 
 pub(super) fn enqueue_liquidation_then_order_strategy(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     liquidation: PendingLiquidation,
     strategy: PendingOrderStrategyTransition,
 ) -> Result<()> {
@@ -89,7 +89,7 @@ pub(super) fn enqueue_liquidation_then_order_strategy(
 
 pub(super) fn enqueue_order_strategy(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     strategy: PendingOrderStrategyTransition,
 ) -> Result<()> {
     let pending_signal = session.pending_signal_context.take();

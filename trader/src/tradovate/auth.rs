@@ -1,6 +1,7 @@
 async fn authenticate(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
     if let Some(token) = empty_as_none(&cfg.token_override) {
-        let user_name = fetch_auth_me(client, &cfg.env, token)
+        let rest_url = cfg.broker_rest_url();
+        let user_name = fetch_auth_me(client, &rest_url, token)
             .await
             .ok()
             .and_then(|value| {
@@ -21,7 +22,8 @@ async fn authenticate(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
     match cfg.auth_mode {
         AuthMode::TokenFile => {
             let tokens = load_runtime_token_bundle(cfg)?.tokens;
-            let user_name = fetch_auth_me(client, &cfg.env, &tokens.access_token)
+            let rest_url = cfg.broker_rest_url();
+            let user_name = fetch_auth_me(client, &rest_url, &tokens.access_token)
                 .await
                 .ok()
                 .and_then(|value| {
@@ -142,7 +144,8 @@ fn save_token_cache(path: &Path, tokens: &TokenBundle) -> Result<()> {
 }
 
 async fn request_access_token(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
-    let url = format!("{}/auth/accesstokenrequest", cfg.env.rest_url());
+    let rest_url = cfg.broker_rest_url();
+    let url = format!("{rest_url}/auth/accesstokenrequest");
     let payload = json!({
         "name": cfg.username,
         "password": cfg.password,
@@ -187,10 +190,10 @@ async fn request_access_token(client: &Client, cfg: &AppConfig) -> Result<TokenB
 
 async fn renew_access_token(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     current: &TokenBundle,
 ) -> Result<TokenBundle> {
-    let url = format!("{}/auth/renewAccessToken", env.rest_url());
+    let url = format!("{rest_url}/auth/renewAccessToken");
     let response = client
         .get(url)
         .bearer_auth(&current.access_token)
@@ -228,8 +231,8 @@ async fn renew_access_token(
     })
 }
 
-async fn fetch_auth_me(client: &Client, env: &TradingEnvironment, token: &str) -> Result<Value> {
-    let url = format!("{}/auth/me", env.rest_url());
+async fn fetch_auth_me(client: &Client, rest_url: &str, token: &str) -> Result<Value> {
+    let url = format!("{rest_url}/auth/me");
     let response = client.get(url).bearer_auth(token).send().await?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -241,20 +244,20 @@ async fn fetch_auth_me(client: &Client, env: &TradingEnvironment, token: &str) -
 
 async fn measure_rest_rtt_ms(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     token: &str,
 ) -> Result<u64> {
     let started = time::Instant::now();
-    let _ = fetch_auth_me(client, env, token).await?;
+    let _ = fetch_auth_me(client, rest_url, token).await?;
     Ok(started.elapsed().as_millis() as u64)
 }
 
 async fn list_accounts(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     token: &str,
 ) -> Result<Vec<AccountInfo>> {
-    let payload = fetch_entity_list(client, env, token, "account").await?;
+    let payload = fetch_entity_list(client, rest_url, token, "account").await?;
     Ok(payload
         .into_iter()
         .filter_map(|item| {
@@ -271,12 +274,12 @@ async fn list_accounts(
 
 async fn search_contracts(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     token: &str,
     query: &str,
     limit: usize,
 ) -> Result<Vec<ContractSuggestion>> {
-    let url = format!("{}/contract/suggest", env.rest_url());
+    let url = format!("{rest_url}/contract/suggest");
     let response = client
         .get(url)
         .bearer_auth(token)
@@ -322,13 +325,13 @@ async fn search_contracts(
             });
         }
     }
-    enrich_contract_maturities(client, env, token, &mut out).await;
+    enrich_contract_maturities(client, rest_url, token, &mut out).await;
     Ok(out)
 }
 
 async fn enrich_contract_maturities(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     token: &str,
     contracts: &mut [ContractSuggestion],
 ) {
@@ -340,7 +343,7 @@ async fn enrich_contract_maturities(
         return;
     }
 
-    let url = format!("{}/contractMaturity/items", env.rest_url());
+    let url = format!("{rest_url}/contractMaturity/items");
     let response = client
         .get(url)
         .bearer_auth(token)

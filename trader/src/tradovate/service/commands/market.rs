@@ -3,8 +3,8 @@ use super::*;
 pub(super) fn select_account(
     account_id: i64,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    event_tx: &ServiceEventSender,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let broker_tx = state.broker_tx.clone();
     {
@@ -22,7 +22,7 @@ pub(super) async fn search_contracts_command(
     query: String,
     limit: usize,
     state: &ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_ref() else {
         bail!("connect first");
@@ -36,9 +36,10 @@ pub(super) async fn search_contracts_command(
         let _ = event_tx.send(ServiceEvent::ContractSearchResults { query, results });
         return Ok(());
     }
+    let rest_url = session.cfg.broker_rest_url();
     let results = search_contracts(
         &state.client,
-        &session.cfg.env,
+        &rest_url,
         &session.tokens.access_token,
         &query,
         limit,
@@ -53,9 +54,9 @@ pub(super) async fn subscribe_bars(
     bar_type: BarType,
     candle_mode: CandleMode,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let candle_mode = bar_type.effective_candle_mode(candle_mode);
     let Some(session) = state.session.as_mut() else {
@@ -63,6 +64,7 @@ pub(super) async fn subscribe_bars(
     };
     if let Some(task) = state.market_task.take() {
         task.abort();
+        let _ = task.await;
     }
     session.market = MarketSnapshot::default();
     let _ = market_tx.send(MarketSnapshot::default());
@@ -97,7 +99,7 @@ pub(super) async fn subscribe_bars(
     } else {
         let market_specs = fetch_contract_specs(
             &state.client,
-            &session.cfg.env,
+            &session.cfg.broker_rest_url(),
             &session.tokens.access_token,
             &contract,
         )
@@ -122,7 +124,7 @@ pub(super) async fn subscribe_bars(
 pub(super) fn set_replay_speed(
     speed: ReplaySpeed,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_ref() else {
         return Ok(());

@@ -3,14 +3,15 @@ use super::account::{
     selected_market_position_qty,
 };
 use super::orders::{dispatch_target_position_order, sync_native_protection};
-use super::state::{IronbeamSession, OrderDispatchOutcome};
-use crate::broker::{Bar, InstrumentSessionWindow, LatencySnapshot, ServiceEvent};
+use super::state::{InternalEventSender, IronbeamSession, OrderDispatchOutcome};
+use crate::broker::{
+    Bar, InstrumentSessionWindow, LatencySnapshot, ServiceEvent, ServiceEventSender,
+};
 use crate::strategies::{StrategySignal, side_from_signed_qty};
 use crate::strategy::{NativeSignalTiming, NativeStrategyKind, StrategyKind};
 use crate::strategy_debug::{StrategyDecisionDebug, format_strategy_decision};
 use anyhow::{Context, Result};
 use reqwest::Client;
-use tokio::sync::mpsc::UnboundedSender;
 
 const PENDING_TARGET_WATCHDOG_SECS: u64 = 3;
 
@@ -18,7 +19,7 @@ pub(super) async fn handle_execution_account_sync(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let actual_qty = selected_market_position_qty(session);
     let actual_entry = selected_market_entry_price(session);
@@ -66,8 +67,8 @@ pub(super) async fn maybe_run_execution_strategy(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    internal_tx: InternalEventSender,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
         return Ok(());
@@ -464,7 +465,7 @@ async fn continue_staged_reversal(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<bool> {
     let Some(staged) = session.execution_runtime.pending_reversal_entry.clone() else {
         return Ok(false);
@@ -1004,7 +1005,7 @@ async fn sync_execution_protection(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
     trailing_bar: Option<&Bar>,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {

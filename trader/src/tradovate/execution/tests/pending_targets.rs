@@ -4,7 +4,7 @@ use super::*;
 fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;
@@ -63,7 +63,7 @@ fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
 fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;
@@ -122,7 +122,7 @@ fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
 fn strategy_loop_keeps_pending_target_during_broker_path_grace_after_ack() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;
@@ -175,7 +175,7 @@ fn strategy_loop_keeps_pending_target_during_broker_path_grace_after_ack() {
 fn strategy_loop_keeps_market_order_pending_target_during_position_sync_grace() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;
@@ -239,7 +239,7 @@ fn strategy_loop_keeps_market_order_pending_target_during_position_sync_grace() 
 fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;
@@ -291,7 +291,7 @@ fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace(
 fn strategy_loop_rechecks_latest_bar_when_pending_target_reaches_with_live_broker_path() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.fast_length = 2;
@@ -395,7 +395,7 @@ fn strategy_loop_rechecks_latest_bar_when_pending_target_reaches_with_live_broke
 fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_expires() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_runtime.armed = true;

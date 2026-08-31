@@ -40,6 +40,11 @@ const DOM_CAPTURE_MAX_SPEED: u16 = 400;
 /// then md/subscribeDOM emits the historical DOM stream as the replay clock
 /// advances. No live orders or engine market subscriptions are started.
 pub async fn capture_replay_dom(cfg: &AppConfig, options: DomCaptureOptions) -> Result<()> {
+    if cfg.simulation_proxy.enabled {
+        bail!(
+            "DOM capture is unavailable in simulation_proxy mode; use a proxy market fixture instead"
+        );
+    }
     let start = parse_dom_capture_timestamp(&options.start, "--start")?;
     let end = parse_dom_capture_timestamp(&options.end, "--end")?;
     if start >= end {
@@ -199,6 +204,11 @@ pub async fn capture_replay_dom(cfg: &AppConfig, options: DomCaptureOptions) -> 
 /// Capture live DOM in a standalone opt-in process. The normal live engine
 /// never calls this function, so it adds no subscription or task to trading.
 pub async fn capture_live_dom(cfg: &AppConfig, options: LiveDomCaptureOptions) -> Result<()> {
+    if cfg.simulation_proxy.enabled {
+        bail!(
+            "live DOM capture is unavailable in simulation_proxy mode; disable the proxy before connecting to a broker"
+        );
+    }
     if options.duration_seconds == 0 {
         bail!("--duration-seconds must be > 0");
     }
@@ -281,7 +291,8 @@ async fn resolve_dom_capture_contract(
     if requested.is_empty() {
         bail!("contract cannot be empty");
     }
-    let suggestions = search_contracts(client, env, token, requested, 25).await?;
+    let rest_url = env.rest_url();
+    let suggestions = search_contracts(client, rest_url, token, requested, 25).await?;
     suggestions
         .into_iter()
         .find(|contract| contract.name.eq_ignore_ascii_case(requested))

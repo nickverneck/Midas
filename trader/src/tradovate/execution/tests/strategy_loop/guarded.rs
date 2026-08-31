@@ -5,7 +5,7 @@ use super::support::*;
 fn guarded_closed_bar_delay_waits_extra_completed_bar_before_entry() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.fast_length = 2;
@@ -64,7 +64,7 @@ fn guarded_closed_bar_delay_waits_extra_completed_bar_before_entry() {
 fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.fast_length = 2;
@@ -131,7 +131,7 @@ fn guarded_closed_bar_signal_dispatches_once_even_if_position_returns_flat() {
 fn guarded_ema_rechecks_same_timestamp_range_correction_without_error() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_execution_path = NativeExecutionPath::Guarded;
@@ -163,7 +163,7 @@ fn guarded_ema_rechecks_same_timestamp_range_correction_without_error() {
 fn guarded_closed_bar_blocks_repeat_flat_entry_side_until_opposite_dispatch() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.fast_length = 2;
@@ -240,7 +240,7 @@ fn guarded_closed_bar_blocks_repeat_flat_entry_side_until_opposite_dispatch() {
 fn hma_direct_path_executes_current_closed_bar_cross() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
     session.execution_config.native_execution_path = NativeExecutionPath::HmaDirect;
@@ -322,7 +322,7 @@ fn hma_direct_path_executes_current_closed_bar_cross() {
 fn hma_direct_path_does_not_enter_from_stale_cross_state() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
     session.execution_config.native_execution_path = NativeExecutionPath::HmaDirect;
@@ -383,7 +383,7 @@ fn hma_direct_path_does_not_enter_from_stale_cross_state() {
 fn guarded_hma_cross_blocks_same_bar_revised_side_change_after_dispatch() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::HmaCross;
     session.execution_config.native_execution_path = NativeExecutionPath::Guarded;

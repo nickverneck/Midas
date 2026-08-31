@@ -6,8 +6,8 @@ use super::api::{
     cancel_multiple_orders, cancel_order, place_protection_order, submit_market_order, update_order,
 };
 use super::state::{
-    IronbeamSession, ManagedProtectionOrders, OrderDispatchOutcome, ProtectionKey,
-    ProtectionOrderCandidate,
+    InternalEventSender, IronbeamSession, ManagedProtectionOrders, OrderDispatchOutcome,
+    ProtectionKey, ProtectionOrderCandidate,
 };
 use super::support::{
     account_name_by_id, contract_symbol, is_protection_order_type, order_id_string, order_price,
@@ -18,7 +18,6 @@ use crate::broker::{AccountInfo, ContractSuggestion, LatencySnapshot, ManualOrde
 use crate::strategy::NativeReversalMode;
 use anyhow::{Context, Result};
 use reqwest::Client;
-use tokio::sync::mpsc::UnboundedSender;
 
 struct OrderContext<'a> {
     account: &'a AccountInfo,
@@ -45,7 +44,7 @@ pub(super) async fn dispatch_manual_order(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
     action: ManualOrderAction,
 ) -> Result<OrderDispatchOutcome> {
     let order_ctx = resolve_order_context(session)?;
@@ -126,7 +125,7 @@ pub(super) async fn dispatch_target_position_order(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
     target_qty: i32,
     automated: bool,
     reason: &str,
@@ -238,7 +237,7 @@ pub(super) async fn cancel_selected_protection(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let Some(key) = selected_protection_key(session) else {
         return Ok(());
@@ -273,7 +272,7 @@ pub(super) async fn sync_native_protection(
     client: &Client,
     session: &mut IronbeamSession,
     latency: &mut LatencySnapshot,
-    internal_tx: UnboundedSender<super::state::InternalEvent>,
+    internal_tx: InternalEventSender,
     signed_qty: i32,
     take_profit_price: Option<f64>,
     stop_price: Option<f64>,

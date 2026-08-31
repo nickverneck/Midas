@@ -201,10 +201,7 @@ pub(crate) fn execution_probe_snapshot(
     }
 }
 
-pub(crate) fn emit_execution_state(
-    event_tx: &UnboundedSender<ServiceEvent>,
-    session: &SessionState,
-) {
+pub(crate) fn emit_execution_state(event_tx: &ServiceEventSender, session: &SessionState) {
     let _ = event_tx.send(ServiceEvent::ExecutionState(execution_state_snapshot(
         session,
     )));
@@ -485,7 +482,7 @@ pub(crate) fn execution_observability_context(session: &SessionState) -> String 
 }
 
 pub(crate) fn emit_execution_transition_debug(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     next_summary: &str,
     label: &str,

@@ -2,8 +2,8 @@ use super::*;
 
 pub(super) async fn maintain_session(
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    event_tx: &ServiceEventSender,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_ref() else {
         return Ok(());
@@ -34,7 +34,8 @@ pub(super) async fn maintain_session(
                     reacquired_with_credentials = true;
                     request_access_token(&state.client, &session.cfg).await?
                 } else {
-                    renew_access_token(&state.client, &session.cfg.env, &session.tokens).await?
+                    let rest_url = session.cfg.broker_rest_url();
+                    renew_access_token(&state.client, &rest_url, &session.tokens).await?
                 };
                 RuntimeTokenBundle {
                     tokens,
@@ -67,12 +68,15 @@ pub(super) async fn maintain_session(
                     refresh_session_state(&state.client, session, event_tx).await?;
                     if let Some(task) = state.user_task.take() {
                         task.abort();
+                        let _ = task.await;
                     }
                     if let Some(task) = state.market_task.take() {
                         task.abort();
+                        let _ = task.await;
                     }
                     if let Some(task) = state.rest_probe_task.take() {
                         task.abort();
+                        let _ = task.await;
                     }
                     forced_restart = true;
                     let action_label = if reloaded_from_file {
@@ -88,6 +92,7 @@ pub(super) async fn maintain_session(
                 } else if token_changed {
                     if let Some(task) = state.rest_probe_task.take() {
                         task.abort();
+                        let _ = task.await;
                     }
                     let action_label = if reloaded_from_file {
                         "Session token reloaded from file"
@@ -104,6 +109,15 @@ pub(super) async fn maintain_session(
                 }
             }
         }
+    }
+
+    // A maintenance refresh replaces the user store while a snapshot build
+    // may still own a clone of the previous store. Let the single snapshot
+    // coordinator publish the active build and, when needed, its one latest
+    // follow-up; emitting directly here could publish newer state before an
+    // older build completion.
+    if forced_restart {
+        request_snapshot_refresh(state, &internal_tx);
     }
 
     let restart = ensure_background_tasks(state, internal_tx).await?;
@@ -139,13 +153,14 @@ pub(super) async fn maintain_session(
 async fn refresh_session_state(
     client: &Client,
     session: &mut SessionState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
-    let accounts = list_accounts(client, &session.cfg.env, &session.tokens.access_token).await?;
+    let rest_url = session.cfg.broker_rest_url();
+    let accounts = list_accounts(client, &rest_url, &session.tokens.access_token).await?;
     let mut user_store = UserSyncStore::default();
     seed_user_store(
         client,
-        &session.cfg.env,
+        &rest_url,
         &session.tokens.access_token,
         &mut user_store,
     )
@@ -165,12 +180,6 @@ async fn refresh_session_state(
     }
     session.user_store = user_store;
 
-    let snapshots = session.user_store.build_snapshots(
-        &session.accounts,
-        Some(&session.market),
-        &session.managed_protection,
-    );
     let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts));
-    let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(snapshots));
     Ok(())
 }

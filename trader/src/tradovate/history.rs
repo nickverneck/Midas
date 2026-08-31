@@ -100,10 +100,7 @@ pub(super) fn start_engine_run(session: &mut SessionState) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn emit_engine_history(
-    event_tx: &UnboundedSender<ServiceEvent>,
-    session: &SessionState,
-) {
+pub(super) fn emit_engine_history(event_tx: &ServiceEventSender, session: &SessionState) {
     if let Some(run) = session.engine_run.as_ref() {
         let _ = event_tx.send(ServiceEvent::EngineHistoryUpdated(run.history.clone()));
     }
@@ -126,7 +123,7 @@ pub(super) async fn refresh_engine_history_from_broker(
     ] {
         let Ok(items) = fetch_entity_list(
             client,
-            &session.cfg.env,
+            &session.cfg.broker_rest_url(),
             &session.tokens.access_token,
             entity,
         )
@@ -275,7 +272,7 @@ pub(super) fn refresh_engine_history(session: &mut SessionState) {
                 average_entry_price = Some(price);
             }
         }
-        let fee = fill_fee_total(&session.user_store, fill_id, fill);
+        let fee = session.user_store.fee_for_fill(fill_id, fill);
         total_fees += fee;
         // Win/loss describes the trade direction before commissions. Fees
         // belong in net PnL, but must not turn a gross winning exit into a
@@ -360,27 +357,144 @@ fn entity_matches_contract(entity: &Value, contract_id: i64, contract_name: &str
 }
 
 fn fill_fee_total(store: &UserSyncStore, fill_id: i64, fill: &Value) -> f64 {
-    let fill_fee = store
-        .fill_fees
-        .values()
-        .filter(|fee| json_i64(fee, "fillId") == Some(fill_id))
-        .filter_map(|fee| {
-            pick_number(
-                fee,
-                &["amount", "fee", "commission", "totalFee", "totalFees"],
-            )
-        })
-        .map(f64::abs)
-        .sum::<f64>();
-    if fill_fee > f64::EPSILON {
-        fill_fee
-    } else {
-        pick_number(
-            fill,
-            &["amount", "fee", "commission", "totalFee", "totalFees"],
-        )
-        .map(f64::abs)
-        .filter(|fee| fee.is_finite())
-        .unwrap_or_default()
+    store.fee_for_fill(fill_id, fill)
+}
+
+#[cfg(test)]
+mod history_fee_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_session() -> SessionState {
+        let (request_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        SessionState {
+            cfg: AppConfig::default(),
+            session_kind: SessionKind::Live,
+            replay_enabled: false,
+            tokens: TokenBundle {
+                access_token: "access".to_string(),
+                md_access_token: "md".to_string(),
+                expiration_time: None,
+                user_id: None,
+                user_name: None,
+            },
+            token_file_snapshot: None,
+            accounts: vec![AccountInfo {
+                id: 42,
+                name: "SIM".to_string(),
+                raw: json!({}),
+            }],
+            request_tx,
+            execution_config: ExecutionStrategyConfig::default(),
+            execution_runtime: ExecutionRuntimeState::default(),
+            pending_signal_context: None,
+            order_latency_tracker: None,
+            order_submit_in_flight: false,
+            protection_sync_in_flight: false,
+            pending_protection_sync: None,
+            user_store: UserSyncStore::default(),
+            selected_account_id: Some(42),
+            selected_contract: Some(ContractSuggestion {
+                id: 3570918,
+                name: "ESM6".to_string(),
+                description: "E-mini S&P".to_string(),
+                raw: json!({}),
+            }),
+            bar_type: BarType::default(),
+            candle_mode: CandleMode::Standard,
+            market: MarketSnapshot::default(),
+            managed_protection: BTreeMap::new(),
+            active_order_strategy: None,
+            next_strategy_order_nonce: 1,
+            engine_run: None,
+        }
+    }
+
+    #[test]
+    fn f6_uses_evicted_fee_once_for_net_pnl_and_gross_win_loss() {
+        let mut session = test_session();
+        session.market.value_per_point = Some(50.0);
+        start_engine_run(&mut session).expect("engine run");
+        let prefix = session
+            .engine_run
+            .as_ref()
+            .expect("run")
+            .order_prefix
+            .clone();
+        let now = Utc::now().to_rfc3339();
+
+        session.user_store.orders.insert(
+            42,
+            BTreeMap::from([
+                (
+                    100,
+                    json!({
+                        "id": 100,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "symbol": "ESM6",
+                        "action": "Buy",
+                        "clOrdId": format!("{prefix}-entry")
+                    }),
+                ),
+                (
+                    101,
+                    json!({
+                        "id": 101,
+                        "accountId": 42,
+                        "contractId": 3570918,
+                        "symbol": "ESM6",
+                        "action": "Sell",
+                        "clOrdId": format!("{prefix}-exit")
+                    }),
+                ),
+            ]),
+        );
+        session.user_store.history_fills.insert(
+            200,
+            json!({
+                "id": 200,
+                "orderId": 100,
+                "contractId": 3570918,
+                "symbol": "ESM6",
+                "action": "Buy",
+                "qty": 1,
+                "price": 5000.0,
+                "timestamp": now
+            }),
+        );
+        session.user_store.history_fills.insert(
+            201,
+            json!({
+                "id": 201,
+                "orderId": 101,
+                "contractId": 3570918,
+                "symbol": "ESM6",
+                "action": "Sell",
+                "qty": 1,
+                "price": 5001.0,
+                "commission": 1.0,
+                "timestamp": now
+            }),
+        );
+        session.user_store.record_evicted_fee(Some(201), 42, 2.0);
+
+        refresh_engine_history(&mut session);
+
+        let history = &session.engine_run.as_ref().expect("run").history;
+        assert_eq!(history.fees, 2.0);
+        assert_eq!(history.realized_pnl, 48.0);
+        assert_eq!(history.wins, 1);
+        assert_eq!(history.losses, 0);
+    }
+
+    #[test]
+    fn fill_fee_total_delegates_to_the_bounded_store_ledger() {
+        let mut store = UserSyncStore::default();
+        let fill = json!({"id": 1, "commission": 1.0});
+        store.history_fills.insert(1, fill.clone());
+        store.record_evicted_fee(Some(1), 42, 2.0);
+
+        assert_eq!(fill_fee_total(&store, 1, &fill), 2.0);
     }
 }

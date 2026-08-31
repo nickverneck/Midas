@@ -149,7 +149,7 @@ struct TaskRestartState {
 
 async fn ensure_background_tasks(
     state: &mut ServiceState,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<TaskRestartState> {
     let Some(session) = state.session.as_ref() else {
         return Ok(TaskRestartState::default());
@@ -211,6 +211,7 @@ async fn ensure_background_tasks(
     if user_needed {
         if let Some(task) = state.user_task.take() {
             task.abort();
+            let _ = task.await;
         }
         if let Some((cfg, tokens, account_ids)) = user_spawn {
             let (request_tx, user_task) =
@@ -225,10 +226,11 @@ async fn ensure_background_tasks(
     if market_needed {
         if let Some(task) = state.market_task.take() {
             task.abort();
+            let _ = task.await;
         }
         if let Some((cfg, access_token, md_access_token, contract)) = market_spawn {
             let market_specs =
-                fetch_contract_specs(&state.client, &cfg.env, &access_token, &contract)
+                fetch_contract_specs(&state.client, &cfg.broker_rest_url(), &access_token, &contract)
                     .await
                     .ok();
             let bar_type = state
@@ -256,6 +258,7 @@ async fn ensure_background_tasks(
     if rest_probe_needed {
         if let Some(task) = state.rest_probe_task.take() {
             task.abort();
+            let _ = task.await;
         }
         if let Some((client, cfg, access_token)) = rest_probe_spawn {
             state.rest_probe_task = Some(spawn_rest_probe_task(
@@ -274,7 +277,7 @@ async fn ensure_background_tasks(
     })
 }
 
-async fn shutdown_state(state: &mut ServiceState, event_tx: &UnboundedSender<ServiceEvent>) {
+async fn shutdown_state(state: &mut ServiceState, event_tx: &ServiceEventSender) {
     shutdown_tasks(state).await;
     state.session = None;
     let _ = event_tx.send(ServiceEvent::Disconnected);
@@ -283,12 +286,19 @@ async fn shutdown_state(state: &mut ServiceState, event_tx: &UnboundedSender<Ser
 async fn shutdown_tasks(state: &mut ServiceState) {
     if let Some(task) = state.user_task.take() {
         task.abort();
+        let _ = task.await;
     }
     if let Some(task) = state.market_task.take() {
         task.abort();
+        let _ = task.await;
     }
     if let Some(task) = state.rest_probe_task.take() {
         task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = state.snapshot_task.take() {
+        task.abort();
+        let _ = task.await;
     }
     if let Some(job) = state.replay_lookup_job.take() {
         job.task.abort();

@@ -1,5 +1,6 @@
 use super::attempts::AttemptBook;
 use super::*;
+use crate::broker::{ServiceCommandSender, ServiceEventReceiver};
 use std::collections::BTreeSet;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -34,7 +35,7 @@ impl ProfileHarnessState {
 #[derive(Clone)]
 pub(super) struct ProfileRestInspector {
     client: Client,
-    env: TradingEnvironment,
+    rest_url: String,
     access_token: String,
 }
 
@@ -62,7 +63,7 @@ impl ProfileRestInspector {
                 .tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .context("build profiler REST client")?,
-            env: config.env,
+            rest_url: config.broker_rest_url(),
             access_token,
         })
     }
@@ -136,7 +137,7 @@ impl ProfileRestInspector {
     }
 
     async fn fetch_entity_item(&self, entity: &str, id: i64) -> Result<Value> {
-        let url = format!("{}/{entity}/item", self.env.rest_url());
+        let url = format!("{}/{entity}/item", self.rest_url);
         let response = self
             .client
             .get(url)
@@ -153,7 +154,7 @@ impl ProfileRestInspector {
     }
 
     async fn fetch_entity_deps(&self, entity: &str, master_id: i64) -> Result<Vec<Value>> {
-        let url = format!("{}/{entity}/deps", self.env.rest_url());
+        let url = format!("{}/{entity}/deps", self.rest_url);
         let response = self
             .client
             .get(url)
@@ -215,7 +216,19 @@ pub(super) fn merge_probe_order_detail(
         merged = true;
     }
 
-    if !merged {
+    if !merged
+        && !detail.status.as_deref().is_some_and(|status| {
+            matches!(
+                status.to_ascii_lowercase().as_str(),
+                "filled" | "cancelled" | "canceled" | "rejected" | "expired"
+            )
+        })
+    {
+        // The dependency endpoint includes the filled parent order as well
+        // as the currently working bracket children. Keep this collection's
+        // active-order contract intact; terminal parents are already
+        // represented by the tracker and must not look like an extra live
+        // strategy leg to the profiler.
         probe.linked_active_orders.push(detail);
     }
 }
@@ -226,8 +239,8 @@ struct ProcessedEvent {
 }
 
 pub(super) struct ProfileHarness {
-    cmd_tx: UnboundedSender<ServiceCommand>,
-    event_rx: UnboundedReceiver<ServiceEvent>,
+    cmd_tx: ServiceCommandSender,
+    event_rx: ServiceEventReceiver,
     market_rx: watch::Receiver<MarketSnapshot>,
     rest_inspector: Option<ProfileRestInspector>,
     state: ProfileHarnessState,
@@ -236,8 +249,8 @@ pub(super) struct ProfileHarness {
 
 impl ProfileHarness {
     pub(super) fn new(
-        cmd_tx: UnboundedSender<ServiceCommand>,
-        event_rx: UnboundedReceiver<ServiceEvent>,
+        cmd_tx: ServiceCommandSender,
+        event_rx: ServiceEventReceiver,
         market_rx: watch::Receiver<MarketSnapshot>,
         rest_inspector: Option<ProfileRestInspector>,
     ) -> Self {

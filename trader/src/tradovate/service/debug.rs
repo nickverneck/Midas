@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn emit_service_debug_log(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: Option<&SessionState>,
     message: impl FnOnce() -> String,
 ) {
@@ -12,7 +12,7 @@ pub(super) fn emit_service_debug_log(
 }
 
 pub(super) fn emit_service_operational_status(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: Option<&SessionState>,
     message: impl FnOnce() -> String,
 ) {
@@ -23,7 +23,7 @@ pub(super) fn emit_service_operational_status(
 }
 
 pub(super) fn emit_debug_logs_from_latency_delta(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     previous: LatencySnapshot,
     current: LatencySnapshot,
@@ -52,7 +52,7 @@ pub(super) fn emit_debug_logs_from_latency_delta(
 }
 
 fn emit_debug_latency_stage(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     stage: &str,
     previous: Option<u64>,

@@ -33,14 +33,19 @@ Rust-first backtesting and RL/GA playground for intraday trading (Stocks/Futures
 - Rollout details live in [`docs/ml_backend_rollout.md`](docs/ml_backend_rollout.md).
 
 ## CLI examples (Rust)
+
+- Offline live-path proxy/replay harness: see [`tools/trader-replay-proxy/README.md`](tools/trader-replay-proxy/README.md). It is a separate loopback-only process for comparing trader commits against the same recorded bars without contacting Tradovate.
+
 - Load parquet + compute features (default feature-only mode):  
   `cargo run -- --file data/train/SPY0.parquet`
 - EMA rule backtest:  
   `cargo run -- --file data/train/SPY0.parquet --mode ema_rule --ema-fast 5 --ema-slow 21 --commission 1.6 --slippage 0.25`
 - Rust GA-only trainer (requires libtorch, CUDA/MPS optional):  
-  `LIBTORCH=/path/to/libtorch cargo run --features torch --bin train_ga -- --backend libtorch --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga --device cuda --workers 8 --drawdown-penalty 0.05 --drawdown-penalty-growth 0.02`
+  `LIBTORCH=/path/to/libtorch cargo run --features torch --bin train_ga -- --backend libtorch --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --test-parquet data/test/SPY.parquet --selection-use-eval --eval-windows 0 --outdir runs_ga --device cuda --workers 8 --drawdown-penalty 0.05 --drawdown-penalty-growth 0.02`
 - Rust GA-only trainer on Candle CPU:  
-  `cargo run --features backend-candle --bin train_ga -- --backend candle --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --outdir runs_ga_candle`
+  `cargo run --features backend-candle --bin train_ga -- --backend candle --device cpu --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --test-parquet data/test/SPY.parquet --selection-use-eval --eval-windows 0 --outdir runs_ga_candle`
+
+GA uses validation for candidate selection by default. Add `--train-only-selection` when validation should remain diagnostic only; `--selection-use-eval` is retained as an explicit positive spelling.
 - Rust RL trainer on Candle CPU (PPO):  
   `cargo run --features backend-candle --bin train_rl -- --backend candle --device cpu --algorithm ppo --train-parquet data/train/SPY0.parquet --val-parquet data/val/SPY.parquet --test-parquet data/val/SPY.parquet --outdir runs_rl_candle`
 - Rust GA-only trainer on Burn CPU:  

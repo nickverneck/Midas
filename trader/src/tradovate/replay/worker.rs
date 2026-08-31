@@ -12,9 +12,9 @@ pub(crate) fn spawn_replay_market_task(
     contract: ContractSuggestion,
     bar_type: BarType,
     candle_mode: CandleMode,
-    broker_tx: UnboundedSender<BrokerCommand>,
+    broker_tx: BrokerCommandSender,
     replay_speed_rx: tokio::sync::watch::Receiver<ReplaySpeed>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> JoinHandle<()> {
     #[cfg(not(feature = "replay"))]
     {
@@ -44,11 +44,21 @@ pub(crate) fn spawn_replay_market_task(
             .await;
             match result {
                 Ok(()) => {
-                    let _ = internal_tx.send(InternalEvent::ReplayCompleted { error: None });
+                    if internal_tx
+                        .send(InternalEvent::ReplayCompleted { error: None })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
                 Err(err) => {
                     let message = format!("replay data: {err}");
-                    let _ = internal_tx.send(InternalEvent::Error(message.clone()));
+                    if internal_tx
+                        .send(InternalEvent::Error(message.clone()))
+                        .is_err()
+                    {
+                        return;
+                    }
                     let _ = internal_tx.send(InternalEvent::ReplayCompleted {
                         error: Some(message),
                     });
@@ -65,9 +75,9 @@ async fn replay_market_worker_inner(
     contract: ContractSuggestion,
     bar_type: BarType,
     candle_mode: CandleMode,
-    broker_tx: UnboundedSender<BrokerCommand>,
+    broker_tx: BrokerCommandSender,
     replay_speed_rx: &mut tokio::sync::watch::Receiver<ReplaySpeed>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let mut frame_stream = replay.frame_stream_for_type(bar_type)?;
     let bars = frame_stream.bars().to_vec();
@@ -188,7 +198,9 @@ async fn replay_market_worker_inner(
                 drain_replay_broker(&broker_tx, None, None).await?;
             }
         }
-        let _ = internal_tx.send(InternalEvent::UserSocketStatus(initial_status));
+        internal_tx
+            .send(InternalEvent::UserSocketStatus(initial_status))
+            .map_err(|error| anyhow::anyhow!("replay status delivery failed: {error:?}"))?;
     }
 
     let mut live_bars = 0usize;
@@ -311,12 +323,14 @@ async fn replay_market_worker_inner(
 
     frame_stream.finish().await?;
 
-    let _ = internal_tx.send(InternalEvent::UserSocketStatus(format!(
-        "Replay complete for {} ({}) [{}]",
-        contract.name,
-        bar_type.label(),
-        cfg.replay_engine_mode.label()
-    )));
+    internal_tx
+        .send(InternalEvent::UserSocketStatus(format!(
+            "Replay complete for {} ({}) [{}]",
+            contract.name,
+            bar_type.label(),
+            cfg.replay_engine_mode.label()
+        )))
+        .map_err(|error| anyhow::anyhow!("replay status delivery failed: {error:?}"))?;
     Ok(())
 }
 
@@ -353,7 +367,7 @@ pub(super) fn replay_history_loaded(
 
 #[cfg(feature = "replay")]
 async fn process_replay_bar(
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     bar: &Bar,
     ticks: Vec<ReplayMarketTick>,
     dom_updates: Vec<ReplayMarketDom>,
@@ -376,7 +390,7 @@ async fn process_replay_bar(
 
 #[cfg(feature = "replay")]
 async fn configure_replay_broker(
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     mode: ReplayEngineMode,
     fill_model: ReplayFillModel,
     latency: ReplayLatencyConfig,
@@ -401,22 +415,27 @@ async fn configure_replay_broker(
 async fn emit_replay_market_update(
     mode: ReplayEngineMode,
     update: MarketUpdate,
-    internal_tx: &UnboundedSender<InternalEvent>,
+    internal_tx: &InternalEventSender,
 ) -> Result<()> {
     if mode == ReplayEngineMode::Legacy {
-        internal_tx
-            .send(InternalEvent::Market(update))
-            .map_err(|_| anyhow::anyhow!("replay service is unavailable"))?;
+        if !send_market_internal_event(internal_tx, InternalEvent::Market(update)).await {
+            return Err(anyhow::anyhow!("replay service is unavailable"));
+        }
         return Ok(());
     }
 
     let (response_tx, response_rx) = oneshot::channel();
-    internal_tx
-        .send(InternalEvent::ReplayMarket {
+    if !send_market_internal_event(
+        internal_tx,
+        InternalEvent::ReplayMarket {
             update,
             response_tx,
-        })
-        .map_err(|_| anyhow::anyhow!("replay service is unavailable"))?;
+        },
+    )
+    .await
+    {
+        return Err(anyhow::anyhow!("replay service is unavailable"));
+    }
     response_rx
         .await
         .map_err(|_| anyhow::anyhow!("replay strategy evaluation was cancelled"))?
@@ -425,7 +444,7 @@ async fn emit_replay_market_update(
 
 #[cfg(feature = "replay")]
 async fn drain_replay_broker(
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     market_ts_ns: Option<i64>,
     evaluation_id: Option<u64>,
 ) -> Result<()> {

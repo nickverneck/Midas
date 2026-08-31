@@ -160,8 +160,13 @@ pub(super) async fn flatten_selected_contract(
         return Ok(());
     }
 
-    harness.send(ServiceCommand::ManualOrder {
-        action: ManualOrderAction::Close,
+    // Keep profiler cleanup on the same automated target-position path as the
+    // execution test. This avoids requiring the optional manual-orders build
+    // feature and prevents the profiler from depending on a UI-only command.
+    harness.send(ServiceCommand::SetTargetPosition {
+        target_qty: 0,
+        automated: true,
+        reason: reason_tag.to_string(),
     })?;
     let _ = wait_for_settled_state(
         harness,

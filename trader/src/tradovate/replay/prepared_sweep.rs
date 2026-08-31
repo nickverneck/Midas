@@ -15,6 +15,7 @@ use crate::broker::{
     ReplaySignalDiagnostic, transform_bars_for_candle_mode,
 };
 use crate::config::AppConfig;
+use crate::strategies::adx::adx_series;
 use crate::strategies::ema_cross::{EmaCrossConfig, EmaCrossExecutionState};
 use crate::strategies::hma_cross::{hma_series_incremental, hma_warmup_bars};
 use crate::strategies::markov_orientation_gate::{
@@ -39,6 +40,7 @@ pub(crate) struct PreparedEmaSweepInputs {
     pub(crate) signal_bars: Arc<[Bar]>,
     traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
     hma_traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
+    adx_series: Arc<BTreeMap<usize, Arc<[f64]>>>,
     pub(crate) protection: Arc<BarProtectionIndex>,
 }
 
@@ -331,21 +333,114 @@ pub(crate) fn prepare_ema_sweep_inputs(
     let mut periods = HashSet::new();
     for child in children {
         if child.resolved_strategy.kind == StrategyKind::Native
-            && child.resolved_strategy.native_strategy
-                == crate::strategy::NativeStrategyKind::EmaCross
+            && matches!(
+                child.resolved_strategy.native_strategy,
+                crate::strategy::NativeStrategyKind::EmaCross
+                    | crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross
+            )
         {
-            periods.insert(child.resolved_strategy.native_ema.fast_length.max(1));
-            periods.insert(child.resolved_strategy.native_ema.slow_length.max(1));
+            let (fast_length, slow_length) = if child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross
+            {
+                (
+                    child
+                        .resolved_strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .fast_length
+                        .max(1),
+                    child
+                        .resolved_strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .slow_length
+                        .max(1),
+                )
+            } else {
+                (
+                    child.resolved_strategy.native_ema.fast_length.max(1),
+                    child.resolved_strategy.native_ema.slow_length.max(1),
+                )
+            };
+            periods.insert(fast_length);
+            periods.insert(slow_length);
         }
     }
     let mut hma_periods = HashSet::new();
     for child in children {
         if child.resolved_strategy.kind == StrategyKind::Native
-            && child.resolved_strategy.native_strategy
-                == crate::strategy::NativeStrategyKind::HmaCross
+            && matches!(
+                child.resolved_strategy.native_strategy,
+                crate::strategy::NativeStrategyKind::HmaCross
+                    | crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+            )
         {
-            hma_periods.insert(child.resolved_strategy.native_hma_cross.fast_length.max(1));
-            hma_periods.insert(child.resolved_strategy.native_hma_cross.slow_length.max(1));
+            let (fast_length, slow_length) = if child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+            {
+                (
+                    child
+                        .resolved_strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .fast_length
+                        .max(1),
+                    child
+                        .resolved_strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .slow_length
+                        .max(1),
+                )
+            } else {
+                (
+                    child.resolved_strategy.native_hma_cross.fast_length.max(1),
+                    child.resolved_strategy.native_hma_cross.slow_length.max(1),
+                )
+            };
+            hma_periods.insert(fast_length);
+            hma_periods.insert(slow_length);
+        }
+    }
+    let mut adx_periods = HashSet::new();
+    for child in children {
+        if child.resolved_strategy.kind != StrategyKind::Native {
+            continue;
+        }
+        match child.resolved_strategy.native_strategy {
+            crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+                if child
+                    .resolved_strategy
+                    .native_volume_hma_cross
+                    .adaptive_gate
+                    .is_adx_only_fast_path() =>
+            {
+                adx_periods.insert(
+                    child
+                        .resolved_strategy
+                        .native_volume_hma_cross
+                        .adaptive_gate
+                        .adx_length
+                        .max(1),
+                );
+            }
+            crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross
+                if child
+                    .resolved_strategy
+                    .native_volume_ema_cross
+                    .adaptive_gate
+                    .is_adx_only_fast_path() =>
+            {
+                adx_periods.insert(
+                    child
+                        .resolved_strategy
+                        .native_volume_ema_cross
+                        .adaptive_gate
+                        .adx_length
+                        .max(1),
+                );
+            }
+            _ => {}
         }
     }
     if periods.is_empty() && hma_periods.is_empty() {
@@ -373,11 +468,34 @@ pub(crate) fn prepare_ema_sweep_inputs(
     let mut pairs = HashSet::new();
     for child in children {
         if child.resolved_strategy.kind == StrategyKind::Native
-            && child.resolved_strategy.native_strategy
-                == crate::strategy::NativeStrategyKind::EmaCross
+            && matches!(
+                child.resolved_strategy.native_strategy,
+                crate::strategy::NativeStrategyKind::EmaCross
+                    | crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross
+            )
         {
-            let config = &child.resolved_strategy.native_ema;
-            pairs.insert((config.fast_length.max(1), config.slow_length.max(1)));
+            let (fast_length, slow_length) = if child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross
+            {
+                (
+                    child
+                        .resolved_strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .fast_length
+                        .max(1),
+                    child
+                        .resolved_strategy
+                        .native_volume_ema_cross
+                        .ema_cross
+                        .slow_length
+                        .max(1),
+                )
+            } else {
+                let config = &child.resolved_strategy.native_ema;
+                (config.fast_length.max(1), config.slow_length.max(1))
+            };
+            pairs.insert((fast_length, slow_length));
         }
     }
     for (fast_length, slow_length) in pairs {
@@ -418,11 +536,36 @@ pub(crate) fn prepare_ema_sweep_inputs(
     let mut hma_pairs = HashSet::new();
     for child in children {
         if child.resolved_strategy.kind == StrategyKind::Native
-            && child.resolved_strategy.native_strategy
-                == crate::strategy::NativeStrategyKind::HmaCross
+            && matches!(
+                child.resolved_strategy.native_strategy,
+                crate::strategy::NativeStrategyKind::HmaCross
+                    | crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+            )
         {
-            let config = &child.resolved_strategy.native_hma_cross;
-            hma_pairs.insert((config.fast_length.max(1), config.slow_length.max(1)));
+            let (fast_length, slow_length) = if child.resolved_strategy.native_strategy
+                == crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+            {
+                (
+                    child
+                        .resolved_strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .fast_length
+                        .max(1),
+                    child
+                        .resolved_strategy
+                        .native_volume_hma_cross
+                        .hma_cross
+                        .slow_length
+                        .max(1),
+                )
+            } else {
+                (
+                    child.resolved_strategy.native_hma_cross.fast_length.max(1),
+                    child.resolved_strategy.native_hma_cross.slow_length.max(1),
+                )
+            };
+            hma_pairs.insert((fast_length, slow_length));
         }
     }
     for (fast_length, slow_length) in hma_pairs {
@@ -449,6 +592,37 @@ pub(crate) fn prepare_ema_sweep_inputs(
             )),
         );
     }
+    // The service-backed replay strategy sees the capped market history, not
+    // the complete source forever. ADX is therefore rebuilt from the current
+    // retained window after a cap slide. Only crossover rows need a gate
+    // value, so materialize those rolling-window endpoints instead of doing
+    // an O(rows * retained_window) calculation for every bar.
+    let gate_cross_indices = traces
+        .values()
+        .chain(hma_traces.values())
+        .flat_map(|trace| {
+            trace
+                .raw_buy
+                .iter()
+                .zip(trace.raw_sell.iter())
+                .enumerate()
+                .filter_map(|(index, (&buy, &sell))| (buy || sell).then_some(index))
+        })
+        .collect::<HashSet<_>>();
+    let mut prepared_adx_series = BTreeMap::new();
+    for period in adx_periods {
+        let mut values = vec![f64::NAN; signal_bars.len()];
+        for index in &gate_cross_indices {
+            let end = index.saturating_add(1).min(signal_bars.len());
+            let start = end.saturating_sub(crate::tradovate::ENGINE_MARKET_BAR_LIMIT);
+            values[*index] = adx_series(&signal_bars[start..end], period)
+                .adx
+                .last()
+                .copied()
+                .unwrap_or(f64::NAN);
+        }
+        prepared_adx_series.insert(period, Arc::from(values.into_boxed_slice()));
+    }
     Ok(PreparedEmaSweepInputs {
         frames: frames.clone(),
         replay,
@@ -456,6 +630,7 @@ pub(crate) fn prepare_ema_sweep_inputs(
         signal_bars,
         traces: Arc::new(traces),
         hma_traces: Arc::new(hma_traces),
+        adx_series: Arc::new(prepared_adx_series),
         protection: Arc::new(BarProtectionIndex::new(&frames.bars)),
     })
 }
@@ -620,7 +795,13 @@ impl PreparedEmaSweepInputs {
 /// mapping the HMA protection fields into the existing EMA-shaped config;
 /// this adapter is replay-only and never reaches live strategy dispatch.
 pub(crate) fn prepared_hma_child_as_ema(child: &ReplaySweepChildSpec) -> ReplaySweepChildSpec {
-    let hma = &child.resolved_strategy.native_hma_cross;
+    let hma = if child.resolved_strategy.native_strategy
+        == crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+    {
+        &child.resolved_strategy.native_volume_hma_cross.hma_cross
+    } else {
+        &child.resolved_strategy.native_hma_cross
+    };
     let mut prepared = child.clone();
     prepared.resolved_strategy.native_strategy = crate::strategy::NativeStrategyKind::EmaCross;
     prepared.resolved_strategy.native_ema = EmaCrossConfig {
@@ -633,6 +814,19 @@ pub(crate) fn prepared_hma_child_as_ema(child: &ReplaySweepChildSpec) -> ReplayS
         trail_trigger_ticks: hma.trail_trigger_ticks,
         trail_offset_ticks: hma.trail_offset_ticks,
     };
+    prepared
+}
+
+/// Map the EMA embedded in the volume-adaptive EMA wrapper into the prepared
+/// EMA kernel. The wrapper's volume and adaptive-gate settings are handled by
+/// the caller; this adapter is replay-only and never reaches live dispatch.
+pub(crate) fn prepared_volume_ema_child_as_ema(
+    child: &ReplaySweepChildSpec,
+) -> ReplaySweepChildSpec {
+    let ema = &child.resolved_strategy.native_volume_ema_cross.ema_cross;
+    let mut prepared = child.clone();
+    prepared.resolved_strategy.native_strategy = crate::strategy::NativeStrategyKind::EmaCross;
+    prepared.resolved_strategy.native_ema = ema.clone();
     prepared
 }
 
@@ -731,6 +925,51 @@ pub(crate) fn run_prepared_ema_candidate(
     replay: &ReplayState,
     config: &AppConfig,
     child: &ReplaySweepChildSpec,
+) -> Result<PreparedSweepRun> {
+    run_prepared_ema_candidate_with_adx_gate(inputs, replay, config, child, None)
+}
+
+/// Run a volume-adaptive EMA candidate through the prepared kernel when its
+/// only enabled orientation feature is the causal ADX vote. The embedded EMA
+/// remains the trigger and the base orientation is XORed with the ADX vote,
+/// matching the native wrapper semantics.
+pub(crate) fn run_prepared_volume_ema_candidate(
+    inputs: &PreparedEmaSweepInputs,
+    replay: &ReplayState,
+    config: &AppConfig,
+    child: &ReplaySweepChildSpec,
+) -> Result<PreparedSweepRun> {
+    let volume_ema = &child.resolved_strategy.native_volume_ema_cross;
+    let adx_gate = if volume_ema.adaptive_gate.enabled {
+        let values = inputs
+            .adx_series
+            .get(&volume_ema.adaptive_gate.adx_length.max(1))
+            .context("prepared ADX series missing")?;
+        Some(PreparedAdxGate {
+            values,
+            invert_below: volume_ema.adaptive_gate.invert_below_adx,
+            invert_above: volume_ema.adaptive_gate.invert_above_adx,
+        })
+    } else {
+        None
+    };
+    let prepared_child = prepared_volume_ema_child_as_ema(child);
+    run_prepared_ema_candidate_with_adx_gate(inputs, replay, config, &prepared_child, adx_gate)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedAdxGate<'a> {
+    values: &'a [f64],
+    invert_below: f64,
+    invert_above: Option<f64>,
+}
+
+fn run_prepared_ema_candidate_with_adx_gate(
+    inputs: &PreparedEmaSweepInputs,
+    replay: &ReplayState,
+    config: &AppConfig,
+    child: &ReplaySweepChildSpec,
+    adx_gate: Option<PreparedAdxGate<'_>>,
 ) -> Result<PreparedSweepRun> {
     inputs
         .supports(replay, config, child)
@@ -848,10 +1087,22 @@ pub(crate) fn run_prepared_ema_candidate(
                 .as_mut()
                 .map(|gate| gate.observe_cross(&signal_bars[..=signal_index], direction, tick_size))
         });
-        let effective_inverted = markov_decision
-            .as_ref()
-            .and_then(|decision| decision.effective_inverted)
-            .unwrap_or(ema.inverted);
+        let effective_inverted = adx_gate
+            .and_then(|gate| gate.values.get(signal_index).copied())
+            .filter(|value| value.is_finite())
+            .map(|value| {
+                let gate_inverted = adx_gate.is_some_and(|gate| {
+                    value < gate.invert_below
+                        || gate.invert_above.is_some_and(|threshold| value > threshold)
+                });
+                ema.inverted ^ gate_inverted
+            })
+            .unwrap_or_else(|| {
+                markov_decision
+                    .as_ref()
+                    .and_then(|decision| decision.effective_inverted)
+                    .unwrap_or(ema.inverted)
+            });
         let (effective_buy, effective_sell) = if markov_decision
             .as_ref()
             .is_some_and(|decision| decision.effective_inverted.is_none())
@@ -1062,6 +1313,43 @@ pub(crate) fn run_prepared_hma_candidate(
     let mut prepared_inputs = inputs.clone();
     prepared_inputs.traces = inputs.hma_traces.clone();
     run_prepared_ema_candidate(&prepared_inputs, replay, config, &prepared_child)
+}
+
+/// Run the ADX-only orientation gate on a volume-adaptive HMA candidate in
+/// the prepared replay kernel. The wrapper's volume and secondary EMA gates
+/// are intentionally rejected by the sweep runner for this path; the ADX
+/// values are precomputed once and the threshold is applied only at raw HMA
+/// crossover bars, matching the native wrapper's causal behavior.
+pub(crate) fn run_prepared_volume_hma_adx_candidate(
+    inputs: &PreparedEmaSweepInputs,
+    replay: &ReplayState,
+    config: &AppConfig,
+    child: &ReplaySweepChildSpec,
+) -> Result<PreparedSweepRun> {
+    let volume_hma = &child.resolved_strategy.native_volume_hma_cross;
+    let hma = &volume_hma.hma_cross;
+    inputs
+        .hma_traces
+        .get(&(hma.fast_length.max(1), hma.slow_length.max(1)))
+        .context("prepared HMA crossover trace missing")?;
+    let adx_values = inputs
+        .adx_series
+        .get(&volume_hma.adaptive_gate.adx_length.max(1))
+        .context("prepared ADX series missing")?;
+    let prepared_child = prepared_hma_child_as_ema(child);
+    let mut prepared_inputs = inputs.clone();
+    prepared_inputs.traces = inputs.hma_traces.clone();
+    run_prepared_ema_candidate_with_adx_gate(
+        &prepared_inputs,
+        replay,
+        config,
+        &prepared_child,
+        Some(PreparedAdxGate {
+            values: adx_values,
+            invert_below: volume_hma.adaptive_gate.invert_below_adx,
+            invert_above: volume_hma.adaptive_gate.invert_above_adx,
+        }),
+    )
 }
 
 fn prepared_history_loaded(replay: &ReplayState, config: &AppConfig, bars: &[Bar]) -> usize {

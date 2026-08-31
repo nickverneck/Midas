@@ -1,5 +1,6 @@
 use super::*;
 
+pub(super) use crate::broker::{SERVICE_EVENT_QUEUE_CAPACITY, service_event_channel};
 pub(super) use serde_json::json;
 pub(super) use std::collections::BTreeMap;
 

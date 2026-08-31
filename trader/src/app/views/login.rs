@@ -114,11 +114,12 @@ impl App {
     }
 
     pub(in crate::app) fn login_status_lines(&self) -> Vec<Line<'static>> {
+        let config = self.current_config();
         let (rest_url, user_ws, market_ws) = match (self.selected_broker, self.form.env) {
-            (BrokerKind::Tradovate, env) => (
-                env.rest_url().to_string(),
-                Some(env.user_ws_url().to_string()),
-                Some(env.market_ws_url().to_string()),
+            (BrokerKind::Tradovate, _) => (
+                config.broker_rest_url(),
+                Some(config.broker_user_ws_url()),
+                Some(config.broker_market_ws_url()),
             ),
             (BrokerKind::Ironbeam, TradingEnvironment::Sim) => (
                 "https://demo.ironbeamapi.com/v2".to_string(),

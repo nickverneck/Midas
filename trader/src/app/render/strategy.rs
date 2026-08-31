@@ -4,7 +4,7 @@ impl App {
     pub(in crate::app) fn handle_strategy_key(
         &mut self,
         key: KeyEvent,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        cmd_tx: &ServiceCommandSender,
     ) {
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {

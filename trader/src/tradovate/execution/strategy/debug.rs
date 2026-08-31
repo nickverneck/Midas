@@ -5,7 +5,7 @@ use crate::strategy_debug::{StrategyDecisionDebug, format_strategy_decision};
 /// closure is intentional: Quiet mode must avoid formatting and allocating
 /// the message before it reaches the event channel.
 pub(crate) fn emit_debug_log(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     message: impl FnOnce() -> String,
 ) {
@@ -20,7 +20,7 @@ pub(crate) fn emit_debug_log(
 /// the producer so they do not allocate, traverse the IPC queue, or become
 /// TUI log entries during high-frequency range-bar runs.
 pub(crate) fn emit_operational_status(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     message: impl FnOnce() -> String,
 ) {
@@ -218,7 +218,7 @@ pub(crate) fn format_tradovate_strategy_decision(
 }
 
 pub(super) fn emit_guarded_strategy_eval_debug(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     decision: &str,
     signal: StrategySignal,

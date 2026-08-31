@@ -60,7 +60,7 @@ impl App {
     pub(in crate::app) fn handle_replay_key(
         &mut self,
         key: KeyEvent,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        cmd_tx: &ServiceCommandSender,
     ) {
         #[cfg(feature = "replay")]
         if self.replay_view == ReplayView::Downloader {
@@ -472,7 +472,7 @@ impl App {
         }
     }
 
-    fn start_replay_mode(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    fn start_replay_mode(&mut self, cmd_tx: &ServiceCommandSender) {
         if !self.replay_dataset_available() {
             self.status = format!(
                 "Replay dataset missing: no matching cache and no local file at {}",

@@ -172,6 +172,11 @@ pub(crate) async fn download_replay_data(
     config: &AppConfig,
     args: ReplayDownloadArgs,
 ) -> Result<()> {
+    if config.simulation_proxy.enabled {
+        bail!(
+            "replay downloads are unavailable in simulation_proxy mode; use the standalone proxy fixture"
+        );
+    }
     #[cfg(not(feature = "replay"))]
     {
         let _ = (config, args);

@@ -57,6 +57,7 @@ fn strategy_owned_bracket_with_matching_params_counts_as_settled() {
     ];
 
     assert!(analysis::probe_is_settled(&probe, 1, 1));
+    assert!(analysis::probe_findings(&probe, 1).is_empty());
 }
 
 #[test]
@@ -90,4 +91,30 @@ fn merge_probe_order_detail_backfills_qty_from_rest_version() {
     );
 
     assert_eq!(probe.selected_working_orders[0].order_qty, Some(1));
+}
+
+#[test]
+fn merge_probe_does_not_count_a_filled_parent_as_an_active_strategy_order() {
+    let mut probe = base_probe();
+    merge_probe_order_detail(
+        &mut probe,
+        ExecutionProbeOrder {
+            order_id: Some(1000),
+            order_strategy_id: Some(77),
+            cl_ord_id: Some("midas-entry".to_string()),
+            order_type: Some("Market".to_string()),
+            action: Some("Buy".to_string()),
+            order_qty: Some(1),
+            price: Some(5000.0),
+            stop_price: None,
+            status: Some("Filled".to_string()),
+        },
+    );
+
+    assert!(probe.linked_active_orders.is_empty());
+    assert!(
+        !analysis::probe_findings(&probe, 1)
+            .iter()
+            .any(|finding| finding.contains("linked strategy order count"))
+    );
 }

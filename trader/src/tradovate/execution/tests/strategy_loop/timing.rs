@@ -4,7 +4,7 @@ use super::support::*;
 #[test]
 fn quiet_mode_suppresses_routine_strategy_status_rows() {
     let mut session = test_session();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.cfg.log_mode = crate::config::LogMode::Quiet;
 
     emit_operational_status(&event_tx, &session, || "routine strategy row".to_string());
@@ -22,7 +22,7 @@ fn quiet_mode_suppresses_routine_strategy_status_rows() {
 fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_execution_path = NativeExecutionPath::SimpleDiagnostic;
@@ -139,7 +139,7 @@ fn live_signal_diagnostics_remain_disabled_even_when_enabled() {
 fn simple_strategy_does_not_recheck_revised_closed_bar_with_same_timestamp() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_execution_path = NativeExecutionPath::SimpleDiagnostic;
@@ -316,7 +316,7 @@ fn closed_bar_timing_uses_reported_t_minus_one_when_forming_bar_is_present() {
 fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;

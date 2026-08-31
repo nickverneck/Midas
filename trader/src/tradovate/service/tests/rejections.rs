@@ -50,9 +50,9 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
     );
 
     let mut state = test_state(session);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::BrokerOrderFailed(BrokerOrderFailure {
@@ -130,9 +130,9 @@ async fn order_strategy_submit_failure_debug_logs_request_and_target() {
     });
 
     let mut state = test_state(session);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::OrderStrategyFailed(BrokerOrderStrategyFailure {
@@ -261,9 +261,9 @@ async fn asynchronous_command_rejection_reports_reason_and_clears_pending_strate
     ];
 
     let mut state = test_state(session);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::UserEntities(entities.clone()),
@@ -408,7 +408,7 @@ fn gc_rejection_does_not_affect_armed_es_strategy() {
     assert!(!rejection.affects_active_submission);
     assert!(!rejection.affects_active_strategy);
     assert!(!rejection.matches_selected_instrument);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
 
     super::super::internal::apply_broker_rejection(&mut session, &event_tx, rejection);
 

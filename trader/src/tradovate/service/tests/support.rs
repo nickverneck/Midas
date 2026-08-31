@@ -53,6 +53,7 @@ pub(super) fn test_state(session: SessionState) -> ServiceState {
     ServiceState {
         client: Client::builder().build().expect("client"),
         broker_tx,
+        broker_task: None,
         replay_speed_tx,
         replay_speed: ReplaySpeed::default(),
         replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
@@ -61,10 +62,12 @@ pub(super) fn test_state(session: SessionState) -> ServiceState {
         user_task: None,
         market_task: None,
         rest_probe_task: None,
+        snapshot_task: None,
         replay_lookup_job: None,
         replay_download_job: None,
         latency: LatencySnapshot::default(),
         snapshot_generation: 0,
         snapshot_revision: 0,
+        snapshot_refresh_pending: false,
     }
 }

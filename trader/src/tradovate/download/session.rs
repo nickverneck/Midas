@@ -149,6 +149,11 @@ pub async fn prepare_replay_download_session_after_auth<F>(
 where
     F: FnOnce(),
 {
+    if cfg.simulation_proxy.enabled {
+        bail!(
+            "replay downloads are unavailable in simulation_proxy mode; use the standalone proxy fixture"
+        );
+    }
     let client = Client::new();
     let tokens = authenticate(&client, cfg).await?;
     on_authenticated();

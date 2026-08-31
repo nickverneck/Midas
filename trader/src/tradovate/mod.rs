@@ -2,11 +2,14 @@
 use crate::broker::BarKind;
 use crate::broker::{
     AccountInfo, AccountSnapshot, Bar, BarType, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, EngineHistoryFill, EngineHistorySnapshot, ExecutionProbeManagedProtection,
-    ExecutionProbeOrder, ExecutionProbeSnapshot, InstrumentSessionProfile, InstrumentSessionWindow,
-    LatencySnapshot, ManualOrderAction, MarketHistoryUpdate, MarketSnapshot,
-    ReplayDownloadOperationId, ReplaySpeed, ReplayWindowSnapshot, ServiceCommand, ServiceEvent,
-    SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
+    ContractSuggestion, EngineHistoryFill, EngineHistorySnapshot, EngineInspectionSnapshot,
+    ExecutionProbeManagedProtection, ExecutionProbeOrder, ExecutionProbeSnapshot,
+    InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
+    MarketHistoryUpdate, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed,
+    ReplayWindowSnapshot, SERVICE_COMMAND_QUEUE_CAPACITY, SERVICE_EVENT_QUEUE_CAPACITY,
+    ServiceCommand, ServiceCommandReceiver, ServiceEvent, ServiceEventSender, SessionKind,
+    TradeMarker, TradeMarkerSide, infer_session_profile, service_command_channel,
+    service_event_channel,
 };
 use crate::broker::{ReplayBarFrame, ReplayDomLevel, ReplayFrameSet, ReplayMarketDom};
 #[cfg(any(feature = "replay", test))]

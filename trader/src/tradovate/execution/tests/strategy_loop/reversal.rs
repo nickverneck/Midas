@@ -5,7 +5,7 @@ use super::support::*;
 fn staged_reversal_waits_for_broker_path_clear_before_entry() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;
@@ -49,7 +49,7 @@ fn staged_reversal_waits_for_broker_path_clear_before_entry() {
 fn staged_reversal_submits_broker_owned_entry_after_flat_path_clear() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_reversal_mode = NativeReversalMode::FlattenConfirmEnter;

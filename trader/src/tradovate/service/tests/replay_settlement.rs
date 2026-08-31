@@ -91,9 +91,9 @@ async fn replay_protected_exit_is_reported_and_releases_guarded_state() {
     ];
 
     let mut state = test_state(session);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::UserEntities(entities),

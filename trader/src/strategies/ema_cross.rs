@@ -93,6 +93,19 @@ pub struct EmaCrossExecutionState {
     indicator: EmaCrossIndicatorState,
 }
 
+/// Allocation-free counters for auditing the streaming EMA path.
+///
+/// These are deliberately cumulative saturating counters rather than an
+/// event log. They can be sampled by tests/diagnostics without retaining bars
+/// or creating another history structure in the execution state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmaIndicatorAuditCounters {
+    pub incremental_pushes: u64,
+    pub full_rebuilds: u64,
+    pub correction_rebuilds: u64,
+    pub idle_evaluations: u64,
+}
+
 /// Recursive EMA state used by the replay streaming evaluator.
 ///
 /// The legacy evaluator intentionally remains available on
@@ -120,6 +133,7 @@ struct EmaCrossIndicatorState {
     history_fingerprint: Option<u64>,
     history_leading_power: u64,
     source_update_sequence: Option<u64>,
+    audit: EmaIndicatorAuditCounters,
 }
 
 const HISTORY_HASH_OFFSET: u64 = 0xcbf29ce484222325;
@@ -178,16 +192,27 @@ impl EmaCrossIndicatorState {
         self.source_update_sequence = None;
     }
 
-    fn rebuild(&mut self, bars: &[Bar]) {
+    fn rebuild(&mut self, bars: &[Bar], correction: bool) {
+        self.audit.full_rebuilds = self.audit.full_rebuilds.saturating_add(1);
+        if correction {
+            self.audit.correction_rebuilds = self.audit.correction_rebuilds.saturating_add(1);
+        }
         let fast_length = self.fast_length;
         let slow_length = self.slow_length;
         self.reset(fast_length, slow_length);
         for bar in bars {
-            self.push(bar);
+            self.push_inner(bar, false);
         }
     }
 
     fn push(&mut self, bar: &Bar) {
+        self.push_inner(bar, true);
+    }
+
+    fn push_inner(&mut self, bar: &Bar, count_incremental_push: bool) {
+        if count_incremental_push {
+            self.audit.incremental_pushes = self.audit.incremental_pushes.saturating_add(1);
+        }
         if self.first_bar.is_none() {
             self.first_bar = Some(bar.clone());
         }
@@ -299,6 +324,7 @@ impl EmaCrossIndicatorState {
         }
         self.first_bar = Some(new_first.clone());
         self.last_bar = Some(latest.clone());
+        self.audit.incremental_pushes = self.audit.incremental_pushes.saturating_add(1);
         true
     }
 
@@ -378,7 +404,22 @@ impl EmaCrossIndicatorState {
         self.fast_weighted_tail = Some(fast_tail);
         self.slow_weighted_tail = Some(slow_tail);
         self.last_bar = Some(latest.clone());
+        self.audit.incremental_pushes = self.audit.incremental_pushes.saturating_add(1);
         true
+    }
+}
+
+impl EmaCrossExecutionState {
+    /// Return allocation-free audit counters for the streaming indicator.
+    pub fn audit_counters(&self) -> EmaIndicatorAuditCounters {
+        self.indicator.audit
+    }
+
+    /// The streaming EMA retains only the first and latest bars needed for
+    /// correction detection; the caller-owned market window is not copied.
+    pub fn retained_indicator_bar_count(&self) -> usize {
+        usize::from(self.indicator.first_bar.is_some())
+            + usize::from(self.indicator.last_bar.is_some())
     }
 }
 
@@ -602,7 +643,7 @@ impl EmaCrossConfig {
                     )))
         {
             state.reset(self.fast_length, self.slow_length);
-            state.rebuild(bars);
+            state.rebuild(bars, !config_changed);
         } else if !hinted_update_already_applied {
             let latest = bars.last().expect("bars is not empty");
             let same_latest = state.last_bar.as_ref() == Some(latest);
@@ -644,10 +685,12 @@ impl EmaCrossConfig {
                         })
                 };
             if same_latest && !history_matches {
-                state.rebuild(bars);
+                state.rebuild(bars, true);
+            } else if same_latest {
+                state.audit.idle_evaluations = state.audit.idle_evaluations.saturating_add(1);
             } else if same_timestamp_revision {
                 if !state.revise_last(latest) {
-                    state.rebuild(bars);
+                    state.rebuild(bars, true);
                 }
             } else if !same_latest && appended {
                 let first_changed = state.first_bar.as_ref() != bars.first();
@@ -677,21 +720,23 @@ impl EmaCrossConfig {
                 if expected_fingerprint
                     .is_some_and(|expected| Some(expected) != incoming_fingerprint)
                 {
-                    state.rebuild(bars);
+                    state.rebuild(bars, true);
                 } else if first_changed {
                     let Some(first) = bars.first() else {
-                        state.rebuild(bars);
+                        state.rebuild(bars, true);
                         return self.evaluate_streaming(runtime, bars, current_side);
                     };
                     if !state.slide_and_push(first, latest) {
-                        state.rebuild(bars);
+                        state.rebuild(bars, true);
                     }
                 } else {
                     state.push(latest);
                 }
             } else if !same_latest {
-                state.rebuild(bars);
+                state.rebuild(bars, true);
             }
+        } else {
+            state.audit.idle_evaluations = state.audit.idle_evaluations.saturating_add(1);
         }
         if let Some(sequence) = source_update_sequence {
             state.source_update_sequence = Some(sequence);
@@ -1075,6 +1120,61 @@ mod tests {
     }
 
     #[test]
+    fn streaming_ema_state_and_audit_remain_bounded_over_long_append_run() {
+        let config = EmaCrossConfig {
+            fast_length: 10,
+            slow_length: 30,
+            ..EmaCrossConfig::default()
+        };
+        let bars = (0..12_000)
+            .map(|idx| bar(idx + 1, 100.0 + (idx as f64 * 0.17).sin()))
+            .collect::<Vec<_>>();
+        let mut runtime = EmaCrossExecutionState::default();
+
+        let seed_len = 64;
+        let _ = config.evaluate_streaming_with_market_update(
+            &mut runtime,
+            &bars[..seed_len],
+            None,
+            Some(1),
+            MarketHistoryUpdate::Snapshot,
+        );
+        for end in seed_len + 1..=bars.len() {
+            let _ = config.evaluate_streaming_with_market_update(
+                &mut runtime,
+                &bars[..end],
+                None,
+                Some(end as u64),
+                MarketHistoryUpdate::Append,
+            );
+        }
+
+        let audit = runtime.audit_counters();
+        assert!(runtime.retained_indicator_bar_count() <= 2);
+        assert!(audit.incremental_pushes > 0);
+        assert_eq!(audit.full_rebuilds, 1);
+        assert_eq!(audit.correction_rebuilds, 0);
+
+        // A repeated snapshot is an idle/no-work evaluation, not another
+        // retained event or an indicator rebuild.
+        let before = runtime.audit_counters();
+        let _ = config.evaluate_streaming_with_market_update(
+            &mut runtime,
+            &bars,
+            None,
+            Some(bars.len() as u64),
+            MarketHistoryUpdate::Append,
+        );
+        let after = runtime.audit_counters();
+        assert_eq!(after.full_rebuilds, before.full_rebuilds);
+        assert_eq!(after.incremental_pushes, before.incremental_pushes);
+        assert_eq!(
+            after.idle_evaluations,
+            before.idle_evaluations.saturating_add(1)
+        );
+    }
+
+    #[test]
     fn hinted_append_path_matches_batch_without_window_scan() {
         let config = EmaCrossConfig {
             fast_length: 3,
@@ -1223,6 +1323,7 @@ mod tests {
         assert_eq!(actual.previous_slow_ema, expected.previous_slow_ema);
         assert_eq!(actual.fast_ema, expected.fast_ema);
         assert_eq!(actual.slow_ema, expected.slow_ema);
+        assert_eq!(runtime.audit_counters().correction_rebuilds, 1);
     }
 
     #[test]

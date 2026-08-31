@@ -1,5 +1,5 @@
 use super::*;
-use crate::strategies::hma_cross::{HmaCrossConfig, HmaCrossExecutionState};
+use crate::strategies::hma_cross::{HmaCalculationMode, HmaCrossConfig, HmaCrossExecutionState};
 
 /// Indicator values and gate inputs associated with one strategy evaluation.
 /// This is kept separate from the execution tuple so existing order paths can
@@ -85,10 +85,17 @@ pub(crate) fn snapshot_active_execution_strategy(
             }
         }
         NativeStrategyKind::HmaCross => {
-            let evaluation = session
-                .execution_config
-                .native_hma_cross
-                .evaluate(bars, current_side);
+            let config = session.execution_config.native_hma_cross.clone();
+            let evaluation = if config.calculation_mode == HmaCalculationMode::Incremental {
+                // Diagnostics may inspect a historical prefix. Use a bounded
+                // runtime clone so the live side tracker is not rewound, and
+                // use the same rolling implementation as execution instead
+                // of rebuilding both full HMA vectors.
+                let mut runtime = session.execution_runtime.hma_cross_execution.clone();
+                config.evaluate_current_cross(&mut runtime, bars, current_side)
+            } else {
+                config.evaluate(bars, current_side)
+            };
             StrategyEvaluationSnapshot {
                 indicator_name: "HMA",
                 previous_fast_indicator: evaluation.previous_fast_hma,
@@ -214,10 +221,17 @@ pub(crate) fn evaluate_active_execution_strategy(
             )
         }
         NativeStrategyKind::HmaCross => {
-            let evaluation = session
-                .execution_config
-                .native_hma_cross
-                .evaluate(bars, side_from_signed_qty(current_qty));
+            let config = session.execution_config.native_hma_cross.clone();
+            let current_side = side_from_signed_qty(current_qty);
+            let evaluation = if config.calculation_mode == HmaCalculationMode::Incremental {
+                // This helper is immutable because it is also used by the
+                // simple path. Clone only the bounded rolling state rather
+                // than allocating the full-history HMA vectors.
+                let mut runtime = session.execution_runtime.hma_cross_execution.clone();
+                config.evaluate_current_cross(&mut runtime, bars, current_side)
+            } else {
+                config.evaluate(bars, current_side)
+            };
             (
                 evaluation.signal,
                 evaluation.summary(),
@@ -291,6 +305,11 @@ pub(crate) fn evaluate_active_execution_strategy_since(
     let start_idx = after_ts
         .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
         .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let hma_config = session.execution_config.native_hma_cross.clone();
+    let mut hma_runtime = (session.execution_config.native_strategy
+        == NativeStrategyKind::HmaCross
+        && hma_config.calculation_mode == HmaCalculationMode::Incremental)
+        .then(|| session.execution_runtime.hma_cross_execution.clone());
     let mut latest = None;
     for idx in start_idx..bars.len() {
         let window = &bars[..=idx];
@@ -319,10 +338,11 @@ pub(crate) fn evaluate_active_execution_strategy_since(
                 )
             }
             NativeStrategyKind::HmaCross => {
-                let evaluation = session
-                    .execution_config
-                    .native_hma_cross
-                    .evaluate(window, current_side);
+                let evaluation = if let Some(runtime) = hma_runtime.as_mut() {
+                    hma_config.evaluate_current_cross(runtime, window, current_side)
+                } else {
+                    hma_config.evaluate(window, current_side)
+                };
                 (
                     evaluation.signal,
                     evaluation.summary(),

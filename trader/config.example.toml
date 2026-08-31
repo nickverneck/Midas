@@ -47,3 +47,11 @@ replay_fixed_latency_ms = 0
 replay_observed_latency_ms = []
 replay_latency_seed = 1
 replay_bar_protection_policy = "conservative"
+
+# Set this only when a local `trader-replay-proxy` is running.  Live mode
+# rejects this block, and only loopback URLs are accepted.
+[simulation_proxy]
+enabled = false
+rest_url = "http://127.0.0.1:18100/v1"
+user_ws_url = "ws://127.0.0.1:18101/v1/websocket"
+market_ws_url = "ws://127.0.0.1:18102/v1/websocket"

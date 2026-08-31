@@ -246,7 +246,7 @@ pub(crate) fn sync_active_execution_position(
 
 pub(crate) fn sync_execution_protection(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     _trailing_bar: Option<&Bar>,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {

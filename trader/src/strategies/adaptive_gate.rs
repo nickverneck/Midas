@@ -60,6 +60,210 @@ pub enum HigherTimeframeAverageKind {
     Hma,
 }
 
+/// Mutable state for the small streaming subset of the adaptive gate.
+///
+/// The replay/live HMA wrapper normally receives a retained bar slice on every
+/// evaluation.  Rebuilding a complete ADX series from that slice at every
+/// crossover is needlessly expensive, especially for range bars.  This state
+/// preserves the exact Wilder recurrence for the ADX-only configuration and
+/// falls back to a full rebuild when the retained window is not a simple
+/// append (for example, after a correction or window slide).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AdaptiveGateExecutionState {
+    adx: AdxExecutionState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AdxExecutionState {
+    length: usize,
+    bars_len: usize,
+    first_bar: Option<Bar>,
+    last_bar: Option<Bar>,
+    seed_tr: f64,
+    seed_plus: f64,
+    seed_minus: f64,
+    seed_valid: bool,
+    smooth_tr: Option<f64>,
+    smooth_plus: Option<f64>,
+    smooth_minus: Option<f64>,
+    dx_seed: Vec<f64>,
+    dx_seed_invalid: bool,
+    adx: Option<f64>,
+    plus_di: Option<f64>,
+    minus_di: Option<f64>,
+}
+
+impl AdxExecutionState {
+    fn reset(&mut self, length: usize) {
+        *self = Self {
+            length: length.max(1),
+            seed_valid: true,
+            ..Self::default()
+        };
+    }
+
+    fn rebuild(&mut self, bars: &[Bar], length: usize) {
+        self.reset(length);
+        for bar in bars {
+            self.push(bar);
+        }
+    }
+
+    fn update(&mut self, bars: &[Bar], length: usize) {
+        let length = length.max(1);
+        if bars.is_empty() {
+            self.reset(length);
+            return;
+        }
+
+        let latest = bars.last().expect("bars is not empty");
+        let unchanged = self.length == length
+            && self.bars_len == bars.len()
+            && self.first_bar.as_ref() == bars.first()
+            && self.last_bar.as_ref() == Some(latest);
+        if unchanged {
+            return;
+        }
+
+        let appended = self.length == length
+            && self.bars_len.saturating_add(1) == bars.len()
+            && self.first_bar.as_ref() == bars.first()
+            && self.last_bar.as_ref() == bars.get(bars.len().saturating_sub(2))
+            && self
+                .last_bar
+                .as_ref()
+                .is_some_and(|previous| latest.ts_ns > previous.ts_ns);
+        if appended {
+            self.push(latest);
+        } else {
+            self.rebuild(bars, length);
+        }
+    }
+
+    fn push(&mut self, bar: &Bar) {
+        let index = self.bars_len;
+        let length = self.length.max(1);
+        let (tr, plus_dm, minus_dm) = if index == 0 {
+            ((bar.high - bar.low).abs(), 0.0, 0.0)
+        } else if let Some(previous) = self.last_bar.as_ref() {
+            let values = [
+                bar.high,
+                bar.low,
+                bar.close,
+                previous.high,
+                previous.low,
+                previous.close,
+            ];
+            if values.iter().all(|value| value.is_finite()) {
+                let tr = (bar.high - bar.low)
+                    .abs()
+                    .max((bar.high - previous.close).abs())
+                    .max((bar.low - previous.close).abs());
+                let up_move = bar.high - previous.high;
+                let down_move = previous.low - bar.low;
+                let plus_dm = if up_move > down_move && up_move > 0.0 {
+                    up_move
+                } else {
+                    0.0
+                };
+                let minus_dm = if down_move > up_move && down_move > 0.0 {
+                    down_move
+                } else {
+                    0.0
+                };
+                (tr, plus_dm, minus_dm)
+            } else {
+                (f64::NAN, f64::NAN, f64::NAN)
+            }
+        } else {
+            (f64::NAN, f64::NAN, f64::NAN)
+        };
+
+        if index + 1 < length {
+            self.seed_valid &= tr.is_finite() && plus_dm.is_finite() && minus_dm.is_finite();
+            if self.seed_valid {
+                self.seed_tr += tr;
+                self.seed_plus += plus_dm;
+                self.seed_minus += minus_dm;
+            }
+        } else if index + 1 == length {
+            self.seed_valid &= tr.is_finite() && plus_dm.is_finite() && minus_dm.is_finite();
+            if self.seed_valid {
+                self.smooth_tr = Some(self.seed_tr + tr);
+                self.smooth_plus = Some(self.seed_plus + plus_dm);
+                self.smooth_minus = Some(self.seed_minus + minus_dm);
+            } else {
+                self.smooth_tr = None;
+                self.smooth_plus = None;
+                self.smooth_minus = None;
+            }
+        } else if let (Some(previous_tr), Some(previous_plus), Some(previous_minus)) =
+            (self.smooth_tr, self.smooth_plus, self.smooth_minus)
+        {
+            if tr.is_finite() && plus_dm.is_finite() && minus_dm.is_finite() {
+                let length = length as f64;
+                self.smooth_tr = Some(previous_tr - previous_tr / length + tr);
+                self.smooth_plus = Some(previous_plus - previous_plus / length + plus_dm);
+                self.smooth_minus = Some(previous_minus - previous_minus / length + minus_dm);
+            } else {
+                self.smooth_tr = None;
+                self.smooth_plus = None;
+                self.smooth_minus = None;
+            }
+        }
+
+        self.plus_di = None;
+        self.minus_di = None;
+        let dx = match (self.smooth_tr, self.smooth_plus, self.smooth_minus) {
+            (Some(smooth_tr), Some(smooth_plus), Some(smooth_minus))
+                if smooth_tr.is_finite()
+                    && smooth_tr > f64::EPSILON
+                    && smooth_plus.is_finite()
+                    && smooth_minus.is_finite() =>
+            {
+                let plus_di = 100.0 * smooth_plus / smooth_tr;
+                let minus_di = 100.0 * smooth_minus / smooth_tr;
+                self.plus_di = Some(plus_di);
+                self.minus_di = Some(minus_di);
+                let denominator = plus_di + minus_di;
+                (denominator > f64::EPSILON)
+                    .then_some(100.0 * (plus_di - minus_di).abs() / denominator)
+            }
+            _ => None,
+        };
+
+        if index + 1 >= length {
+            if let Some(dx) = dx.filter(|value| value.is_finite()) {
+                if self.adx.is_some() {
+                    let length = length as f64;
+                    self.adx = self
+                        .adx
+                        .map(|previous| (previous * (length - 1.0) + dx) / length);
+                } else if !self.dx_seed_invalid {
+                    self.dx_seed.push(dx);
+                    if self.dx_seed.len() == length {
+                        self.adx = Some(self.dx_seed.iter().sum::<f64>() / length as f64);
+                    }
+                }
+            } else if self.adx.is_none() {
+                self.dx_seed_invalid = true;
+            } else {
+                // The reference series cannot recover after a missing DX,
+                // because the next Wilder ADX value depends on the previous
+                // finite ADX. Preserve that behavior on the fast path.
+                self.adx = None;
+                self.dx_seed_invalid = true;
+            }
+        }
+
+        if self.first_bar.is_none() {
+            self.first_bar = Some(bar.clone());
+        }
+        self.last_bar = Some(bar.clone());
+        self.bars_len = self.bars_len.saturating_add(1);
+    }
+}
+
 impl Default for HigherTimeframeAverageKind {
     fn default() -> Self {
         Self::Ema
@@ -614,6 +818,51 @@ impl RegimeAdaptiveGateConfig {
             return Err("adaptive gate session window is invalid".into());
         }
         Ok(())
+    }
+
+    pub(crate) fn is_adx_only_fast_path(&self) -> bool {
+        self.enabled
+            && self.use_adx
+            && self.invert_confirmation_bars == 1
+            && self.normal_confirmation_bars == 1
+            && !self.use_relative_volume
+            && !self.use_atr_ratio
+            && !self.use_choppiness
+            && !self.use_directional_return
+            && !self.use_di_imbalance
+            && !self.use_ema_spread
+            && !self.use_ema_slope
+            && !self.use_directional_ema_gap
+            && !self.use_session_window
+            && !self.use_higher_timeframe_context
+    }
+
+    pub(crate) fn evaluate_adx_only_streaming(
+        &self,
+        state: &mut AdaptiveGateExecutionState,
+        bars: &[Bar],
+    ) -> RegimeAdaptiveGateEvaluation {
+        debug_assert!(self.is_adx_only_fast_path());
+        state.adx.update(bars, self.adx_length.max(1));
+        let adx = state.adx.adx;
+        let current_vote =
+            adx.map(|value| is_below_or_above(value, self.invert_below_adx, self.invert_above_adx));
+        let ready = current_vote.is_some();
+        let inverted = current_vote.unwrap_or(false);
+        RegimeAdaptiveGateEvaluation {
+            inverted,
+            ready,
+            confirmed: ready,
+            current_vote,
+            available_features: usize::from(ready),
+            inverted_votes: usize::from(inverted),
+            normal_votes: usize::from(ready && !inverted),
+            adx,
+            hold_reason: (self.hold_on_missing_features && !ready)
+                .then_some("adaptive_gate_missing_features"),
+            latest_ts_ns: bars.last().map(|bar| bar.ts_ns).unwrap_or_default(),
+            ..RegimeAdaptiveGateEvaluation::default()
+        }
     }
 
     /// Evaluate the gate at the latest bar.  Every intermediate decision is
@@ -1690,6 +1939,52 @@ mod tests {
         assert!(!first.inverted);
         assert!(!first.ready);
         assert!(!first.should_hold());
+    }
+
+    #[test]
+    fn streaming_adx_only_matches_prefix_reconstruction() {
+        let config = RegimeAdaptiveGateConfig {
+            enabled: true,
+            use_adx: true,
+            adx_length: 5,
+            invert_below_adx: 25.0,
+            ..RegimeAdaptiveGateConfig::default()
+        };
+        assert!(config.is_adx_only_fast_path());
+        let bars = (0..80)
+            .map(|index| {
+                let close = 100.0 + (index as f64 * 0.37).sin() * 3.0 + (index as f64 * 0.11).cos();
+                bar(index as i64 + 1, close, Some(10.0))
+            })
+            .collect::<Vec<_>>();
+        let mut state = AdaptiveGateExecutionState::default();
+
+        for end in 0..bars.len() {
+            let actual = config.evaluate_adx_only_streaming(&mut state, &bars[..=end]);
+            let expected = config.evaluate(&bars[..=end], 2, 3);
+            assert_eq!(actual.inverted, expected.inverted, "prefix ending at {end}");
+            assert_eq!(actual.ready, expected.ready, "prefix ending at {end}");
+            assert_eq!(actual.current_vote, expected.current_vote);
+            assert_eq!(actual.available_features, expected.available_features);
+            assert_eq!(actual.inverted_votes, expected.inverted_votes);
+            assert_eq!(actual.normal_votes, expected.normal_votes);
+            match (actual.adx, expected.adx) {
+                (Some(actual), Some(expected)) => {
+                    assert!((actual - expected).abs() < 1e-10, "prefix ending at {end}")
+                }
+                (None, None) => {}
+                other => panic!("ADX availability mismatch at {end}: {other:?}"),
+            }
+        }
+
+        let mut corrected = bars.clone();
+        let last_index = corrected.len() - 1;
+        corrected[last_index] = bar(80, 107.25, Some(10.0));
+        let actual = config.evaluate_adx_only_streaming(&mut state, &corrected);
+        let expected = config.evaluate(&corrected, 2, 3);
+        assert_eq!(actual.inverted, expected.inverted);
+        assert_eq!(actual.current_vote, expected.current_vote);
+        assert_eq!(actual.adx, expected.adx);
     }
 
     #[test]

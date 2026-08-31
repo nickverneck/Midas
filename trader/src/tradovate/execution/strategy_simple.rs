@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn handle_simple_execution_account_sync(
     session: &mut SessionState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) {
     let actual_qty = selected_market_position_qty(session);
     let actual_entry = selected_market_entry_price(session);
@@ -12,8 +12,8 @@ pub(crate) fn handle_simple_execution_account_sync(
 
 pub(crate) fn maybe_run_simple_execution_strategy(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    broker_tx: &dyn BrokerCommandSink,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
         return Ok(());

@@ -3,8 +3,8 @@ use crate::strategies::PositionSide;
 
 pub(crate) fn maybe_run_hma_direct_execution_strategy(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    broker_tx: &dyn BrokerCommandSink,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
         return Ok(());

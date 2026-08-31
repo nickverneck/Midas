@@ -126,7 +126,7 @@ impl App {
     pub(super) fn handle_replay_downloader_key(
         &mut self,
         key: KeyEvent,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        cmd_tx: &ServiceCommandSender,
     ) {
         match key.code {
             KeyCode::BackTab => {
@@ -332,7 +332,7 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
-    fn search_replay_download_contracts(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    fn search_replay_download_contracts(&mut self, cmd_tx: &ServiceCommandSender) {
         let query = self.replay_downloader.instrument_query.trim().to_string();
         if query.is_empty() {
             self.replay_downloader.phase = ReplayDownloadPhase::Failed;
@@ -359,10 +359,7 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
-    fn inspect_selected_replay_download_contract(
-        &mut self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-    ) {
+    fn inspect_selected_replay_download_contract(&mut self, cmd_tx: &ServiceCommandSender) {
         let Some(contract) = self
             .replay_downloader
             .contract_results
@@ -393,7 +390,7 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
-    fn submit_replay_download(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    fn submit_replay_download(&mut self, cmd_tx: &ServiceCommandSender) {
         let Some(contract) = self.replay_downloader.exact_contract.clone() else {
             self.replay_downloader.phase = ReplayDownloadPhase::Failed;
             self.replay_downloader.phase_message =

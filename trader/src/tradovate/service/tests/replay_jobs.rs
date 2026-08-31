@@ -51,9 +51,9 @@ async fn replay_download_is_single_flight_and_reports_operation_scoped_busy() {
         stage: Arc::new(AtomicU8::new(ReplayDownloadJobStage::Network as u8)),
         task: tokio::spawn(std::future::pending()),
     });
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
     let rejected_id = ReplayDownloadOperationId::next();
 
     handle_command(
@@ -118,7 +118,7 @@ async fn replay_download_cancellation_before_commit_preserves_manifest() {
     let task_ready = ready.clone();
     let task_release = release.clone();
     let task_manifest = manifest_path.clone();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let task_event_tx = event_tx.clone();
     let task = tokio::spawn(async move {
         let _cancel_rx = cancel_rx;
@@ -219,7 +219,7 @@ async fn replay_download_cancellation_during_commit_is_queued_and_commit_is_not_
             task_committed.store(true, std::sync::atomic::Ordering::SeqCst);
         }),
     });
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
 
     commit_claimed.wait().await;
     cancel_replay_operation(operation_id, &mut state, &event_tx).await;
@@ -332,9 +332,9 @@ async fn shutdown_aborts_an_owned_network_stage_download() {
 #[tokio::test]
 async fn replay_downloader_validation_failure_is_reported_without_starting_live_state() {
     let mut state = test_state(test_session());
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     let operation_id = ReplayDownloadOperationId::next();
     tokio::time::timeout(
@@ -394,7 +394,7 @@ async fn replay_downloader_validation_failure_is_reported_without_starting_live_
 #[tokio::test]
 async fn replay_read_only_jobs_dispatch_without_blocking_live_service_state() {
     let mut state = test_state(test_session());
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
     let mut config = AppConfig::default();
     config.token_path = std::env::temp_dir().join("trader-missing-replay-token.json");
@@ -433,7 +433,7 @@ async fn replay_read_only_jobs_dispatch_without_blocking_live_service_state() {
     ];
 
     for command in commands {
-        let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
             handle_command(command, &mut state, &event_tx, &market_tx, internal_tx),

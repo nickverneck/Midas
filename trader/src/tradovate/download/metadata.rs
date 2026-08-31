@@ -5,6 +5,11 @@ pub async fn search_replay_download_contracts(
     query: &str,
     limit: usize,
 ) -> Result<Vec<ContractSuggestion>> {
+    if cfg.simulation_proxy.enabled {
+        bail!(
+            "replay downloads are unavailable in simulation_proxy mode; use the standalone proxy fixture"
+        );
+    }
     let query = query.trim();
     if query.is_empty() {
         bail!("replay contract search query cannot be empty");
@@ -57,6 +62,11 @@ pub async fn inspect_replay_download_contract(
     cfg: &AppConfig,
     contract: ContractSuggestion,
 ) -> Result<TradovateReplayContractInspection> {
+    if cfg.simulation_proxy.enabled {
+        bail!(
+            "replay downloads are unavailable in simulation_proxy mode; use the standalone proxy fixture"
+        );
+    }
     let client = Client::new();
     let tokens = authenticate(&client, cfg).await?;
     let (metadata, _) = fetch_download_contract_metadata(&client, cfg, &tokens, &contract).await;
@@ -478,7 +488,8 @@ pub(super) async fn resolve_download_contract(
     contract_symbol: &str,
     limit: usize,
 ) -> Result<ContractSuggestion> {
-    let contracts = search_contracts(client, env, token, contract_symbol, limit).await?;
+    let rest_url = env.rest_url();
+    let contracts = search_contracts(client, rest_url, token, contract_symbol, limit).await?;
     contracts
         .iter()
         .find(|contract| contract.name.eq_ignore_ascii_case(contract_symbol))

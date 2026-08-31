@@ -139,11 +139,51 @@ impl Default for LogMode {
     }
 }
 
+/// Explicit loopback endpoints used by the standalone replay proxy.
+///
+/// This is deliberately separate from `TradingEnvironment`: `sim` continues
+/// to mean the Tradovate demo environment unless this opt-in is enabled.  A
+/// proxy configuration can never be used with `live`, and the URL validator
+/// only permits loopback addresses.  Keeping the seam in the serialized
+/// application config lets an engine launched by the TUI and an engine
+/// launched headlessly use the exact same test boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SimulationProxyConfig {
+    pub enabled: bool,
+    pub rest_url: String,
+    pub user_ws_url: String,
+    pub market_ws_url: String,
+}
+
+impl Default for SimulationProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rest_url: "http://127.0.0.1:18100/v1".to_string(),
+            user_ws_url: "ws://127.0.0.1:18101/v1/websocket".to_string(),
+            market_ws_url: "ws://127.0.0.1:18102/v1/websocket".to_string(),
+        }
+    }
+}
+
+impl SimulationProxyConfig {
+    fn validate(&self) -> Result<()> {
+        validate_loopback_endpoint(&self.rest_url, "http", "simulation_proxy.rest_url")?;
+        validate_loopback_endpoint(&self.user_ws_url, "ws", "simulation_proxy.user_ws_url")?;
+        validate_loopback_endpoint(&self.market_ws_url, "ws", "simulation_proxy.market_ws_url")?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub broker: BrokerKind,
     pub env: TradingEnvironment,
+    /// Explicitly route a simulation session to the local replay proxy.
+    /// Disabled by default so existing simulation behavior is unchanged.
+    pub simulation_proxy: SimulationProxyConfig,
     pub auth_mode: AuthMode,
     pub log_mode: LogMode,
     pub session_stats_enabled: bool,
@@ -226,6 +266,7 @@ impl Default for AppConfig {
         Self {
             broker: default_broker(),
             env: TradingEnvironment::Sim,
+            simulation_proxy: SimulationProxyConfig::default(),
             auth_mode: AuthMode::TokenFile,
             log_mode: LogMode::Default,
             session_stats_enabled: true,
@@ -302,6 +343,18 @@ impl AppConfig {
         }
         if let Some(raw) = env_string_any(&["TRADER_ENV", "MIDAS_TUI_ENV"]) {
             self.env = parse_env(&raw)?;
+        }
+        if let Some(raw) = env_bool_any(&["TRADER_SIM_PROXY_ENABLED"])? {
+            self.simulation_proxy.enabled = raw;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_SIM_PROXY_REST_URL"]) {
+            self.simulation_proxy.rest_url = raw;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_SIM_PROXY_USER_WS_URL"]) {
+            self.simulation_proxy.user_ws_url = raw;
+        }
+        if let Some(raw) = env_string_any(&["TRADER_SIM_PROXY_MARKET_WS_URL"]) {
+            self.simulation_proxy.market_ws_url = raw;
         }
         if let Some(raw) = env_string_any(&["TRADER_AUTH_MODE", "MIDAS_TUI_AUTH_MODE"]) {
             self.auth_mode = parse_auth_mode(&raw)?;
@@ -509,6 +562,12 @@ impl AppConfig {
         if self.order_qty <= 0 {
             bail!("order_qty must be > 0");
         }
+        if self.simulation_proxy.enabled {
+            if self.env != TradingEnvironment::Sim {
+                bail!("simulation_proxy can only be enabled when env is sim");
+            }
+            self.simulation_proxy.validate()?;
+        }
         if self.replay_bar_interval_ms == 0 {
             bail!("replay_bar_interval_ms must be > 0");
         }
@@ -591,6 +650,67 @@ impl AppConfig {
             seed: self.replay_latency_seed,
         }
     }
+
+    /// REST base URL for the selected broker session.
+    pub(crate) fn broker_rest_url(&self) -> String {
+        // Route an enabled proxy regardless of the mutable UI environment
+        // value. `validate()` rejects live+proxy at the connect boundary; the
+        // unconditional route here is the fail-closed defense if a caller
+        // changes env after startup and forgets to validate first.
+        if self.simulation_proxy.enabled {
+            self.simulation_proxy.rest_url.clone()
+        } else {
+            self.env.rest_url().to_string()
+        }
+    }
+
+    /// User/account WebSocket URL for the selected broker session.
+    pub(crate) fn broker_user_ws_url(&self) -> String {
+        if self.simulation_proxy.enabled {
+            self.simulation_proxy.user_ws_url.clone()
+        } else {
+            self.env.user_ws_url().to_string()
+        }
+    }
+
+    /// Market-data WebSocket URL for the selected broker session.
+    pub(crate) fn broker_market_ws_url(&self) -> String {
+        if self.simulation_proxy.enabled {
+            self.simulation_proxy.market_ws_url.clone()
+        } else {
+            self.env.market_ws_url().to_string()
+        }
+    }
+}
+
+fn validate_loopback_endpoint(value: &str, scheme: &str, field: &str) -> Result<()> {
+    let value = value.trim();
+    let prefix = format!("{scheme}://");
+    let authority_and_path = value
+        .strip_prefix(&prefix)
+        .with_context(|| format!("{field} must use {scheme}://"))?;
+    let authority = authority_and_path
+        .split('/')
+        .next()
+        .filter(|authority| !authority.is_empty())
+        .with_context(|| format!("{field} is missing a host"))?;
+    if authority.contains('@') {
+        bail!("{field} must not contain credentials");
+    }
+    let port = if let Some(port) = authority.strip_prefix("127.0.0.1:") {
+        port
+    } else if let Some(port) = authority.strip_prefix("[::1]:") {
+        port
+    } else {
+        bail!("{field} must point to 127.0.0.1 or [::1]");
+    };
+    let port = port
+        .parse::<u16>()
+        .with_context(|| format!("{field} has an invalid port"))?;
+    if port == 0 {
+        bail!("{field} port must be non-zero");
+    }
+    Ok(())
 }
 
 fn parse_replay_engine_mode(raw: &str) -> Result<ReplayEngineMode> {
@@ -958,6 +1078,66 @@ mod tests {
                 .to_string()
                 .contains("requires replay_observed_latency_ms")
         );
+    }
+
+    #[test]
+    fn simulation_proxy_is_disabled_and_keeps_real_sim_defaults() {
+        let config = AppConfig::default();
+
+        assert!(!config.simulation_proxy.enabled);
+        assert_eq!(config.broker_rest_url(), config.env.rest_url());
+        assert_eq!(config.broker_user_ws_url(), config.env.user_ws_url());
+        assert_eq!(config.broker_market_ws_url(), config.env.market_ws_url());
+    }
+
+    #[test]
+    fn simulation_proxy_loads_nested_endpoints_and_routes_only_sim() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            env = "sim"
+            [simulation_proxy]
+            enabled = true
+            rest_url = "http://127.0.0.1:19000/v1"
+            user_ws_url = "ws://127.0.0.1:19001/v1/websocket"
+            market_ws_url = "ws://[::1]:19002/v1/websocket"
+            "#,
+        )
+        .expect("proxy config");
+
+        assert!(config.validate().is_ok());
+        assert_eq!(config.broker_rest_url(), "http://127.0.0.1:19000/v1");
+        assert_eq!(
+            config.broker_user_ws_url(),
+            "ws://127.0.0.1:19001/v1/websocket"
+        );
+        assert_eq!(
+            config.broker_market_ws_url(),
+            "ws://[::1]:19002/v1/websocket"
+        );
+    }
+
+    #[test]
+    fn simulation_proxy_rejects_live_and_non_loopback_endpoints() {
+        let live = AppConfig {
+            env: TradingEnvironment::Live,
+            simulation_proxy: SimulationProxyConfig {
+                enabled: true,
+                ..SimulationProxyConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        assert!(live.validate().is_err());
+
+        let non_loopback: AppConfig = toml::from_str(
+            r#"
+            [simulation_proxy]
+            enabled = true
+            rest_url = "http://192.0.2.1:19000/v1"
+            "#,
+        )
+        .expect("non-loopback proxy config parses");
+        let error = non_loopback.validate().unwrap_err().to_string();
+        assert!(error.contains("127.0.0.1 or [::1]"));
     }
 }
 

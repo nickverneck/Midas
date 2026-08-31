@@ -124,6 +124,13 @@ impl HmaAngleConfig {
         (self.hma_length.saturating_add(sqrt_length)).max(self.bars_required_to_trade)
     }
 
+    /// Evaluate the explicit batch/reference HMA-angle implementation.
+    ///
+    /// Unlike [`crate::strategies::hma_cross::HmaCrossConfig`], this strategy
+    /// has no incremental calculation mode. It intentionally materializes
+    /// its HMA/ATR vectors for parity with historical runs; the execution
+    /// state below contains position/protection state only, not indicator
+    /// history. Keep callers from treating this as a streaming hot path.
     pub fn evaluate(&self, bars: &[Bar], current_side: Option<PositionSide>) -> HmaAngleEvaluation {
         let warmup_bars = self.warmup_bars();
         let Some(last_bar) = bars.last() else {

@@ -60,6 +60,9 @@ async fn main() -> Result<()> {
                 account_filter: args.account_filter,
                 contract_query: args.contract_query,
                 contract_exact: args.contract_exact,
+                bar_value: args.bar_value,
+                require_simulation_proxy: args.require_simulation_proxy || !args.allow_real_sim,
+                allow_findings: args.allow_findings,
                 delays_ms: args.delays_ms,
                 iterations_per_delay: args.iterations,
                 take_profit_ticks: args.take_profit_ticks,
@@ -191,7 +194,7 @@ async fn main() -> Result<()> {
         return run_engine_server(&cli.engine_socket).await;
     }
     if matches!(cli.mode, Some(Mode::List)) {
-        return list_engines();
+        return list_engines().await;
     }
     if let Some(Mode::Kill { id, close }) = cli.mode {
         return kill_engine(id, close).await;

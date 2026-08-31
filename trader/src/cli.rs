@@ -28,6 +28,22 @@ pub(crate) struct SwipeProfileArgs {
     pub(crate) contract_query: String,
     #[arg(long)]
     pub(crate) contract_exact: Option<String>,
+    /// Range-bar size used by the headless order-path probe.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) bar_value: u32,
+    /// Require the config to route sim traffic to the loopback replay proxy.
+    /// This is enabled by default; use --allow-real-sim only for an explicit
+    /// real Tradovate simulation-account probe.
+    #[arg(long)]
+    pub(crate) require_simulation_proxy: bool,
+    /// Explicitly allow swipe-profile to use the real Tradovate simulation
+    /// endpoint when the config does not enable the replay proxy.
+    #[arg(long)]
+    pub(crate) allow_real_sim: bool,
+    /// Keep exit status zero when the profile records an unsettled scenario
+    /// or a validation finding. Reports still contain the findings.
+    #[arg(long)]
+    pub(crate) allow_findings: bool,
     #[arg(long, value_delimiter = ',', default_values_t = [50_u64, 250, 500, 1_000, 5_000])]
     pub(crate) delays_ms: Vec<u64>,
     #[arg(long, default_value_t = 10)]

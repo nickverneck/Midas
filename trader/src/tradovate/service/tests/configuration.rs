@@ -10,9 +10,9 @@ async fn config_sync_does_not_disarm_armed_native_strategy() {
     session.execution_runtime.last_closed_bar_ts = Some(123);
     session.execution_runtime.last_summary = "Armed before edit".to_string();
     let mut state = test_state(session);
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
     let mut config = ExecutionStrategyConfig::default();
     config.kind = StrategyKind::Native;
     config.native_ema.fast_length = 8;

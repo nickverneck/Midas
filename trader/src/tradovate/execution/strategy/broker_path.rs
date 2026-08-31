@@ -228,7 +228,7 @@ pub(super) fn flat_broker_path_should_wait(session: &SessionState) -> bool {
 }
 
 pub(super) fn emit_pending_target_gate_debug(
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     session: &SessionState,
     source: &str,
     pending_target_qty: i32,
@@ -281,7 +281,7 @@ pub(crate) fn clear_stale_pending_target(
     session: &mut SessionState,
     pending: i32,
     actual_qty: i32,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) {
     // Capture the request context before clearing the tracker.  Otherwise
     // the diagnostic loses the clOrdId/order id that explains which stale

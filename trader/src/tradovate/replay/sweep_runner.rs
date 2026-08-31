@@ -10,7 +10,8 @@ use super::ReplayState;
 use super::load::load_replay_state_blocking;
 use super::prepared_sweep::{
     PreparedEmaSweepInputs, PreparedSweepRun, prepare_ema_sweep_inputs, prepared_hma_child_as_ema,
-    run_prepared_ema_candidate, run_prepared_hma_candidate,
+    prepared_volume_ema_child_as_ema, run_prepared_ema_candidate, run_prepared_hma_candidate,
+    run_prepared_volume_ema_candidate, run_prepared_volume_hma_adx_candidate,
 };
 use super::results::{ReplayResultInput, write_replay_result};
 use super::sweep::{
@@ -18,8 +19,10 @@ use super::sweep::{
     ReplaySweepOutputFormat, ReplaySweepResourceEstimate, ReplaySweepSpec,
 };
 use crate::broker::{
-    BrokerKind, MarketSnapshot, ReplayEvaluatorMode, ReplayFrameSet, ReplaySpeed, ServiceCommand,
-    ServiceEvent,
+    BrokerKind, MarketSnapshot, ReplayEvaluatorMode, ReplayFrameSet, ReplaySpeed,
+    SERVICE_COMMAND_QUEUE_CAPACITY, SERVICE_EVENT_QUEUE_CAPACITY, ServiceCommand,
+    ServiceCommandSender, ServiceEvent, ServiceEventReceiver, service_command_channel,
+    service_event_channel,
 };
 use crate::config::AppConfig;
 use crate::replay_cache::{ReplayDatasetView, ReplayDatasetViewStore};
@@ -649,6 +652,8 @@ async fn prepare_prepared_ema_inputs(
                 child.resolved_strategy.native_strategy,
                 crate::strategy::NativeStrategyKind::EmaCross
                     | crate::strategy::NativeStrategyKind::HmaCross
+                    | crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross
+                    | crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross
             )
     }) {
         return Ok(None);
@@ -758,15 +763,56 @@ async fn run_child(
 
     let mut prepared_fallback_reason = None;
     if let Some(prepared_inputs) = prepared_inputs.as_ref() {
-        let is_hma = child.resolved_strategy.native_strategy
+        let is_plain_hma = child.resolved_strategy.native_strategy
             == crate::strategy::NativeStrategyKind::HmaCross;
+        let is_volume_hma = child.resolved_strategy.native_strategy
+            == crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross;
+        let is_volume_ema = child.resolved_strategy.native_strategy
+            == crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross;
+        let is_hma = is_plain_hma || is_volume_hma;
         let prepared_support = if is_hma {
-            if child.resolved_strategy.native_hma_cross.calculation_mode
-                != crate::strategies::hma_cross::HmaCalculationMode::Incremental
-            {
-                Err("prepared HMA kernel requires incremental calculation mode".to_string())
+            if is_volume_hma {
+                let volume_hma = &child.resolved_strategy.native_volume_hma_cross;
+                if !volume_hma.adaptive_gate.is_adx_only_fast_path()
+                    || volume_hma.volume_regime.invert_below_relative_volume > 0.0
+                    || volume_hma.ema_gate.enabled
+                {
+                    Err(
+                        "prepared volume HMA kernel supports only an ADX-only adaptive gate with volume and EMA gates disabled"
+                            .to_string(),
+                    )
+                } else if volume_hma.hma_cross.calculation_mode
+                    != crate::strategies::hma_cross::HmaCalculationMode::Incremental
+                {
+                    Err("prepared HMA kernel requires incremental calculation mode".to_string())
+                } else {
+                    let prepared_child = prepared_hma_child_as_ema(&child);
+                    prepared_inputs.supports(&prepared_inputs.replay, &cfg, &prepared_child)
+                }
             } else {
-                let prepared_child = prepared_hma_child_as_ema(&child);
+                if child.resolved_strategy.native_hma_cross.calculation_mode
+                    != crate::strategies::hma_cross::HmaCalculationMode::Incremental
+                {
+                    Err("prepared HMA kernel requires incremental calculation mode".to_string())
+                } else {
+                    let prepared_child = prepared_hma_child_as_ema(&child);
+                    prepared_inputs.supports(&prepared_inputs.replay, &cfg, &prepared_child)
+                }
+            }
+        } else if is_volume_ema {
+            let volume_ema = &child.resolved_strategy.native_volume_ema_cross;
+            let adaptive_gate = &volume_ema.adaptive_gate;
+            let gate_supported = !adaptive_gate.enabled || adaptive_gate.is_adx_only_fast_path();
+            if !gate_supported
+                || volume_ema.volume_regime.invert_below_relative_volume > 0.0
+                || volume_ema.ema_gate.enabled
+            {
+                Err(
+                    "prepared volume EMA kernel supports only a disabled gate or an ADX-only gate with volume and secondary EMA gates disabled"
+                        .to_string(),
+                )
+            } else {
+                let prepared_child = prepared_volume_ema_child_as_ema(&child);
                 prepared_inputs.supports(&prepared_inputs.replay, &cfg, &prepared_child)
             }
         } else {
@@ -783,7 +829,21 @@ async fn run_child(
                 let worker_replay = replay.clone();
                 let worker_child = run_child.clone();
                 let prepared_result = tokio::task::spawn_blocking(move || {
-                    if is_hma {
+                    if is_volume_hma {
+                        run_prepared_volume_hma_adx_candidate(
+                            &inputs,
+                            &worker_replay,
+                            &worker_cfg,
+                            &worker_child,
+                        )
+                    } else if is_volume_ema {
+                        run_prepared_volume_ema_candidate(
+                            &inputs,
+                            &worker_replay,
+                            &worker_cfg,
+                            &worker_child,
+                        )
+                    } else if is_plain_hma {
                         run_prepared_hma_candidate(
                             &inputs,
                             &worker_replay,
@@ -855,8 +915,8 @@ async fn run_child(
         }
     }
 
-    let (command_tx, command_rx) = mpsc::unbounded_channel();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (command_tx, command_rx) = service_command_channel(SERVICE_COMMAND_QUEUE_CAPACITY);
+    let (event_tx, event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = watch::channel(MarketSnapshot::default());
     let service_task = tokio::spawn(crate::tradovate::service_loop(
         command_rx, event_tx, market_tx,
@@ -901,8 +961,8 @@ async fn run_child(
 }
 
 async fn drive_child_service(
-    command_tx: &mpsc::UnboundedSender<ServiceCommand>,
-    mut event_rx: mpsc::UnboundedReceiver<ServiceEvent>,
+    command_tx: &ServiceCommandSender,
+    mut event_rx: ServiceEventReceiver,
     config: AppConfig,
     child: ReplaySweepChildSpec,
     view_path: PathBuf,

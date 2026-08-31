@@ -10,14 +10,116 @@ use crate::strategy::{ExecutionRuntimeSnapshot, ExecutionStrategyConfig};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Instant;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+
+const INTERNAL_EVENT_QUEUE_CAPACITY: usize = 256;
+const INTERNAL_CRITICAL_EVENT_QUEUE_CAPACITY: usize = 128;
+const MAX_INTERNAL_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) enum InternalEvent {
     StreamPayload(String),
     StreamStatus(String),
     StreamError(String),
     RefreshAccountState { reason: Option<String> },
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct InternalEventSender {
+    normal: tokio::sync::mpsc::Sender<InternalEvent>,
+    critical: tokio::sync::mpsc::Sender<InternalEvent>,
+    overflow: Arc<InternalEventOverflow>,
+}
+
+#[derive(Debug, Default)]
+struct InternalEventOverflow {
+    count: AtomicU64,
+    notify: Notify,
+}
+
+impl InternalEventSender {
+    pub(super) fn send(
+        &self,
+        event: InternalEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<InternalEvent>> {
+        let payload_bytes = match &event {
+            InternalEvent::StreamPayload(payload)
+            | InternalEvent::StreamStatus(payload)
+            | InternalEvent::StreamError(payload) => payload.len(),
+            InternalEvent::RefreshAccountState { .. } => 0,
+        };
+        if payload_bytes > MAX_INTERNAL_EVENT_PAYLOAD_BYTES {
+            self.overflow.count.fetch_add(1, Ordering::Relaxed);
+            self.overflow.notify.notify_one();
+            return Err(tokio::sync::mpsc::error::TrySendError::Full(event));
+        }
+        let queue = if is_critical_event(&event) {
+            &self.critical
+        } else {
+            &self.normal
+        };
+        match queue.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(error @ tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.overflow.count.fetch_add(1, Ordering::Relaxed);
+                self.overflow.notify.notify_one();
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn overflow_notified(&self) {
+        self.overflow.notify.notified().await;
+    }
+
+    pub(super) fn take_overflow_count(&self) -> u64 {
+        self.overflow.count.swap(0, Ordering::AcqRel)
+    }
+}
+
+pub(super) struct InternalEventReceiver {
+    critical: tokio::sync::mpsc::Receiver<InternalEvent>,
+    normal: tokio::sync::mpsc::Receiver<InternalEvent>,
+}
+
+impl InternalEventReceiver {
+    pub(super) async fn recv(&mut self) -> Option<InternalEvent> {
+        tokio::select! {
+            biased;
+            event = self.critical.recv() => event,
+            event = self.normal.recv() => event,
+        }
+    }
+}
+
+pub(super) fn internal_event_channel() -> (InternalEventSender, InternalEventReceiver) {
+    let (critical, critical_receiver) =
+        tokio::sync::mpsc::channel(INTERNAL_CRITICAL_EVENT_QUEUE_CAPACITY);
+    let (normal, normal_receiver) = tokio::sync::mpsc::channel(INTERNAL_EVENT_QUEUE_CAPACITY);
+    (
+        InternalEventSender {
+            normal,
+            critical,
+            overflow: Arc::new(InternalEventOverflow::default()),
+        },
+        InternalEventReceiver {
+            critical: critical_receiver,
+            normal: normal_receiver,
+        },
+    )
+}
+
+fn is_critical_event(event: &InternalEvent) -> bool {
+    matches!(
+        event,
+        InternalEvent::StreamError(_) | InternalEvent::RefreshAccountState { .. }
+    )
 }
 
 pub(super) struct IronbeamState {

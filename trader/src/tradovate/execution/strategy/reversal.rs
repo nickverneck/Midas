@@ -11,8 +11,8 @@ fn staged_reversal_timing(entry: &PendingNativeReversalEntry) -> String {
 
 pub(crate) fn continue_staged_reversal(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    broker_tx: &dyn BrokerCommandSink,
+    event_tx: &ServiceEventSender,
     actual_qty: i32,
 ) -> Result<bool> {
     let Some(staged) = session.execution_runtime.pending_reversal_entry.clone() else {

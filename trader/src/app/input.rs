@@ -1,5 +1,5 @@
 impl App {
-    pub fn handle_key(&mut self, key: KeyEvent, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    pub fn handle_key(&mut self, key: KeyEvent, cmd_tx: &ServiceCommandSender) {
         if key.kind != KeyEventKind::Press {
             return;
         }

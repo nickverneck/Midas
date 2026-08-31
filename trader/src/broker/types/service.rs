@@ -2,8 +2,8 @@
 use super::ReplayFrameSet;
 use super::{
     AccountInfo, AccountSnapshot, BarType, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, EngineHistorySnapshot, ExecutionProbeSnapshot, LatencySnapshot,
-    MarketSnapshot, ReplayDownloadCacheTarget, ReplayDownloadOperationId,
+    ContractSuggestion, EngineHistorySnapshot, EngineHistorySummary, ExecutionProbeSnapshot,
+    LatencySnapshot, MarketSnapshot, ReplayDownloadCacheTarget, ReplayDownloadOperationId,
     ReplayExecutionLedgerSnapshot, ReplayExecutionLedgerSummary, ReplaySpeed, TradeMarker,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
@@ -66,6 +66,10 @@ pub enum ServiceCommand {
     CancelReplayDownloadOperation {
         operation_id: ReplayDownloadOperationId,
     },
+    /// Request the state already held by the engine. This is deliberately
+    /// distinct from ReplayState, which is also used by TUI hydration and
+    /// may refresh broker history.
+    InspectState,
     ReplayState,
     SelectAccount {
         account_id: i64,
@@ -141,6 +145,9 @@ pub enum ServiceEvent {
     MarketSnapshot(MarketSnapshot),
     TradeMarkersUpdated(Vec<TradeMarker>),
     EngineHistoryUpdated(EngineHistorySnapshot),
+    /// A bounded, read-only snapshot for inspection tools. It contains no
+    /// raw account/fill payloads and must be answered from cached state.
+    StateInspected(EngineInspectionSnapshot),
     Latency(LatencySnapshot),
     ExecutionState(ExecutionStateSnapshot),
     ExecutionProbe(ExecutionProbeSnapshot),
@@ -188,6 +195,19 @@ pub enum ServiceEvent {
         phase: ReplayDownloadPhase,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EngineInspectionSnapshot {
+    pub broker: BrokerKind,
+    pub env: TradingEnvironment,
+    pub session_kind: SessionKind,
+    pub account_id: Option<i64>,
+    pub account_name: Option<String>,
+    pub contract_id: Option<i64>,
+    pub contract_name: Option<String>,
+    pub execution: ExecutionStateSnapshot,
+    pub history: Option<EngineHistorySummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,5 +271,39 @@ impl SessionKind {
             Self::Live => "Live",
             Self::Replay => "Replay",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspection_command_and_event_are_wire_serializable() {
+        let command = serde_json::to_string(&ServiceCommand::InspectState)
+            .expect("serialize inspection command");
+        assert!(matches!(
+            serde_json::from_str::<ServiceCommand>(&command),
+            Ok(ServiceCommand::InspectState)
+        ));
+
+        let event = ServiceEvent::StateInspected(EngineInspectionSnapshot {
+            broker: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            session_kind: SessionKind::Live,
+            account_id: Some(42),
+            account_name: Some("SIM42".to_string()),
+            contract_id: Some(7),
+            contract_name: Some("GCZ6".to_string()),
+            execution: ExecutionStateSnapshot::default(),
+            history: None,
+        });
+        let encoded = serde_json::to_string(&event).expect("serialize inspection event");
+        assert!(encoded.contains("StateInspected"));
+        assert!(!encoded.contains("\"fills\""));
+        assert!(matches!(
+            serde_json::from_str::<ServiceEvent>(&encoded),
+            Ok(ServiceEvent::StateInspected(snapshot)) if snapshot.account_id == Some(42)
+        ));
     }
 }

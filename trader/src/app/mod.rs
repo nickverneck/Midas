@@ -6,8 +6,8 @@ use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, InstrumentSessionWindow, LatencySnapshot,
     MarketSnapshot, ReplayExecutionLedgerSummary, ReplayLatencyModel, ReplaySpeed, ServiceCommand,
-    ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide, compiled_brokers, default_broker,
-    transform_bars_for_candle_mode,
+    ServiceCommandSender, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide,
+    compiled_brokers, default_broker, transform_bars_for_candle_mode,
 };
 #[cfg(feature = "replay")]
 use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};
@@ -47,7 +47,6 @@ use ratatui::widgets::{
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::sync::mpsc::UnboundedSender;
 
 const UI_LOG_ENTRY_LIMIT: usize = 200;
 const PERSISTED_LOG_ENTRY_LIMIT: usize = 10_000;
@@ -392,7 +391,7 @@ impl ReplayDownloaderState {
         self.active_operation_id = None;
     }
 
-    fn cancel_active_operation(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    fn cancel_active_operation(&mut self, cmd_tx: &ServiceCommandSender) {
         if let Some(operation_id) = self.active_operation_id.take() {
             let _ = cmd_tx.send(ServiceCommand::CancelReplayDownloadOperation { operation_id });
         }

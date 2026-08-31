@@ -17,7 +17,7 @@ mod replay_jobs;
 mod strategy;
 
 #[cfg(test)]
-pub(super) use connection::replay_state;
+pub(super) use connection::{inspect_state, replay_state};
 pub(super) use dispatch::handle_command;
 #[cfg(all(test, feature = "replay"))]
 pub(super) use replay_jobs::{

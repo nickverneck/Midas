@@ -5,7 +5,7 @@ use super::support::*;
 fn strategy_blockout_flattens_inside_configured_preclose_window() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let bar_ts = et_ts_ns(2026, 3, 9, 16, 20);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
@@ -54,7 +54,7 @@ fn strategy_blockout_flattens_inside_configured_preclose_window() {
 fn disabled_strategy_blockout_does_not_flatten_preclose_position() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let bar_ts = et_ts_ns(2026, 3, 9, 16, 20);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;

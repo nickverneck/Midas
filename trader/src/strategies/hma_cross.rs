@@ -1,4 +1,5 @@
 use crate::broker::Bar;
+use crate::strategies::adaptive_gate::AdaptiveGateExecutionState;
 use crate::strategies::{PositionSide, StrategySignal};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -179,6 +180,22 @@ pub enum HmaCrossSide {
     Below,
 }
 
+/// Allocation-free counters for auditing the incremental HMA path.
+///
+/// The counters are saturating and contain no retained event data. The
+/// retained-size fields are high-water marks for the bounded source tail and
+/// rolling WMA windows, which makes them useful in long-running soak tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HmaIndicatorAuditCounters {
+    pub incremental_pushes: u64,
+    pub full_rebuilds: u64,
+    pub correction_rebuilds: u64,
+    pub idle_evaluations: u64,
+    pub max_retained_source_bars: u64,
+    pub max_retained_fast_wma_bars: u64,
+    pub max_retained_slow_wma_bars: u64,
+}
+
 impl HmaCrossSide {
     pub fn label(self) -> &'static str {
         match self {
@@ -198,18 +215,63 @@ impl HmaCrossSide {
     }
 }
 
+/// Exact HMA values from the last stateful evaluation.  The timestamp and
+/// observed side alone cannot identify an unchanged evaluation: a corrected
+/// range-bar snapshot can revise the previous HMA point while leaving the
+/// current side unchanged.  This compact fingerprint keeps that distinction
+/// bounded and allocation-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HmaCrossGeometryFingerprint {
+    previous_fast_hma: u64,
+    previous_slow_hma: u64,
+    fast_hma: u64,
+    slow_hma: u64,
+}
+
+impl HmaCrossGeometryFingerprint {
+    fn from_values(
+        previous_fast_hma: f64,
+        previous_slow_hma: f64,
+        fast_hma: f64,
+        slow_hma: f64,
+    ) -> Self {
+        Self {
+            previous_fast_hma: previous_fast_hma.to_bits(),
+            previous_slow_hma: previous_slow_hma.to_bits(),
+            fast_hma: fast_hma.to_bits(),
+            slow_hma: slow_hma.to_bits(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct HmaCrossExecutionState {
     pub position: Option<HmaCrossManagedPosition>,
     pub last_observed_side: Option<HmaCrossSide>,
     pub last_observed_bar_ts: Option<i64>,
     pub last_observed_delta: Option<f64>,
+    last_observed_geometry: Option<HmaCrossGeometryFingerprint>,
     /// Rolling HMA state used only when the config selects the incremental
     /// evaluator.  Keeping it here makes the live and replay stateful paths
     /// share exactly the same implementation while leaving the stateless
     /// reference evaluator untouched.
     #[allow(dead_code)]
     incremental: HmaIncrementalState,
+    /// Streaming state used by the optional adaptive orientation wrapper.
+    /// Plain HMA crossover callers leave this at its zero-cost default.
+    pub(crate) adaptive_gate: AdaptiveGateExecutionState,
+}
+
+impl HmaCrossExecutionState {
+    /// Return allocation-free counters for the incremental HMA state.
+    pub fn audit_counters(&self) -> HmaIndicatorAuditCounters {
+        self.incremental.audit
+    }
+
+    /// Return the current bounded retained source-tail size.
+    pub fn retained_indicator_bar_count(&self) -> usize {
+        self.incremental.bars.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +423,7 @@ struct HmaIncrementalState {
     bars: VecDeque<(i64, u64)>,
     fast: HmaStream,
     slow: HmaStream,
+    audit: HmaIndicatorAuditCounters,
 }
 
 impl HmaIncrementalState {
@@ -377,8 +440,12 @@ impl HmaIncrementalState {
             self.fast_length != Some(fast_length) || self.slow_length != Some(slow_length);
         let previous_window_len = self.window_len;
 
-        if lengths_changed || self.bars.is_empty() || bars.len() < previous_window_len {
-            self.rebuild(bars, fast_length, slow_length, cache_capacity);
+        if lengths_changed || self.bars.is_empty() {
+            self.rebuild(bars, fast_length, slow_length, cache_capacity, false);
+            return self.outputs();
+        }
+        if bars.len() < previous_window_len {
+            self.rebuild(bars, fast_length, slow_length, cache_capacity, true);
             return self.outputs();
         }
 
@@ -392,6 +459,7 @@ impl HmaIncrementalState {
                 .checked_sub(self.bars.len())
                 .is_some_and(|start| self.matches_slice(bars, start));
         if same_tail_matches {
+            self.audit.idle_evaluations = self.audit.idle_evaluations.saturating_add(1);
             return self.outputs();
         }
 
@@ -428,6 +496,7 @@ impl HmaIncrementalState {
         if one_bar_suffix_matches {
             let bar = bars.last().expect("checked non-empty suffix overlap");
             self.push_cached_bar(bar, cache_capacity);
+            self.audit.incremental_pushes = self.audit.incremental_pushes.saturating_add(1);
             self.window_len = bars.len();
             return self.outputs();
         }
@@ -436,7 +505,7 @@ impl HmaIncrementalState {
         // gaps, and snapshots with no provable suffix overlap all rebuild from
         // the bounded source tail. This cannot mix old rolling state with a
         // revised window.
-        self.rebuild(bars, fast_length, slow_length, cache_capacity);
+        self.rebuild(bars, fast_length, slow_length, cache_capacity, true);
         self.outputs()
     }
 
@@ -481,7 +550,12 @@ impl HmaIncrementalState {
         fast_length: usize,
         slow_length: usize,
         cache_capacity: usize,
+        correction: bool,
     ) {
+        self.audit.full_rebuilds = self.audit.full_rebuilds.saturating_add(1);
+        if correction {
+            self.audit.correction_rebuilds = self.audit.correction_rebuilds.saturating_add(1);
+        }
         self.fast_length = Some(fast_length);
         self.slow_length = Some(slow_length);
         self.window_len = bars.len();
@@ -502,6 +576,26 @@ impl HmaIncrementalState {
         }
         self.fast.push(bar.close);
         self.slow.push(bar.close);
+        self.audit.max_retained_source_bars = self
+            .audit
+            .max_retained_source_bars
+            .max(self.bars.len() as u64);
+        self.audit.max_retained_fast_wma_bars = self.audit.max_retained_fast_wma_bars.max(
+            self.fast
+                .half
+                .values
+                .len()
+                .max(self.fast.full.values.len())
+                .max(self.fast.sqrt.values.len()) as u64,
+        );
+        self.audit.max_retained_slow_wma_bars = self.audit.max_retained_slow_wma_bars.max(
+            self.slow
+                .half
+                .values
+                .len()
+                .max(self.slow.full.values.len())
+                .max(self.slow.sqrt.values.len()) as u64,
+        );
     }
 
     fn outputs(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
@@ -748,6 +842,12 @@ impl HmaCrossConfig {
             return evaluation;
         };
 
+        let evaluation_geometry = evaluation
+            .previous_fast_hma
+            .zip(evaluation.previous_slow_hma)
+            .map(|(previous_fast, previous_slow)| {
+                HmaCrossGeometryFingerprint::from_values(previous_fast, previous_slow, fast, slow)
+            });
         let expected_previous_bar_ts = bars.get(bars.len().saturating_sub(2)).map(|bar| bar.ts_ns);
         let stored_side_is_previous_bar = runtime.last_observed_bar_ts == expected_previous_bar_ts;
         let stored_side_is_current_bar = runtime.last_observed_bar_ts == Some(last_bar.ts_ns);
@@ -756,6 +856,11 @@ impl HmaCrossConfig {
             .filter(|_| stored_side_is_previous_bar || stored_side_is_current_bar);
         let desired_side = self.desired_position_side(observed_side);
         let current_bar_side_edge = previous_side.is_some_and(|side| side != observed_side);
+        let repeated_incremental_bar = self.calculation_mode == HmaCalculationMode::Incremental
+            && stored_side_is_current_bar
+            && previous_side == Some(observed_side)
+            && evaluation_geometry.is_some()
+            && runtime.last_observed_geometry == evaluation_geometry;
 
         evaluation.previous_observed_side = previous_side;
         evaluation.observed_side = Some(observed_side);
@@ -770,11 +875,19 @@ impl HmaCrossConfig {
             } else {
                 None
             };
+        } else if repeated_incremental_bar {
+            // A broker can publish the same forming/corrected bar repeatedly.
+            // Once the incremental state has observed its side, do not emit
+            // the same raw cross again while waiting for the broker position
+            // snapshot. Legacy mode intentionally keeps its historical output.
+            evaluation.signal = StrategySignal::Hold;
+            evaluation.hold_reason = Some("stateful_side_already_current");
         }
 
         runtime.last_observed_side = Some(observed_side);
         runtime.last_observed_bar_ts = Some(last_bar.ts_ns);
         runtime.last_observed_delta = Some(fast - slow);
+        runtime.last_observed_geometry = evaluation_geometry;
         evaluation
     }
 
@@ -1184,6 +1297,84 @@ mod tests {
     }
 
     #[test]
+    fn incremental_current_cross_does_not_repeat_same_bar_signal() {
+        let config = HmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            calculation_mode: HmaCalculationMode::Incremental,
+            ..HmaCrossConfig::default()
+        };
+        let bars = vec![
+            bar(1, 10.0),
+            bar(2, 10.0),
+            bar(3, 10.0),
+            bar(4, 10.0),
+            bar(5, 10.0),
+            bar(6, 8.0),
+            bar(7, 12.0),
+        ];
+        let mut runtime = HmaCrossExecutionState::default();
+
+        let first = config.evaluate_current_cross(&mut runtime, &bars, None);
+        let repeated = config.evaluate_current_cross(&mut runtime, &bars, None);
+
+        assert_eq!(first.signal, StrategySignal::EnterLong);
+        assert_eq!(repeated.signal, StrategySignal::Hold);
+        assert_eq!(repeated.hold_reason, Some("stateful_side_already_current"));
+        assert_eq!(runtime.audit_counters().idle_evaluations, 1);
+    }
+
+    #[test]
+    fn incremental_current_cross_reemits_for_corrected_previous_hma_geometry() {
+        let config = HmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            calculation_mode: HmaCalculationMode::Incremental,
+            ..HmaCrossConfig::default()
+        };
+        let mut bars = vec![
+            bar(1, 13.0),
+            bar(2, 20.0),
+            bar(3, 10.0),
+            bar(4, 12.0),
+            bar(5, 6.0),
+            bar(6, 5.0),
+            bar(7, 4.0),
+        ];
+        let mut runtime = HmaCrossExecutionState::default();
+
+        let initial = config.evaluate_current_cross(&mut runtime, &bars, None);
+        assert_eq!(initial.signal, StrategySignal::Hold);
+        assert_eq!(initial.observed_side, Some(HmaCrossSide::Above));
+        assert!(!initial.raw_buy_signal);
+
+        // A range-bar correction changes the prior HMA geometry, while the
+        // current HMA values and side remain unchanged. It is a new valid
+        // crossover, not an unchanged duplicate of the original evaluation.
+        bars[1] = bar(2, 9.0);
+        let corrected = config.evaluate_current_cross(&mut runtime, &bars, None);
+        let expected = HmaCrossConfig {
+            calculation_mode: HmaCalculationMode::Legacy,
+            ..config.clone()
+        }
+        .evaluate(&bars, None);
+
+        assert_optional_close(corrected.fast_hma, initial.fast_hma);
+        assert_optional_close(corrected.slow_hma, initial.slow_hma);
+        assert_ne!(corrected.previous_slow_hma, initial.previous_slow_hma);
+        assert_eq!(corrected.previous_observed_side, Some(HmaCrossSide::Above));
+        assert_eq!(corrected.observed_side, Some(HmaCrossSide::Above));
+        assert!(!corrected.current_bar_side_edge);
+        assert!(corrected.raw_buy_signal);
+        assert_eq!(corrected.signal, StrategySignal::EnterLong);
+        assert_eq!(corrected.signal, expected.signal);
+        assert_optional_close(corrected.previous_fast_hma, expected.previous_fast_hma);
+        assert_optional_close(corrected.previous_slow_hma, expected.previous_slow_hma);
+        assert_optional_close(corrected.fast_hma, expected.fast_hma);
+        assert_optional_close(corrected.slow_hma, expected.slow_hma);
+    }
+
+    #[test]
     fn current_cross_ignores_stale_observed_side() {
         let config = HmaCrossConfig {
             fast_length: 2,
@@ -1380,6 +1571,13 @@ mod tests {
         }
 
         assert!(runtime.incremental.bars.len() <= hma_state_cache_capacity(21, 55));
+        let audit = runtime.audit_counters();
+        assert!(audit.incremental_pushes > 0);
+        assert_eq!(audit.full_rebuilds, 1);
+        assert_eq!(audit.correction_rebuilds, 0);
+        assert!(audit.max_retained_source_bars <= hma_state_cache_capacity(21, 55) as u64);
+        assert!(audit.max_retained_fast_wma_bars <= 21);
+        assert!(audit.max_retained_slow_wma_bars <= 55);
     }
 
     #[test]
@@ -1412,6 +1610,55 @@ mod tests {
         assert_optional_close(actual.fast_hma, expected.fast_hma);
         assert_optional_close(actual.slow_hma, expected.slow_hma);
         assert_eq!(actual.signal, expected.signal);
+        assert_eq!(runtime.audit_counters().correction_rebuilds, 1);
+    }
+
+    #[test]
+    fn incremental_hma_append_revision_sequence_matches_legacy_reference() {
+        let mut bars = (0..96)
+            .map(|index| bar(index as i64 + 1, 100.0 + (index as f64 * 0.23).sin() * 2.0))
+            .collect::<Vec<_>>();
+        let incremental = HmaCrossConfig {
+            fast_length: 7,
+            slow_length: 19,
+            calculation_mode: HmaCalculationMode::Incremental,
+            ..HmaCrossConfig::default()
+        };
+        let legacy = HmaCrossConfig {
+            calculation_mode: HmaCalculationMode::Legacy,
+            ..incremental.clone()
+        };
+        let mut runtime = HmaCrossExecutionState::default();
+        let seed_len = 48;
+        let _ = incremental.evaluate_incremental(&mut runtime, &bars[..seed_len], None);
+
+        for index in seed_len..bars.len() {
+            let window = &bars[..=index];
+            let expected = legacy.evaluate(window, None);
+            let actual = incremental.evaluate_incremental(&mut runtime, window, None);
+            assert_optional_close(actual.fast_hma, expected.fast_hma);
+            assert_optional_close(actual.slow_hma, expected.slow_hma);
+            assert_eq!(actual.signal, expected.signal, "append at {index}");
+        }
+
+        // Revise the active bar, then append again. Both correction and the
+        // following append must continue from the corrected state.
+        bars.last_mut().expect("active bar").close += 1.5;
+        let expected_revision = legacy.evaluate(&bars, None);
+        let actual_revision = incremental.evaluate_incremental(&mut runtime, &bars, None);
+        assert_optional_close(actual_revision.fast_hma, expected_revision.fast_hma);
+        assert_optional_close(actual_revision.slow_hma, expected_revision.slow_hma);
+
+        bars.push(bar(97, 101.0));
+        let expected_append = legacy.evaluate(&bars, None);
+        let actual_append = incremental.evaluate_incremental(&mut runtime, &bars, None);
+        assert_optional_close(actual_append.fast_hma, expected_append.fast_hma);
+        assert_optional_close(actual_append.slow_hma, expected_append.slow_hma);
+
+        let audit = runtime.audit_counters();
+        assert!(audit.incremental_pushes > 0);
+        assert!(audit.correction_rebuilds > 0);
+        assert!(runtime.retained_indicator_bar_count() <= hma_state_cache_capacity(7, 19));
     }
 
     #[test]

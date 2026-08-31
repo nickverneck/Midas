@@ -171,11 +171,7 @@ impl App {
 
     pub fn enter_engine_session_for_key(&mut self, engine_key: EngineKey, socket_path: PathBuf) {
         let mode = self.engine_create_mode_for_key(&engine_key);
-        self.enter_engine_session_for_key_with_mode(
-            engine_key,
-            socket_path,
-            mode,
-        );
+        self.enter_engine_session_for_key_with_mode(engine_key, socket_path, mode);
     }
 
     pub fn enter_engine_session_for_key_with_mode(
@@ -221,7 +217,8 @@ impl App {
                 if strategy_already_running {
                     self.screen = Screen::Dashboard;
                     self.focus = Focus::AccountList;
-                    self.status = "Attached to the running strategy; dashboard restored.".to_string();
+                    self.status =
+                        "Attached to the running strategy; dashboard restored.".to_string();
                 }
             }
             EngineCreateMode::Replay => self.move_to_replay_screen(),
@@ -336,11 +333,7 @@ impl App {
         cfg
     }
 
-    pub fn handle_service_event(
-        &mut self,
-        event: ServiceEvent,
-        _cmd_tx: &UnboundedSender<ServiceCommand>,
-    ) {
+    pub fn handle_service_event(&mut self, event: ServiceEvent, _cmd_tx: &ServiceCommandSender) {
         match event {
             ServiceEvent::Status(message) => {
                 self.status = message.clone();
@@ -485,6 +478,7 @@ impl App {
             ServiceEvent::EngineHistoryUpdated(history) => {
                 self.engine_history = Some(history);
             }
+            ServiceEvent::StateInspected(_) => {}
             ServiceEvent::Latency(snapshot) => {
                 self.latency = snapshot;
             }
@@ -508,6 +502,18 @@ impl App {
                         .position(|account| account.id == selected_account_id)
                     {
                         self.selected_account = index;
+                    }
+                }
+                if let Some(contract_name) = snapshot.selected_contract_name.as_deref() {
+                    // ExecutionState is the only attach-time source for the
+                    // selected contract when no MarketSnapshot has arrived
+                    // yet. Preserve an existing market contract because it
+                    // may be newer data from the market stream.
+                    if self.market.contract_name.is_none() {
+                        self.market.contract_name = Some(contract_name.to_string());
+                    }
+                    if self.instrument_query.trim().is_empty() {
+                        self.instrument_query = contract_name.to_string();
                     }
                 }
                 let restoring_attached_engine = self.resume_dashboard_pending;
@@ -719,13 +725,46 @@ impl App {
         engine_key: EngineKey,
         event: ServiceEvent,
         is_active_detail: bool,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        cmd_tx: &ServiceCommandSender,
+    ) {
+        self.apply_engine_service_event(engine_key, event, is_active_detail, cmd_tx, None);
+    }
+
+    pub fn handle_engine_service_event_sequenced(
+        &mut self,
+        engine_key: EngineKey,
+        event: ServiceEvent,
+        is_active_detail: bool,
+        cmd_tx: &ServiceCommandSender,
+        sequence: u64,
+    ) {
+        self.apply_engine_service_event(
+            engine_key,
+            event,
+            is_active_detail,
+            cmd_tx,
+            Some(sequence),
+        );
+    }
+
+    fn apply_engine_service_event(
+        &mut self,
+        engine_key: EngineKey,
+        event: ServiceEvent,
+        is_active_detail: bool,
+        cmd_tx: &ServiceCommandSender,
+        sequence: Option<u64>,
     ) {
         if let Some(summary) = self
             .engine_summaries
             .iter_mut()
             .find(|summary| summary.key == engine_key)
         {
+            if let Some(sequence) = sequence
+                && !summary.accept_observation_sequence(sequence)
+            {
+                return;
+            }
             summary.apply_event(&event);
         }
 
@@ -773,6 +812,10 @@ fn replay_cache_root_for_app(configured: &std::path::Path) -> std::path::PathBuf
 
     candidates
         .into_iter()
-        .find(|candidate| !crate::replay_cache::ReplayCacheLibrary::scan(candidate).datasets.is_empty())
+        .find(|candidate| {
+            !crate::replay_cache::ReplayCacheLibrary::scan(candidate)
+                .datasets
+                .is_empty()
+        })
         .unwrap_or_else(|| configured.to_path_buf())
 }

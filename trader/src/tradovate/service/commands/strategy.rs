@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn set_execution_strategy_config(
     mut config: ExecutionStrategyConfig,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
@@ -44,7 +44,7 @@ fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig
 
 pub(super) fn arm_execution_strategy_command(
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
@@ -69,7 +69,7 @@ pub(super) fn arm_execution_strategy_command(
 pub(super) fn disarm_execution_strategy_command(
     reason: String,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
@@ -82,7 +82,7 @@ pub(super) fn disarm_execution_strategy_command(
 pub(super) fn probe_execution(
     tag: String,
     state: &ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_ref() else {
         bail!("connect first");

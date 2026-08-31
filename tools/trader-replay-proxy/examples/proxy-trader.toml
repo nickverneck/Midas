@@ -1,0 +1,17 @@
+# Minimal trader config for the standalone replay proxy.
+# Start trader-replay-proxy first; it is loopback-only and has no broker
+# credentials.  This config deliberately uses a synthetic token so the
+# trader cannot contact a real Tradovate account through this path.
+broker = "tradovate"
+env = "sim"
+auth_mode = "token_file"
+token_override = "replay-proxy-token"
+autoconnect = true
+history_bars = 500
+log_mode = "debug"
+
+[simulation_proxy]
+enabled = true
+rest_url = "http://127.0.0.1:18100/v1"
+user_ws_url = "ws://127.0.0.1:18101/v1/websocket"
+market_ws_url = "ws://127.0.0.1:18102/v1/websocket"

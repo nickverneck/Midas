@@ -245,9 +245,10 @@ async fn replay_state_reemits_existing_engine_history_for_tui_reattach() {
     start_engine_run(&mut session).expect("engine run");
     let expected_run_id = session.engine_run.as_ref().expect("run").run_id.clone();
     let mut state = test_state(session);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
-    super::super::commands::replay_state(&mut state, &event_tx)
+    super::super::commands::replay_state(&mut state, &event_tx, &internal_tx)
         .await
         .expect("replay state");
 
@@ -264,6 +265,56 @@ async fn replay_state_reemits_existing_engine_history_for_tui_reattach() {
     )));
 }
 
+#[test]
+fn inspect_state_emits_cached_summary_without_refreshing_engine_state() {
+    let mut session = test_session();
+    session.execution_runtime.armed = true;
+    start_engine_run(&mut session).expect("engine run");
+    let expected_history = session
+        .engine_run
+        .as_ref()
+        .expect("engine history")
+        .history
+        .clone();
+    let state = test_state(session);
+    let history_fill_count = state
+        .session
+        .as_ref()
+        .expect("session")
+        .user_store
+        .history_fills
+        .len();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+
+    // The inspection helper only accepts an immutable service state. In
+    // particular, it has no client/internal queue through which a REST
+    // refresh or store mutation could be initiated.
+    super::super::commands::inspect_state(&state, &event_tx).expect("inspect state");
+
+    let event = event_rx.try_recv().expect("inspection event");
+    let ServiceEvent::StateInspected(snapshot) = event else {
+        panic!("expected cached inspection response");
+    };
+    assert_eq!(snapshot.broker, BrokerKind::Tradovate);
+    assert_eq!(snapshot.account_id, Some(42));
+    assert_eq!(snapshot.contract_name.as_deref(), Some("ESM6"));
+    assert_eq!(snapshot.execution.runtime.armed, true);
+    let summary = snapshot.history.expect("cached history summary");
+    assert_eq!(summary.run_id, expected_history.run_id);
+    assert_eq!(summary.fill_count, expected_history.fills.len());
+
+    let session = state.session.as_ref().expect("session");
+    assert_eq!(
+        session.engine_run.as_ref().expect("engine history").history,
+        expected_history
+    );
+    assert_eq!(session.user_store.history_fills.len(), history_fill_count);
+    assert!(
+        event_rx.try_recv().is_err(),
+        "inspection emitted extra events"
+    );
+}
+
 #[tokio::test]
 async fn automated_liquidation_ack_registers_broker_order_with_engine_run() {
     let mut session = test_session();
@@ -273,8 +324,8 @@ async fn automated_liquidation_ack_registers_broker_order_with_engine_run() {
         session.engine_run.as_ref().expect("run").order_prefix
     );
     let mut state = test_state(session);
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     super::super::internal::handle_broker_order_ack(
         BrokerOrderAck {

@@ -33,9 +33,9 @@ async fn pending_target_watchdog_respects_order_strategy_position_sync_grace() {
     });
 
     let mut state = test_state(session);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::PendingTargetWatchdog,
@@ -84,9 +84,9 @@ async fn pending_target_watchdog_does_not_reset_a_staged_flatten_lifecycle() {
     );
 
     let mut state = test_state(session);
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::PendingTargetWatchdog,
@@ -178,9 +178,9 @@ async fn pending_target_watchdog_does_not_forget_a_stale_broker_owned_path() {
     );
 
     let mut state = test_state(session);
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_internal(
         InternalEvent::PendingTargetWatchdog,
@@ -246,6 +246,7 @@ async fn set_target_position_records_pending_target_for_staged_reversal() {
     let mut state = ServiceState {
         client: Client::builder().build().expect("client"),
         broker_tx,
+        broker_task: None,
         replay_speed_tx,
         replay_speed: ReplaySpeed::default(),
         replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
@@ -259,10 +260,12 @@ async fn set_target_position_records_pending_target_for_staged_reversal() {
         latency: LatencySnapshot::default(),
         snapshot_generation: 0,
         snapshot_revision: 0,
+        snapshot_refresh_pending: false,
+        snapshot_task: None,
     };
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
-    let (internal_tx, _internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
 
     handle_command(
         ServiceCommand::SetTargetPosition {

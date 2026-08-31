@@ -4,7 +4,7 @@ use super::super::*;
 fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;
@@ -121,7 +121,7 @@ fn live_bar_auto_trail_signal_uses_broker_owned_order_strategy() {
 fn strategy_loop_waits_for_position_sync_after_native_protection_activity() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;

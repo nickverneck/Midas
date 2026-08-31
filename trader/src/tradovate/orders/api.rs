@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn cancel_orders_by_id(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     order_ids: &[i64],
 ) -> Result<bool> {
     let mut cancelled = false;
@@ -14,7 +14,7 @@ pub(crate) async fn cancel_orders_by_id(
 }
 
 pub(crate) async fn interrupt_order_strategy_by_id(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     order_strategy_id: i64,
 ) -> Result<()> {
     let payload = json!({
@@ -26,7 +26,7 @@ pub(crate) async fn interrupt_order_strategy_by_id(
 }
 
 pub(crate) async fn cancel_order_by_id(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     order_id: i64,
 ) -> Result<bool> {
     let payload = json!({
@@ -47,7 +47,7 @@ pub(crate) async fn cancel_order_by_id(
 }
 
 pub(crate) async fn request_order_json(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     endpoint: &str,
     payload: &Value,
 ) -> Result<Value> {

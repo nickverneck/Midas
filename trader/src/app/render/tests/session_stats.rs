@@ -34,6 +34,50 @@ fn session_stats_track_wins_losses_and_flats_from_balance_deltas() {
 }
 
 #[test]
+fn session_stats_bounds_event_detail_without_losing_cumulative_count() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    let event_count = SESSION_STATS_EVENT_HISTORY_LIMIT + 2;
+    for balance in 0..=event_count {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![balance_snapshot(
+                7,
+                "SIM",
+                1_000.0 + balance as f64,
+            )]),
+            &cmd_tx,
+        );
+    }
+
+    let stats = app
+        .selected_session_stats()
+        .expect("expected tracked session stats");
+    assert_eq!(stats.event_count(), event_count);
+    assert_eq!(stats.events.len(), SESSION_STATS_EVENT_HISTORY_LIMIT);
+    assert_eq!(
+        stats
+            .events
+            .front()
+            .expect("retained first event")
+            .previous_value,
+        1_002.0
+    );
+    assert_eq!(
+        stats
+            .events
+            .back()
+            .expect("retained last event")
+            .current_value,
+        1_000.0 + event_count as f64
+    );
+}
+
+#[test]
 fn session_stats_reports_pnl_per_hour() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
@@ -165,7 +209,7 @@ fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
         .iter()
         .find(|line| line.to_string().contains("balance short"))
         .expect("expected short balance event line");
-    assert!(line_span_with_fg(long_event_line, "long", Color::Cyan));
+    assert!(line_span_with_fg(long_event_line, "long", Color::Blue));
     assert!(line_span_with_fg(long_event_line, "1015.00", Color::Green));
     assert!(line_span_with_fg(long_event_line, "+15.00", Color::Green));
     assert!(line_span_with_fg(short_event_line, "short", Color::Magenta));
@@ -196,6 +240,37 @@ fn session_stats_attributes_balance_deltas_to_long_and_short_side() {
     assert!(body.contains("pos=long->flat"));
     assert!(body.contains("side=short"));
     assert!(body.contains("pos=short->flat"));
+}
+
+#[test]
+fn session_stats_recent_balance_events_use_gray_for_neutral_values() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.handle_service_event(
+        ServiceEvent::AccountsLoaded(vec![account(7, "SIM")]),
+        &cmd_tx,
+    );
+
+    let snapshot = |balance: f64, realized_pnl: f64, fees: f64| {
+        let mut snapshot = balance_snapshot_with_position(7, "SIM", balance, 0.0);
+        snapshot.realized_pnl = Some(realized_pnl);
+        snapshot.fees = Some(fees);
+        snapshot
+    };
+    for snapshot in [snapshot(1_000.0, 0.0, 0.0), snapshot(996.9, 0.0, 3.1)] {
+        app.handle_service_event(
+            ServiceEvent::AccountSnapshotsLoaded(vec![snapshot]),
+            &cmd_tx,
+        );
+    }
+
+    let event_line = app
+        .session_stats_event_lines(8)
+        .into_iter()
+        .find(|line| line.to_string().contains("balance flat"))
+        .expect("expected neutral balance event line");
+    assert!(line_span_with_fg(&event_line, "flat", Color::Gray));
+    assert!(line_span_with_fg(&event_line, "0.00", Color::Gray));
 }
 
 #[test]

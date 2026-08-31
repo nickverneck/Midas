@@ -44,6 +44,52 @@ pub struct EngineHistorySnapshot {
     pub fills: Vec<EngineHistoryFill>,
 }
 
+/// Compact, read-only view of an engine's already-held history.  Inspection
+/// clients such as `trader list` need the aggregates, not the complete fill
+/// payload. Keeping this separate prevents a status query from copying and
+/// serializing the full history while the engine is executing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EngineHistorySummary {
+    pub run_id: String,
+    pub started_at_utc: DateTime<Utc>,
+    #[serde(default)]
+    pub updated_at_utc: Option<DateTime<Utc>>,
+    pub account_id: i64,
+    pub account_name: String,
+    pub contract_id: i64,
+    pub contract_name: String,
+    pub position_qty: i32,
+    pub average_entry_price: Option<f64>,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub fees: f64,
+    pub wins: usize,
+    pub losses: usize,
+    pub fill_count: usize,
+}
+
+impl EngineHistorySnapshot {
+    pub fn summary(&self) -> EngineHistorySummary {
+        EngineHistorySummary {
+            run_id: self.run_id.clone(),
+            started_at_utc: self.started_at_utc,
+            updated_at_utc: self.updated_at_utc,
+            account_id: self.account_id,
+            account_name: self.account_name.clone(),
+            contract_id: self.contract_id,
+            contract_name: self.contract_name.clone(),
+            position_qty: self.position_qty,
+            average_entry_price: self.average_entry_price,
+            realized_pnl: self.realized_pnl,
+            unrealized_pnl: self.unrealized_pnl,
+            fees: self.fees,
+            wins: self.wins,
+            losses: self.losses,
+            fill_count: self.fills.len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSnapshot {
     pub account_id: i64,

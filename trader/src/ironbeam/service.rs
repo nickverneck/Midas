@@ -16,30 +16,31 @@ use super::orders::{
     dispatch_target_position_order, refresh_managed_protection, selected_protection_prices,
     sync_native_protection,
 };
-use super::state::{InternalEvent, IronbeamSession, IronbeamState, OrderDispatchOutcome};
+use super::state::{
+    InternalEvent, InternalEventSender, IronbeamSession, IronbeamState, OrderDispatchOutcome,
+    internal_event_channel,
+};
 use super::stream::{apply_stream_payload, run_market_stream};
 use super::support::{
     FOLLOWUP_REFRESH_DELAY_MS, contract_session_profile, pick_number, pick_str, schedule_refresh,
 };
 use crate::broker::{
     BarType, BrokerCapabilities, BrokerKind, CandleMode, LatencySnapshot, MarketSnapshot,
-    ReplaySpeed, ServiceCommand, ServiceEvent, SessionKind,
+    ReplaySpeed, ServiceCommand, ServiceCommandReceiver, ServiceEvent, ServiceEventSender,
+    SessionKind,
 };
 use crate::strategy::ExecutionStateSnapshot;
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use std::time::Duration;
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    watch,
-};
+use tokio::sync::watch;
 
 pub async fn service_loop(
-    mut cmd_rx: UnboundedReceiver<ServiceCommand>,
-    event_tx: UnboundedSender<ServiceEvent>,
+    mut cmd_rx: ServiceCommandReceiver,
+    event_tx: ServiceEventSender,
     market_tx: watch::Sender<MarketSnapshot>,
 ) {
-    let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (internal_tx, mut internal_rx) = internal_event_channel();
     let mut state = IronbeamState {
         client: Client::builder()
             .tcp_nodelay(true)
@@ -53,6 +54,8 @@ pub async fn service_loop(
     };
 
     while let Some(next) = tokio::select! {
+        _ = internal_tx.overflow_notified() => Some(Either::InternalOverflow),
+        _ = event_tx.overflow_notified() => Some(Either::EventOverflow),
         cmd = cmd_rx.recv() => cmd.map(Either::Command),
         internal = internal_rx.recv() => internal.map(Either::Internal),
     } {
@@ -70,6 +73,16 @@ pub async fn service_loop(
                 )
                 .await
             }
+            Either::InternalOverflow => {
+                let count = internal_tx.take_overflow_count();
+                let _ = event_tx.send(ServiceEvent::Error(format!(
+                    "Ironbeam internal event queue overflowed ({count} event(s)); disconnecting safely"
+                )));
+                break;
+            }
+            Either::EventOverflow => {
+                break;
+            }
         };
         if let Err(err) = result {
             let _ = event_tx.send(ServiceEvent::Error(err.to_string()));
@@ -82,14 +95,16 @@ pub async fn service_loop(
 enum Either {
     Command(ServiceCommand),
     Internal(InternalEvent),
+    InternalOverflow,
+    EventOverflow,
 }
 
 async fn handle_command(
     cmd: ServiceCommand,
     state: &mut IronbeamState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     market_tx: &watch::Sender<MarketSnapshot>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     match cmd {
         ServiceCommand::Connect(cfg) => {
@@ -170,6 +185,7 @@ async fn handle_command(
             let _ = event_tx.send(ServiceEvent::Latency(state.latency));
             emit_execution_state(event_tx, session);
         }
+        ServiceCommand::InspectState => inspect_state(state, event_tx)?,
         ServiceCommand::SelectAccount { account_id } => {
             let session = require_session_mut(state.session.as_mut())?;
             if !session
@@ -424,9 +440,9 @@ async fn handle_command(
 async fn handle_internal(
     internal: InternalEvent,
     state: &mut IronbeamState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     market_tx: &watch::Sender<MarketSnapshot>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     match internal {
         InternalEvent::StreamStatus(message) => {
@@ -548,18 +564,15 @@ fn shutdown_market_task(session: &mut IronbeamSession, market_tx: &watch::Sender
     let _ = market_tx.send(MarketSnapshot::default());
 }
 
-pub(super) fn emit_account_snapshots(
-    event_tx: &UnboundedSender<ServiceEvent>,
-    session: &IronbeamSession,
-) {
+pub(super) fn emit_account_snapshots(event_tx: &ServiceEventSender, session: &IronbeamSession) {
     let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(
         session.account_snapshots.clone(),
     ));
 }
 
-fn emit_execution_state(event_tx: &UnboundedSender<ServiceEvent>, session: &IronbeamSession) {
+fn execution_state_snapshot(session: &IronbeamSession) -> ExecutionStateSnapshot {
     let (take_profit_price, stop_price) = selected_protection_prices(session);
-    let snapshot = ExecutionStateSnapshot {
+    ExecutionStateSnapshot {
         config: session.execution_config.clone(),
         runtime: session.execution_runtime.snapshot(),
         bar_type: Some(BarType::minute(1)),
@@ -573,6 +586,49 @@ fn emit_execution_state(event_tx: &UnboundedSender<ServiceEvent>, session: &Iron
         market_entry_price: selected_market_entry_price(session),
         selected_contract_take_profit_price: take_profit_price,
         selected_contract_stop_price: stop_price,
-    };
+    }
+}
+
+fn emit_execution_state(event_tx: &ServiceEventSender, session: &IronbeamSession) {
+    let snapshot = execution_state_snapshot(session);
     let _ = event_tx.send(ServiceEvent::ExecutionState(snapshot));
+}
+
+fn inspect_state(state: &IronbeamState, event_tx: &ServiceEventSender) -> Result<()> {
+    let Some(session) = state.session.as_ref() else {
+        let _ = event_tx.send(ServiceEvent::Disconnected);
+        return Ok(());
+    };
+
+    let account_id = session.selected_account_id;
+    let account_name = account_id.and_then(|account_id| {
+        session
+            .accounts
+            .iter()
+            .find(|account| account.id == account_id)
+            .map(|account| account.name.clone())
+    });
+    let (contract_id, contract_name) = session
+        .selected_contract
+        .as_ref()
+        .map(|contract| (Some(contract.id), Some(contract.name.clone())))
+        .unwrap_or((None, None));
+
+    let _ = event_tx.send(ServiceEvent::StateInspected(
+        crate::broker::EngineInspectionSnapshot {
+            broker: BrokerKind::Ironbeam,
+            env: session.cfg.env,
+            session_kind: SessionKind::Live,
+            account_id,
+            account_name,
+            contract_id,
+            contract_name,
+            execution: execution_state_snapshot(session),
+            // Ironbeam does not maintain the Tradovate engine-run history
+            // structure. Its account/session state remains available through
+            // the normal live events, while this inspection stays cached.
+            history: None,
+        },
+    ));
+    Ok(())
 }

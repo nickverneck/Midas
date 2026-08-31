@@ -51,6 +51,11 @@ impl AttemptBook {
     }
 
     pub(super) fn observe(&mut self, at_utc: DateTime<Utc>, event: &ServiceEvent) {
+        if let ServiceEvent::Latency(latency) = event {
+            self.observe_latency(at_utc, *latency);
+            return;
+        }
+
         let Some(message) = event_message(event) else {
             return;
         };
@@ -126,6 +131,50 @@ impl AttemptBook {
             if submit.fill_ms.is_none() {
                 submit.fill_ms = parse_debug_stage_ms(debug_message, "fill");
             }
+        }
+    }
+
+    /// Quiet mode intentionally suppresses status/debug rows, but latency
+    /// snapshots remain part of the execution contract. Keep the profiler
+    /// independent of log verbosity by using the newest attempt as the
+    /// correlation point when those snapshots arrive.
+    fn observe_latency(&mut self, at_utc: DateTime<Utc>, latency: LatencySnapshot) {
+        let Some(index) = self
+            .attempts
+            .iter()
+            .rposition(|attempt| attempt.report.submit.is_none())
+        else {
+            return;
+        };
+
+        let attempt = &mut self.attempts[index].report;
+        if attempt.submit.is_none() && latency.last_order_ack_ms.is_some() {
+            attempt.submit = Some(SwipeSubmitObservation {
+                received_at_utc: at_utc,
+                submit_message: "latency-only submit observation".to_string(),
+                broker_submit_ms: latency.last_order_ack_ms,
+                request_id: None,
+                seen_ms: latency.last_order_seen_ms,
+                exec_report_ms: latency.last_exec_report_ms,
+                fill_ms: latency.last_fill_ms,
+            });
+            return;
+        }
+
+        let Some(submit) = attempt.submit.as_mut() else {
+            return;
+        };
+        if submit.broker_submit_ms.is_none() {
+            submit.broker_submit_ms = latency.last_order_ack_ms;
+        }
+        if submit.seen_ms.is_none() {
+            submit.seen_ms = latency.last_order_seen_ms;
+        }
+        if submit.exec_report_ms.is_none() {
+            submit.exec_report_ms = latency.last_exec_report_ms;
+        }
+        if submit.fill_ms.is_none() {
+            submit.fill_ms = latency.last_fill_ms;
         }
     }
 

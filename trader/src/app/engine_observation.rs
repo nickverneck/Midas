@@ -67,6 +67,7 @@ pub(crate) struct EngineSummary {
     bar_type: Option<BarType>,
     candle_mode: Option<CandleMode>,
     latency: LatencySnapshot,
+    last_observation_sequence: u64,
     latest_status: Option<String>,
     latest_error: Option<String>,
 }
@@ -99,6 +100,7 @@ impl EngineSummary {
             bar_type: None,
             candle_mode: None,
             latency: LatencySnapshot::default(),
+            last_observation_sequence: 0,
             latest_status: None,
             latest_error: None,
         }
@@ -127,6 +129,7 @@ impl EngineSummary {
             bar_type: None,
             candle_mode: None,
             latency: LatencySnapshot::default(),
+            last_observation_sequence: 0,
             latest_status: None,
             latest_error: None,
         }
@@ -214,6 +217,7 @@ impl EngineSummary {
             }
             ServiceEvent::TradeMarkersUpdated(_) => {}
             ServiceEvent::EngineHistoryUpdated(_) => {}
+            ServiceEvent::StateInspected(_) => {}
             ServiceEvent::Latency(snapshot) => {
                 self.latency = *snapshot;
             }
@@ -248,6 +252,14 @@ impl EngineSummary {
             | ServiceEvent::ReplayDownloadFailed { .. }
             | ServiceEvent::ReplayDownloadCompleted { .. } => {}
         }
+    }
+
+    pub(crate) fn accept_observation_sequence(&mut self, sequence: u64) -> bool {
+        if sequence <= self.last_observation_sequence {
+            return false;
+        }
+        self.last_observation_sequence = sequence;
+        true
     }
 
     pub(crate) fn mark_disconnected(&mut self, message: impl Into<String>) {

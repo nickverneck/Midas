@@ -1,5 +1,10 @@
 const SESSION_STATS_DELTA_EPSILON: f64 = 0.005;
 const SESSION_STATS_FEE_MATCH_EPSILON: f64 = 0.015;
+// Session stats are updated from every meaningful account snapshot.  Keep the
+// recent event detail bounded because the cumulative counters below are the
+// source of truth for the session totals.  This prevents a long-running TUI
+// from retaining an unbounded amount of broker/account history.
+const SESSION_STATS_EVENT_HISTORY_LIMIT: usize = 10_000;
 // Fallback values used only when the broker does not expose cumulative
 // realized-PnL/fee fields.  GC's current commission stream is $3.10 per
 // contract-side; the authoritative snapshot path below takes precedence.
@@ -180,7 +185,8 @@ struct AccountSessionStats {
     short_side: SessionSideDeltaStats,
     flat_side: SessionSideDeltaStats,
     unknown_side: SessionSideDeltaStats,
-    events: Vec<SessionBalanceEvent>,
+    events: VecDeque<SessionBalanceEvent>,
+    total_events: usize,
     trade_pnl_ex_fees: f64,
     hourly: [SessionHourlyDeltaStats; 24],
 }
@@ -227,7 +233,8 @@ impl AccountSessionStats {
             short_side: SessionSideDeltaStats::default(),
             flat_side: SessionSideDeltaStats::default(),
             unknown_side: SessionSideDeltaStats::default(),
-            events: Vec::new(),
+            events: VecDeque::new(),
+            total_events: 0,
             trade_pnl_ex_fees: 0.0,
             hourly: [SessionHourlyDeltaStats::default(); 24],
         }
@@ -320,7 +327,11 @@ impl AccountSessionStats {
         };
         self.trade_pnl_ex_fees += event.trade_delta;
         self.hourly[session_stats_local_hour(&event.recorded_at_utc)].record(&event);
-        self.events.push(event);
+        self.total_events = self.total_events.saturating_add(1);
+        if self.events.len() >= SESSION_STATS_EVENT_HISTORY_LIMIT {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
 
         if classification.fee_delta.abs() >= SESSION_STATS_DELTA_EPSILON {
             self.fee_events += 1;
@@ -423,7 +434,7 @@ impl AccountSessionStats {
     }
 
     fn event_count(&self) -> usize {
-        self.events.len()
+        self.total_events
     }
 
     fn side_stats(&self, side: SessionTradeSide) -> &SessionSideDeltaStats {
@@ -765,6 +776,11 @@ impl App {
             return;
         }
 
+        // The service publishes account snapshots in build-completion order:
+        // an active build is published before its one coalesced follow-up.
+        // Keep applying balance deltas in that order; a lower value can be a
+        // legitimate loss, so freshness must not be approximated by clamping
+        // PnL or comparing balances here.
         let captured_at_utc = chrono::Utc::now();
         let fee_context = self.session_fee_context();
         let engine_identity = self.active_engine_stats_identity_key();

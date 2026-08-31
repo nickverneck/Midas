@@ -670,6 +670,127 @@ fn attaching_to_armed_engine_restores_dashboard_and_market_selection() {
 }
 
 #[test]
+fn attach_hydration_restores_disarmed_engine_before_selection_is_chosen() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    let socket = PathBuf::from("/tmp/trader-engine-10.sock");
+    app.set_running_engines(vec![running_engine(10, true)]);
+
+    let mut execution_config = ExecutionStateSnapshot::default().config;
+    execution_config.native_strategy = NativeStrategyKind::HmaCross;
+    execution_config.native_hma_cross.fast_length = 3;
+    execution_config.native_hma_cross.slow_length = 10;
+    let execution = ExecutionStateSnapshot {
+        config: execution_config,
+        runtime: ExecutionRuntimeSnapshot {
+            armed: false,
+            last_summary: "strategy idle".to_string(),
+            ..ExecutionRuntimeSnapshot::default()
+        },
+        bar_type: Some(BarType::range(10)),
+        candle_mode: Some(CandleMode::Standard),
+        selected_account_id: Some(7),
+        selected_contract_name: Some("GCZ6".to_string()),
+        ..ExecutionStateSnapshot::default()
+    };
+
+    // The TUI attach barrier first feeds the overview summary while the App
+    // is still on its neutral engine screen. No default HMA Angle/empty
+    // Selection screen is selected during this phase.
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        false,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::ExecutionState(execution.clone()),
+        false,
+        &cmd_tx,
+    );
+    assert_eq!(app.screen, Screen::EngineSelect);
+
+    // Once the summary is hydrated, activation restores the engine's actual
+    // strategy and market selection, then the initial events are applied to
+    // the active detail state exactly once.
+    app.enter_engine_session_for_key(key.clone(), socket);
+    app.handle_engine_service_event(
+        key.clone(),
+        connected_event(BrokerKind::Tradovate),
+        true,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(key, ServiceEvent::ExecutionState(execution), true, &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Selection);
+    assert_eq!(app.focus, Focus::AccountList);
+    assert_eq!(app.strategy.native_strategy, NativeStrategyKind::HmaCross);
+    assert_eq!(app.strategy.native_hma_cross.fast_length, 3);
+    assert_eq!(app.strategy.native_hma_cross.slow_length, 10);
+    assert_eq!(app.bar_type, BarType::range(10));
+    assert_eq!(app.candle_mode, CandleMode::Standard);
+}
+
+#[test]
+fn execution_state_restores_contract_without_market_snapshot() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.enter_engine_session_for_key(key.clone(), PathBuf::from("/tmp/trader-engine-10.sock"));
+
+    app.handle_engine_service_event(
+        key,
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            selected_contract_name: Some("GCZ6".to_string()),
+            ..ExecutionStateSnapshot::default()
+        }),
+        true,
+        &cmd_tx,
+    );
+
+    assert_eq!(app.market.contract_name.as_deref(), Some("GCZ6"));
+    assert_eq!(app.instrument_query, "GCZ6");
+    assert!(
+        rendered_text(app.selection_summary_lines())
+            .iter()
+            .any(|line| line == "Last subscribed contract: GCZ6")
+    );
+}
+
+#[test]
+fn execution_state_does_not_overwrite_newer_market_contract() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let key = engine_key(10);
+    app.set_running_engines(vec![running_engine(10, true)]);
+    app.enter_engine_session_for_key(key.clone(), PathBuf::from("/tmp/trader-engine-10.sock"));
+
+    app.handle_engine_service_event(
+        key.clone(),
+        ServiceEvent::MarketSnapshot(MarketSnapshot {
+            contract_name: Some("ESZ6".to_string()),
+            ..MarketSnapshot::default()
+        }),
+        true,
+        &cmd_tx,
+    );
+    app.handle_engine_service_event(
+        key,
+        ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+            selected_contract_name: Some("GCZ6".to_string()),
+            ..ExecutionStateSnapshot::default()
+        }),
+        true,
+        &cmd_tx,
+    );
+
+    assert_eq!(app.market.contract_name.as_deref(), Some("ESZ6"));
+}
+
+#[test]
 fn attach_falls_back_to_dashboard_when_armed_state_arrives_after_connect() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();

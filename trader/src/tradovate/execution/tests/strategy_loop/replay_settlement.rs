@@ -174,7 +174,7 @@ fn replay_protected_exit_allows_the_next_guarded_entry_without_wall_clock_grace(
     session.execution_runtime.last_closed_bar_ts = Some(30);
 
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     assert!(
         settle_replay_protected_exit(&mut session, &[replay_protected_exit_fill(42, 3570918, 77)],)
             .is_some()

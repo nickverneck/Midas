@@ -1,11 +1,10 @@
-use super::state::{InternalEvent, IronbeamSession};
+use super::state::{InternalEvent, InternalEventSender, IronbeamSession};
 use crate::broker::{ContractSuggestion, InstrumentSessionProfile};
 use crate::config::TradingEnvironment;
 use anyhow::{Context, Result, bail};
 use reqwest::RequestBuilder;
 use serde_json::Value;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::time;
 
 pub(super) const FOLLOWUP_REFRESH_DELAY_MS: u64 = 600;
@@ -318,7 +317,7 @@ pub(super) fn ironbeam_ws_base_url(env: TradingEnvironment) -> &'static str {
     }
 }
 
-pub(super) fn schedule_followup_refresh(internal_tx: UnboundedSender<InternalEvent>) {
+pub(super) fn schedule_followup_refresh(internal_tx: InternalEventSender) {
     schedule_refresh(
         internal_tx,
         Duration::from_millis(FOLLOWUP_REFRESH_DELAY_MS),
@@ -327,7 +326,7 @@ pub(super) fn schedule_followup_refresh(internal_tx: UnboundedSender<InternalEve
 }
 
 pub(super) fn schedule_refresh(
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
     delay: Duration,
     reason: Option<String>,
 ) {

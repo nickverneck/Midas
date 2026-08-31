@@ -9,7 +9,7 @@ pub(crate) enum MarketOrderDispatchOutcome {
 #[cfg_attr(not(feature = "manual-orders"), allow(dead_code))]
 pub(crate) fn dispatch_manual_order(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     action: ManualOrderAction,
 ) -> Result<MarketOrderDispatchOutcome> {
     let order_ctx = resolve_order_context(session)?;
@@ -93,7 +93,7 @@ pub(crate) fn dispatch_manual_order(
 
 pub(super) fn dispatch_native_order_strategy_target(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     target_qty: i32,
     reason: &str,
 ) -> Result<MarketOrderDispatchOutcome> {
@@ -281,7 +281,7 @@ pub(super) fn dispatch_native_order_strategy_target(
 
 pub(crate) fn dispatch_profile_legacy_order_strategy_target(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     target_qty: i32,
     reason: &str,
 ) -> Result<MarketOrderDispatchOutcome> {
@@ -362,7 +362,7 @@ pub(crate) fn dispatch_profile_legacy_order_strategy_target(
 
 pub(crate) fn dispatch_target_position_order(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     target_qty: i32,
     automated: bool,
     reason: &str,

@@ -4,7 +4,7 @@ use super::super::*;
 fn strategy_loop_does_not_disarm_on_transient_oversize_with_live_strategy_path() {
     let mut session = test_session();
     let (broker_tx, _broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_ema.take_profit_ticks = 8.0;
@@ -69,7 +69,7 @@ fn strategy_loop_does_not_disarm_on_transient_oversize_with_live_strategy_path()
 fn strategy_loop_waits_when_flat_qty_conflicts_with_live_broker_path() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;
@@ -161,7 +161,7 @@ fn strategy_loop_waits_when_flat_qty_conflicts_with_live_broker_path() {
 fn strategy_loop_clears_stale_flat_broker_path_after_sync_grace() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     session.execution_config.kind = StrategyKind::Native;
     session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
     session.execution_config.native_signal_timing = NativeSignalTiming::LiveBar;

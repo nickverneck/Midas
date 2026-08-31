@@ -289,10 +289,7 @@ impl App {
         }
     }
 
-    pub(in crate::app) fn sync_execution_strategy_config(
-        &self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-    ) {
+    pub(in crate::app) fn sync_execution_strategy_config(&self, cmd_tx: &ServiceCommandSender) {
         if !self.capabilities.automated_orders {
             return;
         }
@@ -384,10 +381,7 @@ impl App {
         Some(previous)
     }
 
-    pub(in crate::app) fn manual_disarm_native_strategy(
-        &mut self,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-    ) {
+    pub(in crate::app) fn manual_disarm_native_strategy(&mut self, cmd_tx: &ServiceCommandSender) {
         if !self.capabilities.automated_orders {
             return;
         }
@@ -397,7 +391,7 @@ impl App {
         self.push_log("Manual strategy disarm requested.".to_string());
     }
 
-    pub(in crate::app) fn arm_native_strategy(&mut self, cmd_tx: &UnboundedSender<ServiceCommand>) {
+    pub(in crate::app) fn arm_native_strategy(&mut self, cmd_tx: &ServiceCommandSender) {
         if !self.capabilities.automated_orders {
             return;
         }

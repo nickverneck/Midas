@@ -395,8 +395,8 @@ impl App {
     }
 
     fn session_stats_fee_detail_event_line(&self, event: &SessionBalanceEvent) -> Line<'static> {
-        let delta_style = pnl_style(Some(event.delta));
-        Line::from(vec![
+        let delta_style = session_stats_pnl_style(Some(event.delta));
+        let mut spans = vec![
             Span::raw(format!(
                 "{} {} ",
                 format_session_stats_timestamp(event.recorded_at_utc, false),
@@ -419,20 +419,26 @@ impl App {
             Span::styled(format_signed_money(Some(event.delta)), delta_style),
             Span::raw(")"),
             Span::raw(format!(" {}", event.kind.label())),
-            if event.fee_delta.abs() >= SESSION_STATS_DELTA_EPSILON {
-                Span::raw(format!(
-                    " trade {} fees {}",
+        ];
+        if event.fee_delta.abs() >= SESSION_STATS_DELTA_EPSILON {
+            spans.extend([
+                Span::raw(" trade "),
+                Span::styled(
                     format_signed_money(Some(event.trade_delta)),
-                    format_signed_money(Some(event.fee_delta))
-                ))
-            } else {
-                Span::raw(String::new())
-            },
-        ])
+                    session_stats_pnl_style(Some(event.trade_delta)),
+                ),
+                Span::raw(" fees "),
+                Span::styled(
+                    format_signed_money(Some(event.fee_delta)),
+                    session_stats_pnl_style(Some(event.fee_delta)),
+                ),
+            ]);
+        }
+        Line::from(spans)
     }
 
     fn session_stats_trade_only_event_line(&self, event: &SessionBalanceEvent) -> Line<'static> {
-        let trade_style = pnl_style(Some(event.trade_delta));
+        let trade_style = session_stats_pnl_style(Some(event.trade_delta));
         Line::from(vec![
             Span::raw(format!(
                 "{} {} ",
@@ -459,9 +465,17 @@ impl App {
 
 fn session_trade_side_style(side: SessionTradeSide) -> Style {
     match side {
-        SessionTradeSide::Long => Style::default().fg(Color::Cyan),
+        SessionTradeSide::Long => Style::default().fg(Color::Blue),
         SessionTradeSide::Short => Style::default().fg(Color::Magenta),
-        SessionTradeSide::Flat | SessionTradeSide::Unknown => Style::default(),
+        SessionTradeSide::Flat | SessionTradeSide::Unknown => Style::default().fg(Color::Gray),
+    }
+}
+
+fn session_stats_pnl_style(value: Option<f64>) -> Style {
+    match value {
+        Some(value) if value > 0.0 => Style::default().fg(Color::Green),
+        Some(value) if value < 0.0 => Style::default().fg(Color::Red),
+        _ => Style::default().fg(Color::Gray),
     }
 }
 

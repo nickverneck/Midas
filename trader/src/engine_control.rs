@@ -20,7 +20,9 @@ pub async fn kill_engine_process(id: u32) -> Result<()> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     #[cfg(feature = "manual-orders")]
-    use crate::broker::{ManualOrderAction, ServiceCommand, ServiceEvent};
+    use crate::broker::{
+        ManualOrderAction, ServiceCommand, ServiceCommandSender, ServiceEvent, ServiceEventReceiver,
+    };
     use crate::engine_registry::resolve_engine;
     #[cfg(feature = "manual-orders")]
     use crate::ipc::connect_client;
@@ -32,7 +34,6 @@ mod imp {
     use std::path::Path;
     use std::time::Duration;
     #[cfg(feature = "manual-orders")]
-    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
     #[cfg(feature = "manual-orders")]
     use tokio::time::timeout;
     use tokio::time::{Instant, sleep};
@@ -106,8 +107,8 @@ mod imp {
 
     #[cfg(feature = "manual-orders")]
     async fn replay_engine_state(
-        cmd_tx: &UnboundedSender<ServiceCommand>,
-        event_rx: &mut UnboundedReceiver<ServiceEvent>,
+        cmd_tx: &ServiceCommandSender,
+        event_rx: &mut ServiceEventReceiver,
     ) -> Result<ObservedEngineState> {
         cmd_tx
             .send(ServiceCommand::ReplayState)

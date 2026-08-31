@@ -1,3 +1,76 @@
+const MAX_PENDING_USER_REQUESTS: usize = 256;
+const MAX_WEBSOCKET_WRITE_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
+/// REST seed endpoints are broker-controlled JSON, but a malformed or
+/// unexpectedly broad response must not be fully buffered before admission.
+const MAX_REST_SEED_RESPONSE_BYTES: usize = MAX_WEBSOCKET_MESSAGE_SIZE;
+const MAX_REST_ERROR_PREVIEW_BYTES: usize = 4 * 1024;
+
+fn extract_admitted_entity_chunks(item: &Value) -> Result<Vec<Vec<EntityEnvelope>>> {
+    let item_bytes = serde_json::to_vec(item).context("serialize websocket entity item")?;
+    if item_bytes.len() > MAX_WEBSOCKET_MESSAGE_SIZE {
+        bail!(
+            "websocket entity item exceeds {} bytes",
+            MAX_WEBSOCKET_MESSAGE_SIZE
+        );
+    }
+
+    let envelopes = extract_entity_envelopes(item);
+    let mut chunks = Vec::new();
+    let mut chunk = Vec::new();
+    let mut chunk_bytes = 0_usize;
+    for envelope in envelopes {
+        let entity_bytes =
+            serde_json::to_vec(&envelope.entity).context("serialize websocket entity payload")?;
+        if entity_bytes.len() > MAX_INTERNAL_ENTITY_PAYLOAD_BYTES {
+            bail!(
+                "{} entity exceeds {} bytes",
+                envelope.entity_type,
+                MAX_INTERNAL_ENTITY_PAYLOAD_BYTES
+            );
+        }
+
+        let envelope_bytes = envelope
+            .entity_type
+            .len()
+            .saturating_add(32)
+            .saturating_add(entity_bytes.len());
+        if envelope_bytes > MAX_INTERNAL_EVENT_PAYLOAD_BYTES {
+            bail!(
+                "{} entity envelope exceeds {} bytes",
+                envelope.entity_type,
+                MAX_INTERNAL_EVENT_PAYLOAD_BYTES
+            );
+        }
+        if !chunk.is_empty()
+            && (chunk.len() >= MAX_INTERNAL_ENTITY_COUNT
+                || envelope_bytes
+                    > MAX_INTERNAL_EVENT_PAYLOAD_BYTES.saturating_sub(chunk_bytes))
+        {
+            chunks.push(std::mem::take(&mut chunk));
+            chunk_bytes = 0;
+        }
+        chunk_bytes = chunk_bytes.saturating_add(envelope_bytes);
+        chunk.push(envelope);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    Ok(chunks)
+}
+
+async fn send_user_entity_chunks(
+    internal_tx: &InternalEventSender,
+    chunks: Vec<Vec<EntityEnvelope>>,
+) -> Result<()> {
+    for entities in chunks {
+        if !entities.is_empty() && !send_user_entities(internal_tx, entities).await {
+            bail!("user entity queue backpressure: internal event queue is full or closed");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct MarketSpecs {
     session_profile: Option<InstrumentSessionProfile>,
@@ -7,13 +80,13 @@ struct MarketSpecs {
 
 async fn fetch_contract_specs(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     token: &str,
     contract: &ContractSuggestion,
 ) -> Result<MarketSpecs> {
     let contract_maturity_id = json_i64(&contract.raw, "contractMaturityId")
         .context("selected contract is missing contractMaturityId")?;
-    let maturity_url = format!("{}/contractMaturity/item", env.rest_url());
+    let maturity_url = format!("{rest_url}/contractMaturity/item");
     let maturity_response = client
         .get(&maturity_url)
         .bearer_auth(token)
@@ -21,15 +94,19 @@ async fn fetch_contract_specs(
         .send()
         .await?;
     let maturity_status = maturity_response.status();
-    let maturity_body = maturity_response.text().await.unwrap_or_default();
+    let maturity_body = read_rest_response_limited(maturity_response, "contractMaturity/item")
+        .await?;
     if !maturity_status.is_success() {
-        bail!("contractMaturity/item failed ({maturity_status}): {maturity_body}");
+        bail!(
+            "contractMaturity/item failed ({maturity_status}): {}",
+            rest_error_preview(&maturity_body)
+        );
     }
-    let maturity: Value = serde_json::from_str(&maturity_body)?;
+    let maturity: Value = serde_json::from_slice(&maturity_body)?;
     let product_id =
         json_i64(&maturity, "productId").context("contractMaturity/item missing productId")?;
 
-    let product_url = format!("{}/product/item", env.rest_url());
+    let product_url = format!("{rest_url}/product/item");
     let product_response = client
         .get(&product_url)
         .bearer_auth(token)
@@ -37,11 +114,14 @@ async fn fetch_contract_specs(
         .send()
         .await?;
     let product_status = product_response.status();
-    let product_body = product_response.text().await.unwrap_or_default();
+    let product_body = read_rest_response_limited(product_response, "product/item").await?;
     if !product_status.is_success() {
-        bail!("product/item failed ({product_status}): {product_body}");
+        bail!(
+            "product/item failed ({product_status}): {}",
+            rest_error_preview(&product_body)
+        );
     }
-    let product: Value = serde_json::from_str(&product_body)?;
+    let product: Value = serde_json::from_slice(&product_body)?;
     Ok(MarketSpecs {
         session_profile: Some(infer_session_profile(&product)),
         value_per_point: json_number(&product, "valuePerPoint"),
@@ -51,31 +131,98 @@ async fn fetch_contract_specs(
 
 async fn fetch_entity_list(
     client: &Client,
-    env: &TradingEnvironment,
+    rest_url: &str,
     token: &str,
     entity: &str,
 ) -> Result<Vec<Value>> {
-    let url = format!("{}/{entity}/list", env.rest_url());
+    let url = format!("{rest_url}/{entity}/list");
     let response = client.get(url).bearer_auth(token).send().await?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = read_rest_response_limited(response, &format!("{entity}/list")).await?;
     if !status.is_success() {
-        bail!("{entity}/list failed ({status}): {body}");
+        bail!(
+            "{entity}/list failed ({status}): {}",
+            rest_error_preview(&body)
+        );
     }
-    let parsed: Value = serde_json::from_str(&body)?;
-    Ok(match parsed {
+    parse_rest_entity_list(entity, &body)
+}
+
+fn parse_rest_entity_list(entity: &str, body: &[u8]) -> Result<Vec<Value>> {
+    if body.len() > MAX_REST_SEED_RESPONSE_BYTES {
+        bail!(
+            "{entity}/list response exceeds {} byte limit",
+            MAX_REST_SEED_RESPONSE_BYTES
+        );
+    }
+    let parsed: Value = serde_json::from_slice(body)
+        .with_context(|| format!("parse {entity}/list response"))?;
+    let items = match parsed {
         Value::Array(items) => items,
         Value::Object(_) => vec![parsed],
         _ => Vec::new(),
-    })
+    };
+    validate_rest_entity_items(entity, &items)?;
+    Ok(items)
 }
 
-async fn seed_user_store(
-    client: &Client,
-    env: &TradingEnvironment,
-    token: &str,
-    store: &mut UserSyncStore,
-) {
+fn validate_rest_entity_items(entity: &str, items: &[Value]) -> Result<()> {
+    if items.len() > MAX_INTERNAL_ENTITY_COUNT {
+        bail!(
+            "{entity}/list contains {} entities; maximum is {}",
+            items.len(),
+            MAX_INTERNAL_ENTITY_COUNT
+        );
+    }
+    for item in items {
+        let item_bytes = serde_json::to_vec(item)
+            .with_context(|| format!("serialize {entity}/list entity"))?;
+        if item_bytes.len() > MAX_INTERNAL_ENTITY_PAYLOAD_BYTES {
+            bail!(
+                "{entity}/list entity exceeds {} byte limit",
+                MAX_INTERNAL_ENTITY_PAYLOAD_BYTES
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn read_rest_response_limited(
+    response: reqwest::Response,
+    endpoint: &str,
+) -> Result<Vec<u8>> {
+    use futures_util::StreamExt as _;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_REST_SEED_RESPONSE_BYTES as u64)
+    {
+        bail!(
+            "{endpoint} response exceeds {} byte limit",
+            MAX_REST_SEED_RESPONSE_BYTES
+        );
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("read {endpoint} response"))?;
+        if chunk.len() > MAX_REST_SEED_RESPONSE_BYTES.saturating_sub(body.len()) {
+            bail!(
+                "{endpoint} response exceeds {} byte limit",
+                MAX_REST_SEED_RESPONSE_BYTES
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn rest_error_preview(body: &[u8]) -> String {
+    String::from_utf8_lossy(&body[..body.len().min(MAX_REST_ERROR_PREVIEW_BYTES)]).into_owned()
+}
+
+async fn seed_user_store(client: &Client, rest_url: &str, token: &str, store: &mut UserSyncStore) {
     for entity in [
         "account",
         "accountRiskStatus",
@@ -88,7 +235,7 @@ async fn seed_user_store(
         "fill",
         "fillFee",
     ] {
-        let Ok(items) = fetch_entity_list(client, env, token, entity).await else {
+        let Ok(items) = fetch_entity_list(client, rest_url, token, entity).await else {
             continue;
         };
         for item in items {
@@ -173,8 +320,8 @@ async fn user_sync_worker(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
-    request_rx: UnboundedReceiver<UserSocketCommand>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    request_rx: tokio::sync::mpsc::Receiver<UserSocketCommand>,
+    internal_tx: InternalEventSender,
 ) {
     if let Err(err) =
         user_sync_worker_inner(cfg, tokens, account_ids, request_rx, internal_tx.clone()).await
@@ -187,17 +334,20 @@ async fn user_sync_worker_inner(
     cfg: AppConfig,
     tokens: TokenBundle,
     account_ids: Vec<i64>,
-    mut request_rx: UnboundedReceiver<UserSocketCommand>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    mut request_rx: tokio::sync::mpsc::Receiver<UserSocketCommand>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
         write_buffer_size: 0,
-        max_write_buffer_size: usize::MAX,
+        max_write_buffer_size: MAX_WEBSOCKET_WRITE_BUFFER_SIZE,
+        max_message_size: Some(MAX_WEBSOCKET_MESSAGE_SIZE),
+        max_frame_size: Some(MAX_WEBSOCKET_MESSAGE_SIZE),
         ..Default::default()
     };
-    let (ws_stream, _) = connect_low_latency_ws(cfg.env.user_ws_url(), ws_config)
+    let user_ws_url = cfg.broker_user_ws_url();
+    let (ws_stream, _) = connect_low_latency_ws(&user_ws_url, ws_config)
         .await
-        .with_context(|| format!("connect {}", cfg.env.user_ws_url()))?;
+        .with_context(|| format!("connect {user_ws_url}"))?;
     let (mut write, mut read) = ws_stream.split();
 
     let mut message_id = 1_u64;
@@ -230,6 +380,18 @@ async fn user_sync_worker_inner(
                     continue;
                 }
 
+                if pending_requests.len() >= MAX_PENDING_USER_REQUESTS {
+                    // Fail explicitly rather than retaining requests while
+                    // the broker is not answering. The caller's oneshot is
+                    // still completed, so the broker order/error path can
+                    // account for the rejected request.
+                    let _ = outbound.response_tx.send(Err(format!(
+                        "user websocket backpressure: {} requests already pending",
+                        MAX_PENDING_USER_REQUESTS
+                    )));
+                    continue;
+                }
+
                 message_id += 1;
                 let request_id = message_id;
                 pending_requests.insert(request_id, outbound.response_tx);
@@ -253,10 +415,26 @@ async fn user_sync_worker_inner(
             }
             next = read.next() => {
                 let raw = match next {
-                    Some(Ok(Message::Text(text))) => text,
-                    Some(Ok(Message::Binary(bytes))) => String::from_utf8_lossy(&bytes).to_string(),
+                    Some(Ok(Message::Text(text))) => {
+                        if text.len() > MAX_WEBSOCKET_MESSAGE_SIZE {
+                            bail!("user websocket message exceeds {} bytes", MAX_WEBSOCKET_MESSAGE_SIZE);
+                        }
+                        text.to_string()
+                    }
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if bytes.len() > MAX_WEBSOCKET_MESSAGE_SIZE {
+                            bail!("user websocket message exceeds {} bytes", MAX_WEBSOCKET_MESSAGE_SIZE);
+                        }
+                        String::from_utf8_lossy(&bytes).to_string()
+                    }
                     Some(Ok(Message::Close(_))) => {
-                        let _ = internal_tx.send(InternalEvent::UserSocketStatus("User-data websocket closed".to_string()));
+                        internal_tx
+                            .send(InternalEvent::UserSocketStatus(
+                                "User-data websocket closed".to_string(),
+                            ))
+                            .map_err(|error| {
+                                anyhow::anyhow!("user socket status delivery failed: {error:?}")
+                            })?;
                         break;
                     }
                     Some(Ok(_)) => continue,
@@ -313,24 +491,30 @@ async fn user_sync_worker_inner(
                                 Some(&body),
                             )))
                             .await?;
-                        let _ = internal_tx.send(InternalEvent::UserSocketStatus("User sync authorized".to_string()));
+                        internal_tx
+                            .send(InternalEvent::UserSocketStatus(
+                                "User sync authorized".to_string(),
+                            ))
+                            .map_err(|error| {
+                                anyhow::anyhow!("user sync status delivery failed: {error:?}")
+                            })?;
                         continue;
                     }
 
                     if status == Some(200) && response_id == sync_id {
-                        let mut envelopes = extract_entity_envelopes(&item);
+                        let mut chunks = extract_admitted_entity_chunks(&item)?;
                         // Commands and command reports are subscribed above so future broker
                         // rejections arrive as live props events. Do not replay historical
                         // rejection reports from the initial account snapshot as new errors.
-                        envelopes.retain(|envelope| {
-                            !envelope.entity_type.eq_ignore_ascii_case("command")
-                                && !envelope
-                                    .entity_type
-                                    .eq_ignore_ascii_case("commandReport")
-                        });
-                        if !envelopes.is_empty() {
-                            let _ = internal_tx.send(InternalEvent::UserEntities(envelopes));
+                        for chunk in &mut chunks {
+                            chunk.retain(|envelope| {
+                                !envelope.entity_type.eq_ignore_ascii_case("command")
+                                    && !envelope
+                                        .entity_type
+                                        .eq_ignore_ascii_case("commandReport")
+                            });
                         }
+                        send_user_entity_chunks(&internal_tx, chunks).await?;
                         continue;
                     }
 
@@ -341,10 +525,8 @@ async fn user_sync_worker_inner(
                         }
                     }
 
-                    let envelopes = extract_entity_envelopes(&item);
-                    if !envelopes.is_empty() {
-                        let _ = internal_tx.send(InternalEvent::UserEntities(envelopes));
-                    }
+                    let chunks = extract_admitted_entity_chunks(&item)?;
+                    send_user_entity_chunks(&internal_tx, chunks).await?;
                 }
             }
         }
@@ -360,7 +542,7 @@ async fn market_data_worker(
     market_specs: Option<MarketSpecs>,
     bar_type: BarType,
     candle_mode: CandleMode,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) {
     if let Err(err) = market_data_worker_inner(
         cfg,
@@ -384,16 +566,19 @@ async fn market_data_worker_inner(
     market_specs: Option<MarketSpecs>,
     bar_type: BarType,
     candle_mode: CandleMode,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
         write_buffer_size: 0,
-        max_write_buffer_size: usize::MAX,
+        max_write_buffer_size: MAX_WEBSOCKET_WRITE_BUFFER_SIZE,
+        max_message_size: Some(MAX_WEBSOCKET_MESSAGE_SIZE),
+        max_frame_size: Some(MAX_WEBSOCKET_MESSAGE_SIZE),
         ..Default::default()
     };
-    let (ws_stream, _) = connect_low_latency_ws(cfg.env.market_ws_url(), ws_config)
+    let market_ws_url = cfg.broker_market_ws_url();
+    let (ws_stream, _) = connect_low_latency_ws(&market_ws_url, ws_config)
         .await
-        .with_context(|| format!("connect {}", cfg.env.market_ws_url()))?;
+        .with_context(|| format!("connect {market_ws_url}"))?;
     let (mut write, mut read) = ws_stream.split();
 
     let mut message_id = 1_u64;
@@ -422,8 +607,18 @@ async fn market_data_worker_inner(
             }
             next = read.next() => {
                 let raw = match next {
-                    Some(Ok(Message::Text(text))) => text,
-                    Some(Ok(Message::Binary(bytes))) => String::from_utf8_lossy(&bytes).to_string(),
+                    Some(Ok(Message::Text(text))) => {
+                        if text.len() > MAX_WEBSOCKET_MESSAGE_SIZE {
+                            bail!("market websocket message exceeds {} bytes", MAX_WEBSOCKET_MESSAGE_SIZE);
+                        }
+                        text.to_string()
+                    }
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if bytes.len() > MAX_WEBSOCKET_MESSAGE_SIZE {
+                            bail!("market websocket message exceeds {} bytes", MAX_WEBSOCKET_MESSAGE_SIZE);
+                        }
+                        String::from_utf8_lossy(&bytes).to_string()
+                    }
                     Some(Ok(Message::Close(_))) => break,
                     Some(Ok(_)) => continue,
                     Some(Err(err)) => bail!("market websocket read error: {err}"),
@@ -475,12 +670,16 @@ async fn market_data_worker_inner(
                         let message = parse_socket_response(&item).expect_err(
                             "non-success chart response should produce websocket error text",
                         );
-                        let _ = internal_tx.send(InternalEvent::Error(format!(
-                            "market data chart request failed for {} {} bars: {}",
-                            contract.name,
-                            bar_type.mode_label(candle_mode),
-                            message
-                        )));
+                        internal_tx
+                            .send(InternalEvent::Error(format!(
+                                "market data chart request failed for {} {} bars: {}",
+                                contract.name,
+                                bar_type.mode_label(candle_mode),
+                                message
+                            )))
+                            .map_err(|error| {
+                                anyhow::anyhow!("market error delivery failed: {error:?}")
+                            })?;
                         continue;
                     }
 
@@ -571,11 +770,82 @@ async fn market_data_worker_inner(
                     before_forming,
                     &series,
                 ) {
-                    let _ = internal_tx.send(InternalEvent::Market(update));
+                    let _ = send_market_internal_event(&internal_tx, InternalEvent::Market(update)).await;
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod market_limits_tests {
+    use super::*;
+
+    #[test]
+    fn entity_admission_rejects_single_oversized_payload() {
+        let item = json!({
+            "d": {
+                "entityType": "fill",
+                "entity": "x".repeat(MAX_INTERNAL_ENTITY_PAYLOAD_BYTES)
+            }
+        });
+        let error = extract_admitted_entity_chunks(&item).unwrap_err();
+        assert!(error.to_string().contains("fill entity exceeds"));
+    }
+
+    #[tokio::test]
+    async fn entity_admission_chunks_large_split_response_in_order() {
+        let entity_count = MAX_INTERNAL_ENTITY_COUNT + 17;
+        let item = json!({
+            "d": {
+                "entityType": "fill",
+                "entities": (0..entity_count)
+                    .map(|id| json!({"id": id}))
+                    .collect::<Vec<_>>()
+            }
+        });
+        let chunks = extract_admitted_entity_chunks(&item).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), MAX_INTERNAL_ENTITY_COUNT);
+        assert_eq!(chunks[1].len(), 17);
+
+        let (internal_tx, mut internal_rx) = internal_event_channel(2);
+        send_user_entity_chunks(&internal_tx, chunks)
+            .await
+            .unwrap();
+
+        let mut expected_id = 0_u64;
+        for expected_len in [MAX_INTERNAL_ENTITY_COUNT, 17] {
+            let Some(InternalEvent::UserEntities(entities)) = internal_rx.recv().await else {
+                panic!("expected chunked user entities");
+            };
+            assert_eq!(entities.len(), expected_len);
+            for envelope in entities {
+                assert_eq!(envelope.entity["id"].as_u64(), Some(expected_id));
+                expected_id += 1;
+            }
+        }
+        assert_eq!(expected_id, entity_count as u64);
+    }
+
+    #[tokio::test]
+    async fn entity_chunk_delivery_reports_queue_backpressure() {
+        let (internal_tx, _internal_rx) = internal_event_channel(1);
+        internal_tx
+            .send(InternalEvent::UserSocketStatus("queued".to_string()))
+            .unwrap();
+        let chunks = vec![vec![EntityEnvelope {
+            entity_type: "command".to_string(),
+            deleted: false,
+            entity: json!({"id": 1}),
+        }]];
+
+        let error = send_user_entity_chunks(&internal_tx, chunks)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("queue backpressure"));
+    }
 }

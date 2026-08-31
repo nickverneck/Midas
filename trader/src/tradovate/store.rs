@@ -1,5 +1,19 @@
 const ACCOUNT_FEE_EPSILON: f64 = 0.005;
 
+fn insert_bounded<K: Ord, V>(
+    map: &mut BTreeMap<K, V>,
+    key: K,
+    value: V,
+    limit: usize,
+) -> Option<(K, V)> {
+    map.insert(key, value);
+    if map.len() > limit {
+        map.pop_first()
+    } else {
+        None
+    }
+}
+
 impl UserSyncStore {
     fn apply(&mut self, envelope: EntityEnvelope) {
         let entity_type = envelope.entity_type.to_ascii_lowercase();
@@ -44,7 +58,12 @@ impl UserSyncStore {
                 if envelope.deleted {
                     bucket.remove(&entity_id);
                 } else {
-                    bucket.insert(entity_id, envelope.entity);
+                    insert_bounded(
+                        bucket,
+                        entity_id,
+                        envelope.entity,
+                        USER_STORE_POSITION_LIMIT,
+                    );
                 }
             }
             "order" => {
@@ -55,14 +74,19 @@ impl UserSyncStore {
                 if envelope.deleted {
                     bucket.remove(&entity_id);
                 } else {
-                    bucket.insert(entity_id, envelope.entity);
+                    insert_bounded(bucket, entity_id, envelope.entity, USER_STORE_ORDER_LIMIT);
                 }
             }
             "command" => {
                 if envelope.deleted {
                     self.commands.remove(&entity_id);
                 } else {
-                    self.commands.insert(entity_id, envelope.entity);
+                    insert_bounded(
+                        &mut self.commands,
+                        entity_id,
+                        envelope.entity,
+                        USER_STORE_COMMAND_LIMIT,
+                    );
                 }
             }
             "commandreport" => {
@@ -70,29 +94,53 @@ impl UserSyncStore {
                     self.command_reports.remove(&entity_id);
                     self.reported_command_rejections.remove(&entity_id);
                 } else {
-                    self.command_reports.insert(entity_id, envelope.entity);
+                    if let Some((evicted_id, _)) = insert_bounded(
+                        &mut self.command_reports,
+                        entity_id,
+                        envelope.entity,
+                        USER_STORE_COMMAND_REPORT_LIMIT,
+                    ) {
+                        self.reported_command_rejections.remove(&evicted_id);
+                    }
                 }
             }
             "orderstrategy" => {
                 if envelope.deleted {
                     self.order_strategies.remove(&entity_id);
                 } else {
-                    self.order_strategies.insert(entity_id, envelope.entity);
+                    insert_bounded(
+                        &mut self.order_strategies,
+                        entity_id,
+                        envelope.entity,
+                        USER_STORE_ORDER_STRATEGY_LIMIT,
+                    );
                 }
             }
             "orderstrategylink" => {
                 if envelope.deleted {
                     self.order_strategy_links.remove(&entity_id);
                 } else {
-                    self.order_strategy_links.insert(entity_id, envelope.entity);
+                    insert_bounded(
+                        &mut self.order_strategy_links,
+                        entity_id,
+                        envelope.entity,
+                        USER_STORE_ORDER_STRATEGY_LINK_LIMIT,
+                    );
                 }
             }
             "fill" => {
                 if envelope.deleted {
                     self.history_fills.remove(&entity_id);
+                    self.remove_evicted_fee(entity_id);
                 } else {
-                    self.history_fills
-                        .insert(entity_id, envelope.entity.clone());
+                    if let Some((_, evicted)) = insert_bounded(
+                        &mut self.history_fills,
+                        entity_id,
+                        envelope.entity.clone(),
+                        USER_STORE_HISTORY_FILL_LIMIT,
+                    ) {
+                        self.account_for_evicted_fill(evicted);
+                    }
                 }
                 let Some(account_id) = extract_account_id("fill", &envelope.entity) else {
                     return;
@@ -108,20 +156,120 @@ impl UserSyncStore {
                         self.fills.remove(&account_id);
                     }
                 } else if is_replay_entity(&envelope.entity) {
-                    self.fills
-                        .entry(account_id)
-                        .or_default()
-                        .insert(entity_id, envelope.entity);
+                    let bucket = self.fills.entry(account_id).or_default();
+                    insert_bounded(
+                        bucket,
+                        entity_id,
+                        envelope.entity,
+                        USER_STORE_REPLAY_FILL_LIMIT,
+                    );
                 }
             }
             "fillfee" => {
                 if envelope.deleted {
                     self.fill_fees.remove(&entity_id);
-                } else {
-                    self.fill_fees.insert(entity_id, envelope.entity);
+                    self.remove_evicted_fee_by_fill(json_i64(&envelope.entity, "fillId"));
+                } else if let Some((_, evicted)) = insert_bounded(
+                    &mut self.fill_fees,
+                    entity_id,
+                    envelope.entity,
+                    USER_STORE_FILL_FEE_LIMIT,
+                ) {
+                    self.account_for_evicted_fee(evicted);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn account_for_evicted_fill(&mut self, fill: Value) {
+        let fill_id = extract_entity_id(&fill);
+        let fee = fill_id.and_then(|id| self.fill_fees.remove(&id));
+        let amount = fee
+            .as_ref()
+            .and_then(explicit_fee_amount)
+            .or_else(|| explicit_fee_amount(&fill));
+        let account_id = extract_account_id("fill", &fill)
+            .or_else(|| fee.as_ref().and_then(|value| json_i64(value, "accountId")));
+        if let (Some(account_id), Some(amount)) = (account_id, amount) {
+            self.record_evicted_fee(fill_id, account_id, amount);
+        }
+    }
+
+    fn account_for_evicted_fee(&mut self, fee: Value) {
+        let Some(amount) = explicit_fee_amount(&fee) else {
+            return;
+        };
+        let fill_id = json_i64(&fee, "fillId");
+        let account_id = json_i64(&fee, "accountId")
+            .or_else(|| {
+                fill_id.and_then(|fill_id| {
+                    self.history_fills
+                        .get(&fill_id)
+                        .and_then(|fill| extract_account_id("fill", fill))
+                })
+            })
+            .or_else(|| {
+                fill_id.and_then(|fill_id| {
+                    self.evicted_fee_by_fill
+                        .get(&fill_id)
+                        .map(|(account_id, _)| *account_id)
+                })
+            });
+        if let Some(account_id) = account_id {
+            self.record_evicted_fee(fill_id, account_id, amount);
+        }
+    }
+
+    fn record_evicted_fee(&mut self, fill_id: Option<i64>, account_id: i64, amount: f64) {
+        if let Some(fill_id) = fill_id {
+            if let Some((old_account_id, old_amount)) = self
+                .evicted_fee_by_fill
+                .insert(fill_id, (account_id, amount))
+            {
+                self.adjust_evicted_fee_total(old_account_id, -old_amount);
+            }
+            self.prune_evicted_fee_index();
+        }
+        self.adjust_evicted_fee_total(account_id, amount);
+    }
+
+    fn prune_evicted_fee_index(&mut self) {
+        while self.evicted_fee_by_fill.len() > USER_STORE_EVICTED_FEE_LIMIT {
+            // Keep the per-fill index for fills that are still available to
+            // F6.  The aggregate is authoritative, so removing an index
+            // entry must never subtract from evicted_fee_totals.
+            let removable_id = self
+                .evicted_fee_by_fill
+                .iter()
+                .find(|(fill_id, _)| !self.history_fills.contains_key(fill_id))
+                .map(|(fill_id, _)| *fill_id)
+                .or_else(|| self.evicted_fee_by_fill.keys().next().copied());
+            let Some(removable_id) = removable_id else {
+                break;
+            };
+            self.evicted_fee_by_fill.remove(&removable_id);
+        }
+    }
+
+    fn remove_evicted_fee(&mut self, fill_id: i64) {
+        self.remove_evicted_fee_by_fill(Some(fill_id));
+    }
+
+    fn remove_evicted_fee_by_fill(&mut self, fill_id: Option<i64>) {
+        let Some(fill_id) = fill_id else {
+            return;
+        };
+        if let Some((account_id, amount)) = self.evicted_fee_by_fill.remove(&fill_id) {
+            self.adjust_evicted_fee_total(account_id, -amount);
+        }
+    }
+
+    fn adjust_evicted_fee_total(&mut self, account_id: i64, delta: f64) {
+        let total = self.evicted_fee_totals.entry(account_id).or_default();
+        *total += delta;
+        if !total.is_finite() || total.abs() <= ACCOUNT_FEE_EPSILON {
+            self.evicted_fee_totals.remove(&account_id);
         }
     }
 
@@ -397,6 +545,28 @@ impl UserSyncStore {
             .collect()
     }
 
+    /// Resolve one fill's fee without retaining its full broker payload after
+    /// eviction.  The active fillFee entity wins, followed by the compact
+    /// evicted-fee index, and finally the commission fallback on the fill.
+    /// This is the same precedence used by F6 history accounting.
+    fn fee_for_fill(&self, fill_id: i64, fill: &Value) -> f64 {
+        let active_fee = self
+            .fill_fees
+            .values()
+            .filter(|fee| json_i64(fee, "fillId") == Some(fill_id))
+            .filter_map(explicit_fee_amount)
+            .sum::<f64>();
+        if active_fee > ACCOUNT_FEE_EPSILON && active_fee.is_finite() {
+            return active_fee;
+        }
+        self.evicted_fee_by_fill
+            .get(&fill_id)
+            .map(|(_, amount)| *amount)
+            .filter(|amount| amount.is_finite() && *amount > ACCOUNT_FEE_EPSILON)
+            .or_else(|| explicit_fee_amount(fill))
+            .unwrap_or_default()
+    }
+
     fn find_order(&self, account_id: i64, order_id: i64) -> Option<&Value> {
         self.orders.get(&account_id)?.get(&order_id)
     }
@@ -425,12 +595,24 @@ impl UserSyncStore {
         }
 
         let mut totals = BTreeMap::<i64, f64>::new();
+        for (account_id, amount) in &self.evicted_fee_totals {
+            *totals.entry(*account_id).or_default() += *amount;
+        }
         for fill in self.history_fills.values() {
+            let Some(fill_id) = extract_entity_id(fill) else {
+                continue;
+            };
+            if self.evicted_fee_by_fill.contains_key(&fill_id) {
+                // The fee was already included in evicted_fee_totals. Keep
+                // the per-fill fallback from being counted a second time.
+                continue;
+            }
             let Some(account_id) = extract_account_id("fill", fill) else {
                 continue;
             };
-            let explicit_fill_fee = extract_entity_id(fill)
-                .and_then(|fill_id| fees_by_fill.get(&fill_id).copied())
+            let explicit_fill_fee = fees_by_fill
+                .get(&fill_id)
+                .copied()
                 .filter(|amount| *amount > ACCOUNT_FEE_EPSILON);
             let amount = explicit_fill_fee.or_else(|| explicit_fee_amount(fill));
             if let Some(amount) = amount {
@@ -587,9 +769,12 @@ fn pick_number(value: &Value, keys: &[&str]) -> Option<f64> {
 }
 
 fn explicit_fee_amount(value: &Value) -> Option<f64> {
-    pick_number(value, &["amount", "fee", "commission", "totalFee", "totalFees"])
-        .map(f64::abs)
-        .filter(|amount| amount.is_finite() && *amount > ACCOUNT_FEE_EPSILON)
+    pick_number(
+        value,
+        &["amount", "fee", "commission", "totalFee", "totalFees"],
+    )
+    .map(f64::abs)
+    .filter(|amount| amount.is_finite() && *amount > ACCOUNT_FEE_EPSILON)
 }
 
 fn sum_position_metric(positions: &[Value], keys: &[&str]) -> Option<f64> {
@@ -859,4 +1044,92 @@ fn position_side_sign(position: &Value) -> Option<f64> {
             if is_short { -1.0 } else { 1.0 }
         },
     )
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fill(id: i64, account_id: i64) -> EntityEnvelope {
+        EntityEnvelope {
+            entity_type: "fill".to_string(),
+            deleted: false,
+            entity: json!({
+                "id": id,
+                "accountId": account_id,
+                "commission": 1.0,
+                "source": "replay"
+            }),
+        }
+    }
+
+    #[test]
+    fn historical_fill_caches_have_a_fixed_cap() {
+        let mut store = UserSyncStore::default();
+        for id in 1..=(USER_STORE_HISTORY_FILL_LIMIT as i64 + 1) {
+            store.apply(fill(id, 7));
+        }
+
+        assert_eq!(store.history_fills.len(), USER_STORE_HISTORY_FILL_LIMIT);
+        assert_eq!(
+            store.fills.get(&7).map(BTreeMap::len),
+            Some(USER_STORE_REPLAY_FILL_LIMIT)
+        );
+        assert_eq!(
+            store.account_fee_totals().get(&7).copied(),
+            Some(USER_STORE_HISTORY_FILL_LIMIT as f64 + 1.0)
+        );
+    }
+
+    #[test]
+    fn evicted_explicit_fee_replaces_fill_commission_fallback() {
+        let mut store = UserSyncStore::default();
+        store.apply(fill(1, 7));
+        store.record_evicted_fee(Some(1), 7, 2.0);
+
+        assert_eq!(store.account_fee_totals().get(&7).copied(), Some(2.0));
+    }
+
+    #[test]
+    fn evicted_fee_index_eviction_preserves_cumulative_account_total() {
+        let mut store = UserSyncStore::default();
+        for fill_id in 1..=(USER_STORE_EVICTED_FEE_LIMIT as i64 + 1) {
+            store.record_evicted_fee(Some(fill_id), 7, 1.0);
+        }
+
+        assert_eq!(
+            store.evicted_fee_by_fill.len(),
+            USER_STORE_EVICTED_FEE_LIMIT
+        );
+        assert_eq!(
+            store.account_fee_totals().get(&7).copied(),
+            Some((USER_STORE_EVICTED_FEE_LIMIT + 1) as f64)
+        );
+    }
+
+    #[test]
+    fn evicted_fee_lookup_is_authoritative_over_fill_commission_fallback() {
+        let mut store = UserSyncStore::default();
+        let fill_value = json!({"id": 1, "accountId": 7, "commission": 1.0});
+        store.history_fills.insert(1, fill_value.clone());
+        store.record_evicted_fee(Some(1), 7, 2.0);
+
+        assert_eq!(store.fee_for_fill(1, &fill_value), 2.0);
+        assert_eq!(store.account_fee_totals().get(&7).copied(), Some(2.0));
+    }
+
+    #[test]
+    fn deleting_an_evicted_fill_removes_its_fee_total() {
+        let mut store = UserSyncStore::default();
+        store.record_evicted_fee(Some(1), 7, 2.0);
+        store.apply(EntityEnvelope {
+            entity_type: "fill".to_string(),
+            deleted: true,
+            entity: json!({"id": 1, "accountId": 7}),
+        });
+
+        assert!(!store.evicted_fee_by_fill.contains_key(&1));
+        assert_eq!(store.account_fee_totals().get(&7), None);
+    }
 }

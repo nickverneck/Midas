@@ -3,12 +3,16 @@ use super::{connection::*, market::*, orders::*, replay_jobs::*, strategy::*, *}
 pub(in crate::tradovate::service) async fn handle_command(
     cmd: ServiceCommand,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     match cmd {
         ServiceCommand::Connect(cfg) => {
+            // The login form can change env after the initial config load.
+            // Revalidate at the actual network boundary so an enabled local
+            // proxy can never silently fall through to the live endpoint.
+            cfg.validate()?;
             connect_live_session(cfg, state, event_tx, market_tx, internal_tx).await
         }
         ServiceCommand::EnterReplayMode {
@@ -223,7 +227,8 @@ pub(in crate::tradovate::service) async fn handle_command(
             cancel_replay_operation(operation_id, state, event_tx).await;
             Ok(())
         }
-        ServiceCommand::ReplayState => replay_state(state, event_tx).await,
+        ServiceCommand::InspectState => inspect_state(state, event_tx),
+        ServiceCommand::ReplayState => replay_state(state, event_tx, &internal_tx).await,
         ServiceCommand::SelectAccount { account_id } => {
             select_account(account_id, state, event_tx, internal_tx)
         }

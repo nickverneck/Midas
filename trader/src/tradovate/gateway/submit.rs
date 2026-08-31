@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn submit_market_order_via_gateway(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     order: PendingMarketOrder,
 ) -> Result<BrokerOrderAck, BrokerOrderFailure> {
     if let Some(order_strategy_id) = order.interrupt_order_strategy_id {
@@ -75,7 +75,7 @@ pub(crate) async fn submit_market_order_via_gateway(
 }
 
 pub(crate) async fn submit_liquidation_via_gateway(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     liquidation: PendingLiquidation,
 ) -> Result<BrokerOrderAck, BrokerOrderFailure> {
     if let Some(order_strategy_id) = liquidation.interrupt_order_strategy_id {
@@ -141,7 +141,7 @@ pub(crate) async fn submit_liquidation_via_gateway(
 }
 
 pub(crate) async fn submit_liquidation_then_order_strategy_via_gateway(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     liquidation: PendingLiquidation,
     strategy: PendingOrderStrategyTransition,
 ) -> Result<BrokerOrderStrategyAck, BrokerOrderStrategyFailure> {
@@ -165,7 +165,7 @@ pub(crate) async fn submit_liquidation_then_order_strategy_via_gateway(
 }
 
 pub(crate) async fn submit_order_strategy_via_gateway(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     strategy: PendingOrderStrategyTransition,
 ) -> Result<BrokerOrderStrategyAck, BrokerOrderStrategyFailure> {
     if let Some(order_strategy_id) = strategy.interrupt_order_strategy_id {
@@ -259,7 +259,7 @@ fn interrupt_error_is_stale(err: &anyhow::Error) -> bool {
 }
 
 pub(crate) async fn submit_native_protection_via_gateway(
-    request_tx: &UnboundedSender<UserSocketCommand>,
+    request_tx: &dyn UserSocketCommandSink,
     sync: PendingProtectionSync,
 ) -> Result<ProtectionSyncAck, ProtectionSyncFailure> {
     let next_state = sync.next_state;

@@ -260,6 +260,14 @@ impl VolumeAdaptiveHmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> VolumeAdaptiveHmaCrossEvaluation {
+        // Advance the ADX-only gate once per appended bar. The generic gate
+        // remains on its existing prefix-reconstruction path; this fast path
+        // is deliberately restricted to the configuration used by the
+        // replay ADX experiment and by equivalent live configs.
+        let streamed_adaptive_gate = self.adaptive_gate.is_adx_only_fast_path().then(|| {
+            self.adaptive_gate
+                .evaluate_adx_only_streaming(&mut runtime.adaptive_gate, bars)
+        });
         if self.adaptive_gate.enabled {
             // Probe on a clone so the wrapper can preserve the stateful HMA
             // side tracker on non-crossing bars without advancing it twice
@@ -274,7 +282,9 @@ impl VolumeAdaptiveHmaCrossConfig {
             }
         }
         let (effective, relative_volume, volume_inverted, ema_gate, adaptive_gate) =
-            self.effective_hma(bars);
+            streamed_adaptive_gate
+                .map(|adaptive_gate| self.effective_hma_with_gate(bars, adaptive_gate))
+                .unwrap_or_else(|| self.effective_hma(bars));
         let mut hma = effective.evaluate_current_cross(runtime, bars, current_side);
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_hma(&mut hma);
@@ -345,6 +355,50 @@ impl VolumeAdaptiveHmaCrossConfig {
             self.hma_cross.fast_length,
             self.hma_cross.slow_length,
         );
+        self.effective_hma_with_gate_parts(
+            relative_volume,
+            volume_inverted,
+            ema_gate,
+            adaptive_gate,
+        )
+    }
+
+    fn effective_hma_with_gate(
+        &self,
+        bars: &[Bar],
+        adaptive_gate: RegimeAdaptiveGateEvaluation,
+    ) -> (
+        HmaCrossConfig,
+        Option<f64>,
+        bool,
+        EmaOrientationGateEvaluation,
+        RegimeAdaptiveGateEvaluation,
+    ) {
+        let relative_volume = self.volume_regime.relative_volume(bars);
+        let volume_inverted = relative_volume
+            .is_some_and(|ratio| ratio < self.volume_regime.invert_below_relative_volume);
+        let ema_gate = self.ema_gate.evaluate(bars);
+        self.effective_hma_with_gate_parts(
+            relative_volume,
+            volume_inverted,
+            ema_gate,
+            adaptive_gate,
+        )
+    }
+
+    fn effective_hma_with_gate_parts(
+        &self,
+        relative_volume: Option<f64>,
+        volume_inverted: bool,
+        ema_gate: EmaOrientationGateEvaluation,
+        adaptive_gate: RegimeAdaptiveGateEvaluation,
+    ) -> (
+        HmaCrossConfig,
+        Option<f64>,
+        bool,
+        EmaOrientationGateEvaluation,
+        RegimeAdaptiveGateEvaluation,
+    ) {
         let mut effective = self.hma_cross.clone();
         effective.inverted ^= volume_inverted ^ ema_gate.inverted ^ adaptive_gate.inverted;
         (

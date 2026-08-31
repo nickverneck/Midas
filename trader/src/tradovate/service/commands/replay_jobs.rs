@@ -21,7 +21,7 @@ pub(in crate::tradovate::service) async fn reap_finished_replay_download(state: 
 pub(in crate::tradovate::service) async fn cancel_replay_operation(
     operation_id: ReplayDownloadOperationId,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) {
     if state
         .replay_lookup_job
@@ -124,10 +124,18 @@ pub(super) async fn download_replay_data(
     candle_mode: CandleMode,
     display_name: Option<String>,
     tags: Vec<String>,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
     stage: Arc<AtomicU8>,
 ) -> std::result::Result<(), (ReplayDownloadPhase, anyhow::Error)> {
+    if cfg.simulation_proxy.enabled {
+        return Err((
+            ReplayDownloadPhase::Ready,
+            anyhow::anyhow!(
+                "replay downloads are unavailable in simulation_proxy mode; use the standalone proxy fixture"
+            ),
+        ));
+    }
     #[cfg(not(feature = "replay"))]
     {
         let _ = (

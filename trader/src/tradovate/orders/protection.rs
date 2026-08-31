@@ -9,7 +9,7 @@ pub(crate) struct LiveProtectionOrder {
 
 pub(crate) fn sync_native_protection(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     signed_qty: i32,
     take_profit_price: Option<f64>,
     stop_price: Option<f64>,
@@ -27,7 +27,7 @@ pub(crate) fn sync_native_protection(
 
 pub(crate) fn sync_native_protection_target(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
+    broker_tx: &dyn BrokerCommandSink,
     desired: DesiredNativeProtection,
 ) -> Result<()> {
     if session.protection_sync_in_flight {

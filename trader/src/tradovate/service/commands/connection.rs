@@ -3,9 +3,9 @@ use super::*;
 pub(super) async fn connect_live_session(
     cfg: AppConfig,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     reset_state_for_new_session(state, market_tx).await;
     let _ = event_tx.send(ServiceEvent::Status(format!(
@@ -32,11 +32,12 @@ pub(super) async fn connect_live_session(
         capabilities: tradovate_capabilities(),
     });
 
-    let accounts = list_accounts(&state.client, &cfg.env, &tokens.access_token).await?;
+    let rest_url = cfg.broker_rest_url();
+    let accounts = list_accounts(&state.client, &rest_url, &tokens.access_token).await?;
     let mut user_store = UserSyncStore::default();
     seed_user_store(
         &state.client,
-        &cfg.env,
+        &rest_url,
         &tokens.access_token,
         &mut user_store,
     )
@@ -110,9 +111,9 @@ pub(super) async fn enter_replay_mode(
     replay_dataset_view: Option<std::path::PathBuf>,
     shared_frames: Option<Arc<ReplayFrameSet>>,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let candle_mode = bar_type.effective_candle_mode(candle_mode);
     reset_state_for_new_session(state, market_tx).await;
@@ -134,7 +135,7 @@ pub(super) async fn enter_replay_mode(
     let accounts = replay::replay_accounts(&replay);
     let contract = replay::replay_contract(&replay);
     let selected_account_id = accounts.first().map(|account| account.id);
-    let (request_tx, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (request_tx, _request_rx) = user_socket_command_channel();
     let mut user_store = UserSyncStore::default();
     seed_replay_user_store(&accounts, &mut user_store, cfg.replay_initial_capital);
 
@@ -221,7 +222,8 @@ pub(super) async fn enter_replay_mode(
 
 pub(in crate::tradovate::service) async fn replay_state(
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
+    internal_tx: &InternalEventSender,
 ) -> Result<()> {
     let Some(session) = state.session.as_mut() else {
         let _ = event_tx.send(ServiceEvent::Disconnected);
@@ -237,13 +239,6 @@ pub(in crate::tradovate::service) async fn replay_state(
         capabilities: tradovate_capabilities(),
     });
     let _ = event_tx.send(ServiceEvent::AccountsLoaded(session.accounts.clone()));
-    let _ = event_tx.send(ServiceEvent::AccountSnapshotsLoaded(
-        session.user_store.build_snapshots(
-            &session.accounts,
-            Some(&session.market),
-            &session.managed_protection,
-        ),
-    ));
     let _ = event_tx.send(ServiceEvent::Latency(state.latency));
     if session.replay_enabled {
         let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));
@@ -256,6 +251,52 @@ pub(in crate::tradovate::service) async fn replay_state(
     }
     emit_execution_state(event_tx, session);
     emit_engine_history(event_tx, session);
+    // Route the snapshot through the single owned/coalesced build path so a
+    // replay-state re-emit cannot overtake an older active build.
+    request_snapshot_refresh(state, internal_tx);
+    Ok(())
+}
+
+/// Emit the state currently owned by the engine without doing any broker
+/// refresh. This path is intentionally synchronous and immutable so external
+/// inspection (for example `trader list`) cannot compete with live execution
+/// or mutate the user store.
+pub(in crate::tradovate::service) fn inspect_state(
+    state: &ServiceState,
+    event_tx: &ServiceEventSender,
+) -> Result<()> {
+    let Some(session) = state.session.as_ref() else {
+        let _ = event_tx.send(ServiceEvent::Disconnected);
+        return Ok(());
+    };
+
+    let execution = execution_state_snapshot(session);
+    let account_id = session.selected_account_id;
+    let account_name = account_id.and_then(|account_id| {
+        session
+            .accounts
+            .iter()
+            .find(|account| account.id == account_id)
+            .map(|account| account.name.clone())
+    });
+    let (contract_id, contract_name) = session
+        .selected_contract
+        .as_ref()
+        .map(|contract| (Some(contract.id), Some(contract.name.clone())))
+        .unwrap_or((None, None));
+    let history = session.engine_run.as_ref().map(|run| run.history.summary());
+
+    let _ = event_tx.send(ServiceEvent::StateInspected(EngineInspectionSnapshot {
+        broker: BrokerKind::Tradovate,
+        env: session.cfg.env,
+        session_kind: session.session_kind,
+        account_id,
+        account_name,
+        contract_id,
+        contract_name,
+        execution,
+        history,
+    }));
     Ok(())
 }
 
@@ -266,6 +307,7 @@ async fn reset_state_for_new_session(
     shutdown_tasks(state).await;
     state.snapshot_generation = state.snapshot_generation.wrapping_add(1);
     state.snapshot_revision = 0;
+    state.snapshot_refresh_pending = false;
     state.latency = LatencySnapshot::default();
     state.replay_speed = ReplaySpeed::default();
     state.replay_execution_ledger = replay::ReplayExecutionLedgerState::default();

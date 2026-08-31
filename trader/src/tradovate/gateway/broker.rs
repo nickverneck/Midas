@@ -537,8 +537,8 @@ fn drain_replay_lifecycle_through(
     lifecycle: &mut ReplayLifecycleDispatchQueue,
     market_ts_ns: i64,
     logical_step: u64,
-    internal_tx: &UnboundedSender<InternalEvent>,
-) {
+    internal_tx: &InternalEventSender,
+) -> Result<()> {
     while let Some((kind, dispatch)) = lifecycle.pop_next_through(market_ts_ns, logical_step) {
         if let ReplayVirtualEventKind::OrderArrivesAtExchange { order_id } = kind {
             if let Some(command) = commands
@@ -549,9 +549,12 @@ fn drain_replay_lifecycle_through(
             }
         }
         if let Some(event) = dispatch {
-            let _ = internal_tx.send(event);
+            internal_tx
+                .send(event)
+                .map_err(|error| anyhow::anyhow!("replay event delivery failed: {error:?}"))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(feature = "replay")]
@@ -566,7 +569,7 @@ fn process_replay_tick_bar(
     bar_step: u64,
     policy: ReplayBarProtectionPolicy,
     fill_model: ReplayFillModel,
-    internal_tx: &UnboundedSender<InternalEvent>,
+    internal_tx: &InternalEventSender,
 ) -> Result<()> {
     for (tick_index, tick) in ticks.iter().enumerate() {
         let tick_step = bar_step.saturating_add(tick_index as u64).saturating_add(1);
@@ -579,7 +582,7 @@ fn process_replay_tick_bar(
         // Arrival events use the prior logical step, so an order arriving at
         // the exact tick timestamp is eligible for this tick rather than the
         // following one.
-        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx);
+        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx)?;
 
         // Existing protection is evaluated before newly arriving market
         // commands. A bracket created by an entry cannot self-trigger on the
@@ -619,7 +622,7 @@ fn process_replay_tick_bar(
                 )?;
             }
         }
-        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx);
+        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx)?;
 
         let mut waiting_commands = VecDeque::new();
         while let Some(command) = commands.pop_front() {
@@ -634,7 +637,7 @@ fn process_replay_tick_bar(
             }
         }
         *commands = waiting_commands;
-        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx);
+        drain_replay_lifecycle_through(commands, lifecycle, tick.ts_ns, tick_step, internal_tx)?;
         *last_logical_step = (*last_logical_step).max(tick_step);
     }
     Ok(())
@@ -652,7 +655,7 @@ fn process_replay_dom_bar(
     bar_step: u64,
     policy: ReplayBarProtectionPolicy,
     fill_model: ReplayFillModel,
-    internal_tx: &UnboundedSender<InternalEvent>,
+    internal_tx: &InternalEventSender,
 ) -> Result<()> {
     for (dom_index, dom) in dom_updates.iter().enumerate() {
         let dom_step = bar_step.saturating_add(dom_index as u64).saturating_add(1);
@@ -662,7 +665,7 @@ fn process_replay_dom_bar(
             ReplayVirtualEventKind::DomUpdate { dom_index },
             None,
         )?;
-        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx);
+        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx)?;
 
         let mut protection_events = replay_state.simulate_replay_dom(dom, policy);
         let protection_sequence = (!protection_events.is_empty()).then(|| {
@@ -697,7 +700,7 @@ fn process_replay_dom_bar(
                 )?;
             }
         }
-        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx);
+        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx)?;
 
         let mut dom_book = ReplayDomBook::from_snapshot(dom);
         let mut waiting_commands = VecDeque::new();
@@ -720,7 +723,7 @@ fn process_replay_dom_bar(
             }
         }
         *commands = waiting_commands;
-        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx);
+        drain_replay_lifecycle_through(commands, lifecycle, dom.ts_ns, dom_step, internal_tx)?;
         *last_logical_step = (*last_logical_step).max(dom_step);
     }
     Ok(())
@@ -992,16 +995,57 @@ fn annotate_replay_dom_fill_events(events: &mut [InternalEvent], dom_fill: Repla
 }
 
 pub(crate) fn spawn_broker_gateway_task(
-    request_rx: UnboundedReceiver<BrokerCommand>,
-    internal_tx: UnboundedSender<InternalEvent>,
+    request_rx: BrokerCommandReceiver,
+    internal_tx: InternalEventSender,
 ) -> JoinHandle<()> {
-    tokio::spawn(broker_gateway_worker(request_rx, internal_tx))
+    #[cfg(not(test))]
+    {
+        tokio::spawn(async move {
+            if let Err(error) = broker_gateway_worker(request_rx, internal_tx.clone()).await {
+                let _ = internal_tx.send(InternalEvent::Error(format!("broker gateway: {error}")));
+            }
+        })
+    }
+
+    #[cfg(test)]
+    {
+        // Tests use their historical unbounded receiver type. It is bridged
+        // only in test builds; production receives BrokerCommandReceiver,
+        // which is a bounded Tokio receiver created by broker_command_channel.
+        let (bounded_tx, bounded_rx) = tokio::sync::mpsc::channel(BROKER_COMMAND_QUEUE_CAPACITY);
+        tokio::spawn(async move {
+            let worker = tokio::spawn(broker_gateway_worker(bounded_rx, internal_tx.clone()));
+            let mut request_rx = request_rx;
+            while let Some(command) = request_rx.recv().await {
+                if bounded_tx.try_send(command).is_err() {
+                    let _ = internal_tx.send(InternalEvent::Error(
+                        "test broker gateway command queue overflowed".to_string(),
+                    ));
+                    break;
+                }
+            }
+            drop(bounded_tx);
+            let _ = worker.await;
+        })
+    }
 }
 
 async fn broker_gateway_worker(
-    mut request_rx: UnboundedReceiver<BrokerCommand>,
-    internal_tx: UnboundedSender<InternalEvent>,
-) {
+    mut request_rx: tokio::sync::mpsc::Receiver<BrokerCommand>,
+    internal_tx: InternalEventSender,
+) -> Result<()> {
+    // Every event emitted by this worker is part of the service's bounded
+    // failure domain.  In particular, an acknowledgement/fill/protection
+    // event must never disappear silently when the service queue is closed or
+    // full: stop the worker so the service supervisor can tear down the
+    // affected session rather than allowing an order state to become stale.
+    macro_rules! emit {
+        ($event:expr) => {
+            internal_tx
+                .send($event)
+                .map_err(|error| anyhow::anyhow!("broker event delivery failed: {error:?}"))?
+        };
+    }
     let mut replay_state = ReplayBrokerState::default();
     #[cfg(feature = "replay")]
     let mut replay_engine_mode = ReplayEngineMode::Legacy;
@@ -1037,20 +1081,20 @@ async fn broker_gateway_worker(
                     match replay_state.simulate_market_order(order) {
                         Ok(events) => {
                             for event in events {
-                                let _ = internal_tx.send(event);
+                                emit!(event);
                             }
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+                            emit!(InternalEvent::BrokerOrderFailed(failure));
                         }
                     }
                 } else {
                     match submit_market_order_via_gateway(&request_tx, order).await {
                         Ok(ack) => {
-                            let _ = internal_tx.send(InternalEvent::BrokerOrderAck(ack));
+                            emit!(InternalEvent::BrokerOrderAck(ack));
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+                            emit!(InternalEvent::BrokerOrderFailed(failure));
                         }
                     }
                 }
@@ -1074,20 +1118,20 @@ async fn broker_gateway_worker(
                     match replay_state.simulate_liquidation(liquidation) {
                         Ok(events) => {
                             for event in events {
-                                let _ = internal_tx.send(event);
+                                emit!(event);
                             }
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+                            emit!(InternalEvent::BrokerOrderFailed(failure));
                         }
                     }
                 } else {
                     match submit_liquidation_via_gateway(&request_tx, liquidation).await {
                         Ok(ack) => {
-                            let _ = internal_tx.send(InternalEvent::BrokerOrderAck(ack));
+                            emit!(InternalEvent::BrokerOrderAck(ack));
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::BrokerOrderFailed(failure));
+                            emit!(InternalEvent::BrokerOrderFailed(failure));
                         }
                     }
                 }
@@ -1111,20 +1155,20 @@ async fn broker_gateway_worker(
                     match replay_state.simulate_order_strategy(strategy) {
                         Ok(events) => {
                             for event in events {
-                                let _ = internal_tx.send(event);
+                                emit!(event);
                             }
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                            emit!(InternalEvent::OrderStrategyFailed(failure));
                         }
                     }
                 } else {
                     match submit_order_strategy_via_gateway(&request_tx, strategy).await {
                         Ok(ack) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyAck(ack));
+                            emit!(InternalEvent::OrderStrategyAck(ack));
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                            emit!(InternalEvent::OrderStrategyFailed(failure));
                         }
                     }
                 }
@@ -1154,11 +1198,11 @@ async fn broker_gateway_worker(
                     {
                         Ok(events) => {
                             for event in events {
-                                let _ = internal_tx.send(event);
+                                emit!(event);
                             }
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                            emit!(InternalEvent::OrderStrategyFailed(failure));
                         }
                     }
                 } else {
@@ -1170,10 +1214,10 @@ async fn broker_gateway_worker(
                     .await
                     {
                         Ok(ack) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyAck(ack));
+                            emit!(InternalEvent::OrderStrategyAck(ack));
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::OrderStrategyFailed(failure));
+                            emit!(InternalEvent::OrderStrategyFailed(failure));
                         }
                     }
                 }
@@ -1183,20 +1227,20 @@ async fn broker_gateway_worker(
                     match replay_state.simulate_native_protection(sync) {
                         Ok(events) => {
                             for event in events {
-                                let _ = internal_tx.send(event);
+                                emit!(event);
                             }
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::ProtectionSyncFailed(failure));
+                            emit!(InternalEvent::ProtectionSyncFailed(failure));
                         }
                     }
                 } else {
                     match submit_native_protection_via_gateway(&request_tx, sync).await {
                         Ok(ack) => {
-                            let _ = internal_tx.send(InternalEvent::ProtectionSyncApplied(ack));
+                            emit!(InternalEvent::ProtectionSyncApplied(ack));
                         }
                         Err(failure) => {
-                            let _ = internal_tx.send(InternalEvent::ProtectionSyncFailed(failure));
+                            emit!(InternalEvent::ProtectionSyncFailed(failure));
                         }
                     }
                 }
@@ -1223,7 +1267,7 @@ async fn broker_gateway_worker(
                         submission_step,
                         Some(bar.ts_ns),
                     ) {
-                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                        emit!(InternalEvent::Error(format!(
                             "deterministic replay lifecycle: {error}"
                         )));
                     }
@@ -1236,7 +1280,7 @@ async fn broker_gateway_worker(
                     },
                     None,
                 ) {
-                    let _ = internal_tx.send(InternalEvent::Error(format!(
+                    emit!(InternalEvent::Error(format!(
                         "deterministic replay lifecycle: {error}"
                     )));
                 }
@@ -1246,7 +1290,7 @@ async fn broker_gateway_worker(
                     bar.ts_ns,
                     bar_step,
                     &internal_tx,
-                );
+                )?;
 
                 if replay_engine_mode == ReplayEngineMode::Deterministic
                     && replay_fill_model == ReplayFillModel::TickBidAsk
@@ -1264,11 +1308,11 @@ async fn broker_gateway_worker(
                         replay_fill_model,
                         &internal_tx,
                     ) {
-                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                        emit!(InternalEvent::Error(format!(
                             "deterministic replay tick lifecycle: {error}"
                         )));
                     }
-                    let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
+                    emit!(InternalEvent::ReplayBarrier(response_tx));
                     continue;
                 }
                 if replay_engine_mode == ReplayEngineMode::Deterministic
@@ -1287,11 +1331,11 @@ async fn broker_gateway_worker(
                         replay_fill_model,
                         &internal_tx,
                     ) {
-                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                        emit!(InternalEvent::Error(format!(
                             "deterministic replay DOM lifecycle: {error}"
                         )));
                     }
-                    let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
+                    emit!(InternalEvent::ReplayBarrier(response_tx));
                     continue;
                 }
 
@@ -1314,7 +1358,7 @@ async fn broker_gateway_worker(
                         if let Err(error) =
                             replay_lifecycle.schedule(bar.ts_ns, bar_step, kind, Some(event))
                         {
-                            let _ = internal_tx.send(InternalEvent::Error(format!(
+                            emit!(InternalEvent::Error(format!(
                                 "deterministic replay lifecycle: {error}"
                             )));
                         }
@@ -1357,7 +1401,7 @@ async fn broker_gateway_worker(
                     if let Err(error) =
                         replay_lifecycle.schedule(bar.ts_ns, bar_step, kind, Some(event))
                     {
-                        let _ = internal_tx.send(InternalEvent::Error(format!(
+                        emit!(InternalEvent::Error(format!(
                             "deterministic replay lifecycle: {error}"
                         )));
                     }
@@ -1370,7 +1414,7 @@ async fn broker_gateway_worker(
                             },
                             None,
                         ) {
-                            let _ = internal_tx.send(InternalEvent::Error(format!(
+                            emit!(InternalEvent::Error(format!(
                                 "deterministic replay lifecycle: {error}"
                             )));
                         }
@@ -1382,8 +1426,8 @@ async fn broker_gateway_worker(
                     bar.ts_ns,
                     bar_step,
                     &internal_tx,
-                );
-                let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
+                )?;
+                emit!(InternalEvent::ReplayBarrier(response_tx));
             }
             #[cfg(feature = "replay")]
             BrokerCommand::ConfigureReplay {
@@ -1426,7 +1470,7 @@ async fn broker_gateway_worker(
                         if let Err(error) =
                             replay_lifecycle.schedule(market_ts_ns, coordinator_step, kind, None)
                         {
-                            let _ = internal_tx.send(InternalEvent::Error(format!(
+                            emit!(InternalEvent::Error(format!(
                                 "deterministic replay coordinator: {error}"
                             )));
                         }
@@ -1449,10 +1493,10 @@ async fn broker_gateway_worker(
                             submission_ts_ns,
                             submission_step,
                             &internal_tx,
-                        ),
+                        )?,
                         Ok(None) => {}
                         Err(error) => {
-                            let _ = internal_tx.send(InternalEvent::Error(format!(
+                            emit!(InternalEvent::Error(format!(
                                 "deterministic replay lifecycle: {error}"
                             )));
                         }
@@ -1467,15 +1511,16 @@ async fn broker_gateway_worker(
                         market_ts_ns,
                         coordinator_step,
                         &internal_tx,
-                    );
+                    )?;
                 }
                 if let Some(coordinator_step) = coordinator_step {
                     replay_last_logical_step = replay_last_logical_step.max(coordinator_step);
                 }
-                let _ = internal_tx.send(InternalEvent::ReplayBarrier(response_tx));
+                emit!(InternalEvent::ReplayBarrier(response_tx));
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "replay"))]
@@ -1621,7 +1666,7 @@ mod tests {
 
     async fn process_bar(
         broker_tx: &UnboundedSender<BrokerCommand>,
-        internal_rx: &mut UnboundedReceiver<InternalEvent>,
+        internal_rx: &mut InternalEventReceiver,
         bar: Bar,
         bar_index: u64,
     ) -> Vec<InternalEvent> {
@@ -1630,7 +1675,7 @@ mod tests {
 
     async fn process_tick_bar(
         broker_tx: &UnboundedSender<BrokerCommand>,
-        internal_rx: &mut UnboundedReceiver<InternalEvent>,
+        internal_rx: &mut InternalEventReceiver,
         bar: Bar,
         ticks: Vec<ReplayMarketTick>,
         bar_index: u64,
@@ -1662,7 +1707,7 @@ mod tests {
 
     async fn process_dom_bar(
         broker_tx: &UnboundedSender<BrokerCommand>,
-        internal_rx: &mut UnboundedReceiver<InternalEvent>,
+        internal_rx: &mut InternalEventReceiver,
         bar: Bar,
         dom_updates: Vec<ReplayMarketDom>,
         bar_index: u64,
@@ -1711,7 +1756,7 @@ mod tests {
 
     async fn drain_broker(
         broker_tx: &UnboundedSender<BrokerCommand>,
-        internal_rx: &mut UnboundedReceiver<InternalEvent>,
+        internal_rx: &mut InternalEventReceiver,
         market_ts_ns: Option<i64>,
         evaluation_id: Option<u64>,
     ) -> Vec<InternalEvent> {
@@ -1792,7 +1837,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_market_order_fills_at_first_bar_open_after_fixed_latency() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure(&broker_tx, ReplayEngineMode::Deterministic, 50).await;
 
@@ -1863,7 +1908,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_tick_market_order_uses_ask_and_quote_precision() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_tick_bid_ask(&broker_tx, 0).await;
 
@@ -1906,7 +1951,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_dom_market_order_consumes_visible_ask_levels() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_dom(&broker_tx, 0).await;
 
@@ -1974,7 +2019,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_dom_market_order_rejects_insufficient_visible_depth() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_dom(&broker_tx, 0).await;
 
@@ -2016,7 +2061,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_dom_protection_uses_executable_top_of_book() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_dom(&broker_tx, 0).await;
 
@@ -2096,7 +2141,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_tick_model_does_not_fall_back_to_empty_bar_open() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_tick_bid_ask(&broker_tx, 0).await;
 
@@ -2137,7 +2182,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_trade_only_tick_fill_is_marked_tick_exact() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_tick_bid_ask(&broker_tx, 0).await;
 
@@ -2174,7 +2219,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_tick_protection_follows_tick_order_and_uses_bid_for_sell_stop() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_tick_bid_ask(&broker_tx, 0).await;
 
@@ -2246,7 +2291,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_tick_trailing_update_applies_on_the_following_tick() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_tick_bid_ask(&broker_tx, 0).await;
 
@@ -2343,7 +2388,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_market_order_keeps_immediate_reference_fill() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure(&broker_tx, ReplayEngineMode::Legacy, 250).await;
 
@@ -2383,7 +2428,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_order_strategy_uses_raw_open_and_rebased_brackets() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure(&broker_tx, ReplayEngineMode::Deterministic, 0).await;
 
@@ -2468,7 +2513,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_lifecycle_handles_signal_and_next_bar_at_same_timestamp() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure(&broker_tx, ReplayEngineMode::Deterministic, 0).await;
 
@@ -2506,7 +2551,7 @@ mod tests {
 
     async fn ambiguous_bar_exit_reason(policy: ReplayBarProtectionPolicy) -> String {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure_with(
             &broker_tx,
@@ -2559,7 +2604,7 @@ mod tests {
     #[tokio::test]
     async fn bar_trailing_stop_tightens_after_close_and_fills_on_next_bar() {
         let (broker_tx, broker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
         let task = spawn_broker_gateway_task(broker_rx, internal_tx);
         configure(&broker_tx, ReplayEngineMode::Deterministic, 0).await;
 

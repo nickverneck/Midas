@@ -1,5 +1,6 @@
 use super::*;
-use tokio::sync::{mpsc, watch};
+use anyhow::bail;
+use tokio::sync::watch;
 
 mod analysis;
 mod attempts;
@@ -30,18 +31,25 @@ const EXECUTION_ARM_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptions) -> Result<()> {
+    let allow_findings = options.allow_findings;
+    if options.require_simulation_proxy && !config.simulation_proxy.enabled {
+        bail!(
+            "swipe-profile requires [simulation_proxy].enabled = true when --require-simulation-proxy is set"
+        );
+    }
     config.broker = BrokerKind::Tradovate;
     config.env = TradingEnvironment::Sim;
     config.auth_mode = AuthMode::TokenFile;
     config.autoconnect = false;
+    let bar_type = BarType::range(options.bar_value);
 
     let report_dir = profile_output_dir(options.output_dir.as_ref())?;
     let raw_log_path = report_dir.join("events.log");
     let json_report_path = report_dir.join("report.json");
     let text_report_path = report_dir.join("report.txt");
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, cmd_rx) = service_command_channel(SERVICE_COMMAND_QUEUE_CAPACITY);
+    let (event_tx, event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, market_rx) = watch::channel(MarketSnapshot::default());
     tokio::spawn(crate::broker::service_loop(cmd_rx, event_tx, market_tx));
     let rest_inspector = Some(ProfileRestInspector::from_config(&config)?);
@@ -92,7 +100,7 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
 
         harness.send(ServiceCommand::SubscribeBars {
             contract: selected_contract.clone(),
-            bar_type: BarType::range(1),
+            bar_type,
             candle_mode: CandleMode::Standard,
         })?;
         harness
@@ -212,11 +220,14 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
             account_name: selected_account.name.clone(),
             contract_id: selected_contract.id,
             contract_name: selected_contract.name.clone(),
-            bar_type: BarType::range(1),
+            bar_type,
             options: SwipeProfileReportOptions {
                 account_filter: options.account_filter,
                 contract_query: options.contract_query,
                 contract_exact: options.contract_exact,
+                bar_value: options.bar_value,
+                require_simulation_proxy: options.require_simulation_proxy,
+                allow_findings: options.allow_findings,
                 delays_ms: options.delays_ms,
                 iterations_per_delay: options.iterations_per_delay,
                 take_profit_ticks: options.take_profit_ticks,
@@ -238,6 +249,42 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
         .with_context(|| format!("write {}", json_report_path.display()))?;
     fs::write(&text_report_path, render_text_report(&report))
         .with_context(|| format!("write {}", text_report_path.display()))?;
+
+    if !allow_findings {
+        let mut failures = Vec::new();
+        for scenario in &report.scenarios {
+            if !scenario.bootstrap.settled || !scenario.bootstrap.findings.is_empty() {
+                failures.push(format!("{} bootstrap", scenario.scenario.slug()));
+            }
+            for delay in &scenario.delays {
+                if !delay.final_settled || !delay.final_findings.is_empty() {
+                    failures.push(format!(
+                        "{} delay {}ms",
+                        scenario.scenario.slug(),
+                        delay.delay_ms
+                    ));
+                }
+                if delay
+                    .attempts
+                    .iter()
+                    .any(|attempt| !attempt.delay_findings.is_empty())
+                {
+                    failures.push(format!(
+                        "{} delay {}ms attempt findings",
+                        scenario.scenario.slug(),
+                        delay.delay_ms
+                    ));
+                }
+            }
+        }
+        if !failures.is_empty() {
+            bail!(
+                "swipe-profile validation failed for {}; reports were written to {}",
+                failures.join(", "),
+                report_dir.display()
+            );
+        }
+    }
 
     println!("Swipe profile complete.");
     println!("Account: {} ({})", report.account_name, report.account_id);

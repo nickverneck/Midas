@@ -5,7 +5,8 @@ pub(super) use crate::broker::ManualOrderAction;
 pub(super) use crate::broker::ReplayDownloadPhase;
 pub(super) use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BrokerCapabilities, BrokerKind, CandleMode,
-    ContractSuggestion, LatencySnapshot, MarketSnapshot, ServiceEvent,
+    ContractSuggestion, LatencySnapshot, MarketSnapshot, ServiceCommand, ServiceCommandReceiver,
+    ServiceCommandSender, ServiceEvent, service_command_channel,
 };
 pub(super) use crate::config::{AppConfig, AuthMode, LogMode, TradingEnvironment};
 pub(super) use crate::engine_registry::RunningEngine;
@@ -17,7 +18,9 @@ pub(super) use crate::strategy::{
 pub(super) use ratatui::{Terminal, backend::TestBackend};
 pub(super) use serde_json::json;
 pub(super) use std::path::PathBuf;
-pub(super) use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+pub(super) fn unbounded_channel() -> (ServiceCommandSender, ServiceCommandReceiver) {
+    service_command_channel(256)
+}
 
 pub(super) fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -193,7 +196,7 @@ pub(super) fn select_ready_contract(app: &mut App) {
     app.market.contract_name = Some("ESZ6".to_string());
 }
 
-pub(super) fn expect_select_account(rx: &mut UnboundedReceiver<ServiceCommand>, account_id: i64) {
+pub(super) fn expect_select_account(rx: &mut ServiceCommandReceiver, account_id: i64) {
     match rx.try_recv().expect("expected select-account command") {
         ServiceCommand::SelectAccount { account_id: actual } => {
             assert_eq!(actual, account_id);

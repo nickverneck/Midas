@@ -723,36 +723,45 @@ impl ReplaySweepSpec {
     pub(crate) fn expand(&self) -> Result<Vec<ReplaySweepChildSpec>> {
         self.validate()?;
         let combinations = cartesian_values(&self.parameters);
+        let combination_count = combinations.len();
         let base_encoded = serde_json::to_value(&self.base_strategy)
             .context("serialize base strategy for sweep expansion")?;
         let base_markov_encoded = serde_json::to_value(&self.replay_markov_orientation_gate)
             .context("serialize base replay Markov gate for sweep expansion")?;
         let mut children = Vec::with_capacity(combinations.len());
 
-        for (run_index, values) in combinations.into_iter().enumerate() {
+        for (combination_index, values) in combinations.into_iter().enumerate() {
             let parameter_values = self
                 .parameters
                 .iter()
                 .zip(values)
                 .map(|(parameter, value)| (parameter.path.clone(), value))
                 .collect::<BTreeMap<_, _>>();
-            let resolved_strategy = resolve_strategy(&self.base_strategy, &parameter_values)
-                .with_context(|| format!("resolve sweep child {}", run_index + 1))?;
+            // Deserialize before validating so relational constraints such
+            // as fast_length < slow_length can filter invalid Cartesian pairs
+            // instead of failing the whole sweep at the first invalid pair.
+            let resolved_strategy =
+                resolve_strategy_unchecked(&self.base_strategy, &parameter_values)
+                    .with_context(|| format!("resolve sweep child {}", combination_index + 1))?;
             let resolved_markov_orientation_gate = resolve_markov_orientation_gate(
                 &self.replay_markov_orientation_gate,
                 &parameter_values,
             )
-            .with_context(|| format!("resolve replay Markov gate child {}", run_index + 1))?;
+            .with_context(|| {
+                format!("resolve replay Markov gate child {}", combination_index + 1)
+            })?;
+            let mut satisfies_constraints = true;
             for constraint in &self.constraints {
                 if !constraint.evaluate(&resolved_strategy)? {
-                    let (left, right) = constraint.paths();
-                    bail!(
-                        "sweep child {} violates constraint: {left} {} {right}",
-                        run_index + 1,
-                        constraint.label()
-                    );
+                    satisfies_constraints = false;
+                    break;
                 }
             }
+            if !satisfies_constraints {
+                continue;
+            }
+            validate_strategy_config(&resolved_strategy)
+                .with_context(|| format!("validate sweep child {}", combination_index + 1))?;
 
             let resolved_encoded = serde_json::to_value(&resolved_strategy)
                 .context("serialize resolved child strategy")?;
@@ -782,8 +791,8 @@ impl ReplaySweepSpec {
             }
 
             children.push(ReplaySweepChildSpec {
-                run_id: format!("{}-{:06}", self.sweep_id, run_index + 1),
-                run_index,
+                run_id: format!("{}-{:06}", self.sweep_id, children.len() + 1),
+                run_index: children.len(),
                 parent_sweep_id: self.sweep_id.clone(),
                 resolved_strategy,
                 parameter_values,
@@ -802,6 +811,18 @@ impl ReplaySweepSpec {
                 margin: self.margin.clone(),
                 replay_markov_orientation_gate: resolved_markov_orientation_gate,
             });
+        }
+        if children.is_empty() && !self.constraints.is_empty() && combination_count > 0 {
+            let labels = self
+                .constraints
+                .iter()
+                .map(|constraint| {
+                    let (left, right) = constraint.paths();
+                    format!("{left} {} {right}", constraint.label())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("sweep constraints ({labels}) reject every Cartesian combination");
         }
         Ok(children)
     }
@@ -950,7 +971,9 @@ impl ReplaySweepPlan {
             );
         }
         self.spec.validate()?;
-        let expected_children = self.spec.combination_count()?;
+        // Constraints are filters over the Cartesian grid, so the persisted
+        // plan may contain fewer children than the raw combination count.
+        let expected_children = self.spec.expand()?.len();
         if self.children.len() != expected_children {
             bail!(
                 "replay sweep plan contains {} children, expected {}",
@@ -1489,7 +1512,7 @@ fn set_value_at_path(root: &mut Value, path: &str, value: Value) -> Result<()> {
     Ok(())
 }
 
-fn resolve_strategy(
+fn resolve_strategy_unchecked(
     base: &ExecutionStrategyConfig,
     values: &BTreeMap<String, Value>,
 ) -> Result<ExecutionStrategyConfig> {
@@ -1499,9 +1522,7 @@ fn resolve_strategy(
             set_value_at_path(&mut encoded, path, value.clone())?;
         }
     }
-    let resolved = serde_json::from_value(encoded).context("deserialize resolved strategy")?;
-    validate_strategy_config(&resolved)?;
-    Ok(resolved)
+    serde_json::from_value(encoded).context("deserialize resolved strategy")
 }
 
 fn cartesian_values(parameters: &[ReplaySweepParameter]) -> Vec<Vec<Value>> {
@@ -1724,6 +1745,20 @@ mod tests {
         spec.max_runs = 1;
         let error = spec.plan().expect_err("invalid constraint must fail");
         assert!(format!("{error:#}").contains("fast_length"));
+    }
+
+    #[test]
+    fn relational_constraints_filter_invalid_cartesian_pairs() {
+        let mut spec = sample_spec();
+        spec.parameters[0].values = vec![Value::from(10), Value::from(40)];
+        spec.parameters[1].values = vec![Value::from(20), Value::from(30)];
+        spec.max_runs = 4;
+        let plan = spec.plan().expect("at least one valid constrained pair");
+        assert_eq!(plan.children.len(), 2);
+        assert!(plan.children.iter().all(|child| {
+            child.resolved_strategy.native_ema.fast_length
+                < child.resolved_strategy.native_ema.slow_length
+        }));
     }
 
     #[test]

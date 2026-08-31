@@ -4,7 +4,7 @@ impl App {
     pub(in crate::app) fn handle_dashboard_key(
         &mut self,
         key: KeyEvent,
-        cmd_tx: &UnboundedSender<ServiceCommand>,
+        cmd_tx: &ServiceCommandSender,
     ) {
         let action = match key.code {
             KeyCode::Char('[') if self.session_kind == SessionKind::Replay => {

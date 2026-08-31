@@ -1,6 +1,6 @@
 use super::account::{rebuild_account_snapshots, selected_trade_markers};
 use super::orders::refresh_managed_protection;
-use super::state::{AccountState, InternalEvent, IronbeamSession};
+use super::state::{AccountState, InternalEvent, InternalEventSender, IronbeamSession};
 use super::support::{
     account_id_string, fill_key, order_id_string, parse_timestamp_ns, pick_number, position_key,
     position_update_groups, value_items,
@@ -9,11 +9,12 @@ use crate::broker::{Bar, ContractSuggestion};
 use crate::config::TradingEnvironment;
 use futures_util::StreamExt;
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 const DEFAULT_BAR_LIMIT: usize = 256;
+const MAX_STREAM_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
 
 pub(super) struct StreamEffect {
     pub(super) market_changed: bool,
@@ -26,14 +27,20 @@ pub(super) async fn run_market_stream(
     stream_id: String,
     token: String,
     contract: ContractSuggestion,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) {
     let ws_url = format!(
         "{}/stream/{stream_id}?token={token}",
         super::support::ironbeam_ws_base_url(env)
     );
 
-    let Ok((mut socket, _)) = connect_async(&ws_url).await else {
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(MAX_STREAM_MESSAGE_SIZE),
+        max_frame_size: Some(MAX_STREAM_MESSAGE_SIZE),
+        ..Default::default()
+    };
+    let Ok((mut socket, _)) = connect_async_with_config(&ws_url, Some(ws_config), false).await
+    else {
         let _ = internal_tx.send(InternalEvent::StreamError(format!(
             "Failed to open Ironbeam stream for {}.",
             contract.name
@@ -41,19 +48,48 @@ pub(super) async fn run_market_stream(
         return;
     };
 
-    let _ = internal_tx.send(InternalEvent::StreamStatus(format!(
-        "Ironbeam market stream open for {}.",
-        contract.name
-    )));
+    if internal_tx
+        .send(InternalEvent::StreamStatus(format!(
+            "Ironbeam market stream open for {}.",
+            contract.name
+        )))
+        .is_err()
+    {
+        return;
+    }
 
     while let Some(frame) = socket.next().await {
         match frame {
             Ok(Message::Text(text)) => {
-                let _ = internal_tx.send(InternalEvent::StreamPayload(text.to_string()));
+                if text.len() > MAX_STREAM_MESSAGE_SIZE {
+                    let _ = internal_tx.send(InternalEvent::StreamError(format!(
+                        "Ironbeam stream message exceeds {} bytes for {}.",
+                        MAX_STREAM_MESSAGE_SIZE, contract.name
+                    )));
+                    break;
+                }
+                if internal_tx
+                    .send(InternalEvent::StreamPayload(text.to_string()))
+                    .is_err()
+                {
+                    break;
+                }
             }
             Ok(Message::Binary(bytes)) => {
+                if bytes.len() > MAX_STREAM_MESSAGE_SIZE {
+                    let _ = internal_tx.send(InternalEvent::StreamError(format!(
+                        "Ironbeam stream message exceeds {} bytes for {}.",
+                        MAX_STREAM_MESSAGE_SIZE, contract.name
+                    )));
+                    break;
+                }
                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                    let _ = internal_tx.send(InternalEvent::StreamPayload(text));
+                    if internal_tx
+                        .send(InternalEvent::StreamPayload(text))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
             Ok(Message::Close(frame)) => {

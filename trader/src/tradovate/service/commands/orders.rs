@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn manual_order(
     action: ManualOrderAction,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     #[cfg(not(feature = "manual-orders"))]
     {
@@ -44,7 +44,7 @@ pub(super) fn set_target_position(
     automated: bool,
     reason: String,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let broker_tx = state.broker_tx.clone();
     let Some(session) = state.session.as_mut() else {
@@ -66,7 +66,7 @@ pub(super) fn profile_legacy_order_strategy_target(
     target_qty: i32,
     reason: String,
     state: &mut ServiceState,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let broker_tx = state.broker_tx.clone();
     let Some(session) = state.session.as_mut() else {
@@ -90,7 +90,7 @@ pub(super) fn sync_native_protection_command(
     stop_price: Option<f64>,
     reason: String,
     state: &mut ServiceState,
-    internal_tx: UnboundedSender<InternalEvent>,
+    internal_tx: InternalEventSender,
 ) -> Result<()> {
     let broker_tx = state.broker_tx.clone();
     let Some(session) = state.session.as_mut() else {

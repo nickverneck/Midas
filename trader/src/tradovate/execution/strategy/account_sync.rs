@@ -47,8 +47,8 @@ pub(crate) fn disarm_execution_strategy(session: &mut SessionState, reason: Stri
 
 pub(crate) fn handle_execution_account_sync(
     session: &mut SessionState,
-    broker_tx: &UnboundedSender<BrokerCommand>,
-    event_tx: &UnboundedSender<ServiceEvent>,
+    broker_tx: &dyn BrokerCommandSink,
+    event_tx: &ServiceEventSender,
 ) -> Result<()> {
     let actual_qty = selected_market_position_qty(session);
     let actual_entry = selected_market_entry_price(session);

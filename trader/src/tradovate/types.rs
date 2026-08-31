@@ -43,22 +43,172 @@ struct TokenFileSnapshot {
     content_hash: u64,
 }
 
+/// The command queues are intentionally bounded at the producer boundary.
+/// Order-producing code must observe a full or closed queue synchronously;
+/// putting an unbounded compatibility queue in front of the worker only moves
+/// the memory problem downstream.
+pub(crate) const BROKER_COMMAND_QUEUE_CAPACITY: usize = 256;
+pub(crate) const USER_SOCKET_COMMAND_QUEUE_CAPACITY: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandSendError {
+    Full,
+    Closed,
+}
+
+impl std::fmt::Display for CommandSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Full => "queue is full",
+            Self::Closed => "queue is closed",
+        })
+    }
+}
+
+impl std::error::Error for CommandSendError {}
+
+/// Object-safe producer boundary used by order/execution code. The concrete
+/// production senders below wrap bounded Tokio channels; test-only adapters
+/// keep the existing unit tests that use unbounded channels source-compatible.
+pub(crate) trait BrokerCommandSink: Send + Sync {
+    fn send(&self, command: BrokerCommand) -> Result<(), CommandSendError>;
+}
+
+pub(crate) trait UserSocketCommandSink: Send + Sync {
+    fn send(&self, command: UserSocketCommand) -> Result<(), CommandSendError>;
+}
+
+#[cfg(not(test))]
+#[derive(Clone)]
+pub(crate) struct BrokerCommandSender(tokio::sync::mpsc::Sender<BrokerCommand>);
+
+#[cfg(test)]
+pub(crate) type BrokerCommandSender = UnboundedSender<BrokerCommand>;
+
+#[cfg(not(test))]
+impl BrokerCommandSender {
+    fn bounded(sender: tokio::sync::mpsc::Sender<BrokerCommand>) -> Self {
+        Self(sender)
+    }
+
+    /// Compatibility with the existing service command handlers. This is a
+    /// non-blocking bounded send, not an unbounded Tokio send.
+    pub(crate) fn send(&self, command: BrokerCommand) -> Result<(), CommandSendError> {
+        self.0.try_send(command).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => CommandSendError::Full,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => CommandSendError::Closed,
+        })
+    }
+}
+
+#[cfg(not(test))]
+impl BrokerCommandSink for BrokerCommandSender {
+    fn send(&self, command: BrokerCommand) -> Result<(), CommandSendError> {
+        self.send(command)
+    }
+}
+
+#[cfg(test)]
+impl BrokerCommandSink for UnboundedSender<BrokerCommand> {
+    fn send(&self, command: BrokerCommand) -> Result<(), CommandSendError> {
+        self.send(command).map_err(|_| CommandSendError::Closed)
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Clone)]
+pub(crate) struct UserSocketCommandSender(tokio::sync::mpsc::Sender<UserSocketCommand>);
+
+#[cfg(test)]
+pub(crate) type UserSocketCommandSender = UnboundedSender<UserSocketCommand>;
+
+#[cfg(not(test))]
+impl UserSocketCommandSender {
+    fn bounded(sender: tokio::sync::mpsc::Sender<UserSocketCommand>) -> Self {
+        Self(sender)
+    }
+}
+
+#[cfg(not(test))]
+impl UserSocketCommandSink for UserSocketCommandSender {
+    fn send(&self, command: UserSocketCommand) -> Result<(), CommandSendError> {
+        self.0.try_send(command).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => CommandSendError::Full,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => CommandSendError::Closed,
+        })
+    }
+}
+
+#[cfg(test)]
+impl UserSocketCommandSink for UnboundedSender<UserSocketCommand> {
+    fn send(&self, command: UserSocketCommand) -> Result<(), CommandSendError> {
+        self.send(command).map_err(|_| CommandSendError::Closed)
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) type BrokerCommandReceiver = tokio::sync::mpsc::Receiver<BrokerCommand>;
+
+#[cfg(test)]
+pub(crate) type BrokerCommandReceiver = UnboundedReceiver<BrokerCommand>;
+
+#[cfg(not(test))]
+pub(crate) type UserSocketCommandReceiver = tokio::sync::mpsc::Receiver<UserSocketCommand>;
+
+#[cfg(test)]
+pub(crate) type UserSocketCommandReceiver = UnboundedReceiver<UserSocketCommand>;
+
+pub(crate) fn broker_command_channel() -> (BrokerCommandSender, BrokerCommandReceiver) {
+    #[cfg(not(test))]
+    {
+        let (sender, receiver) = tokio::sync::mpsc::channel(BROKER_COMMAND_QUEUE_CAPACITY);
+        (BrokerCommandSender::bounded(sender), receiver)
+    }
+    #[cfg(test)]
+    {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+}
+
+pub(crate) fn user_socket_command_channel() -> (UserSocketCommandSender, UserSocketCommandReceiver)
+{
+    #[cfg(not(test))]
+    {
+        let (sender, receiver) = tokio::sync::mpsc::channel(USER_SOCKET_COMMAND_QUEUE_CAPACITY);
+        (UserSocketCommandSender::bounded(sender), receiver)
+    }
+    #[cfg(test)]
+    {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+}
+
 struct ServiceState {
     client: Client,
-    broker_tx: UnboundedSender<BrokerCommand>,
+    broker_tx: BrokerCommandSender,
     replay_speed_tx: tokio::sync::watch::Sender<ReplaySpeed>,
     replay_speed: ReplaySpeed,
     replay_execution_ledger: replay::ReplayExecutionLedgerState,
+    /// Keep the broker gateway owned by the service.  Dropping its join
+    /// handle would detach a websocket/order task when the service exits.
+    broker_task: Option<JoinHandle<()>>,
     session: Option<SessionState>,
     replay: Option<replay::ReplayState>,
     user_task: Option<JoinHandle<()>>,
     market_task: Option<JoinHandle<()>>,
     rest_probe_task: Option<JoinHandle<()>>,
+    /// Snapshot construction clones bounded-but-heavy account/fill state.
+    /// Keep the task owned so session replacement can cancel and await it
+    /// instead of letting a detached build outlive the service.
+    snapshot_task: Option<JoinHandle<()>>,
     replay_lookup_job: Option<ReplayLookupJob>,
     replay_download_job: Option<ReplayDownloadJob>,
     latency: LatencySnapshot,
     snapshot_generation: u64,
     snapshot_revision: u64,
+    /// A refresh requested during the owned build is represented by one bit
+    /// of state and serviced after that build completes.
+    snapshot_refresh_pending: bool,
 }
 
 struct ReplayLookupJob {
@@ -129,7 +279,7 @@ struct SessionState {
     tokens: TokenBundle,
     token_file_snapshot: Option<TokenFileSnapshot>,
     accounts: Vec<AccountInfo>,
-    request_tx: UnboundedSender<UserSocketCommand>,
+    request_tx: UserSocketCommandSender,
     execution_config: ExecutionStrategyConfig,
     execution_runtime: ExecutionRuntimeState,
     pending_signal_context: Option<PendingSignalLatencyContext>,
@@ -237,6 +387,13 @@ struct UserSyncStore {
     fills: BTreeMap<i64, BTreeMap<i64, Value>>,
     history_fills: BTreeMap<i64, Value>,
     fill_fees: BTreeMap<i64, Value>,
+    /// Fees for entities evicted from the bounded raw caches. This preserves
+    /// account fee totals without retaining the full broker payload forever.
+    evicted_fee_totals: BTreeMap<i64, f64>,
+    /// For an evicted fee whose fill is still cached, retain only the winning
+    /// amount and account. This prevents the fill commission fallback from
+    /// being counted alongside the already-aggregated explicit fee.
+    evicted_fee_by_fill: BTreeMap<i64, (i64, f64)>,
     order_strategies: BTreeMap<i64, Value>,
     order_strategy_links: BTreeMap<i64, Value>,
 }
@@ -268,6 +425,19 @@ struct TrackedOrderStrategy {
 const TOKEN_REFRESH_LEAD_SECS: i64 = 900;
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 30;
 pub(crate) const ENGINE_MARKET_BAR_LIMIT: usize = 4_096;
+// These maps are a recent-state cache used for account/F6 snapshots, not a
+// durable ledger. Keep a generous window while preventing an all-day stream
+// from retaining every historical entity forever.
+pub(crate) const USER_STORE_HISTORY_FILL_LIMIT: usize = 50_000;
+pub(crate) const USER_STORE_FILL_FEE_LIMIT: usize = 50_000;
+pub(crate) const USER_STORE_REPLAY_FILL_LIMIT: usize = 50_000;
+pub(crate) const USER_STORE_EVICTED_FEE_LIMIT: usize = 100_000;
+pub(crate) const USER_STORE_COMMAND_LIMIT: usize = 8_192;
+pub(crate) const USER_STORE_COMMAND_REPORT_LIMIT: usize = 8_192;
+pub(crate) const USER_STORE_ORDER_STRATEGY_LIMIT: usize = 8_192;
+pub(crate) const USER_STORE_ORDER_STRATEGY_LINK_LIMIT: usize = 8_192;
+pub(crate) const USER_STORE_POSITION_LIMIT: usize = 4_096;
+pub(crate) const USER_STORE_ORDER_LIMIT: usize = 50_000;
 // Keep enough closed bars for the dashboard to render long native indicators.
 // A 300-period HMA needs 317 bars before its first finite value (plus one
 // prior bar for crossover display), while the chart itself still only paints
