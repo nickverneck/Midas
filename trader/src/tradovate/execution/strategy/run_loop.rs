@@ -149,6 +149,41 @@ pub(crate) fn maybe_run_execution_strategy(
         return Ok(());
     }
 
+    // During the pre-close blockout and the daily Globex break, no new
+    // strategy entry can be accepted.  In live guarded execution, check that
+    // gate before evaluating EMA/HMA so high-rate market updates do not spend
+    // service-loop time calculating signals that will be rejected anyway.
+    // Replay keeps the existing path so its per-bar diagnostics remain
+    // unchanged.
+    if !session.replay_enabled
+        && let Some(protection_bar) = strategy_bars(session).last().cloned()
+        && let Some(window) = session_window_at(session, protection_bar.ts_ns)
+        && window.hold_entries
+    {
+        // Do not replay signals that arrived while the gate was active after
+        // the session reopens.  The indicator runtime will rebuild/advance
+        // from the current retained history on the first eligible update.
+        if let Some(last_strategy_ts) = latest_strategy_bar_ts(session) {
+            session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
+            session.execution_runtime.last_closed_bar_fingerprint =
+                latest_strategy_bar_fingerprint(session);
+        }
+
+        let current_qty = effective_market_position_qty(session);
+        return handle_session_hold(
+            session,
+            broker_tx,
+            event_tx,
+            window,
+            &protection_bar,
+            &protection_bar,
+            StrategySignal::Hold,
+            actual_market_qty,
+            current_qty,
+            "session gate preflight skipped strategy evaluation",
+        );
+    }
+
     let Some(last_strategy_ts) = latest_strategy_bar_ts(session) else {
         session.execution_runtime.last_summary = format!(
             "Native {} armed; waiting for first {}.",
@@ -480,122 +515,18 @@ pub(crate) fn maybe_run_execution_strategy(
 
     if let Some(window) = session_window_at(session, protection_bar.ts_ns) {
         if window.hold_entries {
-            if actual_market_qty != 0 {
-                record_replay_signal_diagnostic(
-                    session,
-                    signal_bar.ts_ns,
-                    signal,
-                    actual_market_qty,
-                    current_qty,
-                    Some(0),
-                    "session_hold_flattening",
-                    "session hold requires flattening before the close/reopen window",
-                    Some(if actual_market_qty > 0 { "Sell" } else { "Buy" }),
-                    Some(actual_market_qty.abs()),
-                    &debug_summary,
-                );
-                emit_guarded_strategy_eval_debug(
-                    event_tx,
-                    session,
-                    "session hold flattening position",
-                    signal,
-                    signal_bar.ts_ns,
-                    actual_market_qty,
-                    current_qty,
-                    Some(0),
-                    &debug_summary,
-                );
-                if !native_order_strategy_enabled(session) {
-                    sync_native_protection(
-                        session,
-                        broker_tx,
-                        0,
-                        None,
-                        None,
-                        &format!("{} session auto-close", active_native_slug(session)),
-                    )?;
-                }
-                let reason = if window.session_open {
-                    format!(
-                        "{} session auto-close {:.0}m before {} close",
-                        active_native_slug(session),
-                        window.minutes_to_close.unwrap_or_default(),
-                        session
-                            .market
-                            .session_profile
-                            .map(|profile| profile.label())
-                            .unwrap_or("session")
-                    )
-                } else {
-                    format!(
-                        "{} session hold until {} reopen",
-                        active_native_slug(session),
-                        session
-                            .market
-                            .session_profile
-                            .map(|profile| profile.label())
-                            .unwrap_or("session")
-                    )
-                };
-                match dispatch_target_position_order(session, broker_tx, 0, true, &reason)? {
-                    MarketOrderDispatchOutcome::NoOp { message } => {
-                        let _ = event_tx.send(ServiceEvent::Status(message));
-                    }
-                    MarketOrderDispatchOutcome::Queued { target_qty } => {
-                        session.execution_runtime.pending_target_qty = target_qty;
-                    }
-                }
-                session.execution_runtime.last_summary = if window.session_open {
-                    format!(
-                        "Session hold active; flattening {} {:.0}m before close.",
-                        actual_market_qty,
-                        window.minutes_to_close.unwrap_or_default()
-                    )
-                } else {
-                    format!(
-                        "Session closed; flattening {} and holding until reopen.",
-                        actual_market_qty
-                    )
-                };
-                emit_execution_state(event_tx, session);
-                return Ok(());
-            }
-
-            record_replay_signal_diagnostic(
+            return handle_session_hold(
                 session,
-                signal_bar.ts_ns,
-                signal,
-                actual_market_qty,
-                current_qty,
-                target_qty_for_signal(signal, current_qty, session.execution_config.order_qty),
-                "session_hold_blocked_entries",
-                "session hold blocks new entries while flat",
-                None,
-                None,
-                &debug_summary,
-            );
-            emit_guarded_strategy_eval_debug(
+                broker_tx,
                 event_tx,
-                session,
-                "session hold blocked entries",
+                window,
+                &protection_bar,
+                &signal_bar,
                 signal,
-                signal_bar.ts_ns,
                 actual_market_qty,
                 current_qty,
-                target_qty_for_signal(signal, current_qty, session.execution_config.order_qty),
                 &debug_summary,
             );
-            sync_execution_protection(session, broker_tx, Some(&protection_bar))?;
-            session.execution_runtime.last_summary = if window.session_open {
-                format!(
-                    "Session hold active; no new entries with {:.0}m to close.",
-                    window.minutes_to_close.unwrap_or_default()
-                )
-            } else {
-                "Session closed; holding flat until reopen.".to_string()
-            };
-            emit_execution_state(event_tx, session);
-            return Ok(());
         }
     }
 
@@ -827,6 +758,136 @@ pub(crate) fn maybe_run_execution_strategy(
             mark_closed_bar_signal_dispatched(session, signal_bar.ts_ns, signal);
         }
     }
+    emit_execution_state(event_tx, session);
+    Ok(())
+}
+
+fn handle_session_hold(
+    session: &mut SessionState,
+    broker_tx: &dyn BrokerCommandSink,
+    event_tx: &ServiceEventSender,
+    window: InstrumentSessionWindow,
+    protection_bar: &Bar,
+    signal_bar: &Bar,
+    signal: StrategySignal,
+    actual_market_qty: i32,
+    current_qty: i32,
+    debug_summary: &str,
+) -> Result<()> {
+    if actual_market_qty != 0 {
+        record_replay_signal_diagnostic(
+            session,
+            signal_bar.ts_ns,
+            signal,
+            actual_market_qty,
+            current_qty,
+            Some(0),
+            "session_hold_flattening",
+            "session hold requires flattening before the close/reopen window",
+            Some(if actual_market_qty > 0 { "Sell" } else { "Buy" }),
+            Some(actual_market_qty.abs()),
+            debug_summary,
+        );
+        emit_guarded_strategy_eval_debug(
+            event_tx,
+            session,
+            "session hold flattening position",
+            signal,
+            signal_bar.ts_ns,
+            actual_market_qty,
+            current_qty,
+            Some(0),
+            debug_summary,
+        );
+        if !native_order_strategy_enabled(session) {
+            sync_native_protection(
+                session,
+                broker_tx,
+                0,
+                None,
+                None,
+                &format!("{} session auto-close", active_native_slug(session)),
+            )?;
+        }
+        let reason = if window.session_open {
+            format!(
+                "{} session auto-close {:.0}m before {} close",
+                active_native_slug(session),
+                window.minutes_to_close.unwrap_or_default(),
+                session
+                    .market
+                    .session_profile
+                    .map(|profile| profile.label())
+                    .unwrap_or("session")
+            )
+        } else {
+            format!(
+                "{} session hold until {} reopen",
+                active_native_slug(session),
+                session
+                    .market
+                    .session_profile
+                    .map(|profile| profile.label())
+                    .unwrap_or("session")
+            )
+        };
+        match dispatch_target_position_order(session, broker_tx, 0, true, &reason)? {
+            MarketOrderDispatchOutcome::NoOp { message } => {
+                let _ = event_tx.send(ServiceEvent::Status(message));
+            }
+            MarketOrderDispatchOutcome::Queued { target_qty } => {
+                session.execution_runtime.pending_target_qty = target_qty;
+            }
+        }
+        session.execution_runtime.last_summary = if window.session_open {
+            format!(
+                "Session hold active; flattening {} {:.0}m before close.",
+                actual_market_qty,
+                window.minutes_to_close.unwrap_or_default()
+            )
+        } else {
+            format!(
+                "Session closed; flattening {} and holding flat until reopen.",
+                actual_market_qty
+            )
+        };
+        emit_execution_state(event_tx, session);
+        return Ok(());
+    }
+
+    record_replay_signal_diagnostic(
+        session,
+        signal_bar.ts_ns,
+        signal,
+        actual_market_qty,
+        current_qty,
+        target_qty_for_signal(signal, current_qty, session.execution_config.order_qty),
+        "session_hold_blocked_entries",
+        "session hold blocks new entries while flat",
+        None,
+        None,
+        debug_summary,
+    );
+    emit_guarded_strategy_eval_debug(
+        event_tx,
+        session,
+        "session hold blocked entries",
+        signal,
+        signal_bar.ts_ns,
+        actual_market_qty,
+        current_qty,
+        target_qty_for_signal(signal, current_qty, session.execution_config.order_qty),
+        debug_summary,
+    );
+    sync_execution_protection(session, broker_tx, Some(protection_bar))?;
+    session.execution_runtime.last_summary = if window.session_open {
+        format!(
+            "Session hold active; no new entries with {:.0}m to close.",
+            window.minutes_to_close.unwrap_or_default()
+        )
+    } else {
+        "Session closed; holding flat until reopen.".to_string()
+    };
     emit_execution_state(event_tx, session);
     Ok(())
 }
