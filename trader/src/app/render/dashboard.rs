@@ -392,7 +392,7 @@ impl App {
             .block(chart_block)
             .x_axis(
                 Axis::default()
-                    .title("Time UTC")
+                    .title("Time local")
                     .bounds(x_bounds)
                     .labels(time_labels),
             )
@@ -438,10 +438,10 @@ impl App {
             .iter()
             .map(|index| bars[*index].ts_ns)
             .collect::<Vec<_>>();
-        let first_date = bars.first().and_then(|bar| utc_bar_date(bar.ts_ns));
+        let first_date = bars.first().and_then(|bar| local_bar_date(bar.ts_ns));
         let spans_multiple_days = bars
             .iter()
-            .filter_map(|bar| utc_bar_date(bar.ts_ns))
+            .filter_map(|bar| local_bar_date(bar.ts_ns))
             .any(|date| Some(date) != first_date);
         let mut labels = timestamps
             .iter()
@@ -549,19 +549,20 @@ fn has_duplicate_labels(labels: &[String]) -> bool {
         .any(|(index, label)| labels[..index].contains(label))
 }
 
-fn utc_bar_datetime(timestamp_ns: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+fn local_bar_datetime(timestamp_ns: i64) -> Option<chrono::DateTime<chrono::Local>> {
     chrono::DateTime::<chrono::Utc>::from_timestamp(
         timestamp_ns.div_euclid(1_000_000_000),
         timestamp_ns.rem_euclid(1_000_000_000) as u32,
     )
+    .map(|timestamp| timestamp.with_timezone(&chrono::Local))
 }
 
-fn utc_bar_date(timestamp_ns: i64) -> Option<chrono::NaiveDate> {
-    utc_bar_datetime(timestamp_ns).map(|timestamp| timestamp.date_naive())
+fn local_bar_date(timestamp_ns: i64) -> Option<chrono::NaiveDate> {
+    local_bar_datetime(timestamp_ns).map(|timestamp| timestamp.date_naive())
 }
 
 fn chart_time_label(timestamp_ns: i64, include_date: bool, include_seconds: bool) -> String {
-    let Some(timestamp) = utc_bar_datetime(timestamp_ns) else {
+    let Some(timestamp) = local_bar_datetime(timestamp_ns) else {
         return "--:--".to_string();
     };
     let format = match (include_date, include_seconds) {

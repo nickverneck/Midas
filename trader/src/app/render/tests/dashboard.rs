@@ -338,7 +338,7 @@ fn dashboard_visual_toggle_updates_state_without_sending_commands() {
 
 #[cfg(feature = "replay")]
 #[test]
-fn dashboard_chart_renders_compact_utc_time_and_ohlc_price_axes_at_100_columns() {
+fn dashboard_chart_renders_compact_local_time_and_ohlc_price_axes_at_100_columns() {
     use chrono::{NaiveDate, TimeZone, Utc};
 
     let mut app = App::new(AppConfig::default());
@@ -388,12 +388,24 @@ fn dashboard_chart_renders_compact_utc_time_and_ohlc_price_axes_at_100_columns()
     let rows = rendered_terminal_rows(&terminal, 100);
     let text = rows.join("\n");
 
-    for visible_axis_label in [
-        "Price", "Time UTC", "99.60", "104.00", "108.40", "09:30", "09:31", "09:32",
-    ] {
+    for visible_axis_label in ["Price", "Time local", "99.60", "104.00", "108.40"] {
         assert!(
             text.contains(visible_axis_label),
             "expected chart label {visible_axis_label:?} in:\n{text}"
+        );
+    }
+    for timestamp in [start, start + 60_000_000_000, start + 120_000_000_000] {
+        let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            timestamp.div_euclid(1_000_000_000),
+            timestamp.rem_euclid(1_000_000_000) as u32,
+        )
+        .expect("timestamp")
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+        assert!(
+            text.contains(&expected),
+            "expected local chart time label {expected:?} in:\n{text}"
         );
     }
 }
@@ -429,9 +441,17 @@ fn dashboard_chart_shows_one_time_tick_without_duplicate_labels() {
         .draw(|frame| app.render_chart(frame, frame.area()))
         .expect("render chart");
     let text = rendered_terminal_rows(&terminal, 66).join("\n");
-    assert_eq!(text.matches("09:30").count(), 1, "{text}");
+    let expected_time = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        timestamp.div_euclid(1_000_000_000),
+        timestamp.rem_euclid(1_000_000_000) as u32,
+    )
+    .expect("timestamp")
+    .with_timezone(&chrono::Local)
+    .format("%H:%M")
+    .to_string();
+    assert_eq!(text.matches(&expected_time).count(), 1, "{text}");
     assert!(text.contains("Price"));
-    assert!(text.contains("Time UTC"));
+    assert!(text.contains("Time local"));
 }
 
 #[cfg(feature = "replay")]
@@ -508,24 +528,49 @@ fn dashboard_chart_keeps_replay_tick_window_endpoints_distinct_when_truncated() 
             .expect("render dashboard");
         let text = rendered_terminal_rows(&terminal, width).join("\n");
 
+        let visible_bars = &app.market.bars[32..];
+        let local_label = |timestamp_ns: i64| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(
+                timestamp_ns.div_euclid(1_000_000_000),
+                timestamp_ns.rem_euclid(1_000_000_000) as u32,
+            )
+            .expect("timestamp")
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string()
+        };
+        let expected_labels = [
+            local_label(visible_bars[0].ts_ns),
+            local_label(visible_bars[visible_bars.len() / 2].ts_ns),
+            local_label(visible_bars[visible_bars.len() - 1].ts_ns),
+        ];
+        for (position, expected) in expected_labels.iter().enumerate() {
+            assert!(
+                text.contains(expected),
+                "visible tick {position} missing ({expected}):\n{text}"
+            );
+        }
+        assert_eq!(text.matches(&expected_labels[0]).count(), 1, "{text}");
+        assert_eq!(text.matches(&expected_labels[2]).count(), 1, "{text}");
+        let truncated_label = local_label(app.market.bars[0].ts_ns);
         assert!(
-            text.contains("13:30:09"),
-            "first visible tick missing:\n{text}"
+            !text.contains(&truncated_label),
+            "truncated tick leaked:\n{text}"
         );
-        assert!(text.contains("13:30:34"), "middle tick missing:\n{text}");
-        assert!(
-            text.contains("13:30:59"),
-            "last visible tick missing:\n{text}"
-        );
-        assert_eq!(text.matches("13:30:09").count(), 1, "{text}");
-        assert_eq!(text.matches("13:30:59").count(), 1, "{text}");
-        assert!(!text.contains("13:30:00"), "truncated tick leaked:\n{text}");
     }
 
     // The screenshot regression had the same displayed second at both ends.
     // If a market snapshot supplies repeated timestamps, preserve the visible
     // sequence positions so the endpoints do not look like one collapsed tick.
     let repeated_timestamp = start + 59_839_000_000;
+    let repeated_label = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        repeated_timestamp.div_euclid(1_000_000_000),
+        repeated_timestamp.rem_euclid(1_000_000_000) as u32,
+    )
+    .expect("timestamp")
+    .with_timezone(&chrono::Local)
+    .format("%H:%M:%S")
+    .to_string();
     for bar in &mut app.market.bars {
         bar.ts_ns = repeated_timestamp;
     }
@@ -537,15 +582,15 @@ fn dashboard_chart_keeps_replay_tick_window_endpoints_distinct_when_truncated() 
         let text = rendered_terminal_rows(&terminal, width).join("\n");
 
         assert!(
-            text.contains("13:30:59#1"),
+            text.contains(&format!("{repeated_label}#1")),
             "first tick label missing:\n{text}"
         );
         assert!(
-            text.contains("13:30:59#91"),
+            text.contains(&format!("{repeated_label}#91")),
             "middle tick label missing:\n{text}"
         );
         assert!(
-            text.contains("13:30:59#180"),
+            text.contains(&format!("{repeated_label}#180")),
             "last tick label missing:\n{text}"
         );
     }
@@ -570,16 +615,34 @@ fn dashboard_chart_time_labels_preserve_non_monotonic_and_equal_timestamps() {
         volume: None,
     };
 
+    let local_label = |timestamp_ns: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(
+            timestamp_ns.div_euclid(1_000_000_000),
+            timestamp_ns.rem_euclid(1_000_000_000) as u32,
+        )
+        .expect("timestamp")
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string()
+    };
     assert_eq!(
         app.dashboard_chart_time_labels(&[
             bar(start + 59_000_000_000),
             bar(start),
             bar(start + 59_000_000_000),
         ]),
-        ["13:30:59#1", "13:30:00#2", "13:30:59#3"]
+        [
+            format!("{}#1", local_label(start + 59_000_000_000)),
+            format!("{}#2", local_label(start)),
+            format!("{}#3", local_label(start + 59_000_000_000)),
+        ]
     );
     assert_eq!(
         app.dashboard_chart_time_labels(&[bar(start), bar(start), bar(start)]),
-        ["13:30:00#1", "13:30:00#2", "13:30:00#3"]
+        [
+            format!("{}#1", local_label(start)),
+            format!("{}#2", local_label(start)),
+            format!("{}#3", local_label(start)),
+        ]
     );
 }
