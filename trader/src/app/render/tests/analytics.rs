@@ -5,7 +5,122 @@ mod replay_analytics_tests {
         ReplaySweepRankingDocument, ReplaySweepRankingEntry, ReplaySweepRankingMetric,
         ReplaySweepRankingOptions, ReplaySweepRankingRow,
     };
+    use chrono::TimeZone;
     use std::collections::BTreeMap;
+
+    fn enum_value<T: serde::Serialize>(value: T) -> serde_json::Value {
+        serde_json::to_value(value).expect("serialize enum")
+    }
+
+    fn write_minimal_result(root: &std::path::Path, run_id: &str, completed_minute: u32) {
+        let completed = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 10, 14, completed_minute, 0)
+            .unwrap();
+        let mut metadata = json!({
+            "app_version": "test",
+            "package_version": "test",
+            "git_commit": null,
+            "broker": "tradovate",
+            "environment": enum_value(crate::config::TradingEnvironment::Sim),
+            "run_mode": "cached_replay",
+            "strategy": serde_json::to_value(crate::strategy::ExecutionStrategyConfig::default()).unwrap(),
+            "signal_source": "cached_bars",
+            "fill_model": enum_value(crate::broker::ReplayFillModel::RawBarOpen),
+            "fill_price_sources": [],
+            "execution_precisions": [],
+            "latency_model": enum_value(crate::broker::ReplayLatencyModel::Fixed),
+            "fixed_latency_ms": 0,
+            "latency_seed": null,
+            "observed_latency_sample_count": 0,
+            "bar_protection_policy": enum_value(crate::broker::ReplayBarProtectionPolicy::Conservative),
+        })
+        .as_object()
+        .expect("metadata object")
+        .clone();
+        metadata.extend(
+            json!({
+                "fee_model": "primary",
+                "initial_capital": 10000.0,
+                "account_currency": "USD",
+                "margin_model": "fixed",
+                "account_id": 1,
+                "account_name": "test",
+                "contract_id": 1,
+                "contract_name": "ESZ6",
+                "tick_size": 0.25,
+                "value_per_point": 50.0,
+                "bar_type": serde_json::to_value(crate::broker::BarType::minute(1)).unwrap(),
+                "candle_mode": enum_value(crate::broker::CandleMode::Standard),
+                "timezone": "UTC",
+                "replay_file_path": "",
+                "replay_dom_file_path": null,
+                "replay_cache_dir": "",
+                "dataset_view": null,
+                "evaluation_start_utc": completed,
+                "evaluation_end_utc": completed,
+                "warmup_start_utc": null,
+                "market_first_timestamp_ns": null,
+                "market_last_timestamp_ns": null,
+                "source_kind": "cached_server_bars",
+                "source_label": "Cached Replay · ESZ6",
+                "source_record_kind": "bars",
+                "source_record_count": 12,
+                "source_bar_count": 12,
+                "warmup_rows": 4,
+                "evaluation_rows_total": 8,
+                "evaluation_rows_processed": 8
+            })
+            .as_object()
+            .expect("metadata continuation")
+            .clone(),
+        );
+        let result = json!({
+            "schema_version": 3,
+            "result_type": "replay_result",
+            "run_id": run_id,
+            "status": "completed",
+            "error": null,
+            "created_at_utc": completed,
+            "started_at_utc": completed,
+            "completed_at_utc": completed,
+            "metadata": metadata,
+            "summary": {
+                "initial_capital": 10000.0,
+                "ending_equity": 10000.0,
+                "gross_pnl": 0.0,
+                "net_pnl": 0.0,
+                "fees": 0.0,
+                "return_on_initial_capital_pct": null,
+                "fill_count": 0,
+                "trade_count": 0,
+                "closed_trade_count": 0,
+                "win_count": 0,
+                "loss_count": 0,
+                "win_rate_pct": null,
+                "profit_factor": null,
+                "max_drawdown": 0.0,
+                "max_drawdown_pct": null,
+                "max_open_position": 0.0,
+                "precision": [],
+                "exit_reason_counts": {},
+                "evaluation_rows_processed": 8
+            },
+            "artifacts": {
+                "result_json": "result.json",
+                "trades_csv": "trades.csv",
+                "fills_csv": "fills.csv",
+                "equity_csv": "equity.csv"
+            },
+            "ledger": serde_json::to_value(crate::broker::ReplayExecutionLedgerSnapshot::default()).unwrap()
+        });
+        let run_dir = root.join(run_id);
+        std::fs::create_dir_all(&run_dir).expect("create result directory");
+        std::fs::write(
+            run_dir.join("result.json"),
+            serde_json::to_vec(&result).expect("serialize result fixture"),
+        )
+        .expect("write result fixture");
+    }
 
     #[test]
     fn f8_opens_saved_analytics_without_an_active_engine() {
@@ -18,6 +133,141 @@ mod replay_analytics_tests {
 
         assert_eq!(app.screen, Screen::Analytics);
         assert_eq!(app.analytics_return_screen, Screen::EngineSelect);
+    }
+
+    #[test]
+    fn opening_analytics_selects_newest_run_and_matching_detail() {
+        let root = std::env::temp_dir().join(format!(
+            "trader-analytics-latest-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        write_minimal_result(&root, "older-run", 10);
+        write_minimal_result(&root, "newest-run", 11);
+
+        let mut config = AppConfig::default();
+        config.replay_result_dir = root.clone();
+        let mut app = App::new(config);
+        enable_tradovate_controls(&mut app);
+        app.session_mode = EngineCreateMode::Replay;
+        app.replay_analytics.selected_run = 1;
+        app.replay_analytics.focus = AnalyticsFocus::Trades;
+        let (tx, _rx) = unbounded_channel();
+
+        app.handle_key(key(KeyCode::F(8)), &tx);
+
+        assert_eq!(app.screen, Screen::Analytics);
+        assert_eq!(app.replay_analytics.focus, AnalyticsFocus::Runs);
+        assert_eq!(app.replay_analytics.selected_run, 0);
+        assert_eq!(
+            app.replay_analytics
+                .selected_entry()
+                .map(|entry| entry.document.run_id.as_str()),
+            Some("newest-run")
+        );
+        assert!(
+            rendered_text(app.analytics_selected_run_lines())
+                .join(" | ")
+                .contains("newest-run")
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).expect("terminal");
+        terminal
+            .draw(|frame| app.draw(frame))
+            .expect("draw analytics");
+        let rows = rendered_terminal_rows(&terminal, 140).join("\n");
+        assert!(rows.contains("> newest-run [ok]"), "{rows}");
+        assert!(!rows.contains("> > newest-run [ok]"));
+        assert!(rows.contains("Selected Run Detail"));
+        assert!(rows.contains("newest-run | ESZ6"));
+        assert!(rows.contains("Research Summary"));
+        assert!(rows.contains("Equity Curve"));
+        assert!(rows.contains("Trade Excursions"));
+
+        std::fs::remove_dir_all(root).expect("remove analytics fixture");
+    }
+
+    #[test]
+    fn compact_analytics_fits_80_by_24_and_scrolls_selected_run_summary() {
+        let root = std::env::temp_dir().join(format!(
+            "trader-analytics-compact-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        write_minimal_result(&root, "older-run", 10);
+        write_minimal_result(&root, "newest-run", 11);
+
+        let mut config = AppConfig::default();
+        config.replay_result_dir = root.clone();
+        let mut app = App::new(config);
+        enable_tradovate_controls(&mut app);
+        app.screen = Screen::Analytics;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+        terminal
+            .draw(|frame| app.draw(frame))
+            .expect("draw compact analytics");
+        let rows = rendered_terminal_rows(&terminal, 80).join("\n");
+        assert!(rows.contains("Saved Replay Runs (2)"), "{rows}");
+        assert!(rows.contains("Selected Run Summary"), "{rows}");
+        assert!(rows.contains("> newest-run [ok]"), "{rows}");
+        assert!(!rows.contains("> > newest-run"), "{rows}");
+        assert!(rows.contains("Run: newest-run"), "{rows}");
+        assert!(rows.contains("Source: Cached Replay · ESZ6"), "{rows}");
+        assert!(rows.contains("Warmup: 4 | Evaluated: 8"), "{rows}");
+        assert!(rows.contains("PgUp/PgDn scroll"), "{rows}");
+
+        app.handle_analytics_key(key(KeyCode::PageDown));
+        assert_eq!(app.replay_analytics.compact_scroll, 5);
+        terminal
+            .draw(|frame| app.draw(frame))
+            .expect("draw scrolled summary");
+        let scrolled_rows = rendered_terminal_rows(&terminal, 80).join("\n");
+        assert!(
+            !scrolled_rows.contains("Run: newest-run"),
+            "{scrolled_rows}"
+        );
+
+        for _ in 0..10 {
+            app.handle_analytics_key(key(KeyCode::PageDown));
+        }
+        terminal
+            .draw(|frame| app.draw(frame))
+            .expect("draw summary end");
+        let end_rows = rendered_terminal_rows(&terminal, 80).join("\n");
+        assert!(end_rows.contains("Margin: not configured"), "{end_rows}");
+
+        for _ in 0..11 {
+            app.handle_analytics_key(key(KeyCode::PageUp));
+        }
+        assert_eq!(app.replay_analytics.compact_scroll, 0);
+
+        std::fs::remove_dir_all(root).expect("remove analytics fixture");
+    }
+
+    #[test]
+    fn analytics_q_quits_even_when_stale_replay_text_focus_remains() {
+        let mut app = App::new(AppConfig::default());
+        app.screen = Screen::Analytics;
+        app.focus = Focus::ReplayInitialCapital;
+        let (tx, _rx) = unbounded_channel();
+
+        app.handle_key(key(KeyCode::Char('q')), &tx);
+
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn q_keeps_normal_login_text_editing() {
+        let mut app = App::new(AppConfig::default());
+        app.screen = Screen::Login;
+        app.focus = Focus::Username;
+        let (tx, _rx) = unbounded_channel();
+
+        app.handle_key(key(KeyCode::Char('q')), &tx);
+
+        assert!(!app.should_quit);
+        assert_eq!(app.form.username, "q");
     }
 
     #[test]

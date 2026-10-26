@@ -150,6 +150,39 @@ pub enum ReplaySpeed {
     X25,
 }
 
+/// NinjaTrader's hosted Market Replay speed in provider percent units.
+/// This is intentionally distinct from [`ReplaySpeed`], which controls the
+/// local clock for Cached Replay. The provider accepts 0–400, where 0 pauses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct NinjaTraderReplaySpeed(u16);
+
+impl NinjaTraderReplaySpeed {
+    pub const MIN: u16 = 0;
+    pub const MAX: u16 = 400;
+
+    pub fn new(percent: u16) -> Result<Self, String> {
+        (percent <= Self::MAX)
+            .then_some(Self(percent))
+            .ok_or_else(|| {
+                format!(
+                    "NinjaTrader replay speed must be between 0 and {}",
+                    Self::MAX
+                )
+            })
+    }
+
+    pub const fn percent(self) -> u16 {
+        self.0
+    }
+}
+
+impl Default for NinjaTraderReplaySpeed {
+    fn default() -> Self {
+        Self(100)
+    }
+}
+
 impl ReplaySpeed {
     pub fn label(self) -> &'static str {
         match self {

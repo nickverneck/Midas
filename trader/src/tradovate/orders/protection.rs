@@ -93,7 +93,7 @@ pub(super) fn plan_native_protection_sync(
             return Ok(None);
         }
         return Ok(Some(PendingProtectionSync {
-            simulate: session.replay_enabled,
+            simulate: session.replay_enabled && !session.hosted_replay_orders,
             key,
             account_name: account_name.clone(),
             contract_name: contract_name.clone(),

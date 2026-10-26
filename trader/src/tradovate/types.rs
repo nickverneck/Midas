@@ -8,6 +8,8 @@ struct AccessTokenResponse {
     user_id: Option<i64>,
     name: Option<String>,
     has_live: Option<bool>,
+    #[serde(default)]
+    api_hosts: Option<ApiHosts>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +26,18 @@ struct TokenCacheFile {
     name: Option<String>,
     #[serde(rename = "hasLive")]
     has_live: Option<bool>,
+    #[serde(default, rename = "apiHosts")]
+    api_hosts: Option<ApiHosts>,
+}
+
+/// Dynamic NinjaTrader service hosts returned by authentication. Hosted
+/// Market Replay requires the authenticated `replay` host and never guesses
+/// or falls back to a Live/Demo hostname.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiHosts {
+    #[serde(default)]
+    replay: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +47,7 @@ struct TokenBundle {
     expiration_time: Option<String>,
     user_id: Option<i64>,
     user_name: Option<String>,
+    api_hosts: Option<ApiHosts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +203,10 @@ struct ServiceState {
     broker_tx: BrokerCommandSender,
     replay_speed_tx: tokio::sync::watch::Sender<ReplaySpeed>,
     replay_speed: ReplaySpeed,
+    ninja_replay_stop_tx: Option<tokio::sync::watch::Sender<bool>>,
+    /// Monotonic identity for hosted Replay workers. Delayed events from an
+    /// earlier stream must never affect a replacement session.
+    ninja_replay_generation: u64,
     replay_execution_ledger: replay::ReplayExecutionLedgerState,
     /// Keep the broker gateway owned by the service.  Dropping its join
     /// handle would detach a websocket/order task when the service exits.
@@ -276,6 +295,11 @@ struct SessionState {
     cfg: AppConfig,
     session_kind: SessionKind,
     replay_enabled: bool,
+    /// True only for the direct NinjaTrader hosted Replay session. Orders in
+    /// this session go through its authenticated replay WebSocket; they must
+    /// never be handled by the local cached-replay fill simulator.
+    hosted_replay_orders: bool,
+    hosted_replay_running: bool,
     tokens: TokenBundle,
     token_file_snapshot: Option<TokenFileSnapshot>,
     accounts: Vec<AccountInfo>,

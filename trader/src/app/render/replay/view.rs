@@ -3,7 +3,10 @@ use super::*;
 impl App {
     pub(in crate::app) fn render_replay_screen(&self, frame: &mut Frame<'_>, area: Rect) {
         #[cfg(feature = "replay")]
-        if self.replay_view == ReplayView::Downloader {
+        if matches!(
+            self.replay_view,
+            ReplayView::Downloader | ReplayView::StreamSetup
+        ) {
             self.render_replay_downloader_screen(frame, area);
             return;
         }

@@ -432,6 +432,14 @@ async fn handle_command(
                 "Replay downloads are only available on Tradovate.".to_string(),
             ));
         }
+        #[cfg(feature = "replay")]
+        ServiceCommand::EnterNinjaTraderReplay { .. }
+        | ServiceCommand::SetNinjaTraderReplaySpeed { .. }
+        | ServiceCommand::StopNinjaTraderReplay => {
+            let _ = event_tx.send(ServiceEvent::Error(
+                "NinjaTrader hosted Replay is only available on Tradovate.".to_string(),
+            ));
+        }
     }
 
     Ok(())

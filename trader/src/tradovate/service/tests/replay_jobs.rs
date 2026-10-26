@@ -1,4 +1,6 @@
 #[cfg(feature = "replay")]
+use super::super::commands::handle_command;
+#[cfg(feature = "replay")]
 use super::super::commands::{
     begin_replay_cache_commit, cancel_replay_operation, reap_finished_replay_download,
     replace_replay_lookup,
@@ -8,6 +10,198 @@ use super::support::{test_session, test_state};
 #[cfg(feature = "replay")]
 use crate::broker::{ReplayDownloadOperationId, ReplayDownloadPhase};
 use serde_json::json;
+
+#[cfg(feature = "replay")]
+#[tokio::test]
+async fn hosted_replay_end_disconnects_session_before_final_reason() {
+    for failed in [false, true] {
+        let mut session = test_session();
+        session.session_kind = SessionKind::NinjaTraderReplay;
+        session.replay_enabled = true;
+        session.hosted_replay_orders = true;
+        session.hosted_replay_running = true;
+        session.execution_runtime.armed = true;
+        let mut state = test_state(session);
+        state.ninja_replay_generation = 7;
+        state.snapshot_generation = 7;
+        state.snapshot_revision = 3;
+        state.snapshot_refresh_pending = true;
+        state.snapshot_task = Some(tokio::spawn(std::future::pending()));
+        let (stop_tx, _stop_rx) = tokio::sync::watch::channel(false);
+        state.ninja_replay_stop_tx = Some(stop_tx);
+
+        let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+        let stale_market = MarketSnapshot {
+            contract_id: Some(42),
+            contract_name: Some("ESZ6".to_string()),
+            ..MarketSnapshot::default()
+        };
+        let (market_tx, market_rx) = tokio::sync::watch::channel(stale_market);
+        let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
+        let reason = if failed {
+            "NinjaTrader hosted Replay: provider socket closed".to_string()
+        } else {
+            "reached optional end time".to_string()
+        };
+
+        handle_internal(
+            InternalEvent::HostedReplayEnded {
+                generation: 7,
+                reason: reason.clone(),
+                failed,
+            },
+            &mut state,
+            &event_tx,
+            &market_tx,
+            internal_tx,
+        )
+        .await
+        .expect("Hosted Replay completion should clean up its session");
+
+        assert!(state.session.is_none());
+        assert!(state.replay.is_none());
+        assert!(state.ninja_replay_stop_tx.is_none());
+        assert_eq!(state.snapshot_generation, 8);
+        assert_eq!(state.snapshot_revision, 0);
+        assert!(!state.snapshot_refresh_pending);
+        assert!(state.snapshot_task.is_none());
+        assert_eq!(market_rx.borrow().contract_id, None);
+        assert_eq!(market_rx.borrow().contract_name, None);
+        assert!(market_rx.borrow().bars.is_empty());
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        let disconnected_index = events
+            .iter()
+            .position(|event| matches!(event, ServiceEvent::Disconnected))
+            .expect("worker end must notify the app that the session disconnected");
+        let reason_index = events
+            .iter()
+            .position(|event| match event {
+                ServiceEvent::Error(message) | ServiceEvent::Status(message) => message == &reason,
+                _ => false,
+            })
+            .expect("worker end reason must remain visible");
+        assert!(disconnected_index < reason_index);
+        assert!(if failed {
+            matches!(&events[reason_index], ServiceEvent::Error(_))
+        } else {
+            matches!(&events[reason_index], ServiceEvent::Status(_))
+        });
+    }
+}
+
+#[cfg(feature = "replay")]
+#[tokio::test]
+async fn stale_hosted_replay_events_cannot_disconnect_or_advance_current_run() {
+    let mut session = test_session();
+    session.session_kind = SessionKind::NinjaTraderReplay;
+    session.replay_enabled = true;
+    session.hosted_replay_orders = true;
+    session.hosted_replay_running = true;
+    let mut state = test_state(session);
+    state.ninja_replay_generation = 12;
+    state.snapshot_generation = 21;
+    state.snapshot_task = Some(tokio::spawn(std::future::pending()));
+    let (stop_tx, _stop_rx) = tokio::sync::watch::channel(false);
+    state.ninja_replay_stop_tx = Some(stop_tx);
+    state.market_task = Some(tokio::spawn(std::future::pending()));
+
+    let (event_tx, mut event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
+    handle_internal(
+        InternalEvent::HostedReplayEnded {
+            generation: 11,
+            reason: "old replay ended".to_string(),
+            failed: true,
+        },
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx.clone(),
+    )
+    .await
+    .expect("stale Hosted Replay completion should be ignored");
+    handle_internal(
+        InternalEvent::HostedReplayClock {
+            generation: 11,
+            timestamp: chrono::Utc::now(),
+            speed: NinjaTraderReplaySpeed::default(),
+        },
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("stale Hosted Replay clock should be ignored");
+
+    assert_eq!(state.ninja_replay_generation, 12);
+    assert_eq!(state.snapshot_generation, 21);
+    assert!(state.snapshot_task.is_some());
+    assert!(state.market_task.is_some());
+    assert!(state.ninja_replay_stop_tx.is_some());
+    assert!(
+        state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.session_kind == SessionKind::NinjaTraderReplay)
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "stale events emitted UI updates"
+    );
+
+    if let Some(task) = state.snapshot_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = state.market_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[cfg(feature = "replay")]
+#[tokio::test]
+async fn manual_hosted_replay_stop_invalidates_snapshot_work() {
+    let mut session = test_session();
+    session.session_kind = SessionKind::NinjaTraderReplay;
+    session.replay_enabled = true;
+    session.hosted_replay_orders = true;
+    session.hosted_replay_running = true;
+    let mut state = test_state(session);
+    state.ninja_replay_generation = 30;
+    state.snapshot_generation = 8;
+    state.snapshot_revision = 5;
+    state.snapshot_refresh_pending = true;
+    state.snapshot_task = Some(tokio::spawn(std::future::pending()));
+    let (stop_tx, _stop_rx) = tokio::sync::watch::channel(false);
+    state.ninja_replay_stop_tx = Some(stop_tx);
+
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    let (market_tx, _market_rx) = tokio::sync::watch::channel(MarketSnapshot::default());
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
+    handle_command(
+        ServiceCommand::StopNinjaTraderReplay,
+        &mut state,
+        &event_tx,
+        &market_tx,
+        internal_tx,
+    )
+    .await
+    .expect("Hosted Replay stop should succeed");
+
+    assert!(state.session.is_none());
+    assert_eq!(state.ninja_replay_generation, 31);
+    assert_eq!(state.snapshot_generation, 9);
+    assert_eq!(state.snapshot_revision, 0);
+    assert!(!state.snapshot_refresh_pending);
+    assert!(state.snapshot_task.is_none());
+}
 
 #[cfg(feature = "replay")]
 #[tokio::test]
@@ -70,7 +264,10 @@ async fn replay_download_is_single_flight_and_reports_operation_scoped_busy() {
             target: None,
             start_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("start"),
             end_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("end"),
+            start_time_utc: None,
+            end_time_utc: None,
             source_kind: "server-bars".to_string(),
+            replay_speed: 400,
             bar_type: BarType::minute(1),
             candle_mode: CandleMode::Standard,
             display_name: None,
@@ -353,7 +550,10 @@ async fn replay_downloader_validation_failure_is_reported_without_starting_live_
                 target: None,
                 start_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 24).expect("start"),
                 end_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("end"),
+                start_time_utc: None,
+                end_time_utc: None,
                 source_kind: "server-bars".to_string(),
+                replay_speed: 400,
                 bar_type: BarType::minute(1),
                 candle_mode: CandleMode::HeikinAshi,
                 display_name: Some("invalid range".to_string()),
@@ -424,7 +624,10 @@ async fn replay_read_only_jobs_dispatch_without_blocking_live_service_state() {
             target: None,
             start_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("start"),
             end_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 23).expect("end"),
+            start_time_utc: None,
+            end_time_utc: None,
             source_kind: "server-bars".to_string(),
+            replay_speed: 400,
             bar_type: BarType::minute(1),
             candle_mode: CandleMode::Standard,
             display_name: None,

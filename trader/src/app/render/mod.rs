@@ -16,12 +16,13 @@ mod tests;
 
 impl App {
     pub fn draw(&self, frame: &mut Frame<'_>) {
+        let compact_analytics = self.screen == Screen::Analytics && frame.area().width < 110;
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
-                Constraint::Min(20),
-                Constraint::Length(8),
+                Constraint::Length(if compact_analytics { 6 } else { 4 }),
+                Constraint::Min(if compact_analytics { 0 } else { 20 }),
+                Constraint::Length(if compact_analytics { 4 } else { 8 }),
             ])
             .split(frame.area());
 

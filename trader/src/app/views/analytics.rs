@@ -4,6 +4,36 @@ impl App {
     pub(in crate::app) fn handle_analytics_key(&mut self, key: KeyEvent) {
         #[cfg(feature = "replay")]
         {
+            if matches!(
+                key.code,
+                KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Char(
+                        'g' | 'G'
+                            | 's'
+                            | 'S'
+                            | 'm'
+                            | 'M'
+                            | 'f'
+                            | 'F'
+                            | 'd'
+                            | 'D'
+                            | 't'
+                            | 'T'
+                            | 'j'
+                            | 'J'
+                            | 'k'
+                            | 'K'
+                            | '['
+                            | ']'
+                    )
+            ) {
+                self.replay_analytics.compact_scroll = 0;
+            }
             match key.code {
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.replay_analytics.focus = match self.replay_analytics.focus {
@@ -92,6 +122,14 @@ impl App {
                     } else {
                         self.replay_analytics.cycle_fee_scenario(1);
                     }
+                }
+                KeyCode::PageUp => {
+                    self.replay_analytics.compact_scroll =
+                        self.replay_analytics.compact_scroll.saturating_sub(5);
+                }
+                KeyCode::PageDown => {
+                    self.replay_analytics.compact_scroll =
+                        self.replay_analytics.compact_scroll.saturating_add(5);
                 }
                 KeyCode::Char('[') => {
                     if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
@@ -411,7 +449,7 @@ impl App {
                 document.completed_at_utc.format("%Y-%m-%d %H:%M UTC")
             )),
             Line::from(format!(
-                "Dataset: {} | window {} -> {}",
+                "View: {} | window {} -> {}",
                 document
                     .metadata
                     .dataset_view
@@ -429,7 +467,14 @@ impl App {
                     .unwrap_or_else(|| "n/a".to_string())
             )),
             Line::from(format!(
-                "Bars: {} warmup / {} evaluated | {} {}",
+                "Source: {} | {} {}",
+                document.metadata.source_label,
+                document.metadata.source_record_count,
+                document.metadata.source_record_kind
+            )),
+            Line::from(format!(
+                "Bars: {} total | {} warmup / {} evaluated | {} {}",
+                document.metadata.source_bar_count,
                 document.metadata.warmup_rows,
                 document.metadata.evaluation_rows_processed,
                 document
@@ -506,17 +551,23 @@ impl App {
             .enumerate()
             .map(|(index, entry)| {
                 let document = &entry.document;
-                let marker = if self.replay_analytics.selected_run == index {
-                    ">"
+                // The list widget supplies its highlight symbol while Runs is
+                // focused. Keep the inline marker only when another Analytics
+                // pane has focus, so the selected run remains visible without
+                // showing two markers at once.
+                let marker = if self.replay_analytics.focus == AnalyticsFocus::Runs {
+                    ""
+                } else if self.replay_analytics.selected_run == index {
+                    "> "
                 } else {
-                    " "
+                    "  "
                 };
                 let status = match document.status {
                     crate::tradovate::replay::ReplayResultStatus::Completed => "ok",
                     crate::tradovate::replay::ReplayResultStatus::Failed => "failed",
                 };
                 ListItem::new(vec![
-                    Line::from(format!("{marker} {} [{status}]", document.run_id)),
+                    Line::from(format!("{marker}{} [{status}]", document.run_id)),
                     Line::from(format!(
                         "  {} {} | {} trades | {} signals",
                         document.metadata.contract_name,

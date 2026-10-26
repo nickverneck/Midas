@@ -31,6 +31,7 @@ pub(crate) fn entry_signal_consumed_while_flat(
             signal,
             StrategySignal::EnterLong | StrategySignal::EnterShort
         )
+        && !session.execution_config.flat_only_direction_gate_active()
         && session.execution_runtime.last_dispatched_entry_signal == Some(signal)
 }
 

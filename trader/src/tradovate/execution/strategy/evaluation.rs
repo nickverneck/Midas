@@ -408,6 +408,8 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
     bars: &[Bar],
     current_qty: i32,
     after_ts: Option<i64>,
+    source_update_sequence: Option<u64>,
+    market_update: crate::broker::MarketHistoryUpdate,
 ) -> (Bar, StrategySignal, String, String) {
     if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
         let signal_bar = bars
@@ -449,10 +451,12 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
             }
             NativeStrategyKind::HmaCross => {
                 let config = session.execution_config.native_hma_cross.clone();
-                let evaluation = config.evaluate_current_cross(
+                let evaluation = config.evaluate_current_cross_with_market_update(
                     &mut session.execution_runtime.hma_cross_execution,
                     bars,
                     current_side,
+                    source_update_sequence,
+                    market_update,
                 );
                 (
                     evaluation.signal,
@@ -473,10 +477,12 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
             }
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
                 let config = session.execution_config.native_volume_hma_cross.clone();
-                let evaluation = config.evaluate_current_cross(
+                let evaluation = config.evaluate_current_cross_with_market_update(
                     &mut session.execution_runtime.volume_hma_cross_execution,
                     bars,
                     current_side,
+                    source_update_sequence,
+                    market_update,
                 );
                 (
                     evaluation.signal(),
@@ -526,6 +532,14 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
     let mut latest = None;
     for idx in start_idx..bars.len() {
         let window = &bars[..=idx];
+        let candidate_update_sequence = (idx + 1 == bars.len())
+            .then_some(source_update_sequence)
+            .flatten();
+        let candidate_update_kind = if candidate_update_sequence.is_some() {
+            market_update
+        } else {
+            crate::broker::MarketHistoryUpdate::Snapshot
+        };
         let signal_bar = bars[idx].clone();
         let (signal, summary, debug_summary) = match session.execution_config.native_strategy {
             NativeStrategyKind::HmaAngle => {
@@ -561,10 +575,12 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
             }
             NativeStrategyKind::HmaCross => {
                 let config = session.execution_config.native_hma_cross.clone();
-                let evaluation = config.evaluate_current_cross(
+                let evaluation = config.evaluate_current_cross_with_market_update(
                     &mut session.execution_runtime.hma_cross_execution,
                     window,
                     current_side,
+                    candidate_update_sequence,
+                    candidate_update_kind,
                 );
                 (
                     evaluation.signal,
@@ -585,10 +601,12 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
             }
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
                 let config = session.execution_config.native_volume_hma_cross.clone();
-                let evaluation = config.evaluate_current_cross(
+                let evaluation = config.evaluate_current_cross_with_market_update(
                     &mut session.execution_runtime.volume_hma_cross_execution,
                     window,
                     current_side,
+                    candidate_update_sequence,
+                    candidate_update_kind,
                 );
                 (
                     evaluation.signal(),
@@ -648,6 +666,8 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
     current_qty: i32,
     after_ts: Option<i64>,
     include_debug: bool,
+    source_update_sequence: Option<u64>,
+    market_update: crate::broker::MarketHistoryUpdate,
 ) -> (Bar, StrategySignal, String, String) {
     let current_side = side_from_signed_qty(current_qty);
     if signal_timing == NativeSignalTiming::LiveBar {
@@ -655,7 +675,13 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
             .last()
             .expect("strategy bars must not be empty")
             .clone();
-        let evaluation = config.evaluate_current_cross(runtime, bars, current_side);
+        let evaluation = config.evaluate_current_cross_with_market_update(
+            runtime,
+            bars,
+            current_side,
+            source_update_sequence,
+            market_update,
+        );
         return (
             signal_bar,
             evaluation.signal,
@@ -673,7 +699,21 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
         .unwrap_or_else(|| bars.len().saturating_sub(1));
     let mut latest = None;
     for idx in start_idx..bars.len() {
-        let evaluation = config.evaluate_current_cross(runtime, &bars[..=idx], current_side);
+        let candidate_update_sequence = (idx + 1 == bars.len())
+            .then_some(source_update_sequence)
+            .flatten();
+        let candidate_update_kind = if candidate_update_sequence.is_some() {
+            market_update
+        } else {
+            crate::broker::MarketHistoryUpdate::Snapshot
+        };
+        let evaluation = config.evaluate_current_cross_with_market_update(
+            runtime,
+            &bars[..=idx],
+            current_side,
+            candidate_update_sequence,
+            candidate_update_kind,
+        );
         let candidate = (
             bars[idx].clone(),
             evaluation.signal,

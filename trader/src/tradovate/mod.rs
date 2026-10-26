@@ -5,11 +5,11 @@ use crate::broker::{
     ContractSuggestion, EngineHistoryFill, EngineHistorySnapshot, EngineInspectionSnapshot,
     ExecutionProbeManagedProtection, ExecutionProbeOrder, ExecutionProbeSnapshot,
     InstrumentSessionProfile, InstrumentSessionWindow, LatencySnapshot, ManualOrderAction,
-    MarketHistoryUpdate, MarketSnapshot, ReplayDownloadOperationId, ReplaySpeed,
-    ReplayWindowSnapshot, SERVICE_COMMAND_QUEUE_CAPACITY, SERVICE_EVENT_QUEUE_CAPACITY,
-    ServiceCommand, ServiceCommandReceiver, ServiceEvent, ServiceEventSender, SessionKind,
-    TradeMarker, TradeMarkerSide, infer_session_profile, service_command_channel,
-    service_event_channel,
+    MarketHistoryUpdate, MarketSnapshot, NinjaTraderReplaySpeed, ReplayDownloadOperationId,
+    ReplaySpeed, ReplayWindowSnapshot, SERVICE_COMMAND_QUEUE_CAPACITY,
+    SERVICE_EVENT_QUEUE_CAPACITY, ServiceCommand, ServiceCommandReceiver, ServiceEvent,
+    ServiceEventSender, SessionKind, TradeMarker, TradeMarkerSide, infer_session_profile,
+    service_command_channel, service_event_channel,
 };
 use crate::broker::{ReplayBarFrame, ReplayDomLevel, ReplayFrameSet, ReplayMarketDom};
 #[cfg(any(feature = "replay", test))]
@@ -60,6 +60,8 @@ mod download;
 mod execution;
 mod gateway;
 mod history;
+#[cfg(feature = "replay")]
+mod hosted_replay;
 mod orders;
 mod profiler;
 mod protocol;

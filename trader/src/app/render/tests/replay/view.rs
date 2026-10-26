@@ -96,6 +96,22 @@ fn dashboard_summary_hides_replay_speed_in_live_mode() {
     assert!(!lines.iter().any(|line| line.contains("Replay Speed")));
 }
 
+#[cfg(feature = "replay")]
+#[test]
+fn dashboard_summary_names_ninjatrader_as_live_replay_provider() {
+    let mut app = App::new(AppConfig::default());
+    app.session_kind = SessionKind::NinjaTraderReplay;
+
+    let lines = rendered_text(app.dashboard_summary_lines());
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Provider: NinjaTrader Hosted Replay")
+    );
+    assert!(!lines.iter().any(|line| line == "Broker: Tradovate"));
+}
+
 #[test]
 fn dashboard_summary_shows_replay_speed_in_replay_mode() {
     let mut app = App::new(AppConfig::default());

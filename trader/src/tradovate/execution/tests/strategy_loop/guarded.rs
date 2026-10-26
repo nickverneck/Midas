@@ -237,6 +237,30 @@ fn guarded_closed_bar_blocks_repeat_flat_entry_side_until_opposite_dispatch() {
 }
 
 #[test]
+fn flat_only_direction_gate_bypasses_legacy_same_side_reentry_latch() {
+    let mut session = test_session();
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_ema.direction_gate.enabled = true;
+    session.execution_runtime.last_dispatched_entry_signal = Some(StrategySignal::EnterShort);
+
+    assert!(
+        !entry_signal_consumed_while_flat(&session, StrategySignal::EnterShort, 0),
+        "flat-only directional gate should allow a fresh crossover after a protection exit"
+    );
+
+    session
+        .execution_config
+        .native_ema
+        .direction_gate
+        .flat_only_entries = false;
+    assert!(entry_signal_consumed_while_flat(
+        &session,
+        StrategySignal::EnterShort,
+        0
+    ));
+}
+
+#[test]
 fn hma_direct_path_executes_current_closed_bar_cross() {
     let mut session = test_session();
     let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();

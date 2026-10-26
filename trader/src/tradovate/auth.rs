@@ -16,6 +16,9 @@ async fn authenticate(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
             expiration_time: None,
             user_id: None,
             user_name,
+            api_hosts: load_token_file(&cfg.token_path)
+                .ok()
+                .and_then(|tokens| tokens.api_hosts),
         });
     }
 
@@ -40,6 +43,27 @@ async fn authenticate(client: &Client, cfg: &AppConfig) -> Result<TokenBundle> {
         }
         AuthMode::Credentials => request_access_token(client, cfg).await,
     }
+}
+
+/// Resolve the hosted Market Replay WebSocket only from NinjaTrader's
+/// authenticated apiHosts response/token bundle. Never derive it from the
+/// selected Live/Demo environment and never fall back to those hosts.
+fn ninja_replay_ws_url(tokens: &TokenBundle) -> Result<String> {
+    let host = tokens
+        .api_hosts
+        .as_ref()
+        .and_then(|hosts| hosts.replay.as_deref())
+        .map(str::trim)
+        .filter(|host| {
+            !host.is_empty()
+                && host.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || ".-".contains(character)
+                })
+                && !host.starts_with('.')
+                && !host.ends_with('.')
+        })
+        .context("NinjaTrader authentication did not provide a valid apiHosts.replay host")?;
+    Ok(format!("wss://{host}/v1/websocket"))
 }
 
 fn load_token_file(path: &Path) -> Result<TokenBundle> {
@@ -69,11 +93,15 @@ fn load_token_file(path: &Path) -> Result<TokenBundle> {
             .get("expirationTime")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        user_id: parsed.get("userId").and_then(Value::as_i64),
+        user_id: json_i64(&parsed, "userId"),
         user_name: parsed
             .get("name")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+        api_hosts: parsed
+            .get("apiHosts")
+            .cloned()
+            .and_then(|hosts| serde_json::from_value(hosts).ok()),
     })
 }
 
@@ -107,11 +135,15 @@ fn load_token_file_with_snapshot(path: &Path) -> Result<RuntimeTokenBundle> {
                 .get("expirationTime")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            user_id: parsed.get("userId").and_then(Value::as_i64),
+            user_id: json_i64(&parsed, "userId"),
             user_name: parsed
                 .get("name")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
+            api_hosts: parsed
+                .get("apiHosts")
+                .cloned()
+                .and_then(|hosts| serde_json::from_value(hosts).ok()),
         },
         file_snapshot: Some(TokenFileSnapshot {
             path: path.to_path_buf(),
@@ -137,6 +169,7 @@ fn save_token_cache(path: &Path, tokens: &TokenBundle) -> Result<()> {
         user_id: tokens.user_id,
         name: tokens.user_name.clone(),
         has_live: None,
+        api_hosts: tokens.api_hosts.clone(),
     };
     fs::write(path, serde_json::to_string_pretty(&body)?)
         .with_context(|| format!("write token cache {}", path.display()))?;
@@ -185,6 +218,7 @@ async fn request_access_token(client: &Client, cfg: &AppConfig) -> Result<TokenB
         expiration_time: parsed.expiration_time,
         user_id: parsed.user_id,
         user_name: parsed.name,
+        api_hosts: parsed.api_hosts,
     })
 }
 
@@ -228,6 +262,7 @@ async fn renew_access_token(
         expiration_time: parsed.expiration_time,
         user_id: parsed.user_id.or(current.user_id),
         user_name: parsed.name.or_else(|| current.user_name.clone()),
+        api_hosts: parsed.api_hosts.or_else(|| current.api_hosts.clone()),
     })
 }
 
@@ -381,5 +416,22 @@ async fn enrich_contract_maturities(
         if let Some(raw) = contract.raw.as_object_mut() {
             raw.insert("_midasContractMaturity".to_string(), maturity.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod token_file_tests {
+    use super::*;
+
+    #[test]
+    fn token_file_user_id_accepts_browser_writer_numeric_string() {
+        let parsed: Value = serde_json::from_str(r#"{"userId":"12345"}"#).unwrap();
+        assert_eq!(json_i64(&parsed, "userId"), Some(12345));
+
+        let numeric: Value = serde_json::from_str(r#"{"userId":12345}"#).unwrap();
+        assert_eq!(json_i64(&numeric, "userId"), Some(12345));
+
+        let invalid: Value = serde_json::from_str(r#"{"userId":"unknown"}"#).unwrap();
+        assert_eq!(json_i64(&invalid, "userId"), None);
     }
 }

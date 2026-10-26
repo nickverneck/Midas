@@ -5,9 +5,9 @@ use crate::broker::ReplaySignalDiagnostic;
 use crate::broker::{
     AccountInfo, AccountSnapshot, BarKind, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, InstrumentSessionWindow, LatencySnapshot,
-    MarketSnapshot, ReplayExecutionLedgerSummary, ReplayLatencyModel, ReplaySpeed, ServiceCommand,
-    ServiceCommandSender, ServiceEvent, SessionKind, TradeMarker, TradeMarkerSide,
-    compiled_brokers, default_broker, transform_bars_for_candle_mode,
+    MarketSnapshot, NinjaTraderReplaySpeed, ReplayExecutionLedgerSummary, ReplayLatencyModel,
+    ReplaySpeed, ServiceCommand, ServiceCommandSender, ServiceEvent, SessionKind, TradeMarker,
+    TradeMarkerSide, compiled_brokers, default_broker, transform_bars_for_candle_mode,
 };
 #[cfg(feature = "replay")]
 use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, ReplayDownloadPhase};
@@ -107,6 +107,14 @@ pub struct App {
     session_mode: EngineCreateMode,
     session_kind: SessionKind,
     replay_speed: ReplaySpeed,
+    /// Whether the active Hosted Replay stream connection is established.
+    /// This is separate from `session_kind`, which remains Hosted Replay
+    /// while the user returns to stream setup after disconnecting.
+    hosted_replay_stream_connected: bool,
+    hosted_replay_clock: Option<chrono::DateTime<chrono::Utc>>,
+    hosted_replay_speed: Option<NinjaTraderReplaySpeed>,
+    #[cfg(feature = "replay")]
+    ninja_replay_resume_speed: Option<NinjaTraderReplaySpeed>,
     replay_execution_ledger: ReplayExecutionLedgerSummary,
     #[cfg(feature = "replay")]
     replay_dataset_index: Option<usize>,
@@ -121,6 +129,11 @@ pub struct App {
     replay_dataset_view_path: Option<PathBuf>,
     #[cfg(feature = "replay")]
     replay_view: ReplayView,
+    /// Tracks a cached replay start request until it connects or disconnects.
+    /// An idle disconnect may retain setup, while a disconnect after a start
+    /// attempt should return to the dataset library and expose the failure.
+    #[cfg(feature = "replay")]
+    replay_session_start_pending: bool,
     #[cfg(feature = "replay")]
     replay_downloader: ReplayDownloaderState,
     #[cfg(feature = "replay")]
@@ -189,6 +202,10 @@ enum Focus {
     EmaFastLength,
     EmaSlowLength,
     EmaInverted,
+    EmaDirectionGateEnabled,
+    EmaDirectionGateFlatOnly,
+    EmaDirectionGateFastLength,
+    EmaDirectionGateSlowLength,
     EmaTakeProfitTicks,
     EmaStopLossTicks,
     EmaTrailingStop,
@@ -259,9 +276,15 @@ enum Focus {
     #[cfg(feature = "replay")]
     ReplayDownloadStart,
     #[cfg(feature = "replay")]
+    ReplayDownloadStartTime,
+    #[cfg(feature = "replay")]
     ReplayDownloadEnd,
     #[cfg(feature = "replay")]
+    ReplayDownloadEndTime,
+    #[cfg(feature = "replay")]
     ReplayDownloadSource,
+    #[cfg(feature = "replay")]
+    ReplayDownloadSpeed,
     #[cfg(feature = "replay")]
     ReplayDownloadBarType,
     #[cfg(feature = "replay")]
@@ -285,6 +308,7 @@ enum ReplayView {
     Library,
     Setup,
     Downloader,
+    StreamSetup,
     DatasetViews,
 }
 
@@ -331,7 +355,13 @@ struct ReplayDownloaderState {
     exact_contract: Option<ContractSuggestion>,
     start_date: String,
     end_date: String,
+    start_time_utc: String,
+    end_time_utc: String,
+    hosted_default_end_date: Option<(String, String)>,
     source_kind: Option<ReplayCacheSourceKind>,
+    hosted_market_replay: bool,
+    ninja_stream: bool,
+    replay_speed_percent: u16,
     bar_type: BarType,
     candle_mode: CandleMode,
     display_name: String,
@@ -365,7 +395,13 @@ impl ReplayDownloaderState {
             exact_contract: None,
             start_date: today.clone(),
             end_date: today,
+            start_time_utc: "00:00".to_string(),
+            end_time_utc: "00:00".to_string(),
+            hosted_default_end_date: None,
             source_kind: Some(ReplayCacheSourceKind::ServerBars),
+            hosted_market_replay: false,
+            ninja_stream: false,
+            replay_speed_percent: 400,
             bar_type: BarType::default(),
             candle_mode: config.candle_mode,
             display_name: String::new(),
@@ -399,6 +435,72 @@ impl ReplayDownloaderState {
 
     fn accepts(&self, operation_id: ReplayDownloadOperationId) -> bool {
         self.active_operation_id == Some(operation_id)
+    }
+
+    fn cycle_source(&mut self, right: bool) {
+        let was_hosted = self.hosted_market_replay;
+        let current = if self.hosted_market_replay {
+            2
+        } else if self.source_kind == Some(ReplayCacheSourceKind::RawTicks) {
+            1
+        } else {
+            0
+        };
+        let next = if right {
+            (current + 1) % 3
+        } else {
+            (current + 2) % 3
+        };
+        self.hosted_market_replay = next == 2;
+        if !was_hosted && self.hosted_market_replay && self.start_date == self.end_date {
+            if let Ok(start_date) = chrono::NaiveDate::parse_from_str(&self.start_date, "%Y-%m-%d")
+                && let Some(end_date) = start_date.succ_opt()
+            {
+                let previous_end = self.end_date.clone();
+                let hosted_end = end_date.format("%Y-%m-%d").to_string();
+                self.end_date = hosted_end.clone();
+                self.hosted_default_end_date = Some((previous_end, hosted_end));
+            }
+        } else if was_hosted && !self.hosted_market_replay {
+            if let Some((previous_end, hosted_end)) = self.hosted_default_end_date.take()
+                && self.end_date == hosted_end
+            {
+                self.end_date = previous_end;
+            }
+        }
+        self.source_kind = Some(if next == 0 {
+            ReplayCacheSourceKind::ServerBars
+        } else {
+            ReplayCacheSourceKind::RawTicks
+        });
+    }
+
+    fn adjust_hosted_speed(&mut self, right: bool) {
+        const SPEEDS: [u16; 5] = [25, 50, 100, 200, 400];
+        let current = SPEEDS
+            .iter()
+            .position(|speed| *speed == self.replay_speed_percent)
+            .unwrap_or(SPEEDS.len() - 1);
+        let next = if right {
+            (current + 1).min(SPEEDS.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.replay_speed_percent = SPEEDS[next];
+    }
+
+    fn adjust_stream_speed(&mut self, right: bool) {
+        const SPEEDS: [u16; 6] = [0, 25, 50, 100, 200, 400];
+        let current = SPEEDS
+            .iter()
+            .position(|speed| *speed == self.replay_speed_percent)
+            .unwrap_or(3);
+        let next = if right {
+            (current + 1) % SPEEDS.len()
+        } else {
+            (current + SPEEDS.len() - 1) % SPEEDS.len()
+        };
+        self.replay_speed_percent = SPEEDS[next];
     }
 }
 
@@ -472,6 +574,7 @@ struct ReplayAnalyticsState {
     selected_trade: usize,
     selected_signal: usize,
     selected_fee_scenario: usize,
+    compact_scroll: u16,
     comparison_run: Option<usize>,
     focus: AnalyticsFocus,
     trade_sort: AnalyticsTradeSort,
@@ -503,6 +606,7 @@ impl ReplayAnalyticsState {
             selected_trade: 0,
             selected_signal: 0,
             selected_fee_scenario: 0,
+            compact_scroll: 0,
             comparison_run: None,
             focus: AnalyticsFocus::Runs,
             trade_sort: AnalyticsTradeSort::TradeId,
@@ -553,6 +657,17 @@ impl ReplayAnalyticsState {
             self.clear_selected_signals();
         }
         self.load_selected_equity();
+    }
+
+    fn refresh_latest(&mut self) {
+        // Opening Analytics after a replay should land on the newest result,
+        // even if the previous visit had an older run selected.
+        self.focus = AnalyticsFocus::Runs;
+        self.selected_run = usize::MAX;
+        self.selected_trade = 0;
+        self.selected_signal = 0;
+        self.selected_fee_scenario = 0;
+        self.refresh();
     }
 
     fn refresh_sweeps(&mut self, selected_path: Option<PathBuf>) {
@@ -978,23 +1093,24 @@ pub(crate) enum EngineSelectionAction {
 pub(crate) enum EngineCreateMode {
     Broker,
     Replay,
+    LiveReplay,
 }
 
 impl EngineCreateMode {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Broker => "Broker",
-            Self::Replay => "Replay",
+            Self::Broker => "Broker Live",
+            Self::Replay => "Cached Replay",
+            Self::LiveReplay => "Live Replay",
         }
     }
 
     pub(crate) fn summary(self) -> &'static str {
         match self {
-            Self::Broker => {
-                "Live broker connection, accounts, selection, strategy, dashboard, and stats."
-            }
-            Self::Replay => {
-                "Local replay data, strategy, dashboard, and analytics; no broker login or account stats."
+            Self::Broker => "Connect to a live broker and account.",
+            Self::Replay => "Play locally cached market data against the local replay account.",
+            Self::LiveReplay => {
+                "Stream from NinjaTrader's hosted Replay account; strategy orders and fills use its ephemeral account."
             }
         }
     }

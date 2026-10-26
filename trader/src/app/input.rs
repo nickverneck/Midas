@@ -10,8 +10,7 @@ impl App {
         }
 
         if key.code == KeyCode::F(5)
-            || (key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('s'))
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s'))
         {
             self.save_logs_to_file();
             return;
@@ -35,7 +34,7 @@ impl App {
         if self.screen == Screen::EngineSelect {
             if key.code == KeyCode::F(7) && self.replay_affordance_visible() {
                 self.status =
-                    "Choose Replay from the create-engine modal.".to_string();
+                    "Choose Cached Replay or Live Replay from the create-engine modal.".to_string();
                 self.push_log(self.status.clone());
                 return;
             }
@@ -43,7 +42,7 @@ impl App {
                 self.analytics_return_screen = self.screen;
                 self.screen = Screen::Analytics;
                 #[cfg(feature = "replay")]
-                self.replay_analytics.refresh();
+                self.replay_analytics.refresh_latest();
                 return;
             }
             self.handle_engine_select_key(key);
@@ -116,12 +115,14 @@ impl App {
                 self.analytics_return_screen = self.screen;
                 self.screen = Screen::Analytics;
                 #[cfg(feature = "replay")]
-                self.replay_analytics.refresh();
+                self.replay_analytics.refresh_latest();
                 return;
             }
             KeyCode::Esc => {
                 #[cfg(feature = "replay")]
-                if self.screen == Screen::Replay && self.replay_view == ReplayView::Downloader {
+                if self.screen == Screen::Replay
+                    && matches!(self.replay_view, ReplayView::Downloader | ReplayView::StreamSetup)
+                {
                     if let Some(operation_id) = self.replay_downloader.active_operation_id {
                         if self.replay_downloader.phase != ReplayDownloadPhase::Cancelling {
                             let _ = cmd_tx.send(ServiceCommand::CancelReplayDownloadOperation {
@@ -140,8 +141,17 @@ impl App {
                         }
                         return;
                     }
-                    self.replay_view = ReplayView::Library;
-                    self.focus = Focus::ReplayInstrumentQuery;
+                    if self.session_mode == EngineCreateMode::LiveReplay {
+                        self.replay_view = ReplayView::Library;
+                        self.session_mode = EngineCreateMode::Broker;
+                        self.session_kind = SessionKind::Live;
+                        self.screen = Screen::EngineSelect;
+                        self.focus = Focus::EngineList;
+                        self.status = "Stream Replay setup canceled; returned to engine selection.".to_string();
+                    } else {
+                        self.replay_view = ReplayView::Library;
+                        self.focus = Focus::ReplayInstrumentQuery;
+                    }
                     return;
                 }
                 #[cfg(feature = "replay")]
@@ -165,7 +175,8 @@ impl App {
                 if self.screen == Screen::Replay {
                     self.screen = Screen::EngineSelect;
                     self.focus = Focus::EngineList;
-                    self.status = "Replay workflow closed; select an engine to continue.".to_string();
+                    self.status =
+                        "Replay workflow closed; select an engine to continue.".to_string();
                 } else if self.screen == Screen::Analytics {
                     self.screen = self.analytics_return_screen;
                 } else if self.screen == Screen::Login && self.available_brokers.len() > 1 {
@@ -180,7 +191,9 @@ impl App {
             _ => {}
         }
 
-        if !self.is_text_focus() && key.code == KeyCode::Char('q') {
+        if key.code == KeyCode::Char('q')
+            && (self.screen == Screen::Analytics || !self.is_text_focus())
+        {
             self.should_quit = true;
             return;
         }
@@ -224,8 +237,11 @@ impl App {
                 | Focus::ReplayDownloadInstrument
                 | Focus::ReplayDownloadContract
                 | Focus::ReplayDownloadStart
+                | Focus::ReplayDownloadStartTime
                 | Focus::ReplayDownloadEnd
+                | Focus::ReplayDownloadEndTime
                 | Focus::ReplayDownloadSource
+                | Focus::ReplayDownloadSpeed
                 | Focus::ReplayDownloadBarType
                 | Focus::ReplayDownloadBarValue
                 | Focus::ReplayDownloadCandleMode
@@ -237,10 +253,12 @@ impl App {
             self.focus = Focus::ReplayDownloadSubmit;
         }
         self.status = match self.replay_downloader.phase {
-            ReplayDownloadPhase::WritingCache =>
-                "Replay cache commit is active; wait for completion before navigating.",
-            ReplayDownloadPhase::Cancelling =>
-                "Replay cancellation is pending; wait for confirmation before navigating.",
+            ReplayDownloadPhase::WritingCache => {
+                "Replay cache commit is active; wait for completion before navigating."
+            }
+            ReplayDownloadPhase::Cancelling => {
+                "Replay cancellation is pending; wait for confirmation before navigating."
+            }
             _ => "Replay downloader is active; press Esc to cancel or wait for completion.",
         }
         .to_string();

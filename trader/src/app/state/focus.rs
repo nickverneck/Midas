@@ -1,6 +1,56 @@
 use super::super::*;
 
 impl App {
+    pub(in crate::app) fn native_direction_gate(
+        &self,
+    ) -> Option<&crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig> {
+        match self.strategy.native_strategy {
+            NativeStrategyKind::EmaCross => Some(&self.strategy.native_ema.direction_gate),
+            NativeStrategyKind::HmaCross => Some(&self.strategy.native_hma_cross.direction_gate),
+            NativeStrategyKind::VolumeAdaptiveEmaCross => Some(
+                &self
+                    .strategy
+                    .native_volume_ema_cross
+                    .ema_cross
+                    .direction_gate,
+            ),
+            NativeStrategyKind::VolumeAdaptiveHmaCross => Some(
+                &self
+                    .strategy
+                    .native_volume_hma_cross
+                    .hma_cross
+                    .direction_gate,
+            ),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn native_direction_gate_mut(
+        &mut self,
+    ) -> Option<&mut crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig> {
+        match self.strategy.native_strategy {
+            NativeStrategyKind::EmaCross => Some(&mut self.strategy.native_ema.direction_gate),
+            NativeStrategyKind::HmaCross => {
+                Some(&mut self.strategy.native_hma_cross.direction_gate)
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => Some(
+                &mut self
+                    .strategy
+                    .native_volume_ema_cross
+                    .ema_cross
+                    .direction_gate,
+            ),
+            NativeStrategyKind::VolumeAdaptiveHmaCross => Some(
+                &mut self
+                    .strategy
+                    .native_volume_hma_cross
+                    .hma_cross
+                    .direction_gate,
+            ),
+            _ => None,
+        }
+    }
+
     pub(in crate::app) fn login_focus_order(&self) -> Vec<Focus> {
         let mut order = vec![
             Focus::Env,
@@ -63,7 +113,18 @@ impl App {
                         Focus::EmaFastLength,
                         Focus::EmaSlowLength,
                         Focus::EmaInverted,
+                        Focus::EmaDirectionGateEnabled,
                     ]);
+                    let direction_gate = self
+                        .native_direction_gate()
+                        .expect("cross strategies have a direction gate");
+                    if direction_gate.enabled {
+                        order.extend([
+                            Focus::EmaDirectionGateFlatOnly,
+                            Focus::EmaDirectionGateFastLength,
+                            Focus::EmaDirectionGateSlowLength,
+                        ]);
+                    }
                     if show_protection_controls {
                         order.extend([
                             Focus::EmaTakeProfitTicks,
@@ -89,9 +150,20 @@ impl App {
                         Focus::EmaFastLength,
                         Focus::EmaSlowLength,
                         Focus::EmaInverted,
+                        Focus::EmaDirectionGateEnabled,
                         Focus::VolumeHmaLookbackBars,
                         Focus::VolumeHmaInvertBelowRatio,
                     ]);
+                    if self
+                        .native_direction_gate()
+                        .is_some_and(|gate| gate.enabled)
+                    {
+                        order.extend([
+                            Focus::EmaDirectionGateFlatOnly,
+                            Focus::EmaDirectionGateFastLength,
+                            Focus::EmaDirectionGateSlowLength,
+                        ]);
+                    }
                     if show_protection_controls {
                         order.extend([
                             Focus::EmaTakeProfitTicks,
@@ -113,9 +185,20 @@ impl App {
                         Focus::EmaFastLength,
                         Focus::EmaSlowLength,
                         Focus::EmaInverted,
+                        Focus::EmaDirectionGateEnabled,
                         Focus::VolumeHmaLookbackBars,
                         Focus::VolumeHmaInvertBelowRatio,
                     ]);
+                    if self
+                        .native_direction_gate()
+                        .is_some_and(|gate| gate.enabled)
+                    {
+                        order.extend([
+                            Focus::EmaDirectionGateFlatOnly,
+                            Focus::EmaDirectionGateFastLength,
+                            Focus::EmaDirectionGateSlowLength,
+                        ]);
+                    }
                     if show_protection_controls {
                         order.extend([
                             Focus::EmaTakeProfitTicks,
@@ -181,29 +264,60 @@ impl App {
 
     pub(in crate::app) fn replay_focus_order(&self) -> Vec<Focus> {
         #[cfg(feature = "replay")]
-        if self.replay_view == ReplayView::Downloader {
+        if matches!(
+            self.replay_view,
+            ReplayView::Downloader | ReplayView::StreamSetup
+        ) {
             let mut order = vec![
                 Focus::ReplayDownloadProvider,
                 Focus::ReplayDownloadEnv,
                 Focus::ReplayDownloadInstrument,
                 Focus::ReplayDownloadContract,
                 Focus::ReplayDownloadStart,
-                Focus::ReplayDownloadEnd,
-                Focus::ReplayDownloadSource,
             ];
-            if self.replay_downloader.source_kind == Some(ReplayCacheSourceKind::ServerBars) {
+            if self.replay_downloader.hosted_market_replay || self.replay_downloader.ninja_stream {
+                order.push(Focus::ReplayDownloadStartTime);
+            }
+            if self.replay_downloader.ninja_stream {
+                order.push(Focus::ReplayDownloadEnd);
+                order.push(Focus::ReplayDownloadEndTime);
+                order.push(Focus::ReplayInitialCapital);
+                order.push(Focus::ReplayDownloadSpeed);
                 order.extend([
                     Focus::ReplayDownloadBarType,
                     Focus::ReplayDownloadBarValue,
                     Focus::ReplayDownloadCandleMode,
                 ]);
+            } else {
+                order.push(Focus::ReplayDownloadEnd);
             }
-            order.extend([
-                Focus::ReplayDownloadName,
-                Focus::ReplayDownloadTags,
-                Focus::ReplayDownloadCacheRoot,
-                Focus::ReplayDownloadSubmit,
-            ]);
+            if self.replay_downloader.hosted_market_replay {
+                order.push(Focus::ReplayDownloadEndTime);
+            }
+            if !self.replay_downloader.ninja_stream {
+                order.push(Focus::ReplayDownloadSource);
+                if self.replay_downloader.hosted_market_replay {
+                    order.push(Focus::ReplayDownloadSpeed);
+                } else if self.replay_downloader.source_kind
+                    == Some(ReplayCacheSourceKind::ServerBars)
+                {
+                    order.extend([
+                        Focus::ReplayDownloadBarType,
+                        Focus::ReplayDownloadBarValue,
+                        Focus::ReplayDownloadCandleMode,
+                    ]);
+                }
+            }
+            if self.replay_downloader.ninja_stream {
+                order.push(Focus::ReplayDownloadSubmit);
+            } else {
+                order.extend([
+                    Focus::ReplayDownloadName,
+                    Focus::ReplayDownloadTags,
+                    Focus::ReplayDownloadCacheRoot,
+                    Focus::ReplayDownloadSubmit,
+                ]);
+            }
             return order;
         }
 
@@ -354,6 +468,8 @@ impl App {
                 | Focus::HmaTrailOffsetTicks
                 | Focus::EmaFastLength
                 | Focus::EmaSlowLength
+                | Focus::EmaDirectionGateFastLength
+                | Focus::EmaDirectionGateSlowLength
                 | Focus::EmaTakeProfitTicks
                 | Focus::EmaStopLossTicks
                 | Focus::EmaTrailTriggerTicks
@@ -383,7 +499,9 @@ impl App {
             self.focus,
             Focus::ReplayDownloadInstrument
                 | Focus::ReplayDownloadStart
+                | Focus::ReplayDownloadStartTime
                 | Focus::ReplayDownloadEnd
+                | Focus::ReplayDownloadEndTime
                 | Focus::ReplayDownloadName
                 | Focus::ReplayDownloadTags
                 | Focus::ReplayDownloadCacheRoot
@@ -444,7 +562,9 @@ impl App {
             self.focus,
             Focus::ReplayDownloadInstrument
                 | Focus::ReplayDownloadStart
+                | Focus::ReplayDownloadStartTime
                 | Focus::ReplayDownloadEnd
+                | Focus::ReplayDownloadEndTime
                 | Focus::ReplayDownloadName
                 | Focus::ReplayDownloadTags
                 | Focus::ReplayDownloadCacheRoot

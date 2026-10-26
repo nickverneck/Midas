@@ -21,7 +21,7 @@ impl App {
                 },
                 "r refresh".to_string(),
                 if self.replay_build_available() {
-                    "Create opens Broker/Replay modal".to_string()
+                    "Create opens Broker/Cached Replay/Live Replay modal".to_string()
                 } else {
                     String::new()
                 },
@@ -134,7 +134,13 @@ impl App {
                     items.push("b/s/c manual".to_string());
                 }
                 items.push("v visuals".to_string());
-                if self.session_kind == SessionKind::Replay {
+                if self.session_kind.is_ninjatrader_replay() {
+                    items.extend([
+                        "[/] provider speed".to_string(),
+                        "0 pause".to_string(),
+                        "x Stop".to_string(),
+                    ]);
+                } else if self.session_kind == SessionKind::Replay {
                     items.extend(["[/] replay speed".to_string(), "0 realtime".to_string()]);
                 }
                 items.extend(["F5/Ctrl+S save logs".to_string(), "q quit".to_string()]);
@@ -228,7 +234,12 @@ impl App {
             .split(area);
 
         let screen_label = self.screen_header_label();
-        let help = self.header_help_text();
+        let compact_analytics = self.screen == Screen::Analytics && area.width < 110;
+        let help = if compact_analytics {
+            String::new()
+        } else {
+            self.header_help_text()
+        };
         let titles = self
             .header_tab_titles()
             .into_iter()
@@ -241,12 +252,48 @@ impl App {
             .divider("|");
         frame.render_widget(tabs, rows[0]);
 
-        let auth_label = if self.session_kind == SessionKind::Replay {
+        let auth_label = if self.session_kind.is_replay() {
             "Replay"
         } else {
             self.form.auth_mode.label()
         };
-        let header = Paragraph::new(vec![
+        let broker_label = if self.session_kind.is_ninjatrader_replay() {
+            "NinjaTrader"
+        } else {
+            self.selected_broker.label()
+        };
+        let environment_label = if self.session_kind.is_ninjatrader_replay() {
+            "Hosted Replay"
+        } else {
+            self.form.env.label()
+        };
+        let auth_label = if self.session_kind.is_ninjatrader_replay() {
+            "NinjaTrader Token"
+        } else {
+            auth_label
+        };
+        let mode_label = if self.screen == Screen::EngineSelect && self.active_engine_key.is_none()
+        {
+            "Choose engine"
+        } else if self.session_kind.is_ninjatrader_replay() {
+            "Hosted Replay"
+        } else {
+            self.session_kind.label()
+        };
+        // The full identity row consumes more than 120 columns and otherwise
+        // cuts off immediately after `Mode:` at the common 120x40 size.
+        let compact = area.width < 136;
+        let identity_line = if compact {
+            Line::from(vec![
+                Span::styled(
+                    "Trader",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("  Mode: {mode_label}  Screen: {screen_label}")),
+            ])
+        } else {
             Line::from(vec![
                 Span::styled(
                     "Trader",
@@ -255,17 +302,17 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::raw(format!("Broker: {}", self.selected_broker.label())),
+                Span::raw(format!("Broker: {broker_label}")),
                 Span::raw("  "),
                 Span::raw(format!("Screen: {screen_label}")),
                 Span::raw("  "),
-                Span::raw(format!("Env: {}", self.form.env.label())),
+                Span::raw(format!("Env: {environment_label}")),
                 Span::raw("  "),
                 Span::raw(format!("Auth: {auth_label}")),
                 Span::raw("  "),
                 Span::raw(format!("Logs: {}", self.form.log_mode.label())),
                 Span::raw("  "),
-                Span::raw(format!("Mode: {}", self.session_kind.label())),
+                Span::raw(format!("Mode: {mode_label}")),
                 if self.screen == Screen::EngineSelect {
                     Span::raw("")
                 } else {
@@ -276,22 +323,34 @@ impl App {
                 } else {
                     Span::raw(format!("Engine: {}", self.active_engine_header_label()))
                 },
-            ]),
-            Line::from(vec![
-                Span::raw("Focus: "),
-                Span::styled(
-                    format!("{:?}", self.focus),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw("  "),
-                Span::raw(&self.status),
-                Span::raw("  "),
-                Span::raw(self.latency_summary()),
-                Span::raw("  "),
-                Span::styled(help, Style::default().fg(Color::DarkGray)),
-            ]),
-        ])
-        .block(Block::default().borders(Borders::ALL).title("Session"));
+            ])
+        };
+        let header_lines = if compact_analytics {
+            vec![
+                identity_line,
+                Line::from("Tab views | Up/Down select | PgUp/PgDn scroll"),
+                Line::from("Left/Right fees | s sort | g filter | r refresh | Esc return | q quit"),
+            ]
+        } else {
+            vec![
+                identity_line,
+                Line::from(vec![
+                    Span::raw("Focus: "),
+                    Span::styled(
+                        format!("{:?}", self.focus),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw("  "),
+                    Span::raw(&self.status),
+                    Span::raw("  "),
+                    Span::raw(self.latency_summary()),
+                    Span::raw("  "),
+                    Span::styled(help, Style::default().fg(Color::DarkGray)),
+                ]),
+            ]
+        };
+        let header = Paragraph::new(header_lines)
+            .block(Block::default().borders(Borders::ALL).title("Session"));
         frame.render_widget(header, rows[1]);
     }
 

@@ -275,6 +275,130 @@ impl App {
                     _ => toggle_bool(&mut self.strategy.native_ema.inverted, key),
                 };
             }
+            Focus::EmaDirectionGateEnabled => {
+                let _ = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => toggle_bool(
+                        &mut self.strategy.native_hma_cross.direction_gate.enabled,
+                        key,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => toggle_bool(
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .direction_gate
+                            .enabled,
+                        key,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => toggle_bool(
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .direction_gate
+                            .enabled,
+                        key,
+                    ),
+                    _ => toggle_bool(&mut self.strategy.native_ema.direction_gate.enabled, key),
+                };
+            }
+            Focus::EmaDirectionGateFlatOnly => {
+                if let Some(gate) = self.native_direction_gate_mut() {
+                    let _ = toggle_bool(&mut gate.flat_only_entries, key);
+                }
+            }
+            Focus::EmaDirectionGateFastLength => {
+                let _ = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateFastLength,
+                        &mut self.strategy.native_hma_cross.direction_gate.fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateFastLength,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .direction_gate
+                            .fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateFastLength,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .direction_gate
+                            .fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    _ => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateFastLength,
+                        &mut self.strategy.native_ema.direction_gate.fast_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                };
+            }
+            Focus::EmaDirectionGateSlowLength => {
+                let _ = match self.strategy.native_strategy {
+                    NativeStrategyKind::HmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateSlowLength,
+                        &mut self.strategy.native_hma_cross.direction_gate.slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveHmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateSlowLength,
+                        &mut self
+                            .strategy
+                            .native_volume_hma_cross
+                            .hma_cross
+                            .direction_gate
+                            .slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    NativeStrategyKind::VolumeAdaptiveEmaCross => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateSlowLength,
+                        &mut self
+                            .strategy
+                            .native_volume_ema_cross
+                            .ema_cross
+                            .direction_gate
+                            .slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                    _ => edit_strategy_usize(
+                        &mut self.strategy_numeric_input,
+                        Focus::EmaDirectionGateSlowLength,
+                        &mut self.strategy.native_ema.direction_gate.slow_length,
+                        key,
+                        1,
+                        1,
+                    ),
+                };
+            }
             Focus::EmaTakeProfitTicks => {
                 let _ = match self.strategy.native_strategy {
                     NativeStrategyKind::HmaCross => edit_strategy_float(
@@ -679,6 +803,25 @@ impl App {
             Focus::StrategyContinue => {
                 if key.code == KeyCode::Enter {
                     let readiness = self.strategy_readiness();
+                    if readiness.status == StrategyReadinessStatus::AwaitingHostedReplay {
+                        #[cfg(feature = "replay")]
+                        {
+                            self.screen = Screen::Replay;
+                            self.replay_view = ReplayView::StreamSetup;
+                            self.focus = Focus::ReplayDownloadInstrument;
+                            self.status = readiness.blockers.first().cloned().unwrap_or_else(|| {
+                                "Start a hosted Replay stream before evaluating strategy readiness."
+                                    .to_string()
+                            });
+                            self.push_log(self.status.clone());
+                        }
+                        #[cfg(not(feature = "replay"))]
+                        {
+                            self.screen = Screen::Dashboard;
+                            self.status = "Hosted Replay is unavailable in this build.".to_string();
+                        }
+                        return;
+                    }
                     if readiness.status == StrategyReadinessStatus::NeedsAttention {
                         self.status = readiness.blockers.first().cloned().unwrap_or_else(|| {
                             "Review strategy setup before continuing.".to_string()
@@ -692,6 +835,13 @@ impl App {
                     self.sync_selected_account(cmd_tx);
                     if readiness.can_arm() {
                         self.arm_native_strategy(cmd_tx);
+                        #[cfg(feature = "replay")]
+                        if self.session_kind.is_ninjatrader_replay()
+                            && let Some(speed) = self.ninja_replay_resume_speed
+                        {
+                            let _ =
+                                cmd_tx.send(ServiceCommand::SetNinjaTraderReplaySpeed { speed });
+                        }
                     } else {
                         self.push_log(format!(
                             "Opening the dashboard in {} mode.",
@@ -753,8 +903,11 @@ impl App {
             | Focus::ReplayDownloadInstrument
             | Focus::ReplayDownloadContract
             | Focus::ReplayDownloadStart
+            | Focus::ReplayDownloadStartTime
             | Focus::ReplayDownloadEnd
+            | Focus::ReplayDownloadEndTime
             | Focus::ReplayDownloadSource
+            | Focus::ReplayDownloadSpeed
             | Focus::ReplayDownloadBarType
             | Focus::ReplayDownloadBarValue
             | Focus::ReplayDownloadCandleMode
@@ -817,7 +970,7 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Selected Strategy"),
+                    .title("Strategy Draft + Engine"),
             )
             .wrap(Wrap { trim: true });
         frame.render_widget(preview, right[1]);

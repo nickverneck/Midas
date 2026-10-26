@@ -17,6 +17,7 @@ fn token_refresh_due_uses_jwt_exp_when_expiration_time_missing() {
         expiration_time: None,
         user_id: Some(42),
         user_name: Some("demo".to_string()),
+        api_hosts: None,
     };
 
     let before_refresh_window = DateTime::<Utc>::from_timestamp(1_773_436_044 - 901, 0).unwrap();

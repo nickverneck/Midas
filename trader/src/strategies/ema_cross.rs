@@ -1,4 +1,7 @@
 use crate::broker::{Bar, MarketHistoryUpdate};
+use crate::strategies::ema_crossover_gate::{
+    EmaCrossoverGateConfig, EmaCrossoverGateEvaluation, filter_position_entry_signals,
+};
 use crate::strategies::{PositionSide, StrategySignal};
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct EmaCrossConfig {
     pub fast_length: usize,
     pub slow_length: usize,
+    #[serde(default)]
+    pub direction_gate: EmaCrossoverGateConfig,
     pub inverted: bool,
     pub take_profit_ticks: f64,
     pub stop_loss_ticks: f64,
@@ -19,6 +24,7 @@ impl Default for EmaCrossConfig {
         Self {
             fast_length: 21,
             slow_length: 55,
+            direction_gate: EmaCrossoverGateConfig::default(),
             inverted: false,
             take_profit_ticks: 0.0,
             stop_loss_ticks: 0.0,
@@ -91,6 +97,10 @@ impl EmaCrossEvaluation {
 pub struct EmaCrossExecutionState {
     pub position: Option<EmaManagedPosition>,
     indicator: EmaCrossIndicatorState,
+    /// Separate streaming EMA pair for the optional directional permission
+    /// gate. It reuses the same correction-aware evaluator as the execution
+    /// crossover and stays unallocated when the gate is disabled.
+    direction_gate_runtime: Option<Box<EmaCrossExecutionState>>,
 }
 
 /// Allocation-free counters for auditing the streaming EMA path.
@@ -533,10 +543,19 @@ impl EmaCrossConfig {
         if self.inverted {
             std::mem::swap(&mut buy_signal, &mut sell_signal);
         }
+        let (buy_signal, sell_signal, gate_hold_reason) = filter_position_entry_signals(
+            &self.direction_gate,
+            self.direction_gate.evaluate(bars),
+            buy_signal,
+            sell_signal,
+            current_side.is_some(),
+        );
 
         let signal = resolve_signal(buy_signal, sell_signal, current_side);
         let hold_reason = if signal != StrategySignal::Hold {
             None
+        } else if let Some(reason) = gate_hold_reason {
+            Some(reason)
         } else if buy_signal && current_side == Some(PositionSide::Long) {
             Some("buy_cross_already_long")
         } else if sell_signal && current_side == Some(PositionSide::Short) {
@@ -604,8 +623,21 @@ impl EmaCrossConfig {
         source_update_sequence: Option<u64>,
         market_update: MarketHistoryUpdate,
     ) -> EmaCrossEvaluation {
+        if !self.direction_gate.enabled {
+            // Do not let a disabled gate retain stale state if the same
+            // execution runtime is later reconfigured to enable it.
+            runtime.direction_gate_runtime = None;
+        }
         if bars.is_empty() {
             runtime.indicator.reset(self.fast_length, self.slow_length);
+            if self.direction_gate.enabled {
+                let _ = self.evaluate_direction_gate_streaming(
+                    runtime,
+                    bars,
+                    source_update_sequence,
+                    market_update,
+                );
+            }
             return EmaCrossEvaluation {
                 signal: StrategySignal::Hold,
                 latest_close: None,
@@ -624,6 +656,17 @@ impl EmaCrossConfig {
                 hold_reason: Some("no_bars"),
             };
         }
+
+        let direction_gate = if self.direction_gate.enabled {
+            Some(self.evaluate_direction_gate_streaming(
+                runtime,
+                bars,
+                source_update_sequence,
+                market_update,
+            ))
+        } else {
+            None
+        };
 
         let state = &mut runtime.indicator;
         if source_update_sequence.is_none() {
@@ -799,9 +842,18 @@ impl EmaCrossConfig {
         if self.inverted {
             std::mem::swap(&mut buy_signal, &mut sell_signal);
         }
+        let (buy_signal, sell_signal, gate_hold_reason) = filter_position_entry_signals(
+            &self.direction_gate,
+            direction_gate.unwrap_or_default(),
+            buy_signal,
+            sell_signal,
+            current_side.is_some(),
+        );
         let signal = resolve_signal(buy_signal, sell_signal, current_side);
         let hold_reason = if signal != StrategySignal::Hold {
             None
+        } else if let Some(reason) = gate_hold_reason {
+            Some(reason)
         } else if buy_signal && current_side == Some(PositionSide::Long) {
             Some("buy_cross_already_long")
         } else if sell_signal && current_side == Some(PositionSide::Short) {
@@ -827,6 +879,56 @@ impl EmaCrossConfig {
             effective_buy_signal: buy_signal,
             effective_sell_signal: sell_signal,
             hold_reason,
+        }
+    }
+
+    fn evaluate_direction_gate_streaming(
+        &self,
+        runtime: &mut EmaCrossExecutionState,
+        bars: &[Bar],
+        source_update_sequence: Option<u64>,
+        market_update: MarketHistoryUpdate,
+    ) -> EmaCrossoverGateEvaluation {
+        let gate_config = EmaCrossConfig {
+            fast_length: self.direction_gate.fast_length,
+            slow_length: self.direction_gate.slow_length,
+            ..EmaCrossConfig::default()
+        };
+        let gate_runtime = runtime
+            .direction_gate_runtime
+            .get_or_insert_with(|| Box::new(EmaCrossExecutionState::default()));
+        let gate_source_update_sequence = source_update_sequence.map(|sequence| {
+            sequence.rotate_left(13)
+                ^ (self.direction_gate.fast_length as u64)
+                ^ (self.direction_gate.slow_length as u64).rotate_left(29)
+        });
+        let evaluation = gate_config.evaluate_streaming_with_market_update(
+            gate_runtime,
+            bars,
+            None,
+            gate_source_update_sequence,
+            market_update,
+        );
+        let (Some(fast_ema), Some(slow_ema)) = (evaluation.fast_ema, evaluation.slow_ema) else {
+            return EmaCrossoverGateEvaluation::default();
+        };
+        if !fast_ema.is_finite()
+            || !slow_ema.is_finite()
+            || bars.len() < self.direction_gate.warmup_bars()
+            || fast_ema == slow_ema
+        {
+            return EmaCrossoverGateEvaluation {
+                fast_ema: Some(fast_ema),
+                slow_ema: Some(slow_ema),
+                ..EmaCrossoverGateEvaluation::default()
+            };
+        }
+        EmaCrossoverGateEvaluation {
+            ready: true,
+            fast_ema: Some(fast_ema),
+            slow_ema: Some(slow_ema),
+            bullish: fast_ema > slow_ema,
+            bearish: fast_ema < slow_ema,
         }
     }
 
@@ -1058,6 +1160,95 @@ mod tests {
             close,
             volume: None,
         }
+    }
+
+    #[test]
+    fn directional_ema_gate_matches_entries_and_runs_after_execution_inversion() {
+        let config = EmaCrossConfig {
+            fast_length: 1,
+            slow_length: 2,
+            direction_gate: EmaCrossoverGateConfig {
+                enabled: true,
+                fast_length: 3,
+                slow_length: 5,
+                ..EmaCrossoverGateConfig::default()
+            },
+            ..EmaCrossConfig::default()
+        };
+        let bearish_execution_but_bullish_gate = [10.0, 11.0, 12.0, 13.0, 14.0, 12.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, close)| bar(index as i64 + 1, close))
+            .collect::<Vec<_>>();
+        let blocked = config.evaluate(&bearish_execution_but_bullish_gate, None);
+        assert!(blocked.raw_sell_signal);
+        assert!(!blocked.effective_sell_signal);
+        assert_eq!(blocked.signal, StrategySignal::Hold);
+        assert_eq!(
+            blocked.hold_reason,
+            Some("directional_ema_gate_blocks_short")
+        );
+
+        let inverted = EmaCrossConfig {
+            inverted: true,
+            ..config.clone()
+        };
+        let allowed_inverted = inverted.evaluate(&bearish_execution_but_bullish_gate, None);
+        assert!(allowed_inverted.raw_sell_signal);
+        assert!(allowed_inverted.effective_buy_signal);
+        assert_eq!(allowed_inverted.signal, StrategySignal::EnterLong);
+
+        let bullish_cross_and_gate = [14.0, 13.0, 12.0, 10.0, 10.0, 15.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, close)| bar(index as i64 + 1, close))
+            .collect::<Vec<_>>();
+        let allowed = config.evaluate(&bullish_cross_and_gate, None);
+        assert!(allowed.raw_buy_signal && allowed.effective_buy_signal);
+        assert_eq!(allowed.signal, StrategySignal::EnterLong);
+
+        let held_while_short = config.evaluate(&bullish_cross_and_gate, Some(PositionSide::Short));
+        assert_eq!(held_while_short.signal, StrategySignal::Hold);
+        assert_eq!(
+            held_while_short.hold_reason,
+            Some("directional_ema_gate_ignores_cross_while_position_open")
+        );
+        let legacy_reversal = EmaCrossConfig {
+            direction_gate: EmaCrossoverGateConfig {
+                flat_only_entries: false,
+                ..config.direction_gate.clone()
+            },
+            ..config.clone()
+        }
+        .evaluate(&bullish_cross_and_gate, Some(PositionSide::Short));
+        assert_eq!(legacy_reversal.signal, StrategySignal::EnterLong);
+    }
+
+    #[test]
+    fn streaming_directional_ema_gate_filters_conflicting_crosses() {
+        let config = EmaCrossConfig {
+            fast_length: 1,
+            slow_length: 2,
+            direction_gate: EmaCrossoverGateConfig {
+                enabled: true,
+                fast_length: 3,
+                slow_length: 5,
+                ..EmaCrossoverGateConfig::default()
+            },
+            ..EmaCrossConfig::default()
+        };
+        let bars = [10.0, 11.0, 12.0, 13.0, 14.0, 12.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, close)| bar(index as i64 + 1, close))
+            .collect::<Vec<_>>();
+        let expected = config.evaluate(&bars, None);
+        let mut runtime = EmaCrossExecutionState::default();
+        let actual = config.evaluate_streaming(&mut runtime, &bars, None);
+        assert_eq!(actual.signal, expected.signal);
+        assert_eq!(actual.effective_buy_signal, expected.effective_buy_signal);
+        assert_eq!(actual.effective_sell_signal, expected.effective_sell_signal);
+        assert_eq!(actual.hold_reason, expected.hold_reason);
     }
 
     #[test]

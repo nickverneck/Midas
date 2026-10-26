@@ -49,6 +49,9 @@ pub(super) fn arm_execution_strategy_command(
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };
+    if session.hosted_replay_orders && !session.hosted_replay_running {
+        bail!("NinjaTrader hosted Replay has ended; start a new Replay session before arming");
+    }
     let was_armed = session.execution_runtime.armed;
     arm_execution_strategy(session);
     if session.execution_runtime.armed

@@ -551,6 +551,25 @@ impl Default for ExecutionStrategyConfig {
     }
 }
 
+impl ExecutionStrategyConfig {
+    /// Whether the active crossover strategy's directional EMA gate is using
+    /// its gate-specific flat-only entry behavior.
+    pub fn flat_only_direction_gate_active(&self) -> bool {
+        let gate = match self.native_strategy {
+            NativeStrategyKind::EmaCross => Some(&self.native_ema.direction_gate),
+            NativeStrategyKind::HmaCross => Some(&self.native_hma_cross.direction_gate),
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                Some(&self.native_volume_ema_cross.ema_cross.direction_gate)
+            }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                Some(&self.native_volume_hma_cross.hma_cross.direction_gate)
+            }
+            _ => None,
+        };
+        gate.is_some_and(|gate| gate.enabled && gate.flat_only_entries)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionRuntimeSnapshot {
     pub armed: bool,

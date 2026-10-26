@@ -2,6 +2,164 @@ use super::super::support::*;
 
 #[cfg(feature = "replay")]
 #[test]
+fn hosted_stream_setup_at_80_by_24_shows_scroll_cue_and_start_when_focused() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_ninjatrader_stream_setup();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw compact hosted Replay setup");
+    let rows = rendered_terminal_rows(&terminal, 80);
+    let initial = rows.join("\n");
+    assert!(initial.contains("Hosted Replay Setup"), "{initial}");
+    assert!(
+        initial.contains("More settings + Start below; Tab scrolls"),
+        "{initial}"
+    );
+
+    app.focus = Focus::ReplayDownloadSubmit;
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw scrolled hosted Replay setup");
+    let scrolled = rendered_terminal_rows(&terminal, 80).join("\n");
+    assert!(
+        scrolled.contains("[Enter] Start stream (paused)"),
+        "{scrolled}"
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn direct_stream_setup_names_hosted_account_and_strategy_choice_controls() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_ninjatrader_stream_setup();
+    app.focus = Focus::ReplayDownloadInstrument;
+
+    let backend = TestBackend::new(140, 44);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw stream setup");
+    let rows = rendered_terminal_rows(&terminal, 140);
+    let rendered = rows.join("\n");
+
+    assert!(rendered.contains("Market data: NinjaTrader hosted Replay"));
+    assert!(rendered.contains("Strategy orders/fills: hosted NinjaTrader Replay account"));
+    assert!(rendered.contains("Authentication: NinjaTrader browser token"));
+    assert!(
+        rendered.contains("Strategy: Native Rust / HMA Angle (arm later via dashboard F3)"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Stream starts paused; choose and arm with F3 on dashboard."));
+    assert!(rendered.contains("[Enter] Start direct stream (starts paused)"));
+    assert!(!rendered.contains("Continue explicitly arms"));
+    assert!(rendered.contains("Tab/↑↓ move"));
+    assert!(!rendered.contains("Provider: Tradovate"));
+    assert!(!rendered.contains("Environment: Simulation"));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn live_stream_contract_inspection_preserves_user_dates_and_open_end() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_ninjatrader_stream_setup();
+    app.replay_downloader.start_date = "2026-10-09".to_string();
+    app.replay_downloader.start_time_utc = "14:00".to_string();
+    app.replay_downloader.end_date.clear();
+    app.replay_downloader.end_time_utc.clear();
+    let operation_id = app.replay_downloader.begin_operation();
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+
+    app.handle_service_event(
+        ServiceEvent::ReplayDownloadContractInspected {
+            operation_id,
+            contract: contract(3_267_314, "ESZ6"),
+            suggested_start_date: Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 9, 18).expect("suggested start"),
+            ),
+            suggested_end_date: Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 12, 18).expect("suggested end"),
+            ),
+            suggestion_basis: Some("estimated contract coverage".to_string()),
+        },
+        &cmd_tx,
+    );
+
+    assert_eq!(app.replay_downloader.start_date, "2026-10-09");
+    assert_eq!(app.replay_downloader.start_time_utc, "14:00");
+    assert!(app.replay_downloader.end_date.is_empty());
+    assert!(app.replay_downloader.end_time_utc.is_empty());
+    assert!(
+        app.replay_downloader
+            .phase_message
+            .contains("dates remain as entered")
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn live_stream_allows_both_end_fields_blank_as_open_ended() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_ninjatrader_stream_setup();
+    app.replay_downloader.exact_contract = Some(contract(3_267_314, "ESZ6"));
+    app.replay_downloader.instrument_query = "ESZ6".to_string();
+    app.replay_downloader.start_date = "2026-10-09".to_string();
+    app.replay_downloader.start_time_utc = "14:00".to_string();
+    app.replay_downloader.end_date.clear();
+    app.replay_downloader.end_time_utc.clear();
+    app.focus = Focus::ReplayDownloadSubmit;
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("open-ended stream command") {
+        ServiceCommand::EnterNinjaTraderReplay { end, start, .. } => {
+            assert_eq!(end, None);
+            assert_eq!(start.to_rfc3339(), "2026-10-09T14:00:00+00:00");
+        }
+        _ => panic!("expected direct NinjaTrader Replay command"),
+    }
+    assert_eq!(
+        app.replay_downloader.phase,
+        ReplayDownloadPhase::Authenticating
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn live_stream_rejects_a_partial_end_window() {
+    for (end_date, end_time) in [("2026-10-09", ""), ("", "14:30")] {
+        let mut app = App::new(AppConfig::default());
+        app.screen = Screen::Replay;
+        app.open_ninjatrader_stream_setup();
+        app.replay_downloader.exact_contract = Some(contract(3_267_314, "ESZ6"));
+        app.replay_downloader.instrument_query = "ESZ6".to_string();
+        app.replay_downloader.start_date = "2026-10-09".to_string();
+        app.replay_downloader.start_time_utc = "14:00".to_string();
+        app.replay_downloader.end_date = end_date.to_string();
+        app.replay_downloader.end_time_utc = end_time.to_string();
+        app.focus = Focus::ReplayDownloadSubmit;
+        let (cmd_tx, mut cmd_rx) = unbounded_channel();
+
+        app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+        assert_eq!(app.replay_downloader.phase, ReplayDownloadPhase::Failed);
+        assert!(
+            app.replay_downloader
+                .phase_message
+                .contains("Set both end fields")
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn replay_new_dataset_search_inspection_and_submit_stay_read_only() {
     let cache_root = replay_cache_test_root("new-download");
     let mut config = AppConfig::default();
@@ -106,6 +264,217 @@ fn replay_new_dataset_search_inspection_and_submit_stay_read_only() {
         }
         _ => panic!("expected replay download command"),
     }
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn hosted_market_replay_source_exposes_reset_warning_speed_and_capture_command() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_new_replay_downloader();
+    app.replay_downloader.exact_contract = Some(ContractSuggestion {
+        id: 4_399_631,
+        name: "MESU6".to_string(),
+        description: "Micro E-mini S&P".to_string(),
+        raw: json!({"id": 4_399_631, "name": "MESU6"}),
+    });
+    app.replay_downloader.instrument_query = "MES".to_string();
+    app.focus = Focus::ReplayDownloadSource;
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+
+    let local_focus_order = app.replay_focus_order();
+    assert!(!local_focus_order.contains(&Focus::ReplayDownloadStartTime));
+    assert!(!local_focus_order.contains(&Focus::ReplayDownloadEndTime));
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    assert!(!app.replay_downloader.hosted_market_replay);
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    assert!(app.replay_downloader.hosted_market_replay);
+    let hosted_focus_order = app.replay_focus_order();
+    assert!(hosted_focus_order.contains(&Focus::ReplayDownloadStartTime));
+    assert!(hosted_focus_order.contains(&Focus::ReplayDownloadEndTime));
+    assert_eq!(app.next_replay_focus(), Focus::ReplayDownloadSpeed);
+    app.focus = Focus::ReplayDownloadSpeed;
+    app.handle_replay_key(key(KeyCode::Left), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Left), &cmd_tx);
+    assert_eq!(app.replay_downloader.replay_speed_percent, 100);
+
+    app.focus = Focus::ReplayDownloadSubmit;
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    match cmd_rx.try_recv().expect("hosted replay capture command") {
+        ServiceCommand::DownloadReplayData {
+            source_kind,
+            replay_speed,
+            contract,
+            start_date,
+            end_date,
+            start_time_utc,
+            end_time_utc,
+            ..
+        } => {
+            assert_eq!(source_kind, "hosted-market-replay");
+            assert_eq!(replay_speed, 100);
+            assert_eq!(contract.name, "MESU6");
+            assert_eq!(start_date.to_string(), app.replay_downloader.start_date);
+            assert_eq!(end_date.to_string(), app.replay_downloader.end_date);
+            assert_eq!(
+                start_time_utc,
+                Some(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+            );
+            assert_eq!(
+                end_time_utc,
+                Some(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+            );
+        }
+        _ => panic!("expected hosted replay capture command"),
+    }
+
+    app.focus = Focus::ReplayDownloadSubmit;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw hosted downloader");
+    let rows = rendered_terminal_rows(&terminal, 120);
+    let rendered = rows.join(" ");
+    assert!(rendered.contains("Hosted stream speed: 100%"));
+    assert!(rendered.contains("resets hosted replay session"));
+    assert!(
+        rendered.contains("Capture resets your single active hosted Replay session."),
+        "the TUI should show the reset warning before hosted capture"
+    );
+    assert!(rendered.contains("Start time UTC: 00:00 (HH:MM)"));
+    assert!(rendered.contains("End time UTC: 00:00 (HH:MM, exclusive)"));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn hosted_market_replay_safety_context_fits_140_by_44_job_pane() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_new_replay_downloader();
+    app.replay_downloader.hosted_market_replay = true;
+    app.replay_downloader.phase = ReplayDownloadPhase::Ready;
+    app.replay_downloader.phase_message =
+        "Exact contract selected; broad estimated coverage was applied and remains editable."
+            .to_string();
+    app.replay_downloader.suggestion_basis = Some(
+        "previous maturity expiration through selected maturity expiration; actual liquidity and provider retention may differ"
+            .to_string(),
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 44)).expect("test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw hosted downloader");
+    let rendered = rendered_terminal_rows(&terminal, 140).join(" ");
+    for copy in [
+        "Capture resets your single active hosted Replay session.",
+        "Window times use UTC; the end time is exclusive.",
+        "Sampled quote updates; not a complete trade tape.",
+        "No orders submitted.",
+        "Choose strategy and local speed after caching.",
+    ] {
+        assert!(
+            rendered.contains(copy),
+            "missing visible safety copy: {copy}"
+        );
+    }
+    assert!(rendered.contains("Phase: Ready"));
+    assert!(rendered.contains("Actual: pending"));
+    assert!(!rendered.contains("Range basis:"));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn hosted_market_replay_rejects_non_increasing_utc_window() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_new_replay_downloader();
+    app.replay_downloader.hosted_market_replay = true;
+    app.replay_downloader.source_kind = Some(ReplayCacheSourceKind::RawTicks);
+    app.replay_downloader.instrument_query = "MES".to_string();
+    app.replay_downloader.exact_contract = Some(ContractSuggestion {
+        id: 4_399_631,
+        name: "MESU6".to_string(),
+        description: "Micro E-mini S&P".to_string(),
+        raw: json!({"id": 4_399_631, "name": "MESU6"}),
+    });
+    app.replay_downloader.start_date = "2026-08-17".to_string();
+    app.replay_downloader.end_date = "2026-08-17".to_string();
+    app.replay_downloader.start_time_utc = "09:30".to_string();
+    app.replay_downloader.end_time_utc = "09:30".to_string();
+    app.focus = Focus::ReplayDownloadSubmit;
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert_eq!(app.replay_downloader.phase, ReplayDownloadPhase::Failed);
+    assert!(
+        app.replay_downloader
+            .phase_message
+            .contains("end UTC date/time")
+    );
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn hosted_market_replay_submits_short_utc_window_without_changing_local_date_semantics() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Replay;
+    app.open_new_replay_downloader();
+    let local_end_date = app.replay_downloader.end_date.clone();
+    app.replay_downloader.exact_contract = Some(ContractSuggestion {
+        id: 4_399_631,
+        name: "MESU6".to_string(),
+        description: "Micro E-mini S&P".to_string(),
+        raw: json!({"id": 4_399_631, "name": "MESU6"}),
+    });
+    app.replay_downloader.instrument_query = "MES".to_string();
+    app.focus = Focus::ReplayDownloadSource;
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    app.handle_replay_key(key(KeyCode::Right), &cmd_tx);
+    assert_ne!(app.replay_downloader.end_date, local_end_date);
+    app.replay_downloader.start_date = "2026-08-17".to_string();
+    app.replay_downloader.end_date = "2026-08-17".to_string();
+    app.replay_downloader.start_time_utc = "09:30".to_string();
+    app.replay_downloader.end_time_utc = "10:05".to_string();
+    app.focus = Focus::ReplayDownloadSubmit;
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+
+    match cmd_rx.try_recv().expect("short-window capture command") {
+        ServiceCommand::DownloadReplayData {
+            start_date,
+            end_date,
+            start_time_utc,
+            end_time_utc,
+            source_kind,
+            ..
+        } => {
+            assert_eq!(source_kind, "hosted-market-replay");
+            assert_eq!(
+                start_date,
+                chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()
+            );
+            assert_eq!(
+                end_date,
+                chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()
+            );
+            assert_eq!(
+                start_time_utc,
+                Some(chrono::NaiveTime::from_hms_opt(9, 30, 0).unwrap())
+            );
+            assert_eq!(
+                end_time_utc,
+                Some(chrono::NaiveTime::from_hms_opt(10, 5, 0).unwrap())
+            );
+        }
+        _ => panic!("expected hosted replay download command"),
+    }
+
+    app.replay_downloader.cycle_source(false);
+    assert_eq!(app.replay_downloader.end_date, "2026-08-17");
 }
 
 #[cfg(feature = "replay")]

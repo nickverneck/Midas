@@ -1,14 +1,131 @@
 use super::super::*;
 
 impl App {
+    fn dashboard_status_label(&self) -> String {
+        if !self.session_kind.is_ninjatrader_replay()
+            || !self.status.starts_with("Waiting for Replay quotes")
+        {
+            return self.status.clone();
+        }
+
+        let contract = self
+            .market
+            .contract_name
+            .as_deref()
+            .or_else(|| {
+                self.status
+                    .strip_prefix("Waiting for Replay quotes for ")
+                    .and_then(|status| status.split_once(';').map(|(contract, _)| contract))
+            })
+            .unwrap_or("the selected contract");
+        let clock_state = if self.hosted_replay_clock.is_none() {
+            "provider clock has not advanced yet"
+        } else if self.strategy_runtime.armed
+            && self
+                .hosted_replay_speed
+                .is_some_and(|speed| speed.percent() > 0)
+        {
+            "provider clock is advancing"
+        } else {
+            "provider clock is paused"
+        };
+
+        format!("Waiting for Replay quotes for {contract}; {clock_state}.")
+    }
+
     pub(in crate::app) fn dashboard_summary_lines(&self) -> Vec<Line<'static>> {
+        let strategy_status = if self.session_kind.is_ninjatrader_replay() {
+            if !self.hosted_replay_stream_connected {
+                "Replay stream: disconnected".to_string()
+            } else if self.ninjatrader_replay_awaiting_account() {
+                "Replay: waiting for account".to_string()
+            } else if !self.capabilities.automated_orders {
+                "Replay orders: unavailable".to_string()
+            } else if !self.strategy_runtime.last_summary.is_empty() {
+                format!("Replay strategy: {}", self.strategy_runtime.last_summary)
+            } else if self.strategy_runtime.armed {
+                "Replay strategy: armed".to_string()
+            } else {
+                "Replay strategy: disarmed".to_string()
+            }
+        } else {
+            format!("Strategy Status: {}", self.strategy_runtime_summary())
+        };
+        let provider_line = if self.session_kind.is_ninjatrader_replay() {
+            "Provider: NinjaTrader Hosted Replay".to_string()
+        } else {
+            format!("Broker: {}", self.selected_broker.label())
+        };
         let mut lines = vec![
-            Line::from(format!("Status: {}", self.status)),
-            Line::from(format!("Broker: {}", self.selected_broker.label())),
-            Line::from(format!("Strategy: {}", self.strategy.summary_label())),
-            Line::from(format!("Mode: {}", self.session_kind.label())),
+            Line::from(format!("Status: {}", self.dashboard_status_label())),
+            Line::from(provider_line),
         ];
-        if self.session_kind == SessionKind::Replay {
+        if self.session_kind.is_ninjatrader_replay() {
+            // Keep order readiness visible in compact terminals, above the
+            // longer clock and selection details that may wrap.
+            lines.push(Line::from(strategy_status.clone()));
+        }
+        lines.extend([
+            Line::from(format!(
+                "{}: {}",
+                if self.session_kind.is_ninjatrader_replay() {
+                    "Strategy selection"
+                } else {
+                    "Strategy"
+                },
+                self.strategy.summary_label()
+            )),
+            Line::from(format!(
+                "Engine strategy: {}",
+                if self.session_kind.is_ninjatrader_replay() && !self.hosted_replay_stream_connected
+                {
+                    "inactive (Replay disconnected)".to_string()
+                } else {
+                    self.engine_strategy_label()
+                }
+            )),
+            Line::from(format!(
+                "Mode: {}",
+                if self.session_kind.is_ninjatrader_replay() {
+                    "Hosted Replay"
+                } else {
+                    self.session_kind.label()
+                }
+            )),
+        ]);
+        if self.session_kind.is_ninjatrader_replay() {
+            lines.push(Line::from(format!(
+                "Provider clock: {}",
+                if !self.hosted_replay_stream_connected {
+                    "disconnected".to_string()
+                } else {
+                    self.hosted_replay_clock
+                        .map(|clock| clock.to_rfc3339())
+                        .unwrap_or_else(|| "waiting for first clock update".to_string())
+                }
+            )));
+            let speed = self
+                .hosted_replay_speed
+                .map(NinjaTraderReplaySpeed::percent)
+                .unwrap_or(0);
+            lines.push(Line::from(if !self.hosted_replay_stream_connected {
+                "Provider speed: stopped".to_string()
+            } else if speed == 0 {
+                "Provider speed: paused (0%)".to_string()
+            } else {
+                format!("Provider speed: {speed}%")
+            }));
+            lines.push(Line::from(if !self.hosted_replay_stream_connected {
+                "Replay is stopped; configure a stream in Replay Setup to continue.".to_string()
+            } else if self.strategy_runtime.armed {
+                "Clock advances while the execution strategy is armed.".to_string()
+            } else {
+                "Clock paused; choose on F3 and arm to advance.".to_string()
+            }));
+            if self.hosted_replay_stream_connected {
+                lines.push(Line::from("x stops this app's Replay stream connection."));
+            }
+        } else if self.session_kind == SessionKind::Replay {
             lines.push(Line::from(format!(
                 "Replay Speed: {}",
                 self.replay_speed.label()
@@ -45,11 +162,10 @@ impl App {
                 )));
             }
         }
+        if !self.session_kind.is_ninjatrader_replay() {
+            lines.push(Line::from(strategy_status));
+        }
         lines.extend([
-            Line::from(format!(
-                "Strategy Status: {}",
-                self.strategy_runtime_summary()
-            )),
             Line::from(format!("Auth Mode: {}", self.form.auth_mode.label())),
             Line::from(format!("Log Mode: {}", self.form.log_mode.label())),
             Line::from(match self.accounts.get(self.selected_account) {
@@ -129,10 +245,22 @@ impl App {
         if self.automated_strategy_affordance_visible() {
             keys.push("d");
         }
-        if self.session_kind == SessionKind::Replay {
+        if self.session_kind.is_ninjatrader_replay() {
+            keys.extend(["[/]", "0", "x stop"]);
+        } else if self.session_kind == SessionKind::Replay {
             keys.extend(["[/]", "0"]);
         }
-        let hotkeys = if self.session_kind == SessionKind::Replay {
+        let hotkeys = if self.session_kind.is_ninjatrader_replay() {
+            format!(
+                "Order {} {} | Keys {} (provider {}%)",
+                self.base_config.order_qty,
+                self.base_config.time_in_force,
+                keys.join(" "),
+                self.hosted_replay_speed
+                    .map(NinjaTraderReplaySpeed::percent)
+                    .unwrap_or(0),
+            )
+        } else if self.session_kind == SessionKind::Replay {
             format!(
                 "Order {} {} | Keys {} ({})",
                 self.base_config.order_qty,

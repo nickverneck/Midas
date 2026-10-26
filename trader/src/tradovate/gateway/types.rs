@@ -192,6 +192,18 @@ pub(crate) enum InternalEvent {
     ReplayCompleted {
         error: Option<String>,
     },
+    #[cfg(feature = "replay")]
+    HostedReplayClock {
+        generation: u64,
+        timestamp: DateTime<Utc>,
+        speed: NinjaTraderReplaySpeed,
+    },
+    #[cfg(feature = "replay")]
+    HostedReplayEnded {
+        generation: u64,
+        reason: String,
+        failed: bool,
+    },
     BrokerOrderAck(BrokerOrderAck),
     BrokerOrderFailed(BrokerOrderFailure),
     OrderStrategyAck(BrokerOrderStrategyAck),
@@ -221,7 +233,9 @@ fn is_critical_event(event: &InternalEvent) -> bool {
         | InternalEvent::ProtectionSyncFailed(_)
         | InternalEvent::Error(_) => true,
         #[cfg(feature = "replay")]
-        InternalEvent::ReplayCompleted { .. } | InternalEvent::ReplayBarrier(_) => true,
+        InternalEvent::ReplayCompleted { .. }
+        | InternalEvent::ReplayBarrier(_)
+        | InternalEvent::HostedReplayEnded { .. } => true,
         _ => false,
     }
 }

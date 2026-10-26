@@ -13,6 +13,71 @@ fn app_starts_on_engine_select() {
 
 #[cfg(feature = "replay")]
 #[test]
+fn header_names_unselected_mode_and_keeps_replay_mode_visible_at_compact_width() {
+    let mut app = App::new(AppConfig::default());
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw engine overview");
+    let rows = rendered_terminal_rows(&terminal, 120);
+    assert!(rows.iter().any(|row| row.contains("Mode: Choose engine")));
+    assert!(!rows.iter().any(|row| row.contains("Mode: Live")));
+
+    app.screen = Screen::Dashboard;
+    app.session_kind = SessionKind::NinjaTraderReplay;
+    app.active_engine_key = Some(engine_key(101));
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw replay dashboard");
+    let rows = rendered_terminal_rows(&terminal, 120);
+    let identity = rows
+        .iter()
+        .find(|row| row.contains("Mode: Hosted Replay"))
+        .expect("complete Hosted Replay identity at 120 columns");
+    assert!(identity.contains("Screen: Dashboard"), "{identity}");
+    assert!(!identity.trim_end().ends_with("Mode:"), "{identity}");
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn create_mode_modal_labels_broker_live_and_keeps_both_replay_choices() {
+    let mut app = App::new(AppConfig::default());
+    app.pending_engine_create_mode = Some(EngineCreateMode::Broker);
+    let backend = TestBackend::new(100, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw create mode modal");
+    let rows = rendered_terminal_rows(&terminal, 100);
+
+    assert!(rows.iter().any(|row| row.contains("Broker Live")));
+    assert!(rows.iter().any(|row| row.contains("Cached Replay")));
+    assert!(rows.iter().any(|row| row.contains("Live Replay")));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn disconnected_live_replay_setup_does_not_claim_a_stream_was_stopped() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.session_mode = EngineCreateMode::LiveReplay;
+    app.session_kind = crate::broker::SessionKind::NinjaTraderReplay;
+    app.engine_socket_path = Some(PathBuf::from("/tmp/trader-engine.sock"));
+
+    app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+
+    assert_eq!(app.replay_downloader.phase, ReplayDownloadPhase::Ready);
+    assert_eq!(
+        app.replay_downloader.phase_message,
+        "No active Replay stream. Configure and start one when ready."
+    );
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn engine_screen_f7_explains_replay_requires_engine_session() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, mut cmd_rx) = unbounded_channel();
@@ -21,7 +86,10 @@ fn engine_screen_f7_explains_replay_requires_engine_session() {
 
     assert_eq!(app.screen, Screen::EngineSelect);
     assert!(app.status.contains("create-engine modal"));
-    assert!(app.header_help_text().contains("Broker/Replay modal"));
+    assert!(
+        app.header_help_text()
+            .contains("Cached Replay/Live Replay modal")
+    );
     assert!(cmd_rx.try_recv().is_err());
 }
 
@@ -129,6 +197,104 @@ fn replay_disconnect_does_not_fall_back_to_broker_login() {
     assert!(!app.header_tab_titles().contains(&"Stats"));
 }
 
+#[cfg(feature = "replay")]
+#[test]
+fn idle_cached_replay_disconnect_keeps_setup_and_back_navigation() {
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = replay_cache_test_root("idle-disconnect");
+    let mut app = App::new(config);
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let socket = PathBuf::from("/tmp/trader-cached-replay-setup.sock");
+    app.enter_engine_session_for_key_with_mode(
+        EngineKey::from_socket_path(socket.as_path()),
+        socket,
+        EngineCreateMode::Replay,
+    );
+    app.replay_view = ReplayView::Setup;
+    app.focus = Focus::ReplayInitialCapital;
+    app.replay_dataset_index = Some(3);
+    let logs_before_disconnect = app.logs.len();
+
+    app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+    app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.replay_view, ReplayView::Setup);
+    assert_eq!(app.focus, Focus::ReplayInitialCapital);
+    assert_eq!(app.replay_dataset_index, Some(3));
+    assert_eq!(
+        app.status,
+        "Cached Replay is idle. Setup retained; press Enter to start."
+    );
+    assert_eq!(app.logs.len(), logs_before_disconnect + 1);
+
+    app.handle_key(key(KeyCode::Esc), &cmd_tx);
+    assert_eq!(app.replay_view, ReplayView::Library);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn cached_replay_disconnect_after_start_attempt_returns_to_library() {
+    let mut config = AppConfig::default();
+    config.replay_file_path = replay_test_file("disconnect-after-start");
+    let mut app = App::new(config);
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    let socket = PathBuf::from("/tmp/trader-cached-replay-start.sock");
+    app.enter_engine_session_for_key_with_mode(
+        EngineKey::from_socket_path(socket.as_path()),
+        socket,
+        EngineCreateMode::Replay,
+    );
+    app.replay_view = ReplayView::Setup;
+    app.focus = Focus::ReplayMode;
+
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    assert!(matches!(
+        cmd_rx.try_recv().expect("cached replay start request"),
+        ServiceCommand::EnterReplayMode { .. }
+    ));
+    app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.replay_view, ReplayView::Library);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
+    assert_eq!(app.status, "Disconnected");
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn active_cached_replay_disconnect_does_not_restore_stale_setup() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    let socket = PathBuf::from("/tmp/trader-cached-replay-active.sock");
+    app.enter_engine_session_for_key_with_mode(
+        EngineKey::from_socket_path(socket.as_path()),
+        socket,
+        EngineCreateMode::Replay,
+    );
+    app.replay_view = ReplayView::Setup;
+    app.handle_service_event(
+        ServiceEvent::Connected {
+            broker: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            user_name: Some("Replay".to_string()),
+            auth_mode: AuthMode::TokenFile,
+            session_kind: SessionKind::Replay,
+            capabilities: BrokerCapabilities::default(),
+        },
+        &cmd_tx,
+    );
+    assert_eq!(app.screen, Screen::Strategy);
+
+    app.handle_service_event(ServiceEvent::Disconnected, &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.replay_view, ReplayView::Library);
+    assert_eq!(app.focus, Focus::ReplayInstrumentQuery);
+    assert_eq!(app.status, "Disconnected");
+}
+
 #[test]
 fn startup_disconnected_event_keeps_broker_picker_visible() {
     let mut app = App::new(AppConfig::default());
@@ -188,7 +354,7 @@ fn engine_picker_enter_on_create_emits_broker_create_action_without_replay() {
 
 #[cfg(feature = "replay")]
 #[test]
-fn engine_picker_create_opens_mode_modal_before_spawning() {
+fn engine_picker_create_opens_safe_mode_default_before_spawning() {
     let mut app = App::new(AppConfig::default());
     app.set_running_engines(vec![running_engine(10, true)]);
     app.selected_engine = app.running_engines.len();
@@ -197,14 +363,14 @@ fn engine_picker_create_opens_mode_modal_before_spawning() {
 
     assert_eq!(
         app.pending_engine_create_mode,
-        Some(EngineCreateMode::Broker)
+        Some(EngineCreateMode::Replay)
     );
     assert!(app.take_engine_selection_action().is_none());
 
     app.handle_engine_select_key(key(KeyCode::Right));
     assert_eq!(
         app.pending_engine_create_mode,
-        Some(EngineCreateMode::Replay)
+        Some(EngineCreateMode::LiveReplay)
     );
     app.handle_engine_select_key(key(KeyCode::Enter));
 
@@ -212,9 +378,50 @@ fn engine_picker_create_opens_mode_modal_before_spawning() {
     assert_eq!(
         app.take_engine_selection_action(),
         Some(EngineSelectionAction::CreateNew {
-            mode: EngineCreateMode::Replay,
+            mode: EngineCreateMode::LiveReplay,
         })
     );
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn compact_create_mode_picker_covers_underlying_panel_and_fits_80_by_24() {
+    let mut app = App::new(AppConfig::default());
+    app.pending_engine_create_mode = Some(EngineCreateMode::Replay);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("draw compact create mode picker");
+    let rows = rendered_terminal_rows(&terminal, 80);
+    let rendered = rows.join("\n");
+
+    assert!(rendered.contains("Choose Engine Mode"), "{rendered}");
+    assert!(rendered.contains("Broker Live"), "{rendered}");
+    assert!(rendered.contains("Cached Replay"), "{rendered}");
+    assert!(rendered.contains("Live Replay"), "{rendered}");
+    assert!(rendered.contains("Selected: Cached Replay"), "{rendered}");
+    assert!(!rendered.contains("Engine Controls"), "{rendered}");
+    assert!(!rendered.contains("Active Engines"), "{rendered}");
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn creating_live_replay_engine_opens_direct_stream_setup() {
+    let mut app = App::new(AppConfig::default());
+    let socket = PathBuf::from("/tmp/trader-ninjatrader-replay-engine.sock");
+    app.enter_engine_session_for_key_with_mode(
+        EngineKey::from_socket_path(socket.as_path()),
+        socket,
+        EngineCreateMode::LiveReplay,
+    );
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.replay_view, ReplayView::StreamSetup);
+    assert!(app.replay_downloader.ninja_stream);
+    assert_eq!(app.session_mode, EngineCreateMode::LiveReplay);
+    assert_eq!(app.session_kind, SessionKind::NinjaTraderReplay);
+    assert!(app.status.contains("hosted Replay account"));
 }
 
 #[cfg(feature = "replay")]

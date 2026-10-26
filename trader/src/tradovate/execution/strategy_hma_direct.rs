@@ -114,6 +114,8 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
     let native_strategy = session.execution_config.native_strategy;
     let hma_config = session.execution_config.native_hma_cross.clone();
     let volume_hma_config = session.execution_config.native_volume_hma_cross.clone();
+    let source_update_sequence = session.execution_runtime.market_update_sequence;
+    let market_update = session.execution_runtime.market_update_kind;
     let include_debug = session.cfg.log_mode != crate::config::LogMode::Quiet;
     let mut hma_runtime = std::mem::take(&mut session.execution_runtime.hma_cross_execution);
     let mut volume_hma_runtime =
@@ -126,8 +128,13 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
             .clone();
         let evaluation = match native_strategy {
             NativeStrategyKind::HmaCross => {
-                let evaluation =
-                    hma_config.evaluate_current_cross(&mut hma_runtime, bars, current_side);
+                let evaluation = hma_config.evaluate_current_cross_with_market_update(
+                    &mut hma_runtime,
+                    bars,
+                    current_side,
+                    source_update_sequence,
+                    market_update,
+                );
                 (
                     evaluation.signal,
                     evaluation.summary(),
@@ -139,10 +146,12 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
                 )
             }
             NativeStrategyKind::VolumeAdaptiveHmaCross => {
-                let evaluation = volume_hma_config.evaluate_current_cross(
+                let evaluation = volume_hma_config.evaluate_current_cross_with_market_update(
                     &mut volume_hma_runtime,
                     bars,
                     current_side,
+                    source_update_sequence,
+                    market_update,
                 );
                 (
                     evaluation.signal(),

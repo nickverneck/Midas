@@ -10,7 +10,11 @@ impl App {
     }
 
     pub(in crate::app) fn replay_navigation_active(&self) -> bool {
-        self.replay_build_available() && self.session_mode == EngineCreateMode::Replay
+        self.replay_build_available()
+            && matches!(
+                self.session_mode,
+                EngineCreateMode::Replay | EngineCreateMode::LiveReplay
+            )
     }
 
     pub(in crate::app) fn broker_supports_bar_type_selection(&self) -> bool {

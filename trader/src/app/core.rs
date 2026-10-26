@@ -73,6 +73,11 @@ impl App {
             session_mode: EngineCreateMode::Broker,
             session_kind: SessionKind::Live,
             replay_speed: ReplaySpeed::default(),
+            hosted_replay_stream_connected: false,
+            hosted_replay_clock: None,
+            hosted_replay_speed: None,
+            #[cfg(feature = "replay")]
+            ninja_replay_resume_speed: None,
             replay_execution_ledger: ReplayExecutionLedgerSummary::default(),
             #[cfg(feature = "replay")]
             replay_dataset_index: None,
@@ -84,6 +89,8 @@ impl App {
             replay_dataset_view_path: None,
             #[cfg(feature = "replay")]
             replay_view: ReplayView::Library,
+            #[cfg(feature = "replay")]
+            replay_session_start_pending: false,
             #[cfg(feature = "replay")]
             replay_downloader,
             #[cfg(feature = "replay")]
@@ -180,10 +187,15 @@ impl App {
         socket_path: PathBuf,
         mode: EngineCreateMode,
     ) {
+        #[cfg(feature = "replay")]
+        {
+            self.replay_session_start_pending = false;
+        }
         self.observe_live_engine_socket(socket_path.clone());
         let active_key = engine_key.clone();
         self.active_engine_key = Some(engine_key);
         self.engine_socket_path = Some(socket_path.clone());
+        self.hosted_replay_stream_connected = false;
         self.resume_dashboard_pending = mode == EngineCreateMode::Broker;
         if let Some(summary) = self
             .engine_summaries
@@ -193,6 +205,7 @@ impl App {
             summary.set_session_kind(match mode {
                 EngineCreateMode::Broker => SessionKind::Live,
                 EngineCreateMode::Replay => SessionKind::Replay,
+                EngineCreateMode::LiveReplay => SessionKind::NinjaTraderReplay,
             });
         }
         let observed_market_selection = self
@@ -222,6 +235,7 @@ impl App {
                 }
             }
             EngineCreateMode::Replay => self.move_to_replay_screen(),
+            EngineCreateMode::LiveReplay => self.move_to_live_replay_setup(),
         }
         self.push_log(format!(
             "Attached to engine socket {}.",
@@ -231,6 +245,10 @@ impl App {
 
     pub fn leave_active_engine_session(&mut self, message: impl Into<String>) {
         let message = message.into();
+        #[cfg(feature = "replay")]
+        {
+            self.replay_session_start_pending = false;
+        }
         self.active_engine_key = None;
         self.engine_socket_path = None;
         self.resume_dashboard_pending = false;
@@ -302,6 +320,21 @@ impl App {
         self.status = "Replay engine ready; select a cached dataset.".to_string();
     }
 
+    #[cfg(feature = "replay")]
+    fn move_to_live_replay_setup(&mut self) {
+        self.selected_broker = BrokerKind::Tradovate;
+        self.session_mode = EngineCreateMode::LiveReplay;
+        self.session_kind = SessionKind::NinjaTraderReplay;
+        self.screen = Screen::Replay;
+        self.replay_view = ReplayView::Library;
+        self.open_ninjatrader_stream_setup();
+    }
+
+    #[cfg(not(feature = "replay"))]
+    fn move_to_live_replay_setup(&mut self) {
+        self.move_to_initial_broker_screen();
+    }
+
     #[cfg(not(feature = "replay"))]
     fn move_to_replay_screen(&mut self) {
         // This branch is unreachable from the picker because the replay mode
@@ -351,6 +384,13 @@ impl App {
             ServiceEvent::Error(message) => {
                 self.status = format!("Error: {message}");
                 self.push_log(format!("ERROR: {message}"));
+                #[cfg(feature = "replay")]
+                if self.replay_view == ReplayView::StreamSetup
+                    && self.replay_downloader.phase == ReplayDownloadPhase::Authenticating
+                {
+                    self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                    self.replay_downloader.phase_message = message;
+                }
             }
             ServiceEvent::Connected {
                 broker,
@@ -360,20 +400,36 @@ impl App {
                 session_kind,
                 capabilities,
             } => {
+                #[cfg(feature = "replay")]
+                {
+                    self.replay_session_start_pending = false;
+                }
                 self.selected_broker = broker;
                 self.capabilities = capabilities;
                 self.normalize_market_controls_for_broker();
                 self.form.env = env;
                 self.form.auth_mode = auth_mode;
                 self.session_kind = session_kind;
-                self.session_mode = if session_kind == SessionKind::Replay {
+                self.hosted_replay_stream_connected = session_kind.is_ninjatrader_replay();
+                let replay_session = session_kind.is_replay();
+                self.session_mode = if session_kind.is_ninjatrader_replay() {
+                    EngineCreateMode::LiveReplay
+                } else if replay_session {
                     EngineCreateMode::Replay
                 } else {
                     EngineCreateMode::Broker
                 };
                 self.replay_speed = ReplaySpeed::default();
                 self.replay_execution_ledger = ReplayExecutionLedgerSummary::default();
-                if session_kind == SessionKind::Replay {
+                self.hosted_replay_clock = None;
+                self.hosted_replay_speed = session_kind
+                    .is_ninjatrader_replay()
+                    .then(|| NinjaTraderReplaySpeed::new(0).expect("0 is a valid Replay speed"));
+                #[cfg(feature = "replay")]
+                if !session_kind.is_ninjatrader_replay() {
+                    self.ninja_replay_resume_speed = None;
+                }
+                if replay_session {
                     self.screen = Screen::Strategy;
                     self.focus = Focus::StrategyKind;
                 } else if self.strategy_runtime.armed
@@ -387,19 +443,33 @@ impl App {
                     self.screen = Screen::Selection;
                     self.focus = Focus::AccountList;
                 }
-                self.status = match user_name {
-                    Some(name) => format!(
-                        "Connected to {} {} as {}",
-                        broker.label(),
-                        env.label(),
-                        name
-                    ),
-                    None => format!("Connected to {} {}", broker.label(), env.label()),
+                self.status = if session_kind.is_ninjatrader_replay() {
+                    "Connected to NinjaTrader Hosted Replay".to_string()
+                } else {
+                    match user_name {
+                        Some(name) => format!(
+                            "Connected to {} {} as {}",
+                            broker.label(),
+                            env.label(),
+                            name
+                        ),
+                        None => format!("Connected to {} {}", broker.label(), env.label()),
+                    }
                 };
                 self.push_log(self.status.clone());
             }
             ServiceEvent::Disconnected => {
-                let replay_mode = self.session_mode == EngineCreateMode::Replay;
+                self.hosted_replay_stream_connected = false;
+                let replay_mode = matches!(
+                    self.session_mode,
+                    EngineCreateMode::Replay | EngineCreateMode::LiveReplay
+                );
+                #[cfg(feature = "replay")]
+                let preserve_cached_replay_setup = self.engine_socket_path.is_some()
+                    && self.screen == Screen::Replay
+                    && self.session_mode == EngineCreateMode::Replay
+                    && self.replay_view == ReplayView::Setup
+                    && !self.replay_session_start_pending;
                 if self.engine_socket_path.is_none() {
                     self.screen = Screen::EngineSelect;
                     self.focus = Focus::EngineList;
@@ -409,8 +479,20 @@ impl App {
                     #[cfg(feature = "replay")]
                     {
                         self.screen = Screen::Replay;
-                        self.focus = Focus::ReplayInstrumentQuery;
-                        self.replay_view = ReplayView::Library;
+                        if preserve_cached_replay_setup {
+                            // A cached replay engine is intentionally idle
+                            // while its next run is being configured.
+                        } else if self.session_mode == EngineCreateMode::LiveReplay {
+                            self.focus = Focus::ReplayDownloadInstrument;
+                            self.replay_view = ReplayView::StreamSetup;
+                            self.replay_downloader.phase = ReplayDownloadPhase::Ready;
+                            self.replay_downloader.phase_message =
+                                "No active Replay stream. Configure and start one when ready."
+                                    .to_string();
+                        } else {
+                            self.focus = Focus::ReplayInstrumentQuery;
+                            self.replay_view = ReplayView::Library;
+                        }
                     }
                     #[cfg(not(feature = "replay"))]
                     {
@@ -428,6 +510,8 @@ impl App {
                 if !replay_mode {
                     self.session_mode = EngineCreateMode::Broker;
                     self.session_kind = SessionKind::Live;
+                } else if self.session_mode == EngineCreateMode::LiveReplay {
+                    self.session_kind = SessionKind::NinjaTraderReplay;
                 } else {
                     self.session_kind = SessionKind::Replay;
                 }
@@ -440,10 +524,34 @@ impl App {
                 self.strategy_runtime = StrategyRuntimeState::default();
                 self.latency = LatencySnapshot::default();
                 self.replay_speed = ReplaySpeed::default();
+                self.hosted_replay_clock = None;
+                self.hosted_replay_speed = None;
+                #[cfg(feature = "replay")]
+                {
+                    self.ninja_replay_resume_speed = None;
+                }
                 self.replay_execution_ledger = ReplayExecutionLedgerSummary::default();
                 self.last_market_update_at = None;
-                self.status = "Disconnected".to_string();
-                self.push_log("Disconnected".to_string());
+                #[cfg(feature = "replay")]
+                {
+                    self.replay_session_start_pending = false;
+                    if preserve_cached_replay_setup {
+                        let waiting_status =
+                            "Cached Replay is idle. Setup retained; press Enter to start.";
+                        if self.status != waiting_status {
+                            self.status = waiting_status.to_string();
+                            self.push_log(waiting_status.to_string());
+                        }
+                    } else {
+                        self.status = "Disconnected".to_string();
+                        self.push_log("Disconnected".to_string());
+                    }
+                }
+                #[cfg(not(feature = "replay"))]
+                {
+                    self.status = "Disconnected".to_string();
+                    self.push_log("Disconnected".to_string());
+                }
             }
             ServiceEvent::AccountsLoaded(accounts) => {
                 self.accounts = accounts;
@@ -481,6 +589,11 @@ impl App {
             ServiceEvent::StateInspected(_) => {}
             ServiceEvent::Latency(snapshot) => {
                 self.latency = snapshot;
+            }
+            #[cfg(feature = "replay")]
+            ServiceEvent::NinjaTraderReplayClockUpdated { timestamp, speed } => {
+                self.hosted_replay_clock = Some(timestamp);
+                self.hosted_replay_speed = Some(speed);
             }
             ServiceEvent::ExecutionState(snapshot) => {
                 if let Some(bar_type) = snapshot.bar_type {
@@ -613,7 +726,9 @@ impl App {
                     }
                     self.replay_downloader.invalidate_operation();
                     self.replay_downloader.exact_contract = Some(contract.clone());
-                    if self.replay_downloader.workflow == ReplayDownloadWorkflow::New {
+                    if self.replay_downloader.workflow == ReplayDownloadWorkflow::New
+                        && !self.replay_downloader.ninja_stream
+                    {
                         if let Some(start) = suggested_start_date {
                             self.replay_downloader.start_date =
                                 start.format("%Y-%m-%d").to_string();
@@ -624,9 +739,10 @@ impl App {
                     }
                     self.replay_downloader.suggestion_basis = suggestion_basis;
                     self.replay_downloader.phase = ReplayDownloadPhase::Ready;
-                    self.replay_downloader.phase_message = if suggested_start_date.is_some()
-                        && suggested_end_date.is_some()
-                    {
+                    self.replay_downloader.phase_message = if self.replay_downloader.ninja_stream {
+                        "Exact contract selected; stream dates remain as entered. Set both end fields to stop at a UTC time."
+                            .to_string()
+                    } else if suggested_start_date.is_some() && suggested_end_date.is_some() {
                         "Exact contract selected; broad estimated coverage was applied and remains editable."
                             .to_string()
                     } else {

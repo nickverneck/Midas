@@ -7,6 +7,19 @@ mod maintenance;
 
 use self::{commands::handle_command, internal::handle_internal, maintenance::maintain_session};
 
+/// Invalidate any account snapshot work tied to the session being closed and
+/// wait for its owned builder to finish. This is shared by Hosted Replay end
+/// paths and normal session replacement.
+pub(super) async fn invalidate_snapshot_work(state: &mut ServiceState) {
+    state.snapshot_generation = state.snapshot_generation.wrapping_add(1);
+    state.snapshot_revision = 0;
+    state.snapshot_refresh_pending = false;
+    if let Some(task) = state.snapshot_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
 pub async fn service_loop(
     mut cmd_rx: ServiceCommandReceiver,
     event_tx: ServiceEventSender,
@@ -29,6 +42,8 @@ pub async fn service_loop(
         broker_task: Some(broker_task),
         replay_speed_tx,
         replay_speed: ReplaySpeed::default(),
+        ninja_replay_stop_tx: None,
+        ninja_replay_generation: 0,
         replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
         session: None,
         replay: None,

@@ -114,6 +114,92 @@ fn load_replay_state_prefers_matching_cached_server_bars() {
 }
 
 #[test]
+fn load_replay_state_honors_selected_manifest_even_when_another_contract_sorts_first() {
+    let cache_root = temp_cache_dir("selected-manifest-identity");
+    for (instrument, contract, open) in [("ES", "ESU6", 5_000.0), ("GC", "GCZ6", 2_500.0)] {
+        write_server_bars_jsonl_cache(ReplayCacheServerBarsWrite {
+            cache_root: cache_root.clone(),
+            target: None,
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: instrument.to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: contract.to_string(),
+                id: Some(if contract == "ESU6" {
+                    25866054
+                } else {
+                    31887012
+                }),
+                expiration: None,
+            },
+            request_start: dt("2026-08-17T13:30:00Z"),
+            request_end: dt("2026-08-17T13:31:00Z"),
+            source_kind: ReplayCacheSourceKind::ServerBars,
+            download_request: json!({"source": "selected-contract-regression"}),
+            bar_type: BarType::minute(1),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: if instrument == "ES" { 50.0 } else { 100.0 },
+            },
+            contract_metadata: None,
+            session_template: Some("Globex".to_string()),
+            bars: vec![Bar {
+                ts_ns: dt("2026-08-17T13:30:00Z")
+                    .timestamp_nanos_opt()
+                    .expect("timestamp ns"),
+                open,
+                high: open + 1.0,
+                low: open - 1.0,
+                close: open + 0.5,
+                volume: Some(100.0),
+            }],
+            warnings: Vec::new(),
+            display_name: Some(if contract == "ESU6" {
+                "Z ESU6 identity fixture".to_string()
+            } else {
+                "A GCZ6 identity fixture".to_string()
+            }),
+            tags: None,
+            notes: None,
+        })
+        .expect("write cached contract");
+    }
+
+    let library = ReplayCacheLibrary::scan(&cache_root);
+    assert_eq!(library.datasets.len(), 2);
+    assert_eq!(library.datasets[0].manifest.contract.symbol, "GCZ6");
+    let es = library
+        .datasets
+        .iter()
+        .find(|dataset| dataset.manifest.contract.symbol == "ESU6")
+        .expect("selected ES dataset");
+    let es_manifest = es.manifest_path.clone();
+
+    let mut cfg = AppConfig::default();
+    cfg.replay_cache_dir = cache_root.clone();
+    cfg.replay_file_path = PathBuf::from("/tmp/trader-replay-missing-local.Last.txt");
+    let state = load_replay_state_blocking(
+        &cfg,
+        BarType::minute(1),
+        CandleMode::Standard,
+        Some(&es_manifest),
+        None,
+    )
+    .expect("load explicitly selected ES dataset");
+
+    assert_eq!(replay_contract(&state).name, "ESU6");
+    let bars = state
+        .bars_for_type(BarType::minute(1))
+        .expect("selected bars");
+    assert_eq!(bars.len(), 1);
+    assert_eq!(bars[0].open, 5_000.0);
+}
+
+#[test]
 fn load_replay_state_applies_saved_dataset_view_including_warmup() {
     let cache_root = temp_cache_dir("cache-view-load");
     let bars = (0..=4)

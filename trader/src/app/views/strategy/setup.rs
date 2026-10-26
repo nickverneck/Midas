@@ -300,6 +300,50 @@ impl App {
                     ));
                     if matches!(
                         self.strategy.native_strategy,
+                        NativeStrategyKind::EmaCross
+                            | NativeStrategyKind::HmaCross
+                            | NativeStrategyKind::VolumeAdaptiveEmaCross
+                            | NativeStrategyKind::VolumeAdaptiveHmaCross
+                    ) {
+                        let gate = self
+                            .native_direction_gate()
+                            .expect("cross strategies have a direction gate");
+                        lines.push(styled_line(
+                            format!("EMA Direction Gate: {}", bool_label(gate.enabled)),
+                            self.focus == Focus::EmaDirectionGateEnabled,
+                        ));
+                        if gate.enabled {
+                            lines.push(styled_line(
+                                format!(
+                                    "Only Enter When Flat: {}",
+                                    bool_label(gate.flat_only_entries)
+                                ),
+                                self.focus == Focus::EmaDirectionGateFlatOnly,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Gate Fast EMA Length: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::EmaDirectionGateFastLength,
+                                        gate.fast_length.to_string(),
+                                    )
+                                ),
+                                self.focus == Focus::EmaDirectionGateFastLength,
+                            ));
+                            lines.push(styled_line(
+                                format!(
+                                    "Gate Slow EMA Length: {}",
+                                    self.strategy_numeric_value(
+                                        Focus::EmaDirectionGateSlowLength,
+                                        gate.slow_length.to_string(),
+                                    )
+                                ),
+                                self.focus == Focus::EmaDirectionGateSlowLength,
+                            ));
+                        }
+                    }
+                    if matches!(
+                        self.strategy.native_strategy,
                         NativeStrategyKind::VolumeAdaptiveHmaCross
                             | NativeStrategyKind::VolumeAdaptiveEmaCross
                     ) {
@@ -568,7 +612,9 @@ impl App {
     }
 
     pub(in crate::app) fn strategy_notes_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from("TUI strategy setup supports Native Rust.")];
+        let mut lines = vec![Line::from(
+            "Strategy edits are a draft until you press Enter on Continue.",
+        )];
 
         match self.strategy.kind {
             StrategyKind::Native => {
@@ -588,16 +634,33 @@ impl App {
                 ]);
                 match self.strategy_readiness().status {
                     StrategyReadinessStatus::ReadyToArm => {
-                        lines.push(Line::from("Enter on Continue arms the strategy."));
+                        if self.session_kind.is_ninjatrader_replay() {
+                            lines.push(Line::from(
+                                "Continue applies and explicitly arms this strategy on the hosted Replay account; the paused provider clock then resumes.",
+                            ));
+                        } else if self.session_kind == SessionKind::Replay {
+                            lines.push(Line::from(
+                                "Continue applies this draft and arms it for local Replay.",
+                            ));
+                        } else {
+                            lines.push(Line::from(
+                                "Continue applies this draft and arms the strategy.",
+                            ));
+                        }
+                    }
+                    StrategyReadinessStatus::AwaitingHostedReplay => {
+                        lines.push(Line::from(
+                            "Start the hosted Replay stream first; readiness will be checked after its account loads.",
+                        ));
                     }
                     StrategyReadinessStatus::NeedsAttention => {
                         lines.push(Line::from(
-                            "Enter on Continue stays here until setup is ready.",
+                            "Continue stays here until setup is ready; engine config is unchanged.",
                         ));
                     }
                     StrategyReadinessStatus::MonitorOnly | StrategyReadinessStatus::PreviewOnly => {
                         lines.push(Line::from(
-                            "Enter on Continue opens the dashboard without arming.",
+                            "Continue opens the dashboard without applying or arming this draft.",
                         ));
                     }
                 }
@@ -620,16 +683,24 @@ impl App {
     pub(in crate::app) fn strategy_preview_lines(&self) -> Vec<Line<'static>> {
         let readiness = self.strategy_readiness();
         let mut lines = vec![
-            Line::from(format!("Selected: {}", self.strategy.summary_label())),
+            Line::from(format!(
+                "Draft: {} (pending until Continue)",
+                self.strategy.summary_label()
+            )),
+            Line::from(format!("Engine: {}", self.engine_strategy_label())),
             Line::from(match self.strategy.kind {
                 StrategyKind::Native if self.automated_strategy_affordance_visible() => {
                     format!(
-                        "Native Rust {} is active and can submit automated market orders.",
+                        "Native Rust {} is selected in this draft.",
                         self.strategy.native_strategy.label()
                     )
                 }
+                StrategyKind::Native if self.ninjatrader_replay_awaiting_account() => format!(
+                    "Native Rust {} is selected for the upcoming hosted Replay stream.",
+                    self.strategy.native_strategy.label()
+                ),
                 StrategyKind::Native => format!(
-                    "Native Rust {} is active for monitor-only observation.",
+                    "Native Rust {} is selected for monitor-only observation.",
                     self.strategy.native_strategy.label()
                 ),
                 StrategyKind::Lua => {
@@ -645,6 +716,7 @@ impl App {
 
         let blocker_prefix = match readiness.status {
             StrategyReadinessStatus::NeedsAttention => "Needs attention",
+            StrategyReadinessStatus::AwaitingHostedReplay => "Waiting for Replay",
             StrategyReadinessStatus::PreviewOnly => "Preview only",
             _ => "Monitor",
         };

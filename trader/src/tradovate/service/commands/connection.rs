@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "replay")]
+use crate::tradovate::hosted_replay::{HostedReplayOptions, start_hosted_replay};
 
 pub(super) async fn connect_live_session(
     cfg: AppConfig,
@@ -74,6 +76,8 @@ pub(super) async fn connect_live_session(
         cfg,
         session_kind: SessionKind::Live,
         replay_enabled: false,
+        hosted_replay_orders: false,
+        hosted_replay_running: false,
         tokens,
         token_file_snapshot,
         accounts,
@@ -152,12 +156,15 @@ pub(super) async fn enter_replay_mode(
         cfg: cfg.clone(),
         session_kind: SessionKind::Replay,
         replay_enabled: true,
+        hosted_replay_orders: false,
+        hosted_replay_running: false,
         tokens: TokenBundle {
             access_token: String::new(),
             md_access_token: String::new(),
             expiration_time: None,
             user_id: None,
             user_name: Some("Replay".to_string()),
+            api_hosts: None,
         },
         token_file_snapshot: None,
         accounts: accounts.clone(),
@@ -217,6 +224,198 @@ pub(super) async fn enter_replay_mode(
         internal_tx,
     ));
 
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+pub(super) async fn enter_ninjatrader_replay(
+    cfg: AppConfig,
+    contract: ContractSuggestion,
+    start: DateTime<Utc>,
+    end: Option<DateTime<Utc>>,
+    speed: NinjaTraderReplaySpeed,
+    initial_balance: f64,
+    bar_type: BarType,
+    candle_mode: CandleMode,
+    state: &mut ServiceState,
+    event_tx: &ServiceEventSender,
+    market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
+    internal_tx: InternalEventSender,
+) -> Result<()> {
+    reset_state_for_new_session(state, market_tx).await;
+    state.ninja_replay_generation = state.ninja_replay_generation.wrapping_add(1);
+    let hosted_replay_generation = state.ninja_replay_generation;
+    let candle_mode = bar_type.effective_candle_mode(candle_mode);
+    let _ = event_tx.send(ServiceEvent::Status(format!(
+        "Opening NinjaTrader hosted Replay for {} from {}...",
+        contract.name,
+        start.to_rfc3339()
+    )));
+
+    let started = start_hosted_replay(
+        &state.client,
+        HostedReplayOptions {
+            config: cfg.clone(),
+            generation: hosted_replay_generation,
+            contract: contract.clone(),
+            start,
+            end,
+            speed,
+            initial_balance,
+            bar_type,
+            candle_mode,
+        },
+        internal_tx.clone(),
+    )
+    .await?;
+    let accounts = started.accounts;
+    let selected_account_id = accounts.first().map(|account| account.id);
+    let user_name = started
+        .tokens
+        .user_name
+        .clone()
+        .or(Some("NinjaTrader Replay".to_string()));
+
+    state.session = Some(SessionState {
+        cfg: cfg.clone(),
+        session_kind: SessionKind::NinjaTraderReplay,
+        replay_enabled: true,
+        hosted_replay_orders: true,
+        hosted_replay_running: true,
+        tokens: started.tokens,
+        token_file_snapshot: None,
+        accounts: accounts.clone(),
+        request_tx: started.request_tx,
+        execution_config: ExecutionStrategyConfig::default(),
+        execution_runtime: ExecutionRuntimeState::default(),
+        pending_signal_context: None,
+        order_latency_tracker: None,
+        order_submit_in_flight: false,
+        protection_sync_in_flight: false,
+        pending_protection_sync: None,
+        user_store: UserSyncStore::default(),
+        selected_account_id,
+        selected_contract: Some(contract.clone()),
+        bar_type,
+        candle_mode,
+        market: MarketSnapshot::default(),
+        managed_protection: BTreeMap::new(),
+        active_order_strategy: None,
+        next_strategy_order_nonce: 1,
+        engine_run: None,
+    });
+    state.ninja_replay_stop_tx = Some(started.stop_tx);
+    state.market_task = Some(started.task);
+
+    let _ = event_tx.send(ServiceEvent::Connected {
+        broker: BrokerKind::Tradovate,
+        env: cfg.env,
+        user_name,
+        auth_mode: cfg.auth_mode,
+        session_kind: SessionKind::NinjaTraderReplay,
+        capabilities: tradovate_capabilities(),
+    });
+    let _ = event_tx.send(ServiceEvent::AccountsLoaded(accounts));
+    let _ = event_tx.send(ServiceEvent::ContractSearchResults {
+        query: contract.name.clone(),
+        results: vec![contract],
+    });
+    let _ = event_tx.send(ServiceEvent::Latency(state.latency));
+    if let Some(session) = state.session.as_ref() {
+        emit_execution_state(event_tx, session);
+    }
+    request_snapshot_refresh(state, &internal_tx);
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+pub(super) async fn set_ninjatrader_replay_speed(
+    speed: NinjaTraderReplaySpeed,
+    state: &ServiceState,
+    event_tx: &ServiceEventSender,
+) -> Result<()> {
+    if speed.percent() > NinjaTraderReplaySpeed::MAX {
+        bail!("NinjaTrader Replay speed must be between 0 and 400 percent");
+    }
+    let session = state
+        .session
+        .as_ref()
+        .filter(|session| {
+            session.session_kind == SessionKind::NinjaTraderReplay
+                && session.hosted_replay_orders
+                && session.hosted_replay_running
+        })
+        .context("NinjaTrader hosted Replay is not running")?;
+    if speed.percent() > 0 && !session.execution_runtime.armed {
+        bail!(
+            "Replay is paused: choose an executable strategy with F3, continue to arm it, then change speed"
+        );
+    }
+    request_order_json(
+        &session.request_tx,
+        "replay/changespeed",
+        &json!({ "speed": speed.percent() }),
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("change NinjaTrader Replay speed: {err}"))?;
+    let _ = event_tx.send(ServiceEvent::Status(format!(
+        "NinjaTrader Replay speed set to {}%",
+        speed.percent()
+    )));
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+pub(super) async fn stop_ninjatrader_replay(
+    state: &mut ServiceState,
+    event_tx: &ServiceEventSender,
+    market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
+) -> Result<()> {
+    let Some(stop_tx) = state.ninja_replay_stop_tx.take() else {
+        if state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.session_kind == SessionKind::NinjaTraderReplay)
+        {
+            state.ninja_replay_generation = state.ninja_replay_generation.wrapping_add(1);
+            invalidate_snapshot_work(state).await;
+            state.session = None;
+            state.replay = None;
+            let _ = market_tx.send(MarketSnapshot::default());
+            let _ = event_tx.send(ServiceEvent::Disconnected);
+            let _ = event_tx.send(ServiceEvent::Status(
+                "NinjaTrader hosted Replay session closed.".to_string(),
+            ));
+            return Ok(());
+        }
+        let _ = event_tx.send(ServiceEvent::Status(
+            "No NinjaTrader hosted Replay session is running.".to_string(),
+        ));
+        return Ok(());
+    };
+    // Reject an end event that may already be queued while the worker is
+    // acknowledging this manual stop.
+    state.ninja_replay_generation = state.ninja_replay_generation.wrapping_add(1);
+    invalidate_snapshot_work(state).await;
+    let _ = stop_tx.send(true);
+    if let Some(mut task) = state.market_task.take() {
+        if time::timeout(Duration::from_secs(3), &mut task)
+            .await
+            .is_err()
+        {
+            // A failed provider socket may not be able to acknowledge stop;
+            // dropping the task closes its websocket and releases the quote subscription.
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    state.session = None;
+    state.replay = None;
+    let _ = market_tx.send(MarketSnapshot::default());
+    let _ = event_tx.send(ServiceEvent::Disconnected);
+    let _ = event_tx.send(ServiceEvent::Status(
+        "NinjaTrader Hosted Replay stream stopped; the app connection was closed.".to_string(),
+    ));
     Ok(())
 }
 
@@ -305,9 +504,8 @@ async fn reset_state_for_new_session(
     market_tx: &tokio::sync::watch::Sender<MarketSnapshot>,
 ) {
     shutdown_tasks(state).await;
-    state.snapshot_generation = state.snapshot_generation.wrapping_add(1);
-    state.snapshot_revision = 0;
-    state.snapshot_refresh_pending = false;
+    state.ninja_replay_generation = state.ninja_replay_generation.wrapping_add(1);
+    invalidate_snapshot_work(state).await;
     state.latency = LatencySnapshot::default();
     state.replay_speed = ReplaySpeed::default();
     state.replay_execution_ledger = replay::ReplayExecutionLedgerState::default();

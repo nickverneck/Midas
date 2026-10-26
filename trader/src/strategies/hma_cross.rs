@@ -1,5 +1,9 @@
-use crate::broker::Bar;
+use crate::broker::{Bar, MarketHistoryUpdate};
 use crate::strategies::adaptive_gate::AdaptiveGateExecutionState;
+use crate::strategies::ema_cross::{EmaCrossConfig, EmaCrossExecutionState};
+use crate::strategies::ema_crossover_gate::{
+    EmaCrossoverGateConfig, EmaCrossoverGateEvaluation, filter_position_entry_signals,
+};
 use crate::strategies::{PositionSide, StrategySignal};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -8,6 +12,8 @@ use std::collections::VecDeque;
 pub struct HmaCrossConfig {
     pub fast_length: usize,
     pub slow_length: usize,
+    #[serde(default)]
+    pub direction_gate: EmaCrossoverGateConfig,
     /// Selects the HMA implementation used by the stateful live/replay path.
     ///
     /// `Incremental` is the default for live/replay execution. It keeps
@@ -66,6 +72,7 @@ impl Default for HmaCrossConfig {
         Self {
             fast_length: 21,
             slow_length: 55,
+            direction_gate: EmaCrossoverGateConfig::default(),
             calculation_mode: HmaCalculationMode::Incremental,
             inverted: false,
             take_profit_ticks: 0.0,
@@ -260,6 +267,8 @@ pub struct HmaCrossExecutionState {
     /// Streaming state used by the optional adaptive orientation wrapper.
     /// Plain HMA crossover callers leave this at its zero-cost default.
     pub(crate) adaptive_gate: AdaptiveGateExecutionState,
+    /// Stateful EMA pair used by the optional same-direction entry gate.
+    pub(crate) direction_gate_runtime: EmaCrossExecutionState,
 }
 
 impl HmaCrossExecutionState {
@@ -682,6 +691,7 @@ impl HmaCrossConfig {
             prev_slow,
             curr_fast,
             curr_slow,
+            Some(self.direction_gate.evaluate(bars)),
         )
     }
 
@@ -734,6 +744,7 @@ impl HmaCrossConfig {
             prev_slow.unwrap_or(f64::NAN),
             curr_fast.unwrap_or(f64::NAN),
             curr_slow.unwrap_or(f64::NAN),
+            None,
         )
     }
 
@@ -745,6 +756,7 @@ impl HmaCrossConfig {
         prev_slow: f64,
         curr_fast: f64,
         curr_slow: f64,
+        direction_gate: Option<EmaCrossoverGateEvaluation>,
     ) -> HmaCrossEvaluation {
         let Some(last_bar) = bars.last() else {
             return self.evaluate(bars, current_side);
@@ -784,10 +796,23 @@ impl HmaCrossConfig {
         if self.inverted {
             std::mem::swap(&mut buy_signal, &mut sell_signal);
         }
+        let (buy_signal, sell_signal, gate_hold_reason) = direction_gate
+            .map(|gate| {
+                filter_position_entry_signals(
+                    &self.direction_gate,
+                    gate,
+                    buy_signal,
+                    sell_signal,
+                    current_side.is_some(),
+                )
+            })
+            .unwrap_or((buy_signal, sell_signal, None));
 
         let signal = resolve_signal(buy_signal, sell_signal, current_side);
         let hold_reason = if signal != StrategySignal::Hold {
             None
+        } else if let Some(reason) = gate_hold_reason {
+            Some(reason)
         } else if buy_signal && current_side == Some(PositionSide::Long) {
             Some("buy_cross_already_long")
         } else if sell_signal && current_side == Some(PositionSide::Short) {
@@ -825,6 +850,32 @@ impl HmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> HmaCrossEvaluation {
+        self.evaluate_current_cross_with_market_update(
+            runtime,
+            bars,
+            current_side,
+            None,
+            MarketHistoryUpdate::Snapshot,
+        )
+    }
+
+    /// Evaluate the current HMA cross while forwarding a trusted market
+    /// update hint to the EMA direction-gate runtime. Callers without a
+    /// publisher hint should use [`Self::evaluate_current_cross`], which
+    /// retains correction-safe history fingerprinting.
+    pub fn evaluate_current_cross_with_market_update(
+        &self,
+        runtime: &mut HmaCrossExecutionState,
+        bars: &[Bar],
+        current_side: Option<PositionSide>,
+        source_update_sequence: Option<u64>,
+        market_update: MarketHistoryUpdate,
+    ) -> HmaCrossEvaluation {
+        if !self.direction_gate.enabled {
+            // Rebuild from the full retained history if this runtime later
+            // gets a config update that enables the gate.
+            runtime.direction_gate_runtime = EmaCrossExecutionState::default();
+        }
         let mut evaluation = match self.calculation_mode {
             HmaCalculationMode::Legacy => self.evaluate(bars, current_side),
             HmaCalculationMode::Incremental => {
@@ -884,11 +935,86 @@ impl HmaCrossConfig {
             evaluation.hold_reason = Some("stateful_side_already_current");
         }
 
+        if self.direction_gate.enabled {
+            let gate = if self.calculation_mode == HmaCalculationMode::Legacy {
+                self.direction_gate.evaluate(bars)
+            } else {
+                self.evaluate_direction_gate_streaming(
+                    runtime,
+                    bars,
+                    source_update_sequence,
+                    market_update,
+                )
+            };
+            let (buy_signal, sell_signal, gate_hold_reason) = filter_position_entry_signals(
+                &self.direction_gate,
+                gate,
+                evaluation.signal == StrategySignal::EnterLong,
+                evaluation.signal == StrategySignal::EnterShort,
+                current_side.is_some(),
+            );
+            if (evaluation.signal == StrategySignal::EnterLong && !buy_signal)
+                || (evaluation.signal == StrategySignal::EnterShort && !sell_signal)
+            {
+                evaluation.signal = StrategySignal::Hold;
+                evaluation.hold_reason = gate_hold_reason;
+            }
+            evaluation.effective_buy_signal = buy_signal;
+            evaluation.effective_sell_signal = sell_signal;
+        }
+
         runtime.last_observed_side = Some(observed_side);
         runtime.last_observed_bar_ts = Some(last_bar.ts_ns);
         runtime.last_observed_delta = Some(fast - slow);
         runtime.last_observed_geometry = evaluation_geometry;
         evaluation
+    }
+
+    fn evaluate_direction_gate_streaming(
+        &self,
+        runtime: &mut HmaCrossExecutionState,
+        bars: &[Bar],
+        source_update_sequence: Option<u64>,
+        market_update: MarketHistoryUpdate,
+    ) -> EmaCrossoverGateEvaluation {
+        let gate_config = EmaCrossConfig {
+            fast_length: self.direction_gate.fast_length,
+            slow_length: self.direction_gate.slow_length,
+            ..EmaCrossConfig::default()
+        };
+        let gate_source_update_sequence = source_update_sequence.map(|sequence| {
+            sequence.rotate_left(13)
+                ^ (self.direction_gate.fast_length as u64)
+                ^ (self.direction_gate.slow_length as u64).rotate_left(29)
+        });
+        let evaluation = gate_config.evaluate_streaming_with_market_update(
+            &mut runtime.direction_gate_runtime,
+            bars,
+            None,
+            gate_source_update_sequence,
+            market_update,
+        );
+        let (Some(fast_ema), Some(slow_ema)) = (evaluation.fast_ema, evaluation.slow_ema) else {
+            return EmaCrossoverGateEvaluation::default();
+        };
+        if !fast_ema.is_finite()
+            || !slow_ema.is_finite()
+            || bars.len() < self.direction_gate.warmup_bars()
+            || fast_ema == slow_ema
+        {
+            return EmaCrossoverGateEvaluation {
+                fast_ema: Some(fast_ema),
+                slow_ema: Some(slow_ema),
+                ..EmaCrossoverGateEvaluation::default()
+            };
+        }
+        EmaCrossoverGateEvaluation {
+            ready: true,
+            fast_ema: Some(fast_ema),
+            slow_ema: Some(slow_ema),
+            bullish: fast_ema > slow_ema,
+            bearish: fast_ema < slow_ema,
+        }
     }
 
     fn desired_position_side(&self, hma_side: HmaCrossSide) -> PositionSide {
@@ -1196,6 +1322,212 @@ mod tests {
 
         let evaluation = config.evaluate(&bars, None);
         assert_eq!(evaluation.signal, StrategySignal::EnterLong);
+    }
+
+    #[test]
+    fn flat_only_direction_gate_ignores_hma_crosses_while_in_a_position() {
+        let config = HmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            direction_gate: EmaCrossoverGateConfig {
+                enabled: true,
+                fast_length: 1,
+                slow_length: 2,
+                ..EmaCrossoverGateConfig::default()
+            },
+            ..HmaCrossConfig::default()
+        };
+        let bars = vec![
+            bar(1, 10.0),
+            bar(2, 10.0),
+            bar(3, 10.0),
+            bar(4, 10.0),
+            bar(5, 10.0),
+            bar(6, 8.0),
+            bar(7, 12.0),
+        ];
+        let flat = config.evaluate(&bars, None);
+        assert_eq!(flat.signal, StrategySignal::EnterLong);
+        let held = config.evaluate(&bars, Some(PositionSide::Short));
+        assert_eq!(held.signal, StrategySignal::Hold);
+        assert_eq!(
+            held.hold_reason,
+            Some("directional_ema_gate_ignores_cross_while_position_open")
+        );
+
+        let reversal_config = HmaCrossConfig {
+            direction_gate: EmaCrossoverGateConfig {
+                flat_only_entries: false,
+                ..config.direction_gate.clone()
+            },
+            ..config
+        };
+        assert_eq!(
+            reversal_config
+                .evaluate(&bars, Some(PositionSide::Short))
+                .signal,
+            StrategySignal::EnterLong
+        );
+    }
+
+    #[test]
+    fn hinted_direction_gate_matches_correction_safe_snapshot_evaluation() {
+        let config = HmaCrossConfig {
+            fast_length: 2,
+            slow_length: 4,
+            direction_gate: EmaCrossoverGateConfig {
+                enabled: true,
+                fast_length: 4,
+                slow_length: 12,
+                ..EmaCrossoverGateConfig::default()
+            },
+            ..HmaCrossConfig::default()
+        };
+        let ungated_config = HmaCrossConfig {
+            direction_gate: EmaCrossoverGateConfig::default(),
+            ..config.clone()
+        };
+        let closes = [
+            100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+            100.0, 100.0, 100.0, 80.0, 60.0, 40.0, 100.0, 120.0, 130.0, 110.0, 80.0, 50.0, 30.0,
+            70.0, 110.0, 140.0, 120.0, 90.0, 60.0, 40.0, 100.0, 130.0, 150.0,
+        ];
+        let mut bars = closes
+            .iter()
+            .enumerate()
+            .map(|(index, close)| bar(index as i64 + 1, *close))
+            .collect::<Vec<_>>();
+        let mut hinted_runtime = HmaCrossExecutionState::default();
+        let mut snapshot_runtime = HmaCrossExecutionState::default();
+        let mut ungated_runtime = HmaCrossExecutionState::default();
+        let mut saw_bullish_gate = false;
+        let mut saw_bearish_gate = false;
+        let mut saw_gate_blocked_entry = false;
+        let mut saw_allowed_entry = false;
+        let mut update_sequence = 0_u64;
+        let compare_with_snapshot = |hinted: &HmaCrossEvaluation,
+                                     snapshot: &HmaCrossEvaluation,
+                                     ungated: &HmaCrossEvaluation,
+                                     prefix: &[Bar],
+                                     update_label: &str| {
+            let gate = config.direction_gate.evaluate(prefix);
+            let (expected_buy, expected_sell, gate_hold_reason) = filter_position_entry_signals(
+                &config.direction_gate,
+                gate,
+                ungated.effective_buy_signal,
+                ungated.effective_sell_signal,
+                false,
+            );
+
+            assert_eq!(hinted.signal, snapshot.signal, "signal at {update_label}");
+            assert_eq!(
+                hinted.raw_buy_signal, snapshot.raw_buy_signal,
+                "raw buy at {update_label}"
+            );
+            assert_eq!(
+                hinted.raw_sell_signal, snapshot.raw_sell_signal,
+                "raw sell at {update_label}"
+            );
+            assert_eq!(
+                hinted.effective_buy_signal, snapshot.effective_buy_signal,
+                "effective buy at {update_label}"
+            );
+            assert_eq!(
+                hinted.effective_sell_signal, snapshot.effective_sell_signal,
+                "effective sell at {update_label}"
+            );
+            assert_eq!(
+                hinted.hold_reason, snapshot.hold_reason,
+                "hold reason at {update_label}"
+            );
+            assert_eq!(
+                hinted.effective_buy_signal, expected_buy,
+                "gate-filtered buy at {update_label}"
+            );
+            assert_eq!(
+                hinted.effective_sell_signal, expected_sell,
+                "gate-filtered sell at {update_label}"
+            );
+
+            (
+                gate.ready && gate.bullish,
+                gate.ready && gate.bearish,
+                gate_hold_reason.is_some(),
+                hinted.signal != StrategySignal::Hold,
+            )
+        };
+
+        for index in 0..bars.len() {
+            let prefix = &bars[..=index];
+            let update = if index == 0 {
+                MarketHistoryUpdate::Snapshot
+            } else {
+                MarketHistoryUpdate::Append
+            };
+            update_sequence += 1;
+            let hinted = config.evaluate_current_cross_with_market_update(
+                &mut hinted_runtime,
+                prefix,
+                None,
+                Some(update_sequence),
+                update,
+            );
+            let snapshot = config.evaluate_current_cross(&mut snapshot_runtime, prefix, None);
+            let ungated = ungated_config.evaluate_current_cross(&mut ungated_runtime, prefix, None);
+            let parity = compare_with_snapshot(
+                &hinted,
+                &snapshot,
+                &ungated,
+                prefix,
+                &format!("append prefix {index}"),
+            );
+            saw_bullish_gate |= parity.0;
+            saw_bearish_gate |= parity.1;
+            saw_gate_blocked_entry |= parity.2;
+            saw_allowed_entry |= parity.3;
+
+            if index == 20 {
+                bars[index].close += 3.0;
+                update_sequence += 1;
+                let corrected_prefix = &bars[..=index];
+                let hinted_correction = config.evaluate_current_cross_with_market_update(
+                    &mut hinted_runtime,
+                    corrected_prefix,
+                    None,
+                    Some(update_sequence),
+                    MarketHistoryUpdate::Correction,
+                );
+                let snapshot_correction =
+                    config.evaluate_current_cross(&mut snapshot_runtime, corrected_prefix, None);
+                let ungated_correction = ungated_config.evaluate_current_cross(
+                    &mut ungated_runtime,
+                    corrected_prefix,
+                    None,
+                );
+                let parity = compare_with_snapshot(
+                    &hinted_correction,
+                    &snapshot_correction,
+                    &ungated_correction,
+                    corrected_prefix,
+                    "same-timestamp correction",
+                );
+                saw_bullish_gate |= parity.0;
+                saw_bearish_gate |= parity.1;
+                saw_gate_blocked_entry |= parity.2;
+                saw_allowed_entry |= parity.3;
+            }
+        }
+
+        assert!(saw_bullish_gate, "fixture should exercise a bullish gate");
+        assert!(saw_bearish_gate, "fixture should exercise a bearish gate");
+        assert!(
+            saw_gate_blocked_entry,
+            "fixture should exercise a blocked entry"
+        );
+        assert!(
+            saw_allowed_entry,
+            "fixture should exercise an allowed entry"
+        );
     }
 
     #[test]

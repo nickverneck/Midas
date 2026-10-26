@@ -1142,6 +1142,10 @@ fn validate_ema(config: &EmaCrossConfig) -> Result<()> {
             config.slow_length
         );
     }
+    config
+        .direction_gate
+        .validate()
+        .map_err(|error| anyhow::anyhow!("EMA {error}"))?;
     validate_protection_values(
         "EMA",
         config.take_profit_ticks,
@@ -1162,6 +1166,10 @@ fn validate_hma_cross(config: &HmaCrossConfig) -> Result<()> {
             config.slow_length
         );
     }
+    config
+        .direction_gate
+        .validate()
+        .map_err(|error| anyhow::anyhow!("HMA crossover {error}"))?;
     validate_protection_values(
         "HMA crossover",
         config.take_profit_ticks,
@@ -1249,6 +1257,9 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_hma.trail_offset_ticks",
     "native_ema.fast_length",
     "native_ema.slow_length",
+    "native_ema.direction_gate.enabled",
+    "native_ema.direction_gate.fast_length",
+    "native_ema.direction_gate.slow_length",
     "native_ema.inverted",
     "native_ema.take_profit_ticks",
     "native_ema.stop_loss_ticks",
@@ -1257,6 +1268,9 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_ema.trail_offset_ticks",
     "native_hma_cross.fast_length",
     "native_hma_cross.slow_length",
+    "native_hma_cross.direction_gate.enabled",
+    "native_hma_cross.direction_gate.fast_length",
+    "native_hma_cross.direction_gate.slow_length",
     "native_hma_cross.inverted",
     "native_hma_cross.take_profit_ticks",
     "native_hma_cross.stop_loss_ticks",
@@ -1266,6 +1280,9 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_heikin_ashi.inverted",
     "native_volume_hma_cross.fast_length",
     "native_volume_hma_cross.slow_length",
+    "native_volume_hma_cross.direction_gate.enabled",
+    "native_volume_hma_cross.direction_gate.fast_length",
+    "native_volume_hma_cross.direction_gate.slow_length",
     "native_volume_hma_cross.calculation_mode",
     "native_volume_hma_cross.inverted",
     "native_volume_hma_cross.take_profit_ticks",
@@ -1343,6 +1360,9 @@ const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
     "native_volume_hma_cross.adaptive_gate.higher_timeframe_conflict_action",
     "native_volume_ema_cross.fast_length",
     "native_volume_ema_cross.slow_length",
+    "native_volume_ema_cross.direction_gate.enabled",
+    "native_volume_ema_cross.direction_gate.fast_length",
+    "native_volume_ema_cross.direction_gate.slow_length",
     "native_volume_ema_cross.inverted",
     "native_volume_ema_cross.take_profit_ticks",
     "native_volume_ema_cross.stop_loss_ticks",
@@ -1677,12 +1697,13 @@ mod tests {
         }];
         spec.max_runs = 2;
         spec.parallelism = 1;
+        let expected_fast_length = spec.base_strategy.native_ema.fast_length;
 
         let plan = spec.plan().expect("valid Markov gate grid");
         assert_eq!(plan.children.len(), 2);
         assert_eq!(
             plan.children[0].resolved_strategy.native_ema.fast_length,
-            10
+            expected_fast_length
         );
         assert_eq!(
             plan.children[0]

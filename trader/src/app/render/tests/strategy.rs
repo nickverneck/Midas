@@ -69,6 +69,95 @@ fn strategy_setup_scrolls_focused_option_into_short_panel() {
 }
 
 #[test]
+fn volume_cross_direction_gate_controls_are_keyboard_focusable_and_rendered() {
+    for native_strategy in [
+        NativeStrategyKind::VolumeAdaptiveEmaCross,
+        NativeStrategyKind::VolumeAdaptiveHmaCross,
+    ] {
+        let mut app = App::new(AppConfig::default());
+        let (cmd_tx, _cmd_rx) = unbounded_channel();
+        app.screen = Screen::Strategy;
+        app.strategy.kind = StrategyKind::Native;
+        app.strategy.native_strategy = native_strategy;
+        let gate = crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig {
+            enabled: false,
+            fast_length: 3,
+            slow_length: 8,
+            ..crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig::default()
+        };
+        match native_strategy {
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                app.strategy
+                    .native_volume_ema_cross
+                    .ema_cross
+                    .direction_gate = gate;
+            }
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                app.strategy
+                    .native_volume_hma_cross
+                    .hma_cross
+                    .direction_gate = gate;
+            }
+            _ => unreachable!("loop contains only volume cross strategies"),
+        }
+
+        app.focus = Focus::EmaDirectionGateEnabled;
+        app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+        assert!(app.native_direction_gate().expect("volume gate").enabled);
+
+        let order = app.strategy_focus_order();
+        let enabled_index = order
+            .iter()
+            .position(|focus| *focus == Focus::EmaDirectionGateEnabled)
+            .expect("direction gate toggle should be keyboard-focusable");
+        let fast_index = order
+            .iter()
+            .position(|focus| *focus == Focus::EmaDirectionGateFastLength)
+            .expect("direction gate fast length should be keyboard-focusable");
+        let slow_index = order
+            .iter()
+            .position(|focus| *focus == Focus::EmaDirectionGateSlowLength)
+            .expect("direction gate slow length should be keyboard-focusable");
+        let flat_only_index = order
+            .iter()
+            .position(|focus| *focus == Focus::EmaDirectionGateFlatOnly)
+            .expect("flat-only entry toggle should be keyboard-focusable");
+        assert!(
+            enabled_index < flat_only_index
+                && flat_only_index < fast_index
+                && fast_index < slow_index
+        );
+
+        app.focus = Focus::EmaDirectionGateFastLength;
+        app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+        let gate = app.native_direction_gate().expect("volume gate");
+        assert_eq!(gate.fast_length, 4);
+        assert_eq!(gate.slow_length, 8);
+
+        let lines = app.strategy_setup_lines();
+        for label in [
+            "EMA Direction Gate: on",
+            "Only Enter When Flat: on",
+            "Gate Fast EMA Length: 4",
+            "Gate Slow EMA Length: 8",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.to_string().contains(label)),
+                "missing rendered volume gate control: {label}"
+            );
+        }
+        app.focus = Focus::EmaDirectionGateFlatOnly;
+        app.handle_strategy_key(key(KeyCode::Left), &cmd_tx);
+        assert!(
+            !app.native_direction_gate()
+                .expect("volume gate")
+                .flat_only_entries
+        );
+        assert_focused_line_visible(&lines, Rect::new(0, 0, 120, 30));
+    }
+}
+
+#[test]
 fn focused_list_state_selects_only_visible_focused_lists() {
     assert_eq!(focused_list_state(true, 7, 10).selected(), Some(7));
     assert_eq!(focused_list_state(false, 7, 10).selected(), None);
@@ -311,18 +400,73 @@ fn monitor_only_strategy_setup_removes_arm_wording() {
     assert!(
         notes
             .iter()
-            .any(|line| line.contains("dashboard without arming"))
+            .any(|line| line.contains("without applying or arming this draft"))
     );
     assert!(
         preview
             .iter()
-            .any(|line| line.contains("monitor-only observation"))
+            .any(|line| line.contains("selected for monitor-only observation"))
     );
     assert!(
         preview
             .iter()
             .all(|line| !line.contains("automated market orders"))
     );
+}
+
+#[test]
+fn replay_strategy_setup_distinguishes_pending_draft_from_engine_strategy() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.session_kind = crate::broker::SessionKind::Replay;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.accounts = vec![account(1, "Replay")];
+    select_ready_contract(&mut app);
+
+    let engine = running_engine(41, true);
+    let key = engine_key(engine.id);
+    let mut summary = crate::app::EngineSummary::from_running_engine(&engine);
+    let mut engine_config = crate::strategy::ExecutionStrategyConfig::default();
+    engine_config.kind = StrategyKind::Native;
+    engine_config.native_strategy = NativeStrategyKind::HmaAngle;
+    summary.apply_event(&ServiceEvent::ExecutionState(ExecutionStateSnapshot {
+        config: engine_config,
+        runtime: ExecutionRuntimeSnapshot::default(),
+        ..ExecutionStateSnapshot::default()
+    }));
+    app.engine_summaries.push(summary);
+    app.active_engine_key = Some(key);
+
+    let preview = rendered_text(app.strategy_preview_lines());
+    let notes = rendered_text(app.strategy_notes_lines());
+
+    assert!(preview.iter().any(|line| {
+        line.contains("Draft: Native Rust / EMA Crossover (pending until Continue)")
+    }));
+    assert!(
+        preview
+            .iter()
+            .any(|line| line.contains("Engine: HMA Angle idle"))
+    );
+    assert!(
+        notes.iter().any(|line| {
+            line.contains("Continue applies this draft and arms it for local Replay")
+        })
+    );
+}
+
+#[test]
+fn replay_strategy_detail_uses_runtime_neutral_status_label() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.session_kind = crate::broker::SessionKind::Replay;
+    app.strategy.kind = StrategyKind::Native;
+
+    let detail = rendered_text(app.strategy_detail_lines());
+
+    assert!(detail.iter().any(|line| line == "Runtime status: Disarmed"));
+    assert!(detail.iter().all(|line| !line.starts_with("Live status:")));
 }
 
 #[test]
@@ -343,6 +487,83 @@ fn strategy_readiness_reports_ready_to_arm_with_account_and_contract() {
             .any(|line| line.contains("Continue / Arm Native Strategy"))
     );
     assert!(preview.iter().any(|line| line == "Readiness: Ready to arm"));
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn ninjatrader_strategy_setup_explains_pre_stream_readiness_and_returns_to_setup() {
+    let mut app = App::new(AppConfig::default());
+    app.screen = Screen::Strategy;
+    app.session_kind = crate::broker::SessionKind::NinjaTraderReplay;
+
+    let readiness = app.strategy_readiness();
+    let preview = rendered_text(app.strategy_preview_lines());
+    let notes = rendered_text(app.strategy_notes_lines());
+
+    assert_eq!(
+        readiness.status,
+        StrategyReadinessStatus::AwaitingHostedReplay
+    );
+    assert!(readiness.blockers.iter().any(|line| {
+        line.contains("Start a hosted Replay stream and load its account")
+            && line.contains("readiness can be evaluated")
+    }));
+    assert!(
+        preview
+            .iter()
+            .any(|line| { line.contains("waiting for hosted stream/account") })
+    );
+    assert!(
+        preview
+            .iter()
+            .any(|line| { line.contains("selected for the upcoming hosted Replay stream") })
+    );
+    assert!(
+        preview
+            .iter()
+            .any(|line| line == "Readiness: Waiting for hosted Replay")
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|line| { line.contains("Start the hosted Replay stream first") })
+    );
+    assert!(
+        preview
+            .iter()
+            .all(|line| !line.contains("Tradovate automation is unavailable"))
+    );
+    assert!(preview.iter().all(|line| line != "Readiness: Monitor only"));
+
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.focus = Focus::StrategyContinue;
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+
+    assert_eq!(app.screen, Screen::Replay);
+    assert_eq!(app.replay_view, ReplayView::StreamSetup);
+    assert_eq!(app.focus, Focus::ReplayDownloadInstrument);
+    assert!(cmd_rx.try_recv().is_err(), "pre-stream setup must not arm");
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn ninjatrader_automation_still_requires_hydrated_replay_capability() {
+    let mut app = App::new(AppConfig::default());
+    app.session_kind = crate::broker::SessionKind::NinjaTraderReplay;
+    app.accounts = vec![account(1, "NinjaTrader Replay")];
+    select_ready_contract(&mut app);
+    app.hosted_replay_clock = Some(chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap());
+    app.capabilities.automated_orders = false;
+
+    let readiness = app.strategy_readiness();
+
+    assert_eq!(readiness.status, StrategyReadinessStatus::MonitorOnly);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|line| line == "Tradovate automation is unavailable.")
+    );
 }
 
 #[test]

@@ -260,6 +260,23 @@ impl VolumeAdaptiveHmaCrossConfig {
         bars: &[Bar],
         current_side: Option<PositionSide>,
     ) -> VolumeAdaptiveHmaCrossEvaluation {
+        self.evaluate_current_cross_with_market_update(
+            runtime,
+            bars,
+            current_side,
+            None,
+            MarketHistoryUpdate::Snapshot,
+        )
+    }
+
+    pub fn evaluate_current_cross_with_market_update(
+        &self,
+        runtime: &mut HmaCrossExecutionState,
+        bars: &[Bar],
+        current_side: Option<PositionSide>,
+        source_update_sequence: Option<u64>,
+        market_update: MarketHistoryUpdate,
+    ) -> VolumeAdaptiveHmaCrossEvaluation {
         // Advance the ADX-only gate once per appended bar. The generic gate
         // remains on its existing prefix-reconstruction path; this fast path
         // is deliberately restricted to the configuration used by the
@@ -273,9 +290,13 @@ impl VolumeAdaptiveHmaCrossConfig {
             // side tracker on non-crossing bars without advancing it twice
             // on a real cross.
             let mut probe_runtime = runtime.clone();
-            let base =
-                self.hma_cross
-                    .evaluate_current_cross(&mut probe_runtime, bars, current_side);
+            let base = self.hma_cross.evaluate_current_cross_with_market_update(
+                &mut probe_runtime,
+                bars,
+                current_side,
+                source_update_sequence,
+                market_update,
+            );
             if !base.raw_buy_signal && !base.raw_sell_signal {
                 *runtime = probe_runtime;
                 return self.wrap_without_adaptive(base, bars);
@@ -285,7 +306,13 @@ impl VolumeAdaptiveHmaCrossConfig {
             streamed_adaptive_gate
                 .map(|adaptive_gate| self.effective_hma_with_gate(bars, adaptive_gate))
                 .unwrap_or_else(|| self.effective_hma(bars));
-        let mut hma = effective.evaluate_current_cross(runtime, bars, current_side);
+        let mut hma = effective.evaluate_current_cross_with_market_update(
+            runtime,
+            bars,
+            current_side,
+            source_update_sequence,
+            market_update,
+        );
         if self.ema_gate.enabled && !ema_gate.ready {
             hold_for_ema_gate_hma(&mut hma);
         }
@@ -907,5 +934,102 @@ mod tests {
             other => other,
         };
         assert_eq!(actual.ema.signal, expected_inverted_signal);
+    }
+
+    #[test]
+    fn directional_ema_gate_is_preserved_by_volume_wrapper_streaming_path() {
+        let gate = crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig {
+            enabled: true,
+            fast_length: 2,
+            slow_length: 4,
+            ..crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig::default()
+        };
+        let wrapper = VolumeAdaptiveEmaCrossConfig {
+            ema_cross: EmaCrossConfig {
+                fast_length: 2,
+                slow_length: 3,
+                direction_gate: gate,
+                ..EmaCrossConfig::default()
+            },
+            volume_regime: VolumeRegimeConfig {
+                lookback_bars: 2,
+                invert_below_relative_volume: 0.0,
+            },
+            ema_gate: EmaOrientationGateConfig::default(),
+            adaptive_gate: RegimeAdaptiveGateConfig::default(),
+        };
+        let bars = vec![
+            bar(1, 10.0, Some(100.0)),
+            bar(2, 10.0, Some(100.0)),
+            bar(3, 10.0, Some(100.0)),
+            bar(4, 10.0, Some(100.0)),
+            bar(5, 10.0, Some(100.0)),
+            bar(6, 8.0, Some(100.0)),
+            bar(7, 12.0, Some(100.0)),
+        ];
+
+        let expected = wrapper.evaluate(&bars, None).ema;
+        assert_eq!(expected.signal, StrategySignal::EnterLong);
+        let mut runtime = EmaCrossExecutionState::default();
+        let streamed = wrapper.evaluate_streaming_with_market_update(
+            &mut runtime,
+            &bars,
+            None,
+            Some(7),
+            MarketHistoryUpdate::Snapshot,
+        );
+        assert_eq!(streamed.ema.signal, expected.signal);
+        assert_eq!(
+            streamed.ema.effective_buy_signal,
+            expected.effective_buy_signal
+        );
+        assert_eq!(
+            streamed.ema.effective_sell_signal,
+            expected.effective_sell_signal
+        );
+    }
+
+    #[test]
+    fn directional_ema_gate_is_preserved_by_volume_hma_live_path() {
+        let wrapper = VolumeAdaptiveHmaCrossConfig {
+            hma_cross: HmaCrossConfig {
+                fast_length: 2,
+                slow_length: 4,
+                direction_gate: crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig {
+                    enabled: true,
+                    fast_length: 2,
+                    slow_length: 4,
+                    ..crate::strategies::ema_crossover_gate::EmaCrossoverGateConfig::default()
+                },
+                ..HmaCrossConfig::default()
+            },
+            volume_regime: VolumeRegimeConfig {
+                lookback_bars: 2,
+                invert_below_relative_volume: 0.0,
+            },
+            ema_gate: EmaOrientationGateConfig::default(),
+            adaptive_gate: RegimeAdaptiveGateConfig::default(),
+        };
+        let bars = vec![
+            bar(1, 10.0, Some(100.0)),
+            bar(2, 10.0, Some(100.0)),
+            bar(3, 10.0, Some(100.0)),
+            bar(4, 10.0, Some(100.0)),
+            bar(5, 10.0, Some(100.0)),
+            bar(6, 8.0, Some(100.0)),
+            bar(7, 12.0, Some(100.0)),
+        ];
+
+        let expected = wrapper.evaluate(&bars, None).hma.signal;
+        assert_eq!(expected, StrategySignal::EnterLong);
+        let mut runtime = HmaCrossExecutionState::default();
+        let mut streamed = StrategySignal::Hold;
+        for end in 1..=bars.len() {
+            streamed = wrapper
+                .evaluate_current_cross(&mut runtime, &bars[..end], None)
+                .hma
+                .signal;
+        }
+        assert_eq!(streamed, expected);
     }
 }

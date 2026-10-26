@@ -127,6 +127,22 @@ impl App {
     }
 
     pub(in crate::app) fn strategy_runtime_summary(&self) -> String {
+        if self.session_kind.is_ninjatrader_replay() {
+            if self.ninjatrader_replay_awaiting_account() {
+                return "NinjaTrader Replay: waiting for hosted stream/account".to_string();
+            }
+            if !self.capabilities.automated_orders {
+                return "NinjaTrader Replay strategy orders unavailable".to_string();
+            }
+            if !self.strategy_runtime.last_summary.is_empty() {
+                return format!("NinjaTrader Replay: {}", self.strategy_runtime.last_summary);
+            }
+            return if self.strategy_runtime.armed {
+                "NinjaTrader Replay: strategy armed".to_string()
+            } else {
+                "NinjaTrader Replay: strategy disarmed".to_string()
+            };
+        }
         if !self.capabilities.automated_orders {
             return format!("{} monitor-only", self.selected_broker.label());
         }

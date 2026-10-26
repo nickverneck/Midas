@@ -221,6 +221,8 @@ impl EngineSummary {
             ServiceEvent::Latency(snapshot) => {
                 self.latency = *snapshot;
             }
+            #[cfg(feature = "replay")]
+            ServiceEvent::NinjaTraderReplayClockUpdated { .. } => {}
             ServiceEvent::ExecutionState(snapshot) => {
                 self.strategy_kind = Some(snapshot.config.kind);
                 self.native_strategy = Some(snapshot.config.native_strategy);

@@ -3,11 +3,12 @@ use crate::broker::{ReplayDownloadCacheTarget, ReplayDownloadOperationId, Replay
 
 #[cfg(feature = "replay")]
 use crate::replay_cache::{
-    ReplayCacheContract, ReplayCacheInstrument, ReplayCacheServerBarsWrite, ReplayCacheSourceKind,
+    ReplayCacheContract, ReplayCacheInstrument, ReplayCacheRawTicksWrite,
+    ReplayCacheServerBarsWrite, ReplayCacheSourceKind, write_raw_ticks_parquet_cache,
     write_server_bars_parquet_cache,
 };
 #[cfg(feature = "replay")]
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::Utc;
 
 mod connection;
 mod dispatch;

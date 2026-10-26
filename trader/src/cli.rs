@@ -475,6 +475,14 @@ pub(crate) struct CaptureLiveDomArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct ValidateNinjaTraderTokenArgs {
+    /// Optional RFC3339 timestamp or YYYY-MM-DD to check replay entitlement.
+    /// Defaults to the same time yesterday. This check never starts a replay.
+    #[arg(long)]
+    pub(crate) start: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct ImportBrowserHarArgs {
     /// HAR file exported from the NinjaTrader/Tradovate browser session.
     #[arg(long)]
@@ -607,6 +615,9 @@ pub(crate) enum Mode {
     /// Capture live Level 2 snapshots in a separate, opt-in process.
     #[command(name = "capture-live-dom")]
     CaptureLiveDom(CaptureLiveDomArgs),
+    /// Validate the saved NinjaTrader token and replay entitlement without starting a replay.
+    #[command(name = "validate-ninjatrader-token")]
+    ValidateNinjaTraderToken(ValidateNinjaTraderTokenArgs),
     /// Import a NinjaTrader/Tradovate browser market-data HAR into replay cache.
     #[command(name = "import-browser-har")]
     ImportBrowserHar(ImportBrowserHarArgs),

@@ -291,7 +291,7 @@ pub(super) fn build_order_strategy_request(
     });
 
     Ok(PendingOrderStrategyTransition {
-        simulate: session.replay_enabled,
+        simulate: session.replay_enabled && !session.hosted_replay_orders,
         uuid,
         payload,
         interrupt_order_strategy_id,
@@ -361,7 +361,7 @@ pub(crate) fn build_market_order_request(
     );
 
     PendingMarketOrder {
-        simulate: session.replay_enabled,
+        simulate: session.replay_enabled && !session.hosted_replay_orders,
         cl_ord_id,
         payload,
         account_id: account.id,
@@ -391,7 +391,7 @@ pub(super) fn build_liquidation_request(
     cancel_order_ids: Vec<i64>,
 ) -> PendingLiquidation {
     PendingLiquidation {
-        simulate: session.replay_enabled,
+        simulate: session.replay_enabled && !session.hosted_replay_orders,
         request_id: if automated {
             next_strategy_cl_ord_id(session, "liquidate")
         } else {

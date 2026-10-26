@@ -24,14 +24,432 @@ struct DomCaptureSummary {
     last_ts_ns: Option<i64>,
 }
 
-type DomSocket = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type DomSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type DomRead = futures_util::stream::SplitStream<DomSocket>;
 type DomWrite = futures_util::stream::SplitSink<DomSocket, Message>;
 
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone)]
+pub struct HostedReplayQuoteCapture {
+    pub contract: ContractSuggestion,
+    pub ticks: Vec<crate::replay_cache::ReplayCacheRawTickRow>,
+    pub tick_specs: crate::replay_cache::ReplayCacheTickSpecs,
+    pub contract_metadata: crate::replay_cache::ReplayCacheContractMetadata,
+    pub session_template: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, Default)]
+struct HostedQuoteState {
+    bid_price: Option<f64>,
+    bid_size: Option<f64>,
+    ask_price: Option<f64>,
+    ask_size: Option<f64>,
+}
+
+/// Safe counters for diagnosing a hosted Replay feed without retaining any
+/// provider payloads, credentials, or account data.
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HostedReplayQuoteDiagnostics {
+    websocket_array_frames: u64,
+    replay_clock_events: u64,
+    md_items: u64,
+    md_items_without_quote_array: u64,
+    quote_rows: u64,
+    quote_rows_without_contract_id: u64,
+    quote_rows_other_contract: u64,
+    matching_contract_rows: u64,
+    trade_rows: u64,
+    trade_rows_without_valid_values: u64,
+    trade_rows_without_timestamp: u64,
+    trade_rows_outside_window: u64,
+    valid_trade_ticks: u64,
+    market_updates: u64,
+    closed_bars: u64,
+}
+
+#[cfg(feature = "replay")]
+impl HostedReplayQuoteDiagnostics {
+    fn summary(self) -> String {
+        format!(
+            "feed diagnostics: array frames={}, clock events={}, md items={}, md items without quote array={}, quote rows={}, rows without contract id={}, rows for other contracts={}, matching rows={}, trade rows={}, invalid trade values={}, missing trade timestamps={}, out-of-window trades={}, valid trade ticks={}, market updates={}, closed bars={}",
+            self.websocket_array_frames,
+            self.replay_clock_events,
+            self.md_items,
+            self.md_items_without_quote_array,
+            self.quote_rows,
+            self.quote_rows_without_contract_id,
+            self.quote_rows_other_contract,
+            self.matching_contract_rows,
+            self.trade_rows,
+            self.trade_rows_without_valid_values,
+            self.trade_rows_without_timestamp,
+            self.trade_rows_outside_window,
+            self.valid_trade_ticks,
+            self.market_updates,
+            self.closed_bars,
+        )
+    }
+}
+
 const DOM_CAPTURE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DOM_CAPTURE_MAX_SPEED: u16 = 400;
+
+/// Prefer the replay service host returned with a user's token when that host
+/// is preserved in the token file. Older NinjaTrader browser-token captures
+/// do not include apiHosts, so retain the documented shared-host fallback.
+fn replay_ws_url(cfg: &AppConfig) -> String {
+    let dynamic_host = fs::read_to_string(&cfg.token_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .pointer("/apiHosts/replay")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|host| {
+                    !host.is_empty()
+                        && host.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || ".-".contains(character)
+                        })
+                })
+                .map(ToString::to_string)
+        });
+    dynamic_host
+        .map(|host| format!("wss://{host}/v1/websocket"))
+        .unwrap_or_else(|| cfg.env.replay_ws_url().to_string())
+}
+
+/// Validate an interactive NinjaTrader token without changing hosted replay
+/// state. In particular, this function never calls replay/initializeclock.
+pub async fn validate_ninjatrader_token(cfg: &AppConfig, start: Option<&str>) -> Result<()> {
+    if cfg.simulation_proxy.enabled {
+        bail!("NinjaTrader token validation is unavailable in simulation_proxy mode");
+    }
+    let start = start
+        .map(|value| parse_dom_capture_timestamp(value, "--start"))
+        .transpose()?
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(1));
+    let client = Client::new();
+    let tokens = authenticate(&client, cfg).await?;
+    let rest_url = cfg.broker_rest_url();
+    let response = client
+        .get(format!("{rest_url}/auth/me"))
+        .bearer_auth(&tokens.access_token)
+        .send()
+        .await
+        .context("request auth/me for NinjaTrader token validation")?;
+    if !response.status().is_success() {
+        bail!(
+            "NinjaTrader token failed auth/me validation (HTTP {}); response body omitted",
+            response.status()
+        );
+    }
+
+    let replay_url = ninja_replay_ws_url(&tokens)
+        .context("NinjaTrader token did not provide its authenticated apiHosts.replay host")?;
+    let ws_config = WebSocketConfig {
+        write_buffer_size: 0,
+        max_write_buffer_size: usize::MAX,
+        ..Default::default()
+    };
+    let (ws_stream, _) = connect_low_latency_ws(&replay_url, ws_config)
+        .await
+        .with_context(|| format!("connect {replay_url}"))?;
+    let (mut write, mut read) = ws_stream.split();
+    write
+        .send(Message::Text(format!(
+            "authorize\n1\n\n{}",
+            tokens.access_token
+        )))
+        .await
+        .context("authorize NinjaTrader token on replay websocket")?;
+    wait_dom_response(&mut read, 1, "replay websocket authorization").await?;
+
+    send_dom_request(
+        &mut write,
+        "replay/checkreplaysession",
+        2,
+        &json!({
+            "startTimestamp": start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        }),
+    )
+    .await?;
+    let response = wait_dom_response(&mut read, 2, "check historical replay entitlement").await?;
+    let status = response
+        .pointer("/d/checkStatus")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(status.to_ascii_lowercase().as_str(), "ok" | "eligible") {
+        bail!(
+            "token passed auth/me, but Market Replay is unavailable for {} ({})",
+            start.to_rfc3339(),
+            if status.is_empty() {
+                "provider omitted checkStatus"
+            } else {
+                status
+            }
+        );
+    }
+
+    println!("NinjaTrader token: valid (auth/me)");
+    println!(
+        "Market Replay entitlement: eligible for {}",
+        start.to_rfc3339()
+    );
+    println!("Hosted replay state: unchanged");
+    Ok(())
+}
+
+#[cfg(feature = "replay")]
+pub async fn capture_hosted_replay_quotes(
+    cfg: &AppConfig,
+    contract: ContractSuggestion,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    speed: u16,
+    on_authenticated: impl FnOnce(),
+    mut on_progress: impl FnMut(DateTime<Utc>, usize) + Send,
+) -> Result<HostedReplayQuoteCapture> {
+    if cfg.simulation_proxy.enabled {
+        bail!("hosted Market Replay is unavailable in simulation_proxy mode");
+    }
+    if start >= end {
+        bail!("Market Replay end must be after its start");
+    }
+    if !(25..=DOM_CAPTURE_MAX_SPEED).contains(&speed) {
+        bail!("Market Replay stream speed must be between 25 and {DOM_CAPTURE_MAX_SPEED}");
+    }
+
+    let session = prepare_replay_download_session_after_auth(
+        cfg,
+        &contract.name,
+        Some(&contract),
+        on_authenticated,
+    )
+    .await?;
+    let replay_url = replay_ws_url(cfg);
+    let ws_config = WebSocketConfig {
+        write_buffer_size: 0,
+        max_write_buffer_size: usize::MAX,
+        ..Default::default()
+    };
+    let (ws_stream, _) = connect_low_latency_ws(&replay_url, ws_config)
+        .await
+        .with_context(|| format!("connect {replay_url}"))?;
+    let (mut write, mut read) = ws_stream.split();
+    write
+        .send(Message::Text(format!(
+            "authorize\n1\n\n{}",
+            session.replay_access_token()
+        )))
+        .await
+        .context("authorize replay websocket")?;
+    wait_dom_response(&mut read, 1, "replay websocket authorization").await?;
+
+    let start_timestamp = start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    send_dom_request(
+        &mut write,
+        "replay/checkreplaysession",
+        2,
+        &json!({ "startTimestamp": start_timestamp }),
+    )
+    .await?;
+    let check_response =
+        wait_dom_response(&mut read, 2, "check historical replay entitlement").await?;
+    let check_status = check_response
+        .pointer("/d/checkStatus")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(
+        check_status.to_ascii_lowercase().as_str(),
+        "ok" | "eligible"
+    ) {
+        bail!(
+            "Market Replay is unavailable for {} ({})",
+            start.to_rfc3339(),
+            if check_status.is_empty() {
+                "provider omitted checkStatus"
+            } else {
+                check_status
+            }
+        );
+    }
+
+    send_dom_request(
+        &mut write,
+        "replay/initializeclock",
+        3,
+        &json!({
+            "startTimestamp": start_timestamp,
+            "speed": speed,
+            "initialBalance": cfg.replay_initial_capital,
+        }),
+    )
+    .await?;
+    let initialized = wait_dom_response(&mut read, 3, "initialize hosted Market Replay").await?;
+    if !initialized
+        .pointer("/d/ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let error = initialized
+            .pointer("/d/errorText")
+            .and_then(Value::as_str)
+            .unwrap_or("provider did not confirm replay initialization");
+        bail!("hosted Market Replay initialization failed: {error}");
+    }
+
+    send_dom_request(
+        &mut write,
+        "md/subscribeQuote",
+        4,
+        &json!({ "symbol": session.contract().id }),
+    )
+    .await?;
+    wait_dom_response(&mut read, 4, "subscribe to hosted replay quotes").await?;
+
+    let end_ns = end
+        .timestamp_nanos_opt()
+        .context("Market Replay end is outside supported timestamp range")?;
+    let market_seconds = (end - start).num_seconds().max(1) as u64;
+    let speed_timeout = market_seconds
+        .saturating_mul(100)
+        .saturating_div(u64::from(speed).max(1))
+        .saturating_mul(2)
+        .saturating_add(120);
+    let mut deadline = time::Instant::now() + Duration::from_secs(speed_timeout.max(120));
+    let mut heartbeat = time::interval(Duration::from_secs(2));
+    heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    let mut quote_states = std::collections::HashMap::<i64, HostedQuoteState>::new();
+    let mut ticks = Vec::new();
+    let mut diagnostics = HostedReplayQuoteDiagnostics::default();
+    let mut replay_ts_ns = None::<i64>;
+    let mut last_progress_ts_ns = None::<i64>;
+    let mut replay_speed = Some(speed);
+    let mut observed_replay_speed = None;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "timed out receiving hosted Market Replay quotes for {}; {}",
+                session.contract().name,
+                diagnostics.summary(),
+            );
+        }
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                write.send(Message::Text("[]".to_string())).await.context("send replay websocket heartbeat")?;
+            }
+            next = time::timeout(remaining, read.next()) => {
+                let next = next.context("timed out receiving hosted Market Replay data")?;
+                let Some(next) = next else {
+                    ensure_hosted_replay_window_complete(
+                        replay_ts_ns,
+                        end_ns,
+                        "provider reached EOF",
+                    )?;
+                    break;
+                };
+                let message = next.context("read hosted Market Replay websocket")?;
+                let Some(items) = hosted_replay_items_from_message(message)? else {
+                    ensure_hosted_replay_window_complete(
+                        replay_ts_ns,
+                        end_ns,
+                        "provider closed the websocket",
+                    )?;
+                    break;
+                };
+                diagnostics.websocket_array_frames = diagnostics.websocket_array_frames.saturating_add(1);
+                for item in &items {
+                    if let Some(clock_ts_ns) = parse_replay_clock_timestamp(item) {
+                        diagnostics.replay_clock_events = diagnostics.replay_clock_events.saturating_add(1);
+                        replay_ts_ns = Some(replay_ts_ns.map_or(clock_ts_ns, |current| current.max(clock_ts_ns)));
+                        if last_progress_ts_ns.is_none_or(|last| clock_ts_ns.saturating_sub(last) >= 30_000_000_000) {
+                            on_progress(
+                                DateTime::<Utc>::from_timestamp_nanos(clock_ts_ns),
+                                ticks.len(),
+                            );
+                            last_progress_ts_ns = Some(clock_ts_ns);
+                        }
+                        let clock_speed = parse_replay_clock_speed(item);
+                        if let Some(clock_speed) = clock_speed {
+                            observed_replay_speed = Some(clock_speed);
+                        }
+                        replay_speed = clock_speed.or(replay_speed);
+                        if let Some(clock_ts_ns) = replay_ts_ns {
+                            let left = end_ns.saturating_sub(clock_ts_ns).max(0) as u64 / 1_000_000_000;
+                            if let Some(actual_speed) = replay_speed.filter(|value| *value > 0) {
+                                let estimate = left.saturating_mul(100).saturating_div(u64::from(actual_speed))
+                                    .saturating_add(120);
+                                deadline = time::Instant::now() + Duration::from_secs(estimate.max(120));
+                            } else {
+                                deadline = time::Instant::now() + Duration::from_secs(120);
+                            }
+                        }
+                    }
+                    collect_hosted_quote_ticks(
+                        item,
+                        session.contract().id,
+                        start,
+                        end,
+                        &mut quote_states,
+                        &mut ticks,
+                        &mut diagnostics,
+                    )?;
+                }
+                if hosted_replay_window_complete(replay_ts_ns, end_ns) {
+                    break;
+                }
+            }
+        }
+    }
+
+    ensure_hosted_replay_window_complete(replay_ts_ns, end_ns, "capture stopped")?;
+
+    let _ = send_dom_request(
+        &mut write,
+        "md/unsubscribeQuote",
+        5,
+        &json!({ "symbol": session.contract().id }),
+    )
+    .await;
+    if ticks.is_empty() {
+        bail!(
+            "hosted Market Replay produced no sampled last-trade quote updates for {}; {}",
+            session.contract().name,
+            diagnostics.summary(),
+        );
+    }
+    ticks.sort_by(|left, right| {
+        left.ts_ns
+            .cmp(&right.ts_ns)
+            .then(left.tick_id.cmp(&right.tick_id))
+    });
+    for (index, tick) in ticks.iter_mut().enumerate() {
+        tick.tick_id = Some(i64::try_from(index + 1).unwrap_or(i64::MAX));
+    }
+    let mut warnings = session.warnings().to_vec();
+    warnings.push("Hosted Market Replay md/subscribeQuote last/ls updates are sampled provider quote updates, not a guaranteed complete exchange trade tape.".to_string());
+    if let Some(actual_speed) = observed_replay_speed.filter(|actual| *actual != speed) {
+        warnings.push(format!(
+            "The hosted replay clock reported {actual_speed}% while {speed}% was requested; the provider may limit replay speed."
+        ));
+    }
+    Ok(HostedReplayQuoteCapture {
+        contract: session.contract().clone(),
+        ticks,
+        tick_specs: session.tick_specs().clone(),
+        contract_metadata: session.contract_metadata().clone(),
+        session_template: session.session_template().map(ToString::to_string),
+        warnings,
+    })
+}
 
 /// Capture historical full-book snapshots through Tradovate Market Replay.
 ///
@@ -51,10 +469,7 @@ pub async fn capture_replay_dom(cfg: &AppConfig, options: DomCaptureOptions) -> 
         bail!("--end must be after --start");
     }
     if options.speed == 0 || options.speed > DOM_CAPTURE_MAX_SPEED {
-        bail!(
-            "--speed must be between 1 and {}",
-            DOM_CAPTURE_MAX_SPEED
-        );
+        bail!("--speed must be between 1 and {}", DOM_CAPTURE_MAX_SPEED);
     }
     if !options.initial_balance.is_finite() || options.initial_balance < 0.0 {
         bail!("--initial-balance must be finite and non-negative");
@@ -62,22 +477,19 @@ pub async fn capture_replay_dom(cfg: &AppConfig, options: DomCaptureOptions) -> 
 
     let client = Client::new();
     let tokens = authenticate(&client, cfg).await?;
-    let contract = resolve_dom_capture_contract(
-        &client,
-        &cfg.env,
-        &tokens.access_token,
-        &options.contract,
-    )
-    .await?;
+    let contract =
+        resolve_dom_capture_contract(&client, &cfg.env, &tokens.access_token, &options.contract)
+            .await?;
 
     let ws_config = WebSocketConfig {
         write_buffer_size: 0,
         max_write_buffer_size: usize::MAX,
         ..Default::default()
     };
-    let (ws_stream, _) = connect_low_latency_ws(cfg.env.replay_ws_url(), ws_config)
+    let replay_url = replay_ws_url(cfg);
+    let (ws_stream, _) = connect_low_latency_ws(&replay_url, ws_config)
         .await
-        .with_context(|| format!("connect {}", cfg.env.replay_ws_url()))?;
+        .with_context(|| format!("connect {replay_url}"))?;
     let (mut write, mut read) = ws_stream.split();
 
     write
@@ -97,17 +509,16 @@ pub async fn capture_replay_dom(cfg: &AppConfig, options: DomCaptureOptions) -> 
         &json!({ "startTimestamp": start_timestamp }),
     )
     .await?;
-    let check_response = wait_dom_response(
-        &mut read,
-        2,
-        "check historical replay session entitlement",
-    )
-    .await?;
+    let check_response =
+        wait_dom_response(&mut read, 2, "check historical replay session entitlement").await?;
     let check_status = check_response
         .pointer("/d/checkStatus")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !matches!(check_status.to_ascii_lowercase().as_str(), "ok" | "eligible") {
+    if !matches!(
+        check_status.to_ascii_lowercase().as_str(),
+        "ok" | "eligible"
+    ) {
         bail!(
             "Tradovate historical replay is not available for {}: {}",
             start.to_rfc3339(),
@@ -178,9 +589,8 @@ pub async fn capture_replay_dom(cfg: &AppConfig, options: DomCaptureOptions) -> 
             }
             collect_dom_snapshots(&item, contract.id, Some((start, end)), &mut snapshots)?;
         }
-        if replay_ts_ns.is_some_and(|ts_ns| {
-            ts_ns >= end.timestamp_nanos_opt().unwrap_or(i64::MAX)
-        }) {
+        if replay_ts_ns.is_some_and(|ts_ns| ts_ns >= end.timestamp_nanos_opt().unwrap_or(i64::MAX))
+        {
             break;
         }
     }
@@ -214,13 +624,9 @@ pub async fn capture_live_dom(cfg: &AppConfig, options: LiveDomCaptureOptions) -
     }
     let client = Client::new();
     let tokens = authenticate(&client, cfg).await?;
-    let contract = resolve_dom_capture_contract(
-        &client,
-        &cfg.env,
-        &tokens.access_token,
-        &options.contract,
-    )
-    .await?;
+    let contract =
+        resolve_dom_capture_contract(&client, &cfg.env, &tokens.access_token, &options.contract)
+            .await?;
 
     let ws_config = WebSocketConfig {
         write_buffer_size: 0,
@@ -452,16 +858,10 @@ fn normalize_captured_dom(snapshot: &mut ReplayMarketDom) -> Result<()> {
         bail!("DOM snapshot timestamp must be positive");
     }
     snapshot.bids.retain(|level| {
-        level.price.is_finite()
-            && level.price > 0.0
-            && level.size.is_finite()
-            && level.size > 0.0
+        level.price.is_finite() && level.price > 0.0 && level.size.is_finite() && level.size > 0.0
     });
     snapshot.asks.retain(|level| {
-        level.price.is_finite()
-            && level.price > 0.0
-            && level.size.is_finite()
-            && level.size > 0.0
+        level.price.is_finite() && level.price > 0.0 && level.size.is_finite() && level.size > 0.0
     });
     snapshot
         .bids
@@ -517,6 +917,250 @@ fn parse_replay_clock_timestamp(item: &Value) -> Option<i64> {
     }
 }
 
+fn parse_replay_clock_speed(item: &Value) -> Option<u16> {
+    if item.get("e").and_then(Value::as_str) != Some("clock") {
+        return None;
+    }
+    let raw = item.get("d")?;
+    let clock = raw
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .or_else(|| raw.as_object().cloned().map(Value::Object))?;
+    u16::try_from(clock.get("s")?.as_u64()?).ok()
+}
+
+#[cfg(feature = "replay")]
+fn hosted_replay_items_from_message(message: Message) -> Result<Option<Vec<Value>>> {
+    let raw = match message {
+        Message::Text(text) => text.to_string(),
+        Message::Binary(bytes) => {
+            String::from_utf8(bytes.to_vec()).context("decode hosted replay websocket frame")?
+        }
+        Message::Close(_) => return Ok(None),
+        _ => return Ok(Some(Vec::new())),
+    };
+    let (frame_type, payload) = parse_frame(&raw);
+    match frame_type {
+        'a' => {
+            let payload = payload.context("malformed hosted Market Replay array frame")?;
+            let items = payload
+                .as_array()
+                .context("malformed hosted Market Replay array frame payload")?;
+            Ok(Some(items.clone()))
+        }
+        'h' | 'o' => Ok(Some(Vec::new())),
+        'c' => Ok(None),
+        _ => bail!("malformed hosted Market Replay websocket frame"),
+    }
+}
+
+#[cfg(feature = "replay")]
+fn hosted_replay_window_complete(replay_clock_ns: Option<i64>, end_ns: i64) -> bool {
+    replay_clock_ns.is_some_and(|timestamp| timestamp >= end_ns)
+}
+
+#[cfg(feature = "replay")]
+fn ensure_hosted_replay_window_complete(
+    replay_clock_ns: Option<i64>,
+    end_ns: i64,
+    stop_reason: &str,
+) -> Result<()> {
+    if hosted_replay_window_complete(replay_clock_ns, end_ns) {
+        return Ok(());
+    }
+    let requested_end = DateTime::<Utc>::from_timestamp_nanos(end_ns).to_rfc3339();
+    let last_clock = replay_clock_ns
+        .map(|timestamp| DateTime::<Utc>::from_timestamp_nanos(timestamp).to_rfc3339())
+        .unwrap_or_else(|| "not reported".to_string());
+    bail!(
+        "hosted Market Replay capture incomplete: {stop_reason} before the requested end-exclusive time {requested_end}; last replay clock was {last_clock}. Partial data was discarded"
+    );
+}
+
+#[cfg(feature = "replay")]
+fn collect_hosted_quote_ticks(
+    item: &Value,
+    contract_id: i64,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    states: &mut std::collections::HashMap<i64, HostedQuoteState>,
+    ticks: &mut Vec<crate::replay_cache::ReplayCacheRawTickRow>,
+    diagnostics: &mut HostedReplayQuoteDiagnostics,
+) -> Result<()> {
+    if item.get("e").and_then(Value::as_str) != Some("md") {
+        return Ok(());
+    }
+    diagnostics.md_items = diagnostics.md_items.saturating_add(1);
+    let Some(data) = item.get("d") else {
+        diagnostics.md_items_without_quote_array =
+            diagnostics.md_items_without_quote_array.saturating_add(1);
+        return Ok(());
+    };
+    let Some(quotes) = data
+        .get("quotes")
+        .and_then(Value::as_array)
+        .or_else(|| data.get("q").and_then(Value::as_array))
+    else {
+        diagnostics.md_items_without_quote_array =
+            diagnostics.md_items_without_quote_array.saturating_add(1);
+        return Ok(());
+    };
+    for quote in quotes {
+        diagnostics.quote_rows = diagnostics.quote_rows.saturating_add(1);
+        let Some(id) = quote
+            .get("contractId")
+            .or_else(|| quote.get("id"))
+            .and_then(Value::as_i64)
+        else {
+            diagnostics.quote_rows_without_contract_id =
+                diagnostics.quote_rows_without_contract_id.saturating_add(1);
+            continue;
+        };
+        if id != contract_id {
+            diagnostics.quote_rows_other_contract =
+                diagnostics.quote_rows_other_contract.saturating_add(1);
+            continue;
+        }
+        diagnostics.matching_contract_rows = diagnostics.matching_contract_rows.saturating_add(1);
+        let state = states.entry(id).or_default();
+        let entries = quote.get("entries");
+        let bid = entries.and_then(|entries| entries.get("Bid"));
+        let offer = entries.and_then(|entries| entries.get("Offer"));
+        state.bid_price = quote
+            .get("bid")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                bid.and_then(|entry| entry.get("price").or_else(|| entry.get("Price")))
+                    .and_then(Value::as_f64)
+            })
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .or(state.bid_price);
+        state.bid_size = quote
+            .get("bs")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                bid.and_then(|entry| entry.get("size").or_else(|| entry.get("Size")))
+                    .and_then(Value::as_f64)
+            })
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .or(state.bid_size);
+        state.ask_price = quote
+            .get("ask")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                offer
+                    .and_then(|entry| entry.get("price").or_else(|| entry.get("Price")))
+                    .and_then(Value::as_f64)
+            })
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .or(state.ask_price);
+        state.ask_size = quote
+            .get("as")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                offer
+                    .and_then(|entry| entry.get("size").or_else(|| entry.get("Size")))
+                    .and_then(Value::as_f64)
+            })
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .or(state.ask_size);
+
+        let trade = entries.and_then(|entries| entries.get("Trade"));
+        let has_trade_values = if entries.is_some() {
+            trade.is_some()
+        } else {
+            quote.get("last").is_some() || quote.get("ls").is_some()
+        };
+        if has_trade_values {
+            diagnostics.trade_rows = diagnostics.trade_rows.saturating_add(1);
+        }
+        let (price, size) = if entries.is_some() {
+            let Some(trade) = trade else {
+                continue;
+            };
+            (
+                trade
+                    .get("price")
+                    .or_else(|| trade.get("Price"))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && *value > 0.0),
+                trade
+                    .get("size")
+                    .or_else(|| trade.get("Size"))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && *value > 0.0),
+            )
+        } else {
+            (
+                quote
+                    .get("last")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && *value > 0.0),
+                quote
+                    .get("ls")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && *value > 0.0),
+            )
+        };
+        let (Some(price), Some(size)) = (price, size) else {
+            if has_trade_values {
+                diagnostics.trade_rows_without_valid_values =
+                    diagnostics.trade_rows_without_valid_values.saturating_add(1);
+            }
+            continue;
+        };
+        let raw_timestamp = quote.get("timestamp").or_else(|| quote.get("t"));
+        let timestamp = raw_timestamp.and_then(|raw| {
+            if let Some(value) = raw.as_str() {
+                DateTime::parse_from_rfc3339(value)
+                    .ok()
+                    .map(|value| value.with_timezone(&Utc))
+            } else {
+                raw.as_i64().and_then(|value| {
+                    let millis = if value.unsigned_abs() < 100_000_000_000 {
+                        value.checked_mul(1_000)
+                    } else {
+                        Some(value)
+                    }?;
+                    DateTime::<Utc>::from_timestamp_millis(millis)
+                })
+            }
+        });
+        let Some(timestamp) = timestamp else {
+            diagnostics.trade_rows_without_timestamp =
+                diagnostics.trade_rows_without_timestamp.saturating_add(1);
+            continue;
+        };
+        if timestamp < start || timestamp >= end {
+            diagnostics.trade_rows_outside_window =
+                diagnostics.trade_rows_outside_window.saturating_add(1);
+            continue;
+        }
+        let ts_ns = timestamp
+            .timestamp_nanos_opt()
+            .context("hosted replay quote timestamp is outside nanosecond range")?;
+        let next_id = i64::try_from(ticks.len().saturating_add(1)).unwrap_or(i64::MAX);
+        ticks.push(crate::replay_cache::ReplayCacheRawTickRow {
+            timestamp,
+            ts_ns,
+            tick_id: Some(next_id),
+            price,
+            size,
+            bid_price: state.bid_price,
+            bid_size: state.bid_size,
+            ask_price: state.ask_price,
+            ask_size: state.ask_size,
+            chart_id: None,
+            trade_date: timestamp.format("%Y%m%d").to_string().parse::<i32>().ok(),
+            packet_source: Some("hosted_market_replay_quote".to_string()),
+            packet_base_ts_ms: None,
+            packet_base_price_ticks: None,
+        });
+        diagnostics.valid_trade_ticks = diagnostics.valid_trade_ticks.saturating_add(1);
+    }
+    Ok(())
+}
+
 fn parse_dom_capture_timestamp(raw: &str, label: &str) -> Result<DateTime<Utc>> {
     let raw = raw.trim();
     if let Ok(timestamp) = DateTime::parse_from_rfc3339(raw) {
@@ -565,7 +1209,10 @@ fn write_dom_jsonl(
     if snapshots.is_empty() {
         bail!("DOM capture produced no usable snapshots; no output file was written");
     }
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut file = if overwrite {
@@ -678,5 +1325,204 @@ mod tests {
                     .unwrap()
             )
         );
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn hosted_replay_quote_parser_builds_sampled_raw_tick_with_quote_context() {
+        let item = serde_json::json!({
+            "e": "md",
+            "d": {
+                "q": [
+                    {"id": 99, "t": 1793466000123_i64, "last": 5400.25, "ls": 3.0,
+                     "bid": 5400.0, "bs": 12.0, "ask": 5400.25, "as": 7.0},
+                    {"id": 100, "t": 1793466000123_i64, "last": 1.0, "ls": 1.0}
+                ]
+            }
+        });
+        let start = DateTime::<Utc>::from_timestamp_millis(1793466000000).unwrap();
+        let end = start + chrono::Duration::minutes(1);
+        let mut states = std::collections::HashMap::new();
+        let mut ticks = Vec::new();
+        let mut diagnostics = HostedReplayQuoteDiagnostics::default();
+        collect_hosted_quote_ticks(
+            &item,
+            99,
+            start,
+            end,
+            &mut states,
+            &mut ticks,
+            &mut diagnostics,
+        )
+            .expect("collect quote tick");
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].price, 5400.25);
+        assert_eq!(ticks[0].size, 3.0);
+        assert_eq!(ticks[0].bid_price, Some(5400.0));
+        assert_eq!(ticks[0].ask_price, Some(5400.25));
+        assert_eq!(ticks[0].tick_id, Some(1));
+        assert_eq!(
+            ticks[0].packet_source.as_deref(),
+            Some("hosted_market_replay_quote")
+        );
+        assert_eq!(diagnostics.md_items, 1);
+        assert_eq!(diagnostics.quote_rows, 2);
+        assert_eq!(diagnostics.matching_contract_rows, 1);
+        assert_eq!(diagnostics.quote_rows_other_contract, 1);
+        assert_eq!(diagnostics.valid_trade_ticks, 1);
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn hosted_replay_quote_parser_accepts_official_quotes_entries_and_rfc3339_timestamps() {
+        let start = parse_dom_capture_timestamp("2026-07-31T15:00:00Z", "start").unwrap();
+        let end = start + chrono::Duration::minutes(1);
+        let mut states = std::collections::HashMap::new();
+        let mut ticks = Vec::new();
+        let mut diagnostics = HostedReplayQuoteDiagnostics::default();
+        let bid_offer_update = serde_json::json!({
+            "e": "md",
+            "d": {"quotes": [{
+                "contractId": 99,
+                "timestamp": "2026-07-31T15:00:00.100000000Z",
+                "entries": {
+                    "Bid": {"price": 5400.0, "size": 12.0},
+                    "Offer": {"price": 5400.25, "size": 7.0}
+                }
+            }]}
+        });
+        collect_hosted_quote_ticks(
+            &bid_offer_update,
+            99,
+            start,
+            end,
+            &mut states,
+            &mut ticks,
+            &mut diagnostics,
+        )
+        .expect("collect bid/offer context");
+        assert!(ticks.is_empty(), "bid/offer updates are not trade ticks");
+
+        let trade_update = serde_json::json!({
+            "e": "md",
+            "d": {"quotes": [
+                {
+                    "contractId": 99,
+                    "timestamp": "2026-07-31T11:00:00.123456789-04:00",
+                    "entries": {"Trade": {"price": 5400.25, "size": 3.0}}
+                },
+                {
+                    "contractId": 100,
+                    "timestamp": "2026-07-31T15:00:00.123456789Z",
+                    "entries": {"Trade": {"Price": 1.0, "Size": 1.0}}
+                },
+                {
+                    "contractId": 99,
+                    "timestamp": "2026-07-31T15:00:00.223456789Z",
+                    "entries": {
+                        "Bid": {"Price": 5400.25, "Size": 10.0},
+                        "Offer": {"Price": 5400.5, "Size": 8.0},
+                        "Trade": {"Price": 5400.5, "Size": 2.0}
+                    }
+                }
+            ]}
+        });
+        collect_hosted_quote_ticks(
+            &trade_update,
+            99,
+            start,
+            end,
+            &mut states,
+            &mut ticks,
+            &mut diagnostics,
+        )
+        .expect("collect official trade tick");
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].price, 5400.25);
+        assert_eq!(ticks[0].size, 3.0);
+        assert_eq!(
+            ticks[0].ts_ns,
+            parse_dom_capture_timestamp("2026-07-31T15:00:00.123456789Z", "quote")
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap()
+        );
+        assert_eq!(ticks[0].bid_price, Some(5400.0));
+        assert_eq!(ticks[0].bid_size, Some(12.0));
+        assert_eq!(diagnostics.quote_rows, 4);
+        assert_eq!(diagnostics.matching_contract_rows, 3);
+        assert_eq!(diagnostics.quote_rows_other_contract, 1);
+        assert_eq!(diagnostics.trade_rows, 2);
+        assert_eq!(diagnostics.trade_rows_outside_window, 0);
+        assert_eq!(diagnostics.valid_trade_ticks, 2);
+        assert_eq!(ticks[0].ask_price, Some(5400.25));
+        assert_eq!(ticks[0].ask_size, Some(7.0));
+        assert_eq!(ticks[1].price, 5400.5);
+        assert_eq!(ticks[1].size, 2.0);
+        assert_eq!(ticks[1].bid_price, Some(5400.25));
+        assert_eq!(ticks[1].bid_size, Some(10.0));
+        assert_eq!(ticks[1].ask_price, Some(5400.5));
+        assert_eq!(ticks[1].ask_size, Some(8.0));
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn hosted_replay_window_requires_clock_at_or_past_exclusive_end() {
+        let end = parse_dom_capture_timestamp("2026-07-31T15:01:00Z", "end")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        assert!(!hosted_replay_window_complete(None, end));
+        assert!(!hosted_replay_window_complete(Some(end - 1), end));
+        assert!(hosted_replay_window_complete(Some(end), end));
+        assert!(hosted_replay_window_complete(Some(end + 1), end));
+
+        let error = ensure_hosted_replay_window_complete(
+            Some(end - 1),
+            end,
+            "provider closed the websocket",
+        )
+        .expect_err("an early close cannot complete a hosted capture")
+        .to_string();
+        assert!(error.contains("capture incomplete"));
+        assert!(error.contains("end-exclusive time"));
+        assert!(error.contains("provider closed the websocket"));
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn hosted_replay_stream_parser_rejects_malformed_array_frames() {
+        let error = hosted_replay_items_from_message(Message::Text("a{".into()))
+            .expect_err("malformed stream must fail before caching")
+            .to_string();
+        assert!(error.contains("malformed hosted Market Replay array frame"));
+    }
+
+    #[test]
+    fn replay_clock_speed_accepts_provider_string_payload() {
+        let item = serde_json::json!({
+            "e": "clock",
+            "d": "{\"t\":\"2026-07-31T15:00:00.000Z\",\"s\":200}"
+        });
+        assert_eq!(parse_replay_clock_speed(&item), Some(200));
+    }
+
+    #[test]
+    fn replay_socket_uses_dynamic_host_from_token_file_when_available() {
+        let path =
+            std::env::temp_dir().join(format!("trader-replay-host-{}.json", std::process::id()));
+        fs::write(
+            &path,
+            r#"{"token":"redacted-test-token","apiHosts":{"replay":"replay.org.example"}}"#,
+        )
+        .expect("write token host fixture");
+        let mut config = AppConfig::default();
+        config.token_path = path.clone();
+        assert_eq!(
+            replay_ws_url(&config),
+            "wss://replay.org.example/v1/websocket"
+        );
+        fs::remove_file(path).expect("remove token host fixture");
     }
 }

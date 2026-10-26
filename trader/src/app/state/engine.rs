@@ -13,8 +13,14 @@ impl App {
             .iter()
             .find(|summary| &summary.key == key)
             .and_then(EngineSummary::session_kind)
-            .filter(|session_kind| *session_kind == SessionKind::Replay)
-            .map(|_| EngineCreateMode::Replay)
+            .filter(|session_kind| session_kind.is_replay())
+            .map(|session_kind| {
+                if session_kind.is_ninjatrader_replay() {
+                    EngineCreateMode::LiveReplay
+                } else {
+                    EngineCreateMode::Replay
+                }
+            })
             .unwrap_or(EngineCreateMode::Broker)
     }
 

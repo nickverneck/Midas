@@ -12,6 +12,28 @@ impl App {
         self.focus = Focus::ReplayDownloadInstrument;
     }
 
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn open_ninjatrader_stream_setup(&mut self) {
+        if self.retain_active_replay_downloader() {
+            self.status =
+                "Finish or cancel the active download before opening Stream Replay.".to_string();
+            return;
+        }
+        let config = self.current_config();
+        let mut replay_setup = ReplayDownloaderState::new(&config);
+        replay_setup.ninja_stream = true;
+        replay_setup.replay_speed_percent = 100;
+        replay_setup.end_date.clear();
+        replay_setup.end_time_utc.clear();
+        replay_setup.phase = ReplayDownloadPhase::Ready;
+        replay_setup.phase_message =
+            "Stream starts paused. Choose a strategy and explicitly arm it to begin.".to_string();
+        self.replay_downloader = replay_setup;
+        self.replay_view = ReplayView::StreamSetup;
+        self.focus = Focus::ReplayDownloadInstrument;
+        self.status = "Configure direct NinjaTrader Stream Replay. This streams into NinjaTrader's hosted Replay account.".to_string();
+    }
+
     #[cfg(not(feature = "replay"))]
     pub(in crate::app) fn open_new_replay_downloader(&mut self) {
         self.status = "Replay downloader requires a replay-enabled build.".to_string();
@@ -208,6 +230,17 @@ impl App {
                     edit_string(&mut self.replay_downloader.start_date, key);
                 }
             }
+            Focus::ReplayDownloadStartTime => {
+                if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) {
+                    self.focus = if key.code == KeyCode::Up {
+                        self.prev_replay_focus()
+                    } else {
+                        self.next_replay_focus()
+                    };
+                } else {
+                    edit_string(&mut self.replay_downloader.start_time_utc, key);
+                }
+            }
             Focus::ReplayDownloadEnd => {
                 if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) {
                     self.focus = if key.code == KeyCode::Up {
@@ -219,12 +252,56 @@ impl App {
                     edit_string(&mut self.replay_downloader.end_date, key);
                 }
             }
+            Focus::ReplayDownloadEndTime => {
+                if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) {
+                    self.focus = if key.code == KeyCode::Up {
+                        self.prev_replay_focus()
+                    } else {
+                        self.next_replay_focus()
+                    };
+                } else {
+                    edit_string(&mut self.replay_downloader.end_time_utc, key);
+                }
+            }
+            Focus::ReplayInitialCapital => {
+                if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) {
+                    self.focus = if key.code == KeyCode::Up {
+                        self.prev_replay_focus()
+                    } else {
+                        self.next_replay_focus()
+                    };
+                } else {
+                    let _ = edit_strategy_float(
+                        &mut self.strategy_numeric_input,
+                        Focus::ReplayInitialCapital,
+                        &mut self.base_config.replay_initial_capital,
+                        key,
+                        1.0,
+                        1_000.0,
+                    );
+                }
+            }
             Focus::ReplayDownloadSource => match key.code {
+                KeyCode::Left => self.replay_downloader.cycle_source(false),
+                KeyCode::Right => self.replay_downloader.cycle_source(true),
+                KeyCode::Up => self.focus = self.prev_replay_focus(),
+                KeyCode::Down | KeyCode::Enter => self.focus = self.next_replay_focus(),
+                _ => {}
+            },
+            Focus::ReplayDownloadSpeed => match key.code {
                 KeyCode::Left => {
-                    self.replay_downloader.source_kind = Some(ReplayCacheSourceKind::ServerBars)
+                    if self.replay_downloader.ninja_stream {
+                        self.replay_downloader.adjust_stream_speed(false);
+                    } else {
+                        self.replay_downloader.adjust_hosted_speed(false);
+                    }
                 }
                 KeyCode::Right => {
-                    self.replay_downloader.source_kind = Some(ReplayCacheSourceKind::RawTicks)
+                    if self.replay_downloader.ninja_stream {
+                        self.replay_downloader.adjust_stream_speed(true);
+                    } else {
+                        self.replay_downloader.adjust_hosted_speed(true);
+                    }
                 }
                 KeyCode::Up => self.focus = self.prev_replay_focus(),
                 KeyCode::Down | KeyCode::Enter => self.focus = self.next_replay_focus(),
@@ -391,6 +468,10 @@ impl App {
 
     #[cfg(feature = "replay")]
     fn submit_replay_download(&mut self, cmd_tx: &ServiceCommandSender) {
+        if self.replay_downloader.ninja_stream {
+            self.submit_ninjatrader_stream(cmd_tx);
+            return;
+        }
         let Some(contract) = self.replay_downloader.exact_contract.clone() else {
             self.replay_downloader.phase = ReplayDownloadPhase::Failed;
             self.replay_downloader.phase_message =
@@ -407,9 +488,17 @@ impl App {
         let Some(source_kind) = self.replay_downloader.source_kind else {
             self.replay_downloader.phase = ReplayDownloadPhase::Failed;
             self.replay_downloader.phase_message =
-                "Choose server bars or raw ticks explicitly.".to_string();
+                "Choose server bars, raw ticks, or hosted Market Replay explicitly.".to_string();
             return;
         };
+        if self.replay_downloader.hosted_market_replay
+            && !(25..=400).contains(&self.replay_downloader.replay_speed_percent)
+        {
+            self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+            self.replay_downloader.phase_message =
+                "Hosted Market Replay speed must be between 25% and 400%.".to_string();
+            return;
+        }
         let start_date = match chrono::NaiveDate::parse_from_str(
             self.replay_downloader.start_date.trim(),
             "%Y-%m-%d",
@@ -433,6 +522,44 @@ impl App {
                     "End date must use YYYY-MM-DD and be on or after start.".to_string();
                 return;
             }
+        };
+        let (start_time_utc, end_time_utc) = if self.replay_downloader.hosted_market_replay {
+            let start_time = match chrono::NaiveTime::parse_from_str(
+                self.replay_downloader.start_time_utc.trim(),
+                "%H:%M",
+            ) {
+                Ok(time) => time,
+                Err(_) => {
+                    self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                    self.replay_downloader.phase_message =
+                        "Hosted start time must use 24-hour HH:MM UTC.".to_string();
+                    return;
+                }
+            };
+            let end_time = match chrono::NaiveTime::parse_from_str(
+                self.replay_downloader.end_time_utc.trim(),
+                "%H:%M",
+            ) {
+                Ok(time) => time,
+                Err(_) => {
+                    self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                    self.replay_downloader.phase_message =
+                        "Hosted end time must use 24-hour HH:MM UTC.".to_string();
+                    return;
+                }
+            };
+            let start_at = start_date.and_time(start_time);
+            let end_at = end_date.and_time(end_time);
+            if end_at <= start_at {
+                self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                self.replay_downloader.phase_message =
+                    "Hosted end UTC date/time must be after the start; the end is exclusive."
+                        .to_string();
+                return;
+            }
+            (Some(start_time), Some(end_time))
+        } else {
+            (None, None)
         };
         let instrument = self.replay_downloader.instrument_query.trim().to_string();
         if instrument.is_empty() {
@@ -466,7 +593,14 @@ impl App {
             target: self.replay_downloader.target.clone(),
             start_date,
             end_date,
-            source_kind: source_kind.badge().to_string(),
+            start_time_utc,
+            end_time_utc,
+            source_kind: if self.replay_downloader.hosted_market_replay {
+                "hosted-market-replay".to_string()
+            } else {
+                source_kind.badge().to_string()
+            },
+            replay_speed: self.replay_downloader.replay_speed_percent,
             bar_type: self.replay_downloader.bar_type,
             candle_mode: self.replay_downloader.candle_mode,
             display_name: (!display_name.is_empty()).then_some(display_name),
@@ -476,6 +610,113 @@ impl App {
         self.replay_downloader.phase_message = "Download queued; authenticating...".to_string();
         self.replay_downloader.actual_rows = None;
         self.replay_downloader.actual_bytes = None;
+    }
+
+    #[cfg(feature = "replay")]
+    fn submit_ninjatrader_stream(&mut self, cmd_tx: &ServiceCommandSender) {
+        let Some(contract) = self.replay_downloader.exact_contract.clone() else {
+            self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+            self.replay_downloader.phase_message =
+                "Search for and select an exact contract before starting Stream Replay."
+                    .to_string();
+            return;
+        };
+        let start_date = match chrono::NaiveDate::parse_from_str(
+            self.replay_downloader.start_date.trim(),
+            "%Y-%m-%d",
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                self.replay_downloader.phase_message =
+                    "Start date must use YYYY-MM-DD (UTC).".to_string();
+                return;
+            }
+        };
+        let start_time = match chrono::NaiveTime::parse_from_str(
+            self.replay_downloader.start_time_utc.trim(),
+            "%H:%M",
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                self.replay_downloader.phase_message =
+                    "Start time must use 24-hour HH:MM (UTC).".to_string();
+                return;
+            }
+        };
+        let start = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            start_date.and_time(start_time),
+            chrono::Utc,
+        );
+        let end_date_text = self.replay_downloader.end_date.trim();
+        let end_time_text = self.replay_downloader.end_time_utc.trim();
+        let end = if end_date_text.is_empty() && end_time_text.is_empty() {
+            None
+        } else if end_date_text.is_empty() || end_time_text.is_empty() {
+            self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+            self.replay_downloader.phase_message = "Set both end fields for a timed Replay end, or leave both blank to stream until Stop.".to_string();
+            return;
+        } else {
+            let end_date = match chrono::NaiveDate::parse_from_str(end_date_text, "%Y-%m-%d") {
+                Ok(value) => value,
+                Err(_) => {
+                    self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                    self.replay_downloader.phase_message = "Optional end date must use YYYY-MM-DD (UTC); set both end fields or leave both blank.".to_string();
+                    return;
+                }
+            };
+            let end_time = match chrono::NaiveTime::parse_from_str(end_time_text, "%H:%M") {
+                Ok(value) => value,
+                Err(_) => {
+                    self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                    self.replay_downloader.phase_message = "Optional end time must use 24-hour HH:MM (UTC); set both end fields or leave both blank.".to_string();
+                    return;
+                }
+            };
+            let end = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                end_date.and_time(end_time),
+                chrono::Utc,
+            );
+            if end <= start {
+                self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                self.replay_downloader.phase_message =
+                    "Optional end time must be after the start (exclusive).".to_string();
+                return;
+            }
+            Some(end)
+        };
+        let config = self.current_config();
+        let mut config = config;
+        config.broker = self.replay_downloader.provider;
+        config.env = self.replay_downloader.env;
+        let speed = match NinjaTraderReplaySpeed::new(self.replay_downloader.replay_speed_percent) {
+            Ok(speed) => speed,
+            Err(message) => {
+                self.replay_downloader.phase = ReplayDownloadPhase::Failed;
+                self.replay_downloader.phase_message = message;
+                return;
+            }
+        };
+        let start_paused = NinjaTraderReplaySpeed::new(0).expect("0 is a supported Replay speed");
+        self.ninja_replay_resume_speed = Some(speed);
+        let _ = cmd_tx.send(ServiceCommand::EnterNinjaTraderReplay {
+            config,
+            contract,
+            start,
+            end,
+            speed: start_paused,
+            initial_balance: self.base_config.replay_initial_capital,
+            bar_type: self.replay_downloader.bar_type,
+            candle_mode: self.replay_downloader.candle_mode,
+        });
+        self.replay_downloader.phase = ReplayDownloadPhase::Authenticating;
+        self.replay_downloader.phase_message = format!(
+            "Starting the Replay clock paused. Strategy: {}. After you explicitly arm, speed will move to {}%.",
+            self.strategy.summary_label(),
+            speed.percent()
+        );
+        self.status = self.replay_downloader.phase_message.clone();
     }
 
     #[cfg(feature = "replay")]

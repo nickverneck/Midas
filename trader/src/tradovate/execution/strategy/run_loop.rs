@@ -478,6 +478,8 @@ pub(crate) fn maybe_run_execution_strategy(
         // itself only needs its bounded rolling suffix. Legacy mode remains
         // below as the exact reference path.
         let config = session.execution_config.native_hma_cross.clone();
+        let source_update_sequence = session.execution_runtime.market_update_sequence;
+        let market_update = session.execution_runtime.market_update_kind;
         let mut hma_runtime = std::mem::take(&mut session.execution_runtime.hma_cross_execution);
         let result = {
             let bars = signal_evaluation_bars(session);
@@ -492,6 +494,8 @@ pub(crate) fn maybe_run_execution_strategy(
                 current_qty,
                 previous_strategy_ts,
                 session.cfg.log_mode != crate::config::LogMode::Quiet,
+                source_update_sequence,
+                market_update,
             )
         };
         session.execution_runtime.hma_cross_execution = hma_runtime;
@@ -501,11 +505,15 @@ pub(crate) fn maybe_run_execution_strategy(
         if bars.is_empty() {
             bail!("latest strategy bar disappeared during strategy evaluation");
         }
+        let source_update_sequence = session.execution_runtime.market_update_sequence;
+        let market_update = session.execution_runtime.market_update_kind;
         evaluate_active_execution_strategy_since_mut(
             session,
             &bars,
             current_qty,
             previous_strategy_ts,
+            source_update_sequence,
+            market_update,
         )
     };
     let protection_bar = strategy_bars(session)

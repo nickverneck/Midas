@@ -1,6 +1,40 @@
 use super::*;
 
 #[cfg(feature = "replay")]
+fn compose_replay_download_window(
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
+    start_time_utc: Option<chrono::NaiveTime>,
+    end_time_utc: Option<chrono::NaiveTime>,
+) -> anyhow::Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
+    use chrono::NaiveTime;
+
+    if end_date < start_date {
+        anyhow::bail!("download end date cannot be before start date");
+    }
+    let (start_at, end_at) = match (start_time_utc, end_time_utc) {
+        (Some(start_time), Some(end_time)) => {
+            (start_date.and_time(start_time), end_date.and_time(end_time))
+        }
+        // Older clients sent inclusive dates only. Preserve their original
+        // full UTC day range when replay commands omit the new time fields.
+        _ => {
+            let end_exclusive_date = end_date
+                .succ_opt()
+                .context("download end date overflowed")?;
+            (
+                start_date.and_time(NaiveTime::MIN),
+                end_exclusive_date.and_time(NaiveTime::MIN),
+            )
+        }
+    };
+    if start_at >= end_at {
+        anyhow::bail!("download end UTC date/time must be after its start");
+    }
+    Ok((start_at.and_utc(), end_at.and_utc()))
+}
+
+#[cfg(feature = "replay")]
 pub(in crate::tradovate::service) async fn replace_replay_lookup(state: &mut ServiceState) {
     if let Some(previous) = state.replay_lookup_job.take() {
         previous.task.abort();
@@ -119,7 +153,10 @@ pub(super) async fn download_replay_data(
     target: Option<ReplayDownloadCacheTarget>,
     start_date: chrono::NaiveDate,
     end_date: chrono::NaiveDate,
+    start_time_utc: Option<chrono::NaiveTime>,
+    end_time_utc: Option<chrono::NaiveTime>,
     source_kind: String,
+    replay_speed: u16,
     bar_type: BarType,
     candle_mode: CandleMode,
     display_name: Option<String>,
@@ -146,7 +183,10 @@ pub(super) async fn download_replay_data(
             target,
             start_date,
             end_date,
+            start_time_utc,
+            end_time_utc,
             source_kind,
+            replay_speed,
             bar_type,
             candle_mode,
             display_name,
@@ -170,42 +210,34 @@ pub(super) async fn download_replay_data(
                 anyhow::anyhow!("download end date cannot be before start date"),
             ));
         }
-        let start = Utc
-            .with_ymd_and_hms(
-                start_date.year(),
-                start_date.month(),
-                start_date.day(),
-                0,
-                0,
-                0,
-            )
-            .single()
-            .context("compose download start date")
-            .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
-        let end_exclusive_date = end_date
-            .succ_opt()
-            .context("download end date overflowed")
-            .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
-        let end = Utc
-            .with_ymd_and_hms(
-                end_exclusive_date.year(),
-                end_exclusive_date.month(),
-                end_exclusive_date.day(),
-                0,
-                0,
-                0,
-            )
-            .single()
-            .context("compose download end date")
-            .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
-        let source_kind = match source_kind.as_str() {
-            "server-bars" => ReplayCacheSourceKind::ServerBars,
-            "raw-ticks" => ReplayCacheSourceKind::RawTicks,
-            other => {
-                return Err((
-                    ReplayDownloadPhase::Ready,
-                    anyhow::anyhow!("unsupported replay download source kind: {other}"),
-                ));
+        let hosted_market_replay = source_kind == "hosted-market-replay";
+        let (start, end) = compose_replay_download_window(
+            start_date,
+            end_date,
+            if hosted_market_replay {
+                start_time_utc
+            } else {
+                None
+            },
+            if hosted_market_replay {
+                end_time_utc
+            } else {
+                None
+            },
+        )
+        .map_err(|err| (ReplayDownloadPhase::Ready, err))?;
+        let source_kind = if hosted_market_replay {
+            ReplayCacheSourceKind::RawTicks
+        } else {
+            match source_kind.as_str() {
+                "server-bars" => ReplayCacheSourceKind::ServerBars,
+                "raw-ticks" => ReplayCacheSourceKind::RawTicks,
+                other => {
+                    return Err((
+                        ReplayDownloadPhase::Ready,
+                        anyhow::anyhow!("unsupported replay download source kind: {other}"),
+                    ));
+                }
             }
         };
 
@@ -213,14 +245,138 @@ pub(super) async fn download_replay_data(
             operation_id,
             phase: ReplayDownloadPhase::Authenticating,
             message: format!(
-                "Authenticating for {} {} {} to {}.",
-                instrument, contract.name, start_date, end_date
+                "Authenticating for {} {} from {} to {} UTC (end exclusive).",
+                instrument,
+                contract.name,
+                start.to_rfc3339(),
+                end.to_rfc3339()
             ),
             estimated_rows: None,
             estimated_bytes: None,
         });
 
-        if source_kind == ReplayCacheSourceKind::ServerBars {
+        if hosted_market_replay {
+            let authenticated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let authenticated_callback = authenticated.clone();
+            let progress_tx = event_tx.clone();
+            let replay_progress_tx = event_tx.clone();
+            let capture = crate::tradovate::capture_hosted_replay_quotes(
+                &cfg,
+                contract,
+                start,
+                end,
+                replay_speed,
+                move || {
+                    authenticated_callback.store(true, std::sync::atomic::Ordering::Release);
+                    let _ = progress_tx.send(ServiceEvent::ReplayDownloadProgress {
+                        operation_id,
+                        phase: ReplayDownloadPhase::Downloading,
+                        message: format!(
+                            "Authenticated; resolving the contract and preparing Market Replay at {replay_speed}%."
+                        ),
+                        estimated_rows: None,
+                        estimated_bytes: None,
+                    });
+                },
+                move |replay_at, sampled_quotes| {
+                    let _ = replay_progress_tx.send(ServiceEvent::ReplayDownloadProgress {
+                        operation_id,
+                        phase: ReplayDownloadPhase::Downloading,
+                        message: format!(
+                            "Market Replay {} / {} UTC · {sampled_quotes} sampled quotes.",
+                            replay_at.format("%H:%M:%S"),
+                            end.format("%H:%M:%S")
+                        ),
+                        estimated_rows: None,
+                        estimated_bytes: None,
+                    });
+                },
+            );
+            tokio::pin!(capture);
+            let capture = tokio::select! {
+                biased;
+                _ = wait_for_replay_download_cancellation(&mut cancel_rx) => {
+                    return Err((
+                        ReplayDownloadPhase::Cancelled,
+                        anyhow::anyhow!("hosted Market Replay capture cancelled; the replay socket was closed"),
+                    ));
+                }
+                result = &mut capture => result,
+            }
+            .map_err(|err| {
+                let phase = if authenticated.load(std::sync::atomic::Ordering::Acquire) {
+                    ReplayDownloadPhase::Downloading
+                } else {
+                    ReplayDownloadPhase::Authenticating
+                };
+                (phase, err)
+            })?;
+            begin_replay_cache_commit(&stage)?;
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadProgress {
+                operation_id,
+                phase: ReplayDownloadPhase::WritingCache,
+                message: format!(
+                    "Writing {} sampled quote updates to the replay cache...",
+                    capture.ticks.len()
+                ),
+                estimated_rows: None,
+                estimated_bytes: None,
+            });
+            let write = ReplayCacheRawTicksWrite {
+                cache_root: cfg.replay_cache_dir.clone(),
+                target,
+                provider: cfg.broker,
+                env: cfg.env,
+                instrument: ReplayCacheInstrument {
+                    symbol: instrument,
+                    name: None,
+                    exchange: None,
+                },
+                contract: ReplayCacheContract {
+                    symbol: capture.contract.name,
+                    id: Some(capture.contract.id),
+                    expiration: None,
+                },
+                request_start: start,
+                request_end: end,
+                download_request: serde_json::json!({
+                    "source": "ninjatrader_hosted_market_replay",
+                    "startTimestamp": start.to_rfc3339(),
+                    "endTimestampExclusive": end.to_rfc3339(),
+                    "speedPercent": replay_speed,
+                    "contractId": capture.contract.id,
+                    "quoteChannel": "md/subscribeQuote",
+                    "tradeSemantics": "sampled_last_trade_quote_updates",
+                }),
+                tick_specs: capture.tick_specs,
+                contract_metadata: Some(capture.contract_metadata),
+                session_template: capture.session_template,
+                ticks: capture.ticks,
+                warnings: capture.warnings,
+                display_name,
+                tags: Some(tags),
+                notes: Some(format!(
+                    "Captured through the NinjaTrader hosted Market Replay quote stream at {replay_speed}%. Last/size quote updates are sampled and are not a guaranteed complete trade tape. Starting the capture initialized the account's single hosted replay session. No orders were submitted."
+                )),
+            };
+            let outcome = tokio::task::spawn_blocking(move || write_raw_ticks_parquet_cache(write))
+                .await
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, anyhow::Error::new(err)))?
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, err))?;
+            let data_path = outcome.data_path.clone();
+            let bytes = std::fs::metadata(&data_path)
+                .map(|metadata| metadata.len())
+                .with_context(|| format!("read cache file metadata {}", data_path.display()))
+                .map_err(|err| (ReplayDownloadPhase::WritingCache, err))?;
+            let _ = event_tx.send(ServiceEvent::ReplayDownloadCompleted {
+                operation_id,
+                cache_root: cfg.replay_cache_dir.clone(),
+                manifest_path: outcome.manifest_path,
+                data_path,
+                rows: outcome.row_count,
+                bytes,
+            });
+        } else if source_kind == ReplayCacheSourceKind::ServerBars {
             let authenticated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let authenticated_callback = authenticated.clone();
             let progress_tx = event_tx.clone();
@@ -432,5 +588,41 @@ pub(super) async fn download_replay_data(
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "replay"))]
+mod tests {
+    use super::compose_replay_download_window;
+    use chrono::{NaiveDate, NaiveTime};
+
+    #[test]
+    fn hosted_replay_window_uses_minute_precision_and_exclusive_end() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let start_time = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        let end_time = NaiveTime::from_hms_opt(10, 5, 0).unwrap();
+        let (start, end) =
+            compose_replay_download_window(date, date, Some(start_time), Some(end_time))
+                .expect("valid bounded UTC window");
+
+        assert_eq!(start.to_rfc3339(), "2026-08-17T09:30:00+00:00");
+        assert_eq!(end.to_rfc3339(), "2026-08-17T10:05:00+00:00");
+    }
+
+    #[test]
+    fn date_only_downloads_keep_full_day_inclusive_coverage() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let (start, end) = compose_replay_download_window(date, date, None, None)
+            .expect("date-only UTC day window");
+
+        assert_eq!(start.to_rfc3339(), "2026-08-17T00:00:00+00:00");
+        assert_eq!(end.to_rfc3339(), "2026-08-18T00:00:00+00:00");
+    }
+
+    #[test]
+    fn hosted_replay_window_rejects_non_increasing_end() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let time = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        assert!(compose_replay_download_window(date, date, Some(time), Some(time)).is_err());
     }
 }

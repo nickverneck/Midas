@@ -110,6 +110,7 @@ fn token_bundle_changed(current: &TokenBundle, next: &TokenBundle) -> bool {
         || current.expiration_time != next.expiration_time
         || current.user_id != next.user_id
         || current.user_name != next.user_name
+        || current.api_hosts != next.api_hosts
 }
 
 fn token_stream_restart_reason(
@@ -288,7 +289,15 @@ async fn shutdown_tasks(state: &mut ServiceState) {
         task.abort();
         let _ = task.await;
     }
-    if let Some(task) = state.market_task.take() {
+    if let Some(stop_tx) = state.ninja_replay_stop_tx.take() {
+        let _ = stop_tx.send(true);
+        if let Some(mut task) = state.market_task.take() {
+            if time::timeout(Duration::from_secs(3), &mut task).await.is_err() {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    } else if let Some(task) = state.market_task.take() {
         task.abort();
         let _ = task.await;
     }
@@ -330,6 +339,7 @@ mod session_tests {
             expiration_time: Some(expires_at.to_rfc3339()),
             user_id: Some(42),
             user_name: Some("SIM".to_string()),
+            api_hosts: None,
         }
     }
 

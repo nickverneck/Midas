@@ -121,6 +121,72 @@ pub(super) async fn handle_internal(
         InternalEvent::ReplayCompleted { error } => {
             persist_replay_result(error, state, event_tx)?;
         }
+        #[cfg(feature = "replay")]
+        InternalEvent::HostedReplayClock {
+            generation,
+            timestamp,
+            speed,
+        } => {
+            let current = generation == state.ninja_replay_generation
+                && state.session.as_ref().is_some_and(|session| {
+                    session.session_kind == SessionKind::NinjaTraderReplay
+                        && session.hosted_replay_running
+                });
+            if current {
+                let _ =
+                    event_tx.send(ServiceEvent::NinjaTraderReplayClockUpdated { timestamp, speed });
+            }
+        }
+        #[cfg(feature = "replay")]
+        InternalEvent::HostedReplayEnded {
+            generation,
+            reason,
+            failed,
+        } => {
+            let hosted_replay_was_running = generation == state.ninja_replay_generation
+                && state.session.as_ref().is_some_and(|session| {
+                    session.session_kind == SessionKind::NinjaTraderReplay
+                        && session.hosted_replay_running
+                });
+            if !hosted_replay_was_running {
+                // Ignore delayed worker events after Stop, session replacement,
+                // or a newer Hosted Replay run.
+                return Ok(());
+            }
+            state.ninja_replay_generation = state.ninja_replay_generation.wrapping_add(1);
+            state.ninja_replay_stop_tx = None;
+            if let Some(task) = state.market_task.take() {
+                let _ = task.await;
+            }
+            let session = state
+                .session
+                .as_mut()
+                .expect("running Hosted Replay has a session");
+            session.hosted_replay_running = false;
+            session.execution_runtime.armed = false;
+            session.execution_runtime.pending_target_qty = None;
+            session.execution_runtime.last_summary = if failed {
+                format!("NinjaTrader Replay stopped after an error: {reason}")
+            } else {
+                format!("NinjaTrader Replay ended: {reason}")
+            };
+            emit_execution_state(event_tx, session);
+
+            // A completed stream is no longer an active broker session.
+            // Invalidate account snapshots from this session, clear its
+            // market view, and notify the app before emitting the final
+            // end/error reason so that message remains visible.
+            invalidate_snapshot_work(state).await;
+            state.session = None;
+            state.replay = None;
+            let _ = market_tx.send(MarketSnapshot::default());
+            let _ = event_tx.send(ServiceEvent::Disconnected);
+            if failed {
+                let _ = event_tx.send(ServiceEvent::Error(reason));
+            } else {
+                let _ = event_tx.send(ServiceEvent::Status(reason));
+            }
+        }
         InternalEvent::BrokerOrderAck(ack) => {
             handle_broker_order_ack(ack, state, event_tx, internal_tx)
         }
@@ -167,7 +233,7 @@ fn persist_replay_result(
     let Some(session) = state
         .session
         .as_ref()
-        .filter(|session| session.replay_enabled)
+        .filter(|session| session.replay_enabled && session.session_kind == SessionKind::Replay)
     else {
         return Ok(());
     };
@@ -279,7 +345,7 @@ fn handle_user_entities(
     let replay_ledger_changed = state
         .session
         .as_ref()
-        .filter(|session| session.replay_enabled)
+        .filter(|session| session.replay_enabled && session.session_kind == SessionKind::Replay)
         .map(|session| replay::ReplayLedgerMarketContext {
             contract_name: session
                 .selected_contract
@@ -767,6 +833,8 @@ mod tests {
             broker_task: None,
             replay_speed_tx,
             replay_speed: ReplaySpeed::default(),
+            ninja_replay_stop_tx: None,
+            ninja_replay_generation: 0,
             replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
             session: None,
             replay: None,
@@ -821,6 +889,8 @@ mod tests {
             broker_task: None,
             replay_speed_tx,
             replay_speed: ReplaySpeed::default(),
+            ninja_replay_stop_tx: None,
+            ninja_replay_generation: 0,
             replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
             session: None,
             replay: None,

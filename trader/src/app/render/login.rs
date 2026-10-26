@@ -88,6 +88,10 @@ impl App {
             | Focus::EmaFastLength
             | Focus::EmaSlowLength
             | Focus::EmaInverted
+            | Focus::EmaDirectionGateEnabled
+            | Focus::EmaDirectionGateFlatOnly
+            | Focus::EmaDirectionGateFastLength
+            | Focus::EmaDirectionGateSlowLength
             | Focus::EmaTakeProfitTicks
             | Focus::EmaStopLossTicks
             | Focus::EmaTrailingStop
@@ -139,8 +143,11 @@ impl App {
             | Focus::ReplayDownloadInstrument
             | Focus::ReplayDownloadContract
             | Focus::ReplayDownloadStart
+            | Focus::ReplayDownloadStartTime
             | Focus::ReplayDownloadEnd
+            | Focus::ReplayDownloadEndTime
             | Focus::ReplayDownloadSource
+            | Focus::ReplayDownloadSpeed
             | Focus::ReplayDownloadBarType
             | Focus::ReplayDownloadBarValue
             | Focus::ReplayDownloadCandleMode

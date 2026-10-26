@@ -709,6 +709,21 @@ mod tests {
     }
 
     #[test]
+    fn live_replay_engine_creation_never_autoconnects_to_broker_live() {
+        let config = AppConfig {
+            autoconnect: true,
+            ..AppConfig::default()
+        };
+        assert!(!should_autoconnect_engine_session(
+            &config,
+            false,
+            EngineEntryMode::CreateNew {
+                mode: app::EngineCreateMode::LiveReplay,
+            }
+        ));
+    }
+
+    #[test]
     fn engine_create_does_not_autoconnect_while_broker_picker_is_visible() {
         let config = AppConfig {
             autoconnect: true,

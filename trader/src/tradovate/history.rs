@@ -371,12 +371,15 @@ mod history_fee_tests {
             cfg: AppConfig::default(),
             session_kind: SessionKind::Live,
             replay_enabled: false,
+            hosted_replay_orders: false,
+            hosted_replay_running: false,
             tokens: TokenBundle {
                 access_token: "access".to_string(),
                 md_access_token: "md".to_string(),
                 expiration_time: None,
                 user_id: None,
                 user_name: None,
+                api_hosts: None,
             },
             token_file_snapshot: None,
             accounts: vec![AccountInfo {

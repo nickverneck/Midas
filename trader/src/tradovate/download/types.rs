@@ -87,6 +87,9 @@ pub struct TradovateChunkedRawTickProgress {
 /// market-data token intentionally has no Debug/Serialize surface.
 pub struct TradovateReplayDownloadSession {
     pub(super) cfg: AppConfig,
+    /// Access token for replay-host authorization. Kept alongside the market
+    /// data token but never included in Debug/Serialize output.
+    pub(super) access_token: String,
     pub(super) md_access_token: String,
     pub(super) contract: ContractSuggestion,
     pub(super) tick_specs: ReplayCacheTickSpecs,

@@ -6,12 +6,28 @@ use super::websocket::{fetch_raw_ticks_over_market_ws, fetch_server_bars_over_ma
 use super::*;
 
 impl TradovateReplayDownloadSession {
+    pub fn replay_access_token(&self) -> &str {
+        &self.access_token
+    }
+
     pub fn contract(&self) -> &ContractSuggestion {
         &self.contract
     }
 
     pub fn contract_metadata(&self) -> &ReplayCacheContractMetadata {
         &self.contract_metadata
+    }
+
+    pub fn tick_specs(&self) -> &ReplayCacheTickSpecs {
+        &self.tick_specs
+    }
+
+    pub fn session_template(&self) -> Option<&str> {
+        self.session_template.as_deref()
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub async fn download_server_bars(
@@ -187,6 +203,7 @@ where
     });
     Ok(TradovateReplayDownloadSession {
         cfg: cfg.clone(),
+        access_token: tokens.access_token,
         md_access_token: tokens.md_access_token,
         contract,
         tick_specs,

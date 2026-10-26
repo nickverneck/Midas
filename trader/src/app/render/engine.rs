@@ -61,7 +61,10 @@ impl App {
                     && self.selected_engine == self.engine_summaries.len()
                 {
                     if self.replay_build_available() {
-                        self.pending_engine_create_mode = Some(EngineCreateMode::Broker);
+                        // Do not preselect the live-broker route. Cached Replay
+                        // is a safe default, and users can explicitly choose
+                        // either live mode from this picker.
+                        self.pending_engine_create_mode = Some(EngineCreateMode::Replay);
                         self.status =
                             "Choose whether the new engine is a broker or replay session."
                                 .to_string();
@@ -112,12 +115,14 @@ impl App {
         };
         let next_mode = match key.code {
             KeyCode::Up | KeyCode::Left => Some(match selected_mode {
-                EngineCreateMode::Broker => EngineCreateMode::Replay,
+                EngineCreateMode::Broker => EngineCreateMode::LiveReplay,
                 EngineCreateMode::Replay => EngineCreateMode::Broker,
+                EngineCreateMode::LiveReplay => EngineCreateMode::Replay,
             }),
             KeyCode::Down | KeyCode::Right | KeyCode::Tab => Some(match selected_mode {
                 EngineCreateMode::Broker => EngineCreateMode::Replay,
-                EngineCreateMode::Replay => EngineCreateMode::Broker,
+                EngineCreateMode::Replay => EngineCreateMode::LiveReplay,
+                EngineCreateMode::LiveReplay => EngineCreateMode::Broker,
             }),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.pending_engine_create_mode = None;
@@ -134,9 +139,9 @@ impl App {
         };
         if let Some(mode) = next_mode {
             // The modal is only opened when replay is compiled in, so both
-            // choices are valid here. Keeping the guard makes this handler
+            // Replay choices are valid here. Keeping the guard makes this handler
             // safe if state is restored from an older session.
-            if mode == EngineCreateMode::Replay && !self.replay_build_available() {
+            if mode != EngineCreateMode::Broker && !self.replay_build_available() {
                 return;
             }
             self.pending_engine_create_mode = Some(mode);
@@ -439,7 +444,7 @@ impl App {
             ),
             if self.replay_build_available() {
                 Line::from(
-                    "The create row opens a Broker/Replay workflow modal; replay skips login and account stats.",
+                    "The create row offers Broker, cached Replay, and direct NinjaTrader Live Replay.",
                 )
             } else {
                 Line::from("Replay workflow is unavailable in this build.")
@@ -532,7 +537,6 @@ impl App {
             return;
         };
 
-        let popup = centered_engine_mode_popup(area);
         let broker_style = if selected_mode == EngineCreateMode::Broker {
             Style::default()
                 .fg(Color::Black)
@@ -549,17 +553,58 @@ impl App {
         } else {
             Style::default().fg(Color::Gray)
         };
-        let lines = vec![
-            Line::from("Choose the workflow for the new engine:"),
-            Line::from(""),
-            Line::from(vec![Span::styled("  Broker", broker_style)]),
-            Line::from(format!("  {}", EngineCreateMode::Broker.summary())),
-            Line::from(vec![Span::styled("  Replay", replay_style)]),
-            Line::from(format!("  {}", EngineCreateMode::Replay.summary())),
-            Line::from(""),
-            Line::from(format!("Selected: {}", selected_mode.label())),
-            Line::from("Left/Right or Up/Down switches. Enter continues. Esc cancels."),
-        ];
+        let live_replay_style = if selected_mode == EngineCreateMode::LiveReplay {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let compact = area.width < 100 || area.height < 20;
+        let lines = if compact {
+            vec![
+                Line::from("Choose the workflow for the new engine:"),
+                Line::from(""),
+                Line::from(vec![Span::styled(
+                    "Broker Live — connect to a broker",
+                    broker_style,
+                )]),
+                Line::from(vec![Span::styled(
+                    "Cached Replay — use saved local data",
+                    replay_style,
+                )]),
+                Line::from(vec![Span::styled(
+                    "Live Replay — stream NinjaTrader Hosted Replay",
+                    live_replay_style,
+                )]),
+                Line::from(""),
+                Line::from(format!("Selected: {}", selected_mode.label())),
+                Line::from("←/→ or ↑/↓ choose | Enter continues | Esc cancels"),
+            ]
+        } else {
+            vec![
+                Line::from("Choose the workflow for the new engine:"),
+                Line::from(""),
+                Line::from(vec![Span::styled("  Broker Live", broker_style)]),
+                Line::from(format!("  {}", EngineCreateMode::Broker.summary())),
+                Line::from(vec![Span::styled("  Cached Replay", replay_style)]),
+                Line::from(format!("  {}", EngineCreateMode::Replay.summary())),
+                Line::from(vec![Span::styled("  Live Replay", live_replay_style)]),
+                Line::from(format!("  {}", EngineCreateMode::LiveReplay.summary())),
+                Line::from(""),
+                Line::from(format!("Selected: {}", selected_mode.label())),
+                Line::from("Left/Right or Up/Down switches. Enter continues. Esc cancels."),
+            ]
+        };
+
+        // A narrow centered dialog lets table text show through at both sides
+        // on small terminals, making the choices look like part of the list.
+        let popup = if compact {
+            area
+        } else {
+            centered_engine_mode_popup(area)
+        };
 
         frame.render_widget(Clear, popup);
         frame.render_widget(
@@ -567,7 +612,11 @@ impl App {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title("Create Engine")
+                        .title(if compact {
+                            "Choose Engine Mode"
+                        } else {
+                            "Create Engine"
+                        })
                         .border_style(Style::default().fg(Color::Cyan)),
                 )
                 .wrap(Wrap { trim: true }),
@@ -591,7 +640,7 @@ fn centered_engine_popup(area: Rect) -> Rect {
 
 fn centered_engine_mode_popup(area: Rect) -> Rect {
     let width = area.width.saturating_mul(4).saturating_div(5).max(64);
-    let height = 12;
+    let height = 16;
     let width = width.min(area.width.saturating_sub(2).max(1));
     let height = height.min(area.height.saturating_sub(2).max(1));
     Rect {

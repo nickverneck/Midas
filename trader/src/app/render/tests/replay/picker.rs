@@ -178,6 +178,62 @@ fn replay_setup_is_dedicated_and_arrow_navigation_reaches_every_run_field() {
 
 #[cfg(feature = "replay")]
 #[test]
+fn selected_cached_contract_is_visible_in_setup_and_sent_to_replay_engine() {
+    let cache_root = replay_cache_test_root("selected-contract-setup");
+    let manifest_path = write_replay_cache_manifest(&cache_root);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read replay manifest"))
+            .expect("parse replay manifest");
+    manifest["instrument"]["symbol"] = json!("ES");
+    manifest["contract"]["symbol"] = json!("ESU6");
+    manifest["display_name"] = json!("ESU6 selected test dataset");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize replay manifest"),
+    )
+    .expect("write replay manifest");
+
+    let mut config = AppConfig::default();
+    config.replay_cache_dir = cache_root;
+    let mut app = App::new(config);
+    app.screen = Screen::Replay;
+    app.replay_view = ReplayView::Setup;
+    app.replay_dataset_index = app
+        .replay_cache_library
+        .datasets
+        .iter()
+        .position(|dataset| dataset.manifest.contract.symbol == "ESU6");
+    app.replay_dataset_bar_type = Some(BarType::minute(1));
+
+    let market_lines = rendered_text(app.replay_market_control_lines());
+    let run_lines = rendered_text(app.replay_run_control_lines());
+    for lines in [&market_lines, &run_lines] {
+        assert!(lines.iter().any(|line| line == "Instrument: ES"));
+        assert!(lines.iter().any(|line| line == "Contract: ESU6"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Dataset: ESU6 selected test dataset")
+        );
+    }
+
+    app.focus = Focus::ReplayMode;
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    app.handle_replay_key(key(KeyCode::Enter), &cmd_tx);
+    match cmd_rx
+        .try_recv()
+        .expect("replay command for selected dataset")
+    {
+        ServiceCommand::EnterReplayMode {
+            replay_dataset_manifest,
+            ..
+        } => assert_eq!(replay_dataset_manifest, Some(manifest_path)),
+        _ => panic!("expected selected replay dataset manifest"),
+    }
+}
+
+#[cfg(feature = "replay")]
+#[test]
 fn replay_empty_library_tab_enters_setup_and_escape_returns_to_search() {
     let mut config = AppConfig::default();
     config.replay_cache_dir = replay_cache_test_root("empty-library");

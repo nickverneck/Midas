@@ -4,7 +4,7 @@ use super::liquidation::{
     simulate_replay_liquidation,
 };
 use super::risk::{ReplayMarginAnalysis, ReplayMarginConfig, compute_margin_analysis};
-use super::state::ReplayState;
+use super::state::{ReplayDataSource, ReplayState};
 use crate::broker::{
     BarType, CandleMode, MarketSnapshot, ReplayExecutionFill, ReplayExecutionLedgerSnapshot,
     ReplayFillPriceSource, ReplaySignalDiagnostic,
@@ -482,6 +482,18 @@ pub(crate) struct ReplayResultMetadata {
     pub(crate) bar_type: BarType,
     pub(crate) candle_mode: CandleMode,
     pub(crate) timezone: String,
+    #[serde(default)]
+    pub(crate) source_kind: String,
+    #[serde(default)]
+    pub(crate) source_label: String,
+    #[serde(default)]
+    pub(crate) source_path: Option<String>,
+    #[serde(default)]
+    pub(crate) source_record_kind: String,
+    #[serde(default)]
+    pub(crate) source_record_count: usize,
+    #[serde(default)]
+    pub(crate) source_bar_count: usize,
     pub(crate) replay_file_path: String,
     pub(crate) replay_dom_file_path: Option<String>,
     pub(crate) replay_cache_dir: String,
@@ -780,17 +792,13 @@ pub(crate) fn write_replay_result(
         None
     };
     let equity = build_equity_rows(&fills, initial_capital, input.started_at_utc, &fee_schedule);
+    let evaluation_rows_processed = evaluation_rows_processed(input.replay, input.market);
     let mut summary = build_summary(
         &fills,
         &trades,
         &equity,
         initial_capital,
-        input
-            .market
-            .replay_window
-            .as_ref()
-            .or_else(|| input.replay.replay_window.as_ref())
-            .map_or(0, |value| value.evaluation_rows_processed),
+        evaluation_rows_processed,
     );
     apply_excursion_summary(&mut summary, trade_excursions.as_deref());
     let fee_scenario = fee_scenario_from_summary(&fee_schedule, &summary);
@@ -1233,6 +1241,16 @@ fn build_metadata(
         .as_ref()
         .or_else(|| input.replay.replay_window.as_ref());
     let evaluation_range = input.replay.evaluation_range;
+    let source = replay_source_metadata(input.replay, input.config);
+    let warmup_rows = window.map_or_else(
+        || replay_warmup_rows(input.config, input.market),
+        |value| value.warmup_rows,
+    );
+    let evaluation_rows_total =
+        window.map_or(input.market.live_bars, |value| value.evaluation_rows_total);
+    let evaluation_rows_processed = window.map_or(input.market.live_bars, |value| {
+        value.evaluation_rows_processed
+    });
     let mut fill_price_sources = BTreeSet::new();
     let mut execution_precisions = BTreeSet::new();
     for fill in fills {
@@ -1286,7 +1304,19 @@ fn build_metadata(
         timezone: window
             .map(|value| value.input_timezone.clone())
             .unwrap_or_else(|| "UTC".to_string()),
-        replay_file_path: input.config.replay_file_path.display().to_string(),
+        source_kind: source.kind.clone(),
+        source_label: source.label.clone(),
+        source_path: source.path.clone(),
+        source_record_kind: source.record_kind.clone(),
+        source_record_count: source.record_count,
+        source_bar_count: warmup_rows.saturating_add(evaluation_rows_total),
+        // Retain the legacy field for local Last files, but leave it empty for
+        // cache-backed runs so it cannot point at an unrelated configured file.
+        replay_file_path: if source.kind == "local_tick_file" {
+            source.path.unwrap_or_default()
+        } else {
+            String::new()
+        },
         replay_dom_file_path: input
             .config
             .replay_dom_file_path
@@ -1304,14 +1334,86 @@ fn build_metadata(
         warmup_start_utc: window.map(|value| value.warmup_start),
         market_first_timestamp_ns: input.market.bars.first().map(|bar| bar.ts_ns),
         market_last_timestamp_ns: input.market.bars.last().map(|bar| bar.ts_ns),
-        warmup_rows: window.map_or(0, |value| value.warmup_rows),
-        evaluation_rows_total: window.map_or(0, |value| value.evaluation_rows_total),
-        evaluation_rows_processed: window.map_or(input.market.live_bars, |value| {
-            value.evaluation_rows_processed
-        }),
+        warmup_rows,
+        evaluation_rows_total,
+        evaluation_rows_processed,
         signal_diagnostics_enabled: input.signal_diagnostics.is_some(),
         signal_diagnostic_count: input.signal_diagnostics.map_or(0, |rows| rows.len()),
     }
+}
+
+#[derive(Debug)]
+struct ReplaySourceMetadata {
+    kind: String,
+    label: String,
+    path: Option<String>,
+    record_kind: String,
+    record_count: usize,
+}
+
+fn replay_source_metadata(replay: &ReplayState, config: &AppConfig) -> ReplaySourceMetadata {
+    let raw_path = |key: &str| {
+        replay
+            .contract
+            .raw
+            .get(key)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    let name = replay.contract.name.as_str();
+    match &replay.data {
+        ReplayDataSource::PriceTicks(ticks) => ReplaySourceMetadata {
+            kind: "local_tick_file".to_string(),
+            label: format!("Local tick file · {name}"),
+            path: raw_path("path").or_else(|| Some(config.replay_file_path.display().to_string())),
+            record_kind: "ticks".to_string(),
+            record_count: ticks.len(),
+        },
+        ReplayDataSource::RawTicks(ticks) => ReplaySourceMetadata {
+            kind: "in_memory_raw_ticks".to_string(),
+            label: format!("In-memory raw ticks · {name}"),
+            path: None,
+            record_kind: "raw ticks".to_string(),
+            record_count: ticks.len(),
+        },
+        ReplayDataSource::CachedRawTicks { resolved, .. } => ReplaySourceMetadata {
+            kind: "cached_raw_ticks".to_string(),
+            label: format!("Cached Replay · {}", resolved.manifest.display_name),
+            path: Some(resolved.manifest_path.display().to_string()),
+            record_kind: "raw ticks".to_string(),
+            record_count: resolved
+                .files
+                .iter()
+                .fold(0u64, |total, file| {
+                    total.saturating_add(file.file.row_count)
+                })
+                .try_into()
+                .unwrap_or(usize::MAX),
+        },
+        ReplayDataSource::CachedServerBars { bars, .. } => ReplaySourceMetadata {
+            kind: "cached_server_bars".to_string(),
+            label: format!("Cached Replay · {name}"),
+            path: raw_path("manifestPath").or_else(|| raw_path("dataPath")),
+            record_kind: "bars".to_string(),
+            record_count: bars.len(),
+        },
+    }
+}
+
+fn replay_warmup_rows(config: &AppConfig, market: &MarketSnapshot) -> usize {
+    if market.history_loaded >= crate::tradovate::ENGINE_MARKET_BAR_LIMIT {
+        config.history_bars.max(1)
+    } else {
+        market.history_loaded.saturating_sub(market.live_bars)
+    }
+}
+
+fn evaluation_rows_processed(replay: &ReplayState, market: &MarketSnapshot) -> usize {
+    market
+        .replay_window
+        .as_ref()
+        .or_else(|| replay.replay_window.as_ref())
+        .map_or(market.live_bars, |window| window.evaluation_rows_processed)
 }
 
 fn replay_path_dependence(strategy: &ExecutionStrategyConfig) -> ReplayPathDependence {
@@ -2398,6 +2500,11 @@ mod tests {
         ReplaySignalDiagnostic, ReplayWindowSnapshot,
     };
     use crate::config::TradingEnvironment;
+    use crate::replay_cache::{
+        ReplayCacheContract, ReplayCacheCoverage, ReplayCacheDataFile, ReplayCacheFileFormat,
+        ReplayCacheInstrument, ReplayCacheManifest, ReplayCacheMarketShape,
+        ReplayCacheResolvedRawTicks, ReplayCacheResolvedRawTicksFile, ReplayCacheSourceKind,
+    };
     use crate::tradovate::MarketSpecs;
     use crate::tradovate::replay::state::ReplayDataSource;
     use crate::tradovate::replay::ticks::ReplayTick;
@@ -2469,6 +2576,162 @@ mod tests {
             .into_boxed_slice(),
         ));
         replay
+    }
+
+    fn replay_state_with_cached_raw_tick_source(row_count: u64) -> ReplayState {
+        let timestamp = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let manifest_path = PathBuf::from("/fixture/cache/ESZ6/manifest.json");
+        let manifest = ReplayCacheManifest {
+            manifest_version: 1,
+            provider: crate::broker::BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "ES".to_string(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "ESZ6".to_string(),
+                id: Some(99),
+                expiration: None,
+            },
+            display_name: "ESZ6 2026-10-09 ticks".to_string(),
+            coverage: ReplayCacheCoverage {
+                start: timestamp,
+                end: timestamp,
+                trading_date: Some(timestamp.date_naive()),
+            },
+            completed_raw_tick_coverage: None,
+            completed_raw_tick_windows: Vec::new(),
+            source_kind: ReplayCacheSourceKind::RawTicks,
+            download_request: json!({}),
+            tick_specs: crate::replay_cache::ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 50.0,
+            },
+            contract_metadata: None,
+            files: vec![ReplayCacheDataFile {
+                relative_path: PathBuf::from("raw-ticks/day.parquet"),
+                source_kind: ReplayCacheSourceKind::RawTicks,
+                format: ReplayCacheFileFormat::Parquet,
+                schema_version: Some(2),
+                compression: Some("zstd".to_string()),
+                market_shape: ReplayCacheMarketShape {
+                    bar_type: None,
+                    chart_mode: None,
+                    session_template: None,
+                },
+                row_count,
+                first_timestamp: timestamp,
+                last_timestamp: timestamp,
+                request_start: None,
+                request_end: None,
+                data_hash: None,
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            }],
+            app: None,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+            badges: Vec::new(),
+            available_bar_shapes: Vec::new(),
+            available_chart_modes: Vec::new(),
+            tags: Vec::new(),
+            notes: None,
+        };
+        let file = ReplayCacheResolvedRawTicksFile {
+            manifest_path: manifest_path.clone(),
+            dataset_dir: manifest_path.parent().unwrap().to_path_buf(),
+            data_path: manifest_path.with_file_name("day.parquet"),
+            data_file: std::sync::Arc::new(
+                std::fs::File::open(std::env::current_exe().expect("test binary path"))
+                    .expect("open test binary as inert fixture lease"),
+            ),
+            file: manifest.files[0].clone(),
+            manifest: manifest.clone(),
+        };
+        let resolved = ReplayCacheResolvedRawTicks {
+            manifest_path: manifest_path.clone(),
+            dataset_dir: manifest_path.parent().unwrap().to_path_buf(),
+            manifest,
+            files: vec![file],
+        };
+        let mut replay = replay_state();
+        replay.replay_window = None;
+        replay.contract.name = "ESZ6".to_string();
+        replay.contract.raw = json!({
+            "source": "replay-cache",
+            "sourceKind": "raw-ticks",
+            "manifestPath": manifest_path,
+        });
+        replay.data = ReplayDataSource::CachedRawTicks {
+            resolved,
+            timestamp_range: None,
+        };
+        replay
+    }
+
+    #[test]
+    fn cached_tick_replay_result_reports_cache_provenance_and_one_bar_warmup() {
+        let mut config = AppConfig::default();
+        config.replay_file_path = PathBuf::from("trader/market replay/ES 06-26.Last.txt");
+        let replay = replay_state_with_cached_raw_tick_source(212);
+        let market = MarketSnapshot {
+            contract_id: Some(99),
+            contract_name: Some("ESZ6".to_string()),
+            candle_mode: CandleMode::Standard,
+            bars: vec![crate::broker::Bar {
+                ts_ns: 1_800_000_000_000_000_000,
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.5,
+                volume: Some(212.0),
+            }],
+            trade_markers: Vec::new(),
+            session_profile: None,
+            value_per_point: Some(50.0),
+            tick_size: Some(0.25),
+            history_loaded: 1,
+            live_bars: 0,
+            replay_window: None,
+            status: "Replay complete".to_string(),
+        };
+        let ledger = ReplayExecutionLedgerSnapshot::default();
+        let strategy = ExecutionStrategyConfig::default();
+        let input = ReplayResultInput {
+            config: &config,
+            replay: &replay,
+            market: &market,
+            ledger: &ledger,
+            strategy: &strategy,
+            bar_type: BarType::minute(1),
+            candle_mode: CandleMode::Standard,
+            run_id: "cached-one-bar",
+            started_at_utc: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+            completed_at_utc: DateTime::from_timestamp(1_800_000_060, 0).unwrap(),
+            error: None,
+            signal_diagnostics: None,
+        };
+
+        let metadata = build_metadata(&input, 10_000.0, &[]);
+
+        assert_eq!(metadata.source_kind, "cached_raw_ticks");
+        assert_eq!(
+            metadata.source_label,
+            "Cached Replay · ESZ6 2026-10-09 ticks"
+        );
+        assert_eq!(
+            metadata.source_path.as_deref(),
+            Some("/fixture/cache/ESZ6/manifest.json")
+        );
+        assert_eq!(metadata.source_record_kind, "raw ticks");
+        assert_eq!(metadata.source_record_count, 212);
+        assert_eq!(metadata.source_bar_count, 1);
+        assert_eq!(metadata.replay_file_path, "");
+        assert_eq!(metadata.warmup_rows, 1);
+        assert_eq!(metadata.evaluation_rows_total, 0);
+        assert_eq!(metadata.evaluation_rows_processed, 0);
     }
 
     fn fill(

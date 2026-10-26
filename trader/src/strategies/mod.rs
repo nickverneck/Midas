@@ -1,6 +1,7 @@
 pub mod adaptive_gate;
 pub mod adx;
 pub mod ema_cross;
+pub mod ema_crossover_gate;
 pub mod heikin_ashi;
 pub mod hma_angle;
 pub mod hma_cross;

@@ -172,6 +172,15 @@ async fn main() -> Result<()> {
     if matches!(cli.mode, Some(Mode::CaptureLiveDom(_))) {
         anyhow::bail!("live DOM capture requires the Tradovate feature");
     }
+    #[cfg(feature = "tradovate")]
+    if let Some(Mode::ValidateNinjaTraderToken(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        return tradovate::validate_ninjatrader_token(&config, args.start.as_deref()).await;
+    }
+    #[cfg(not(feature = "tradovate"))]
+    if matches!(cli.mode, Some(Mode::ValidateNinjaTraderToken(_))) {
+        anyhow::bail!("NinjaTrader token validation requires the Tradovate feature");
+    }
     #[cfg(all(feature = "tradovate", feature = "replay"))]
     if let Some(Mode::ImportBrowserHar(args)) = cli.mode.clone() {
         let config = AppConfig::load(cli.config.as_deref())?;

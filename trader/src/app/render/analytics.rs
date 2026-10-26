@@ -4,6 +4,11 @@ impl App {
     pub(in crate::app) fn render_analytics_screen(&self, frame: &mut Frame<'_>, area: Rect) {
         #[cfg(feature = "replay")]
         {
+            if area.width < 110 {
+                self.render_analytics_compact(frame, area);
+                return;
+            }
+
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(31), Constraint::Percentage(69)])
@@ -201,6 +206,204 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
+    fn render_analytics_compact(&self, frame: &mut Frame<'_>, area: Rect) {
+        let showing_sweeps = self.replay_analytics.focus == AnalyticsFocus::Sweeps;
+        let list_focused = self.replay_analytics.focus == AnalyticsFocus::Runs || showing_sweeps;
+        let (items, selected, count, list_title) = if showing_sweeps {
+            let items = if self.replay_analytics.sweep_entries.is_empty() {
+                vec![ListItem::new("No sweep rankings saved. Press r to rescan.")]
+            } else {
+                self.replay_analytics
+                    .sweep_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let selected = self.replay_analytics.selected_sweep == index;
+                        let marker = if selected {
+                            if list_focused { "" } else { "> " }
+                        } else {
+                            "  "
+                        };
+                        ListItem::new(vec![
+                            Line::from(format!(
+                                "{marker}{} [{}]",
+                                compact_analytics_label(&entry.document.sweep_id, 15),
+                                entry.document.metric.label()
+                            )),
+                            Line::from(format!(
+                                "  {}",
+                                compact_analytics_label(&entry.document.name, 24)
+                            )),
+                            Line::from(format!(
+                                "  {} | {} rows",
+                                entry.document.fee_scenario,
+                                entry.document.rows.len()
+                            )),
+                        ])
+                    })
+                    .collect()
+            };
+            (
+                items,
+                self.replay_analytics.selected_sweep,
+                self.replay_analytics.sweep_entries.len(),
+                format!(
+                    "Sweep Rankings ({})",
+                    self.replay_analytics.sweep_entries.len()
+                ),
+            )
+        } else {
+            let items = if self.replay_analytics.entries.is_empty() {
+                vec![ListItem::new("No saved replay runs. Press r to rescan.")]
+            } else {
+                self.replay_analytics
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let selected = self.replay_analytics.selected_run == index;
+                        let marker = if selected {
+                            if list_focused { "" } else { "> " }
+                        } else {
+                            "  "
+                        };
+                        let status = match entry.document.status {
+                            crate::tradovate::replay::ReplayResultStatus::Completed => "ok",
+                            crate::tradovate::replay::ReplayResultStatus::Failed => "failed",
+                        };
+                        ListItem::new(vec![
+                            Line::from(format!(
+                                "{marker}{} [{status}]",
+                                compact_analytics_label(&entry.document.run_id, 16)
+                            )),
+                            Line::from(format!(
+                                "  {} | {} trades",
+                                compact_analytics_label(&entry.document.metadata.contract_name, 8),
+                                entry.document.summary.trade_count
+                            )),
+                            Line::from(format!(
+                                "  PnL {}",
+                                format_signed_money(Some(entry.document.summary.net_pnl))
+                            )),
+                        ])
+                    })
+                    .collect()
+            };
+            (
+                items,
+                self.replay_analytics.selected_run,
+                self.replay_analytics.entries.len(),
+                format!(
+                    "Saved Replay Runs ({})",
+                    self.replay_analytics.entries.len()
+                ),
+            )
+        };
+
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
+            .split(area);
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(list_title))
+            .highlight_symbol("> ")
+            .scroll_padding(1);
+        let mut list_state = focused_list_state(list_focused, selected, count);
+        frame.render_stateful_widget(list, columns[0], &mut list_state);
+
+        let (detail_lines, detail_title) = match self.replay_analytics.focus {
+            AnalyticsFocus::Runs => {
+                let mut lines = self
+                    .replay_analytics
+                    .selected_entry()
+                    .map(|entry| {
+                        let metadata = &entry.document.metadata;
+                        let source = if metadata.source_label.trim().is_empty() {
+                            metadata.source_kind.as_str()
+                        } else {
+                            metadata.source_label.as_str()
+                        };
+                        vec![
+                            Line::from(format!("Source: {}", compact_analytics_label(source, 40))),
+                            Line::from(format!(
+                                "Warmup: {} | Evaluated: {}",
+                                metadata.warmup_rows, metadata.evaluation_rows_processed
+                            )),
+                        ]
+                    })
+                    .unwrap_or_default();
+                lines.extend(self.analytics_summary_lines());
+                (lines, "Selected Run Summary".to_string())
+            }
+            AnalyticsFocus::Trades => {
+                let count = self.replay_analytics.sorted_trades().len();
+                (
+                    self.analytics_selected_trade_lines(),
+                    format!(
+                        "Trade {}/{} | Up/Down select",
+                        if count == 0 {
+                            0
+                        } else {
+                            self.replay_analytics.selected_trade + 1
+                        },
+                        count
+                    ),
+                )
+            }
+            AnalyticsFocus::Signals => {
+                let count = self.replay_analytics.filtered_signals().len();
+                (
+                    self.analytics_selected_signal_lines(),
+                    format!(
+                        "Signal {}/{} | Up/Down select",
+                        if count == 0 {
+                            0
+                        } else {
+                            self.replay_analytics.selected_signal + 1
+                        },
+                        count
+                    ),
+                )
+            }
+            AnalyticsFocus::Sweeps => {
+                let count = self
+                    .replay_analytics
+                    .sweep_ranking
+                    .as_ref()
+                    .map(|ranking| ranking.rows.len())
+                    .unwrap_or_default();
+                (
+                    self.analytics_selected_sweep_lines(),
+                    format!(
+                        "Candidate {}/{} | j/k select",
+                        if count == 0 {
+                            0
+                        } else {
+                            self.replay_analytics.selected_sweep_row + 1
+                        },
+                        count
+                    ),
+                )
+            }
+        };
+        let inner_width = columns[1].width.saturating_sub(2).max(1) as usize;
+        let visible_rows = columns[1].height.saturating_sub(2) as usize;
+        let total_rows = detail_lines
+            .iter()
+            .map(|line| line.width().max(1).div_ceil(inner_width))
+            .sum::<usize>();
+        let max_scroll = total_rows
+            .saturating_sub(visible_rows)
+            .min(u16::MAX as usize) as u16;
+        let scroll = self.replay_analytics.compact_scroll.min(max_scroll);
+        let details = Paragraph::new(detail_lines)
+            .block(Block::default().borders(Borders::ALL).title(detail_title))
+            .wrap(Wrap { trim: true })
+            .scroll((scroll, 0));
+        frame.render_widget(details, columns[1]);
+    }
+
+    #[cfg(feature = "replay")]
     fn render_analytics_equity_chart(&self, frame: &mut Frame<'_>, area: Rect) {
         if self.replay_analytics.equity.is_empty() {
             let message = self
@@ -261,4 +464,17 @@ impl App {
             );
         frame.render_widget(chart, area);
     }
+}
+
+#[cfg(feature = "replay")]
+fn compact_analytics_label(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut compact = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    compact
 }

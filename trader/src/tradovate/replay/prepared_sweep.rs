@@ -17,6 +17,9 @@ use crate::broker::{
 use crate::config::AppConfig;
 use crate::strategies::adx::adx_series;
 use crate::strategies::ema_cross::{EmaCrossConfig, EmaCrossExecutionState};
+use crate::strategies::ema_crossover_gate::{
+    EmaCrossoverGateConfig, EmaCrossoverGateEvaluation, filter_position_entry_signals,
+};
 use crate::strategies::hma_cross::{hma_series_incremental, hma_warmup_bars};
 use crate::strategies::markov_orientation_gate::{
     MarkovOrientationDecision, ReplayMarkovOrientationGate,
@@ -40,6 +43,7 @@ pub(crate) struct PreparedEmaSweepInputs {
     pub(crate) signal_bars: Arc<[Bar]>,
     traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
     hma_traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
+    ema_gate_traces: Arc<BTreeMap<(usize, usize), Arc<EmaCrossTrace>>>,
     adx_series: Arc<BTreeMap<usize, Arc<[f64]>>>,
     pub(crate) protection: Arc<BarProtectionIndex>,
 }
@@ -54,6 +58,24 @@ struct EmaCrossTrace {
     slow: Arc<[f64]>,
     raw_buy: Arc<[bool]>,
     raw_sell: Arc<[bool]>,
+}
+
+fn directional_gate_config(
+    strategy: &crate::strategy::ExecutionStrategyConfig,
+) -> Option<&EmaCrossoverGateConfig> {
+    match strategy.native_strategy {
+        crate::strategy::NativeStrategyKind::EmaCross => Some(&strategy.native_ema.direction_gate),
+        crate::strategy::NativeStrategyKind::HmaCross => {
+            Some(&strategy.native_hma_cross.direction_gate)
+        }
+        crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross => {
+            Some(&strategy.native_volume_ema_cross.ema_cross.direction_gate)
+        }
+        crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross => {
+            Some(&strategy.native_volume_hma_cross.hma_cross.direction_gate)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +388,15 @@ pub(crate) fn prepare_ema_sweep_inputs(
             periods.insert(slow_length);
         }
     }
+    for child in children {
+        if child.resolved_strategy.kind == StrategyKind::Native
+            && let Some(gate) = directional_gate_config(&child.resolved_strategy)
+            && gate.enabled
+        {
+            periods.insert(gate.fast_length.max(1));
+            periods.insert(gate.slow_length.max(1));
+        }
+    }
     let mut hma_periods = HashSet::new();
     for child in children {
         if child.resolved_strategy.kind == StrategyKind::Native
@@ -519,6 +550,37 @@ pub(crate) fn prepare_ema_sweep_inputs(
             )),
         );
     }
+    let mut gate_pairs = HashSet::new();
+    for child in children {
+        if child.resolved_strategy.kind == StrategyKind::Native
+            && let Some(gate) = directional_gate_config(&child.resolved_strategy)
+            && gate.enabled
+        {
+            gate_pairs.insert((gate.fast_length.max(1), gate.slow_length.max(1)));
+        }
+    }
+    let mut ema_gate_traces = BTreeMap::new();
+    for (fast_length, slow_length) in gate_pairs {
+        let fast = ema_series
+            .get(&fast_length)
+            .context("prepared EMA directional-gate fast series missing")?
+            .clone();
+        let slow = ema_series
+            .get(&slow_length)
+            .context("prepared EMA directional-gate slow series missing")?
+            .clone();
+        ema_gate_traces.insert(
+            (fast_length, slow_length),
+            Arc::new(build_trace(
+                fast_length,
+                slow_length,
+                fast,
+                slow,
+                signal_start,
+                None,
+            )),
+        );
+    }
     let mut hma_series: BTreeMap<usize, Arc<[f64]>> = BTreeMap::new();
     for period in hma_periods {
         let start = signal_start.min(signal_bars.len());
@@ -630,6 +692,7 @@ pub(crate) fn prepare_ema_sweep_inputs(
         signal_bars,
         traces: Arc::new(traces),
         hma_traces: Arc::new(hma_traces),
+        ema_gate_traces: Arc::new(ema_gate_traces),
         adx_series: Arc::new(prepared_adx_series),
         protection: Arc::new(BarProtectionIndex::new(&frames.bars)),
     })
@@ -807,6 +870,7 @@ pub(crate) fn prepared_hma_child_as_ema(child: &ReplaySweepChildSpec) -> ReplayS
     prepared.resolved_strategy.native_ema = EmaCrossConfig {
         fast_length: hma.fast_length,
         slow_length: hma.slow_length,
+        direction_gate: hma.direction_gate.clone(),
         inverted: hma.inverted,
         take_profit_ticks: hma.take_profit_ticks,
         stop_loss_ticks: hma.stop_loss_ticks,
@@ -873,11 +937,10 @@ struct PendingTransition {
 struct KernelState {
     position: Option<KernelPosition>,
     pending: Option<PendingTransition>,
-    /// Closed-bar guarded execution remembers the last entry side that was
-    /// dispatched while flat.  If that order is later flattened by a
-    /// protection or blockout event, another same-side crossover is consumed
-    /// until the opposite entry signal appears.  Keep this state in the
-    /// prepared kernel so it follows the reference service's gate exactly.
+    /// Closed-bar guarded execution remembers the last entry side dispatched
+    /// while flat. This legacy latch remains active when flat-only directional
+    /// gate mode is off; that mode instead relies on the per-bar duplicate
+    /// guard and permits each fresh aligned crossover after a protection exit.
     last_dispatched_entry_signal: Option<i8>,
     fills: Vec<ReplayExecutionFill>,
     diagnostics: Vec<ReplaySignalDiagnostic>,
@@ -980,6 +1043,22 @@ fn run_prepared_ema_candidate_with_adx_gate(
         .traces
         .get(&(ema.fast_length.max(1), ema.slow_length.max(1)))
         .context("prepared EMA crossover trace missing")?;
+    let gate_trace = if ema.direction_gate.enabled {
+        if ema.direction_gate.fast_length == 0 || ema.direction_gate.slow_length == 0 {
+            bail!("prepared replay requires valid directional EMA gate lengths");
+        }
+        Some(
+            inputs
+                .ema_gate_traces
+                .get(&(
+                    ema.direction_gate.fast_length,
+                    ema.direction_gate.slow_length,
+                ))
+                .context("prepared EMA directional-gate trace missing")?,
+        )
+    } else {
+        None
+    };
     let tick_size = replay
         .market_tick_size()
         .filter(|value| value.is_finite() && *value > 0.0)
@@ -1113,6 +1192,48 @@ fn run_prepared_ema_candidate_with_adx_gate(
         } else {
             (raw_buy, raw_sell)
         };
+        let direction_gate = gate_trace.map(|gate_trace| {
+            let gate_bars = signal_index
+                .saturating_sub(inputs.signal_start)
+                .saturating_add(1);
+            let fast = gate_trace
+                .fast
+                .get(signal_index)
+                .copied()
+                .unwrap_or(f64::NAN);
+            let slow = gate_trace
+                .slow
+                .get(signal_index)
+                .copied()
+                .unwrap_or(f64::NAN);
+            if gate_bars < ema.direction_gate.warmup_bars()
+                || !fast.is_finite()
+                || !slow.is_finite()
+                || fast == slow
+            {
+                EmaCrossoverGateEvaluation {
+                    fast_ema: Some(fast),
+                    slow_ema: Some(slow),
+                    ..EmaCrossoverGateEvaluation::default()
+                }
+            } else {
+                EmaCrossoverGateEvaluation {
+                    ready: true,
+                    fast_ema: Some(fast),
+                    slow_ema: Some(slow),
+                    bullish: fast > slow,
+                    bearish: fast < slow,
+                }
+            }
+        });
+        let (effective_buy, effective_sell, direction_gate_hold_reason) =
+            filter_position_entry_signals(
+                &ema.direction_gate,
+                direction_gate.unwrap_or_default(),
+                effective_buy,
+                effective_sell,
+                current_qty != 0,
+            );
         let signal = if effective_buy && current_qty <= 0 {
             Some(1)
         } else if effective_sell && current_qty >= 0 {
@@ -1156,6 +1277,8 @@ fn run_prepared_ema_candidate_with_adx_gate(
                     "dispatching",
                     "session hold flattening",
                     markov_decision.as_ref(),
+                    effective_inverted,
+                    direction_gate,
                 );
             } else {
                 append_diagnostic(
@@ -1170,6 +1293,8 @@ fn run_prepared_ema_candidate_with_adx_gate(
                     "blocked",
                     "session hold blocks entries",
                     markov_decision.as_ref(),
+                    effective_inverted,
+                    direction_gate,
                 );
             }
             continue;
@@ -1188,10 +1313,15 @@ fn run_prepared_ema_candidate_with_adx_gate(
                 "no_target",
                 "no actionable crossover",
                 markov_decision.as_ref(),
+                effective_inverted,
+                direction_gate,
             );
             continue;
         };
-        if current_qty == 0 && state.last_dispatched_entry_signal == Some(target_qty.signum() as i8)
+        let flat_only_gate = ema.direction_gate.enabled && ema.direction_gate.flat_only_entries;
+        if !flat_only_gate
+            && current_qty == 0
+            && state.last_dispatched_entry_signal == Some(target_qty.signum() as i8)
         {
             append_diagnostic(
                 &mut state,
@@ -1205,6 +1335,8 @@ fn run_prepared_ema_candidate_with_adx_gate(
                 "flat_entry_already_consumed",
                 "entry side was already consumed while flat",
                 markov_decision.as_ref(),
+                effective_inverted,
+                direction_gate,
             );
             continue;
         }
@@ -1226,6 +1358,8 @@ fn run_prepared_ema_candidate_with_adx_gate(
                     "target already current"
                 },
                 markov_decision.as_ref(),
+                effective_inverted,
+                direction_gate,
             );
             continue;
         }
@@ -1261,8 +1395,10 @@ fn run_prepared_ema_candidate_with_adx_gate(
             strategy,
             Some(target_qty),
             "dispatching",
-            "crossover passed prepared execution gates",
+            direction_gate_hold_reason.unwrap_or("crossover passed prepared execution gates"),
             markov_decision.as_ref(),
+            effective_inverted,
+            direction_gate,
         );
     }
 
@@ -1868,15 +2004,14 @@ fn append_diagnostic(
     decision: &str,
     gate_reason: &str,
     markov: Option<&MarkovOrientationDecision>,
+    effective_inverted: bool,
+    direction_gate: Option<EmaCrossoverGateEvaluation>,
 ) {
     let Some(bar) = bars.get(signal_index) else {
         return;
     };
     let raw_buy = trace.raw_buy.get(signal_index).copied().unwrap_or(false);
     let raw_sell = trace.raw_sell.get(signal_index).copied().unwrap_or(false);
-    let effective_inverted = markov
-        .and_then(|decision| decision.effective_inverted)
-        .unwrap_or(strategy.native_ema.inverted);
     let (effective_buy, effective_sell) =
         if markov.is_some_and(|decision| decision.effective_inverted.is_none()) {
             (false, false)
@@ -1885,6 +2020,13 @@ fn append_diagnostic(
         } else {
             (raw_buy, raw_sell)
         };
+    let (effective_buy, effective_sell, direction_gate_reason) = filter_position_entry_signals(
+        &strategy.native_ema.direction_gate,
+        direction_gate.unwrap_or_default(),
+        effective_buy,
+        effective_sell,
+        current_qty != 0,
+    );
     let signal = if effective_buy {
         "Enter Long"
     } else if effective_sell {
@@ -1930,7 +2072,10 @@ fn append_diagnostic(
         effective_position_qty: current_qty,
         target_qty,
         decision: decision.to_string(),
-        gate_reason: format_markov_audit(gate_reason, markov),
+        gate_reason: format_markov_audit(
+            direction_gate_reason.unwrap_or(gate_reason),
+            markov,
+        ),
         order_action: target_qty.map(|target| {
             if target > current_qty {
                 "Buy".to_string()
@@ -1962,7 +2107,12 @@ fn append_diagnostic(
             .filter(|v| v.is_finite()),
         auxiliary_name: None,
         auxiliary_value: None,
-        hold_reason: (signal == "Hold").then(|| format_markov_audit(gate_reason, markov)),
+        hold_reason: (signal == "Hold").then(|| {
+            format_markov_audit(
+                direction_gate_reason.unwrap_or(gate_reason),
+                markov,
+            )
+        }),
         strategy_detail: format!(
             "EMA {} / {} | inverted {}{}",
             trace.fast_length,
@@ -2013,6 +2163,33 @@ fn format_markov_audit(base: &str, markov: Option<&MarkovOrientationDecision>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_child_with_strategy(
+        resolved_strategy: crate::strategy::ExecutionStrategyConfig,
+    ) -> ReplaySweepChildSpec {
+        let defaults = super::super::sweep::ReplaySweepSpec::default();
+        ReplaySweepChildSpec {
+            run_id: "gate-test-000001".to_string(),
+            run_index: 0,
+            parent_sweep_id: "gate-test".to_string(),
+            resolved_strategy,
+            parameter_values: Default::default(),
+            overrides: Default::default(),
+            base_dataset_view: defaults.base_dataset_view,
+            bar_type: defaults.bar_type,
+            candle_mode: defaults.candle_mode,
+            engine_mode: defaults.engine_mode,
+            evaluator_mode: defaults.evaluator_mode,
+            fill_model: defaults.fill_model,
+            latency: defaults.latency,
+            bar_protection_policy: defaults.bar_protection_policy,
+            primary_fee_schedule: defaults.primary_fee_schedule,
+            fee_scenarios: defaults.fee_scenarios,
+            initial_capital: defaults.initial_capital,
+            margin: defaults.margin,
+            replay_markov_orientation_gate: defaults.replay_markov_orientation_gate,
+        }
+    }
 
     fn bar(ts_ns: i64, open: f64, high: f64, low: f64, close: f64) -> Bar {
         Bar {
@@ -2086,6 +2263,48 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn prepared_kernel_preserves_volume_wrapper_directional_ema_gate() {
+        let gate = EmaCrossoverGateConfig {
+            enabled: true,
+            fast_length: 34,
+            slow_length: 89,
+            ..EmaCrossoverGateConfig::default()
+        };
+        let mut strategy = crate::strategy::ExecutionStrategyConfig::default();
+        strategy.native_strategy = crate::strategy::NativeStrategyKind::VolumeAdaptiveEmaCross;
+        strategy.native_volume_ema_cross.ema_cross.direction_gate = gate.clone();
+        let child = replay_child_with_strategy(strategy);
+
+        assert_eq!(
+            directional_gate_config(&child.resolved_strategy),
+            Some(&gate)
+        );
+        let prepared = prepared_volume_ema_child_as_ema(&child);
+        assert_eq!(prepared.resolved_strategy.native_ema.direction_gate, gate);
+    }
+
+    #[test]
+    fn prepared_kernel_preserves_volume_wrapper_directional_hma_gate() {
+        let gate = EmaCrossoverGateConfig {
+            enabled: true,
+            fast_length: 34,
+            slow_length: 89,
+            ..EmaCrossoverGateConfig::default()
+        };
+        let mut strategy = crate::strategy::ExecutionStrategyConfig::default();
+        strategy.native_strategy = crate::strategy::NativeStrategyKind::VolumeAdaptiveHmaCross;
+        strategy.native_volume_hma_cross.hma_cross.direction_gate = gate.clone();
+        let child = replay_child_with_strategy(strategy);
+
+        assert_eq!(
+            directional_gate_config(&child.resolved_strategy),
+            Some(&gate)
+        );
+        let prepared = prepared_hma_child_as_ema(&child);
+        assert_eq!(prepared.resolved_strategy.native_ema.direction_gate, gate);
     }
 
     #[test]

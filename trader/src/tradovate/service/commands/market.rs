@@ -28,6 +28,23 @@ pub(super) async fn search_contracts_command(
         bail!("connect first");
     };
     if session.replay_enabled {
+        if session.session_kind == SessionKind::NinjaTraderReplay {
+            let results = session
+                .selected_contract
+                .as_ref()
+                .filter(|contract| {
+                    query.trim().is_empty()
+                        || contract
+                            .name
+                            .to_ascii_lowercase()
+                            .contains(&query.trim().to_ascii_lowercase())
+                })
+                .cloned()
+                .into_iter()
+                .collect();
+            let _ = event_tx.send(ServiceEvent::ContractSearchResults { query, results });
+            return Ok(());
+        }
         let results = state
             .replay
             .as_ref()
@@ -62,6 +79,9 @@ pub(super) async fn subscribe_bars(
     let Some(session) = state.session.as_mut() else {
         bail!("connect first");
     };
+    if session.session_kind == SessionKind::NinjaTraderReplay {
+        bail!("the selected contract is fixed when NinjaTrader hosted Replay starts");
+    }
     if let Some(task) = state.market_task.take() {
         task.abort();
         let _ = task.await;
@@ -129,6 +149,9 @@ pub(super) fn set_replay_speed(
     let Some(session) = state.session.as_ref() else {
         return Ok(());
     };
+    if session.session_kind == SessionKind::NinjaTraderReplay {
+        bail!("NinjaTrader Replay speed uses its provider percent control");
+    }
     if !session.replay_enabled || state.replay_speed == speed {
         if session.replay_enabled {
             let _ = event_tx.send(ServiceEvent::ReplaySpeedUpdated(state.replay_speed));

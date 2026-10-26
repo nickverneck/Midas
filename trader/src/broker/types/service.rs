@@ -3,12 +3,13 @@ use super::ReplayFrameSet;
 use super::{
     AccountInfo, AccountSnapshot, BarType, BrokerCapabilities, BrokerKind, CandleMode,
     ContractSuggestion, EngineHistorySnapshot, EngineHistorySummary, ExecutionProbeSnapshot,
-    LatencySnapshot, MarketSnapshot, ReplayDownloadCacheTarget, ReplayDownloadOperationId,
-    ReplayExecutionLedgerSnapshot, ReplayExecutionLedgerSummary, ReplaySpeed, TradeMarker,
+    LatencySnapshot, MarketSnapshot, NinjaTraderReplaySpeed, ReplayDownloadCacheTarget,
+    ReplayDownloadOperationId, ReplayExecutionLedgerSnapshot, ReplayExecutionLedgerSummary,
+    ReplaySpeed, TradeMarker,
 };
 use crate::config::{AppConfig, AuthMode, TradingEnvironment};
 use crate::strategy::{ExecutionStateSnapshot, ExecutionStrategyConfig};
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[cfg(feature = "replay")]
@@ -25,6 +26,31 @@ pub enum ServiceCommand {
         #[serde(default)]
         replay_dataset_view: Option<PathBuf>,
     },
+    /// Start a direct NinjaTrader hosted Market Replay stream. This is a
+    /// separate provider-account session from Cached Replay. `start` is the
+    /// provider replay clock start; `end` is optional and exclusive. The
+    /// strategy remains disarmed until the user arms it in the strategy UI.
+    #[cfg(feature = "replay")]
+    EnterNinjaTraderReplay {
+        config: AppConfig,
+        contract: ContractSuggestion,
+        start: chrono::DateTime<chrono::Utc>,
+        end: Option<chrono::DateTime<chrono::Utc>>,
+        speed: NinjaTraderReplaySpeed,
+        initial_balance: f64,
+        bar_type: BarType,
+        candle_mode: CandleMode,
+    },
+    /// Change the NinjaTrader hosted clock speed. This is a provider percent
+    /// value (0–400), distinct from Cached Replay's `ReplaySpeed` enum.
+    #[cfg(feature = "replay")]
+    SetNinjaTraderReplaySpeed {
+        speed: NinjaTraderReplaySpeed,
+    },
+    /// Stop the active NinjaTrader Replay session and close its dedicated
+    /// socket, quote subscription, and hosted account.
+    #[cfg(feature = "replay")]
+    StopNinjaTraderReplay,
     /// Replay-sweep-only entry point that reuses immutable bars/frames while
     /// keeping broker, strategy, and ledger state private to the child.
     #[cfg(feature = "replay")]
@@ -46,7 +72,13 @@ pub enum ServiceCommand {
         target: Option<ReplayDownloadCacheTarget>,
         start_date: NaiveDate,
         end_date: NaiveDate,
+        #[serde(default)]
+        start_time_utc: Option<NaiveTime>,
+        #[serde(default)]
+        end_time_utc: Option<NaiveTime>,
         source_kind: String,
+        #[serde(default = "default_hosted_replay_speed")]
+        replay_speed: u16,
         bar_type: BarType,
         candle_mode: CandleMode,
         display_name: Option<String>,
@@ -114,6 +146,10 @@ pub enum ServiceCommand {
     },
 }
 
+fn default_hosted_replay_speed() -> u16 {
+    400
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ManualOrderAction {
     Buy,
@@ -152,6 +188,12 @@ pub enum ServiceEvent {
     ExecutionState(ExecutionStateSnapshot),
     ExecutionProbe(ExecutionProbeSnapshot),
     ReplaySpeedUpdated(ReplaySpeed),
+    /// NinjaTrader hosted replay clock, independent of Cached Replay speed.
+    #[cfg(feature = "replay")]
+    NinjaTraderReplayClockUpdated {
+        timestamp: chrono::DateTime<chrono::Utc>,
+        speed: NinjaTraderReplaySpeed,
+    },
     ReplayExecutionLedgerUpdated(ReplayExecutionLedgerSummary),
     ReplayExecutionLedgerSnapshot(ReplayExecutionLedgerSnapshot),
     /// Emitted after the replay worker has durably written its result
@@ -263,6 +305,7 @@ impl ReplayDownloadPhase {
 pub enum SessionKind {
     Live,
     Replay,
+    NinjaTraderReplay,
 }
 
 impl SessionKind {
@@ -270,7 +313,16 @@ impl SessionKind {
         match self {
             Self::Live => "Live",
             Self::Replay => "Replay",
+            Self::NinjaTraderReplay => "NinjaTrader Replay",
         }
+    }
+
+    pub const fn is_replay(self) -> bool {
+        matches!(self, Self::Replay | Self::NinjaTraderReplay)
+    }
+
+    pub const fn is_ninjatrader_replay(self) -> bool {
+        matches!(self, Self::NinjaTraderReplay)
     }
 }
 

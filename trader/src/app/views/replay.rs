@@ -417,7 +417,6 @@ impl App {
                 self.replay_selected_choice_label()
             )));
             lines.push(Line::from("Up/Down select shape | Enter/Right setup"));
-
             const VISIBLE_DATASETS: usize = 8;
             let selected_position = self.replay_selected_option_position(&options).unwrap_or(0);
             let visible_start = selected_position
@@ -447,7 +446,8 @@ impl App {
     }
 
     pub(in crate::app) fn replay_market_control_compact_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
+        let mut lines = self.replay_selected_identity_lines();
+        lines.extend([
             replay_edit_line(
                 "Bar Type",
                 format!("{} (Left/Right)", self.bar_type.kind().label()),
@@ -458,7 +458,7 @@ impl App {
                 format!("{} (digits)", self.bar_value_text()),
                 self.focus == Focus::BarValue,
             ),
-        ];
+        ]);
         if self.candle_mode_controls_visible() {
             lines.push(replay_edit_line(
                 "Candles",
@@ -482,7 +482,8 @@ impl App {
     }
 
     pub(in crate::app) fn replay_run_control_compact_lines(&self) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = self.replay_selected_identity_lines();
+        lines.extend([
             replay_action_line(
                 self.replay_start_action_compact_label(),
                 self.focus == Focus::ReplayMode,
@@ -516,7 +517,8 @@ impl App {
                 },
             ),
             replay_hint_line("Up/Down | digits | Enter"),
-        ]
+        ]);
+        lines
     }
 
     pub(in crate::app) fn replay_dataset_library_lines(&self) -> Vec<Line<'static>> {
@@ -524,7 +526,8 @@ impl App {
     }
 
     pub(in crate::app) fn replay_market_control_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
+        let mut lines = self.replay_selected_identity_lines();
+        lines.extend([
             replay_edit_line(
                 "Bar Type",
                 format!("{} (Left/Right)", self.bar_type.kind().label()),
@@ -535,7 +538,7 @@ impl App {
                 format!("{} (digits)", self.bar_value_text()),
                 self.focus == Focus::BarValue,
             ),
-        ];
+        ]);
 
         if self.candle_mode_controls_visible() {
             lines.push(replay_edit_line(
@@ -580,7 +583,7 @@ impl App {
     }
 
     pub(in crate::app) fn replay_run_control_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
+        let mut lines = self.replay_selected_identity_lines();
         lines.push(replay_action_line(
             self.replay_start_action_label(),
             self.focus == Focus::ReplayMode,
@@ -689,6 +692,24 @@ impl App {
         ));
         lines.push(replay_hint_line("Esc returns to cached contracts"));
         lines
+    }
+
+    fn replay_selected_identity_lines(&self) -> Vec<Line<'static>> {
+        #[cfg(feature = "replay")]
+        {
+            let Some(dataset) = self.replay_selected_dataset() else {
+                return Vec::new();
+            };
+            vec![
+                replay_metadata_line("Instrument", dataset.manifest.instrument.symbol.clone()),
+                replay_metadata_line("Contract", dataset.manifest.contract.symbol.clone()),
+                replay_metadata_line("Dataset", dataset.manifest.display_name.clone()),
+            ]
+        }
+        #[cfg(not(feature = "replay"))]
+        {
+            Vec::new()
+        }
     }
 
     pub(in crate::app) fn replay_dataset_available(&self) -> bool {
@@ -882,7 +903,7 @@ impl App {
     }
 
     #[cfg(feature = "replay")]
-    fn replay_initial_capital_text(&self) -> String {
+    pub(in crate::app) fn replay_initial_capital_text(&self) -> String {
         self.strategy_numeric_value(
             Focus::ReplayInitialCapital,
             format_float_input(self.base_config.replay_initial_capital),

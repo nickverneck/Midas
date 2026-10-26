@@ -63,7 +63,10 @@ impl App {
         cmd_tx: &ServiceCommandSender,
     ) {
         #[cfg(feature = "replay")]
-        if self.replay_view == ReplayView::Downloader {
+        if matches!(
+            self.replay_view,
+            ReplayView::Downloader | ReplayView::StreamSetup
+        ) {
             self.handle_replay_downloader_key(key, cmd_tx);
             return;
         }
@@ -417,6 +420,10 @@ impl App {
             | Focus::EmaFastLength
             | Focus::EmaSlowLength
             | Focus::EmaInverted
+            | Focus::EmaDirectionGateEnabled
+            | Focus::EmaDirectionGateFlatOnly
+            | Focus::EmaDirectionGateFastLength
+            | Focus::EmaDirectionGateSlowLength
             | Focus::EmaTakeProfitTicks
             | Focus::EmaStopLossTicks
             | Focus::EmaTrailingStop
@@ -450,8 +457,11 @@ impl App {
             | Focus::ReplayDownloadInstrument
             | Focus::ReplayDownloadContract
             | Focus::ReplayDownloadStart
+            | Focus::ReplayDownloadStartTime
             | Focus::ReplayDownloadEnd
+            | Focus::ReplayDownloadEndTime
             | Focus::ReplayDownloadSource
+            | Focus::ReplayDownloadSpeed
             | Focus::ReplayDownloadBarType
             | Focus::ReplayDownloadBarValue
             | Focus::ReplayDownloadCandleMode
@@ -496,6 +506,10 @@ impl App {
             replay_dataset_manifest: self.replay_selected_dataset_manifest(),
             replay_dataset_view: self.replay_selected_dataset_view_path(),
         });
+        #[cfg(feature = "replay")]
+        {
+            self.replay_session_start_pending = true;
+        }
         self.push_log(format!(
             "Replay mode requested: {} ({})",
             self.bar_type.mode_label(self.effective_candle_mode()),

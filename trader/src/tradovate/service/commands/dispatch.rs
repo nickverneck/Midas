@@ -37,6 +37,41 @@ pub(in crate::tradovate::service) async fn handle_command(
             .await
         }
         #[cfg(feature = "replay")]
+        ServiceCommand::EnterNinjaTraderReplay {
+            config,
+            contract,
+            start,
+            end,
+            speed,
+            initial_balance,
+            bar_type,
+            candle_mode,
+        } => {
+            enter_ninjatrader_replay(
+                config,
+                contract,
+                start,
+                end,
+                speed,
+                initial_balance,
+                bar_type,
+                candle_mode,
+                state,
+                event_tx,
+                market_tx,
+                internal_tx,
+            )
+            .await
+        }
+        #[cfg(feature = "replay")]
+        ServiceCommand::SetNinjaTraderReplaySpeed { speed } => {
+            set_ninjatrader_replay_speed(speed, state, event_tx).await
+        }
+        #[cfg(feature = "replay")]
+        ServiceCommand::StopNinjaTraderReplay => {
+            stop_ninjatrader_replay(state, event_tx, market_tx).await
+        }
+        #[cfg(feature = "replay")]
         ServiceCommand::EnterReplayModeWithSharedFrames {
             config: cfg,
             bar_type,
@@ -67,7 +102,10 @@ pub(in crate::tradovate::service) async fn handle_command(
             target,
             start_date,
             end_date,
+            start_time_utc,
+            end_time_utc,
             source_kind,
+            replay_speed,
             bar_type,
             candle_mode,
             display_name,
@@ -104,7 +142,10 @@ pub(in crate::tradovate::service) async fn handle_command(
                     target,
                     start_date,
                     end_date,
+                    start_time_utc,
+                    end_time_utc,
                     source_kind,
+                    replay_speed,
                     bar_type,
                     candle_mode,
                     display_name,

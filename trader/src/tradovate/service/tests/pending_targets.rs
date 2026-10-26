@@ -249,6 +249,8 @@ async fn set_target_position_records_pending_target_for_staged_reversal() {
         broker_task: None,
         replay_speed_tx,
         replay_speed: ReplaySpeed::default(),
+        ninja_replay_stop_tx: None,
+        ninja_replay_generation: 0,
         replay_execution_ledger: replay::ReplayExecutionLedgerState::default(),
         session: Some(session),
         replay: None,

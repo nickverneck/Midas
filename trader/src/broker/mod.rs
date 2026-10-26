@@ -275,6 +275,10 @@ fn command_broker(cmd: &ServiceCommand) -> Option<BrokerKind> {
         ServiceCommand::EnterReplayMode { config, .. } => Some(config.broker),
         #[cfg(feature = "replay")]
         ServiceCommand::EnterReplayModeWithSharedFrames { config, .. } => Some(config.broker),
+        #[cfg(feature = "replay")]
+        ServiceCommand::DownloadReplayData { config, .. }
+        | ServiceCommand::SearchReplayDownloadContracts { config, .. }
+        | ServiceCommand::InspectReplayDownloadContract { config, .. } => Some(config.broker),
         _ => None,
     }
 }
@@ -362,6 +366,52 @@ mod tests {
             broker: kind,
             ..AppConfig::default()
         })
+    }
+
+    #[cfg(feature = "replay")]
+    #[test]
+    fn replay_downloader_commands_lazily_select_the_configured_backend() {
+        let config = AppConfig::default();
+        let contract = crate::broker::ContractSuggestion {
+            id: 123,
+            name: "MESU6".to_string(),
+            description: "test contract".to_string(),
+            raw: serde_json::Value::Null,
+        };
+        let start_date = chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let end_date = start_date;
+        let lookup = ServiceCommand::SearchReplayDownloadContracts {
+            operation_id: ReplayDownloadOperationId::next(),
+            config: config.clone(),
+            query: "MES".to_string(),
+            limit: 12,
+        };
+        let inspect = ServiceCommand::InspectReplayDownloadContract {
+            operation_id: ReplayDownloadOperationId::next(),
+            config: config.clone(),
+            contract: contract.clone(),
+        };
+        let download = ServiceCommand::DownloadReplayData {
+            operation_id: ReplayDownloadOperationId::next(),
+            config,
+            instrument: "MES".to_string(),
+            contract,
+            target: None,
+            start_date,
+            end_date,
+            start_time_utc: Some(chrono::NaiveTime::from_hms_opt(9, 30, 0).unwrap()),
+            end_time_utc: Some(chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()),
+            source_kind: "hosted-market-replay".to_string(),
+            replay_speed: 100,
+            bar_type: BarType::default(),
+            candle_mode: CandleMode::Standard,
+            display_name: None,
+            tags: Vec::new(),
+        };
+
+        for command in [lookup, inspect, download] {
+            assert_eq!(command_broker(&command), Some(BrokerKind::Tradovate));
+        }
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ use super::super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum StrategyReadinessStatus {
     ReadyToArm,
+    AwaitingHostedReplay,
     MonitorOnly,
     PreviewOnly,
     NeedsAttention,
@@ -12,6 +13,7 @@ impl StrategyReadinessStatus {
     pub(in crate::app) fn label(self) -> &'static str {
         match self {
             Self::ReadyToArm => "Ready to arm",
+            Self::AwaitingHostedReplay => "Waiting for hosted Replay",
             Self::MonitorOnly => "Monitor only",
             Self::PreviewOnly => "Preview only",
             Self::NeedsAttention => "Needs attention",
@@ -48,6 +50,13 @@ impl App {
 
     pub(in crate::app) fn market_data_title_prefix(&self) -> String {
         self.bar_type.mode_label(self.effective_candle_mode())
+    }
+
+    pub(in crate::app) fn engine_strategy_label(&self) -> String {
+        self.active_engine_summary()
+            .map(|summary| summary.strategy_label())
+            .filter(|label| label != "-")
+            .unwrap_or_else(|| "status not reported".to_string())
     }
 
     pub(in crate::app) fn strategy_numeric_value(&self, focus: Focus, fallback: String) -> String {
@@ -116,6 +125,9 @@ impl App {
                         "Fast EMA Length ({fast}) must be less than Slow EMA Length ({slow})."
                     ));
                 }
+                if let Err(error) = self.strategy.native_ema.direction_gate.validate() {
+                    blockers.push(error);
+                }
             }
             NativeStrategyKind::HmaCross => {
                 let fast = self.strategy.native_hma_cross.fast_length;
@@ -124,6 +136,9 @@ impl App {
                     blockers.push(format!(
                         "Fast HMA Length ({fast}) must be less than Slow HMA Length ({slow})."
                     ));
+                }
+                if let Err(error) = self.strategy.native_hma_cross.direction_gate.validate() {
+                    blockers.push(error);
                 }
             }
             NativeStrategyKind::HeikinAshiColor => {}
@@ -135,6 +150,9 @@ impl App {
                     blockers.push(format!(
                         "Fast HMA Length ({fast}) must be less than Slow HMA Length ({slow})."
                     ));
+                }
+                if let Err(error) = config.hma_cross.direction_gate.validate() {
+                    blockers.push(error);
                 }
                 if let Err(error) = config.volume_regime.validate() {
                     blockers.push(error);
@@ -148,6 +166,9 @@ impl App {
                     blockers.push(format!(
                         "Fast EMA Length ({fast}) must be less than Slow EMA Length ({slow})."
                     ));
+                }
+                if let Err(error) = config.ema_cross.direction_gate.validate() {
+                    blockers.push(error);
                 }
                 if let Err(error) = config.volume_regime.validate() {
                     blockers.push(error);
@@ -247,6 +268,19 @@ impl App {
             };
         }
 
+        if self.ninjatrader_replay_awaiting_account() {
+            blockers.push(
+                "Start a hosted Replay stream and load its account before readiness can be evaluated."
+                    .to_string(),
+            );
+            return StrategyReadiness {
+                status: StrategyReadinessStatus::AwaitingHostedReplay,
+                blockers,
+                warnings,
+                adjustments,
+            };
+        }
+
         if !self.automated_strategy_affordance_visible() {
             blockers.push(format!(
                 "{} automation is unavailable.",
@@ -272,6 +306,13 @@ impl App {
         }
     }
 
+    pub(in crate::app) fn ninjatrader_replay_awaiting_account(&self) -> bool {
+        self.session_kind.is_ninjatrader_replay()
+            && !self.capabilities.automated_orders
+            && self.accounts.is_empty()
+            && self.hosted_replay_clock.is_none()
+    }
+
     pub(in crate::app) fn selected_contract_ready(&self) -> bool {
         self.contract_results.get(self.selected_contract).is_some()
             || self.market.contract_id.is_some()
@@ -282,6 +323,9 @@ impl App {
         match self.strategy_readiness().status {
             StrategyReadinessStatus::ReadyToArm => {
                 "[Enter] Continue / Arm Native Strategy".to_string()
+            }
+            StrategyReadinessStatus::AwaitingHostedReplay => {
+                "[Enter] Return to Live Replay setup".to_string()
             }
             StrategyReadinessStatus::MonitorOnly => "[Enter] Continue / Monitor Only".to_string(),
             StrategyReadinessStatus::PreviewOnly => "[Enter] Continue / Preview Only".to_string(),

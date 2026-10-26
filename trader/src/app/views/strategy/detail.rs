@@ -395,7 +395,10 @@ impl App {
             }
             lines.extend([
                 Line::from(""),
-                Line::from(format!("Live status: {}", self.strategy_runtime_summary())),
+                Line::from(format!(
+                    "Runtime status: {}",
+                    self.strategy_runtime_summary()
+                )),
                 Line::from(format!(
                     "Selected contract qty: {}",
                     self.effective_market_position_qty()
