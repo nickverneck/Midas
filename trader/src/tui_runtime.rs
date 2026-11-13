@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_engine_disconnect_returns_error_and_cleans_up_session() {
+    async fn offline_engine_disconnect_completes_hydration_without_dropping_session() {
         let queue = EngineRelayQueue::new();
         let key = EngineKey::from_socket_path(std::path::Path::new("/tmp/terminal-engine.sock"));
         let mut sessions = HashMap::new();
@@ -877,8 +877,43 @@ mod tests {
             &mut app,
             &mut sessions,
             &mut active,
-            key,
+            key.clone(),
             std::path::PathBuf::from("/tmp/terminal-engine.sock"),
+            &AppConfig::default(),
+            &queue,
+            &dummy_cmd_tx,
+            TokioInstant::now() + Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(sessions.contains_key(&key));
+        assert_eq!(active.as_ref(), Some(&key));
+    }
+
+    #[tokio::test]
+    async fn transport_close_during_hydration_still_fails_and_cleans_up() {
+        let queue = EngineRelayQueue::new();
+        let key =
+            EngineKey::from_socket_path(std::path::Path::new("/tmp/closed-during-hydration.sock"));
+        let mut sessions = HashMap::new();
+        insert_observed_engine_session(&mut sessions, key.clone(), test_engine_session(), &queue)
+            .await;
+        let generation = sessions[&key].generation;
+        assert!(queue.publish(EngineRelayMessage::Closed {
+            engine_key: key.clone(),
+            generation,
+        }));
+        let mut app = App::new(AppConfig::default());
+        let mut active = None;
+        let (dummy_cmd_tx, _dummy_cmd_rx) = service_command_channel(1);
+
+        let result = hydrate_and_enter_existing_engine_until(
+            &mut app,
+            &mut sessions,
+            &mut active,
+            key,
+            std::path::PathBuf::from("/tmp/closed-during-hydration.sock"),
             &AppConfig::default(),
             &queue,
             &dummy_cmd_tx,

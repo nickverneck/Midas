@@ -45,9 +45,13 @@ impl AttachHydration {
             ServiceEvent::AccountsLoaded(_) => self.saw_accounts = true,
             ServiceEvent::AccountSnapshotsLoaded(_) => self.saw_account_snapshots = true,
             ServiceEvent::ExecutionState(_) => self.saw_execution_state = true,
-            ServiceEvent::Disconnected | ServiceEvent::Error(_) => {
-                return AttachHydrationProgress::Terminal;
-            }
+            // `Disconnected` is the broker state returned by ReplayState when
+            // this engine has not selected/connected a broker. It is a valid
+            // offline hydration response. Transport loss is reported by the
+            // relay as EngineRelayMessage::Closed, while broker failures are
+            // represented by Error.
+            ServiceEvent::Disconnected => return AttachHydrationProgress::Ready,
+            ServiceEvent::Error(_) => return AttachHydrationProgress::Terminal,
             _ => {}
         }
 
@@ -272,12 +276,12 @@ mod tests {
     }
 
     #[test]
-    fn attach_hydration_stops_on_terminal_connection_event() {
+    fn attach_hydration_accepts_offline_disconnected_state() {
         let mut hydration = AttachHydration::default();
 
         assert_eq!(
             hydration.observe(&ServiceEvent::Disconnected),
-            AttachHydrationProgress::Terminal
+            AttachHydrationProgress::Ready
         );
     }
 
