@@ -3,6 +3,7 @@ mod broker;
 mod cli;
 mod config;
 mod databento_cli;
+mod ninjatrader_ncd_cli;
 #[cfg(feature = "replay")]
 mod databento_import;
 mod engine_cli;
@@ -14,6 +15,7 @@ mod ipc;
 #[cfg(feature = "ironbeam")]
 mod ironbeam;
 mod lua_replay;
+mod ninjatrader_ncd;
 #[cfg(feature = "replay")]
 mod meta_gate_schedule;
 #[cfg(feature = "replay")]
@@ -33,6 +35,7 @@ use clap::Parser;
 use cli::{Cli, Mode};
 use config::AppConfig;
 use databento_cli::download_databento_trades;
+use ninjatrader_ncd_cli::export_ninjatrader_ncd;
 #[cfg(feature = "replay")]
 use databento_import::import_databento_trades;
 use engine_cli::{configure_attach_mode, kill_all_engines, kill_engine, list_engines};
@@ -189,6 +192,9 @@ async fn main() -> Result<()> {
     #[cfg(feature = "replay")]
     if let Some(Mode::ImportDatabentoTrades(args)) = cli.mode.clone() {
         return import_databento_trades(args);
+    }
+    if let Some(Mode::ExportNinjaTraderNcd(args)) = cli.mode.clone() {
+        return export_ninjatrader_ncd(args);
     }
     #[cfg(not(feature = "replay"))]
     if matches!(cli.mode, Some(Mode::ImportDatabentoTrades(_))) {

@@ -41,6 +41,29 @@ Notes:
 - `TRADER_*` environment variables are preferred; legacy `MIDAS_TUI_*` variables still fall back where supported.
 - `session_stats_enabled = true` turns on the TUI-side session tracker shown on `F6`; set it to `false` or export `TRADER_SESSION_STATS_ENABLED=0` for a leaner session.
 
+NinjaTrader `.ncd` export:
+
+```sh
+# One minute file, interpreted using the NinjaTrader machine's local timezone.
+cargo run --manifest-path trader/Cargo.toml -- export-ninjatrader-ncd \
+  --input '/path/to/ES 12-26/20261113.Last.ncd' \
+  --kind minute --timezone America/New_York --output es-minute.csv
+
+# Combine matching files immediately inside one contract folder.
+cargo run --manifest-path trader/Cargo.toml -- export-ninjatrader-ncd \
+  --input '/path/to/ES 12-26' \
+  --kind tick --timezone America/New_York --output es-tick.csv
+```
+
+The exporter requires an IANA timezone and fails on nonexistent or ambiguous
+local times during daylight-saving transitions. It preserves the source's
+100-nanosecond timestamp precision in a timezone-offset `timestamp` column;
+each row also includes its source filename. Directory input should be one
+contract directory; only its immediate files are read. Inputs accept only one
+file type (`Last`, `Bid`, or `Ask`) and the expected timestamp filename width
+(8 digits for minute data, 12 for tick data). Tick exports contain repeated
+seconds and therefore are not accepted by the web CSV chart uploader.
+
 Suggested config flow:
 1. Pick `broker = "tradovate"` or `broker = "ironbeam"` for single-broker builds. On dual-broker builds you can still switch from the broker selection screen.
 2. Start with token-file mode if you already have a valid bearer token, or switch to credentials mode to request and cache a new token.

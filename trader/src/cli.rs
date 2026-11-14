@@ -204,6 +204,22 @@ pub(crate) struct ImportDatabentoTradesArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct ExportNinjaTraderNcdArgs {
+    /// One .ncd file or a directory whose .ncd files should be combined.
+    #[arg(long)]
+    pub(crate) input: PathBuf,
+    /// Output CSV file.
+    #[arg(long)]
+    pub(crate) output: PathBuf,
+    /// Record encoding: minute or tick.
+    #[arg(long, value_parser = ["minute", "tick"])]
+    pub(crate) kind: String,
+    /// IANA timezone used to interpret NinjaTrader's local wall-clock timestamps.
+    #[arg(long)]
+    pub(crate) timezone: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct RepriceReplayResultArgs {
     /// Existing result.json to reprice without replaying market data.
     #[arg(long)]
@@ -629,6 +645,9 @@ pub(crate) enum Mode {
     /// Import a Databento trades ZIP into an isolated replay raw-tick Parquet cache.
     #[command(name = "import-databento-trades")]
     ImportDatabentoTrades(ImportDatabentoTradesArgs),
+    /// Decode NinjaTrader .ncd data to a timestamped CSV.
+    #[command(name = "export-ninjatrader-ncd")]
+    ExportNinjaTraderNcd(ExportNinjaTraderNcdArgs),
     /// Reprice a saved replay result with an accounting-only fee schedule.
     #[command(name = "reprice-replay-result")]
     RepriceReplayResult(RepriceReplayResultArgs),
