@@ -25,6 +25,7 @@ export function createLuaPrototypeSweep(selected, outputDir, source) {
 		base_strategy: {
 			...selected.base_strategy,
 			kind: 'Lua',
+			native_signal_timing: 'ClosedBar',
 			lua: { ...(selected.base_strategy.lua ?? {}), schema_version: 1, source, memory_limit_bytes: 8 * 1024 * 1024, instruction_limit: 100_000 }
 		}
 	};

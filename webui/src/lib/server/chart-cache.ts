@@ -92,17 +92,22 @@ export class BridgeError extends Error {
 function localHost(host: string | null): boolean {
 	if (!host) return false;
 	const value = host.toLowerCase().replace(/\.$/, '');
-	return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/.test(value);
+	if (/^(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/.test(value)) return true;
+	// LAN access is opt-in for a specific address selected by the operator.
+	const lanHost = process.env.MIDAS_LAN_HOST?.trim().toLowerCase();
+	if (!lanHost || !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(lanHost)) return false;
+	return value === lanHost || (value.startsWith(`${lanHost}:`) && /^\d{1,5}$/.test(value.slice(lanHost.length + 1)));
 }
 
 export function assertLocalRequest(event: RequestEvent): void {
 	if (!localHost(event.request.headers.get('host'))) {
-		throw new BridgeError(403, 'This local bridge only accepts requests addressed to localhost.');
+		throw new BridgeError(403, 'This local bridge only accepts configured local addresses.');
 	}
 	const origin = event.request.headers.get('origin');
 	if (origin) {
 		try {
-			if (!localHost(new URL(origin).host)) throw new Error('remote origin');
+			const url = new URL(origin);
+			if (!['http:', 'https:'].includes(url.protocol) || !localHost(url.host) || url.host.toLowerCase() !== event.request.headers.get('host')?.toLowerCase()) throw new Error('remote origin');
 		} catch {
 			throw new BridgeError(403, 'Cross-origin requests are not accepted by the local bridge.');
 		}

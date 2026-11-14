@@ -78,7 +78,7 @@
 	<p>Uses the selected sweep’s dataset, replay, fee, and account settings. Runs one Lua strategy in isolated replay services.</p>
 	<label for="lua-source">Lua source</label>
 	<textarea id="lua-source" bind:value={source} spellcheck="false" maxlength="12288" aria-describedby="lua-limit"></textarea>
-	<small id="lua-limit">Return “buy”, “sell”, or “hold”. Read bar.open, bar.high, bar.low, bar.close, bar.volume, bar.timestamp_ns, ctx.bar_index and ctx.position_qty. The sandbox resets each bar; globals do not persist. Limits: 8 MiB and 100,000 instructions per evaluation.</small>
+	<small id="lua-limit">Return “buy”, “sell”, or “hold”. Read bar.open, bar.high, bar.low, bar.close, bar.volume, bar.timestamp_ns, ctx.bar_index and ctx.position_qty. Globals persist within each isolated replay. Runs use closed bars; ctx.is_warmup is true while rebuilding history, where position_qty is unavailable. Limits: 8 MiB and 100,000 instructions per evaluation.</small>
 	<div class="actions"><button disabled={busy || (job !== undefined && !terminal) || !sweepId || sourceBytes > maxBytes} on:click={() => submit('lua-validate')}>Validate</button><button class="primary" disabled={busy || (job !== undefined && !terminal) || !sweepId || sourceBytes > maxBytes} on:click={() => submit('lua-run')}>Run replay</button>{#if job && !terminal}<button class="cancel" disabled={busy} on:click={cancel}>Cancel</button>{/if}</div>
 	{#if error}<div class="error" role="alert">{error}</div>{/if}
 	{#if job}<div class="status"><div><strong>{job.operation === 'lua-run' ? 'Replay' : 'Validation'}</strong><span class="state">{job.status}</span></div>{#if job.error}<pre>{job.error}</pre>{:else if job.result}<pre>{JSON.stringify(job.result, null, 2)}</pre>{/if}</div>{/if}

@@ -16,7 +16,7 @@ test('Lua prototype keeps selected replay settings and forces one isolated Lua r
 		bar_type: { kind: 'minute', value: 5 }, engine_mode: 'deterministic', fill_model: 'tick_bid_ask',
 		initial_capital: 25000, parameters: [{ path: 'base_strategy.order_qty', values: [1, 2] }], constraints: [{ expr: 'x' }],
 		output_formats: ['csv_rows'],
-		base_strategy: { kind: 'Native', order_qty: 2, native_ema: { fast: 4 }, lua: { memory_limit_bytes: 32 } }
+		base_strategy: { kind: 'Native', native_signal_timing: 'LiveBar', order_qty: 2, native_ema: { fast: 4 }, lua: { memory_limit_bytes: 32 } }
 	};
 	const output = '/jobs/123/output';
 	const source = 'function on_bar(ctx, bar) return "hold" end';
@@ -32,6 +32,8 @@ test('Lua prototype keeps selected replay settings and forces one isolated Lua r
 	assert.equal(prototype.parallelism, 1);
 	assert.deepEqual(prototype.output_formats, ['json_summary', 'csv_rows']);
 	assert.equal(prototype.base_strategy.kind, 'Lua');
+	assert.equal(prototype.base_strategy.native_signal_timing, 'ClosedBar');
+	assert.equal(selected.base_strategy.native_signal_timing, 'LiveBar');
 	assert.equal(prototype.base_strategy.order_qty, 2);
 	assert.equal(prototype.base_strategy.native_ema, selected.base_strategy.native_ema);
 	assert.deepEqual(prototype.base_strategy.lua, { memory_limit_bytes: 8 * 1024 * 1024, schema_version: 1, source, instruction_limit: 100_000 });
