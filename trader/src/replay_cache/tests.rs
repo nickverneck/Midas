@@ -3,6 +3,7 @@ use super::*;
 mod support;
 use support::*;
 
+mod chart_api;
 mod checkpoint;
 mod loading;
 mod manifest_paths;

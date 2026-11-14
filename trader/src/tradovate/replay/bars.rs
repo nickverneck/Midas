@@ -11,10 +11,32 @@ pub(super) fn derive_cached_raw_tick_bars(
     bar_type: BarType,
     tick_size: f64,
 ) -> Result<Vec<Bar>> {
+    derive_cached_raw_tick_chart_bars_impl(resolved, timestamp_range, bar_type, tick_size, true)
+}
+
+/// Aggregate stored raw ticks for chart reads without rewriting duplicate
+/// timestamps on tick-count bars. Replay uses the strict variant above for its
+/// event ordering contract; chart data retains the builder's source timestamps.
+pub(crate) fn derive_cached_raw_tick_chart_bars(
+    resolved: &ReplayCacheResolvedRawTicks,
+    timestamp_range: Option<&ReplayCacheTimeRange>,
+    bar_type: BarType,
+    tick_size: f64,
+) -> Result<Vec<Bar>> {
+    derive_cached_raw_tick_chart_bars_impl(resolved, timestamp_range, bar_type, tick_size, false)
+}
+
+fn derive_cached_raw_tick_chart_bars_impl(
+    resolved: &ReplayCacheResolvedRawTicks,
+    timestamp_range: Option<&ReplayCacheTimeRange>,
+    bar_type: BarType,
+    tick_size: f64,
+    strict_tick_timestamps: bool,
+) -> Result<Vec<Bar>> {
     let mut bars = match bar_type.kind() {
         BarKind::Minute => {
-            let interval_ns = i64::from(bar_type.value()) * 60 * 1_000_000_000;
-            let mut builder = TimeBarBuilder::new(interval_ns.max(1));
+            let interval_ns = time_bar_interval_ns(bar_type, 60)?;
+            let mut builder = TimeBarBuilder::new(interval_ns);
             stream_resolved_raw_ticks(resolved, timestamp_range, |row| {
                 builder.push_tick_with_size(row.ts_ns, row.price, Some(row.size));
                 Ok(())
@@ -22,8 +44,8 @@ pub(super) fn derive_cached_raw_tick_bars(
             builder.finish()
         }
         BarKind::Second => {
-            let interval_ns = i64::from(bar_type.value()) * 1_000_000_000;
-            let mut builder = TimeBarBuilder::new(interval_ns.max(1));
+            let interval_ns = time_bar_interval_ns(bar_type, 1)?;
+            let mut builder = TimeBarBuilder::new(interval_ns);
             stream_resolved_raw_ticks(resolved, timestamp_range, |row| {
                 builder.push_tick_with_size(row.ts_ns, row.price, Some(row.size));
                 Ok(())
@@ -55,10 +77,35 @@ pub(super) fn derive_cached_raw_tick_bars(
             builder.finish()
         }
     };
-    if matches!(bar_type.kind(), BarKind::Tick) {
+    if strict_tick_timestamps && matches!(bar_type.kind(), BarKind::Tick) {
         make_bar_timestamps_strictly_increasing(&mut bars);
     }
     Ok(bars)
+}
+
+fn time_bar_interval_ns(bar_type: BarType, seconds_per_unit: i64) -> Result<i64> {
+    i64::from(bar_type.value())
+        .checked_mul(seconds_per_unit)
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .context("raw tick bar interval overflows nanoseconds")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_bar_interval_rejects_max_minute_value() {
+        assert!(time_bar_interval_ns(BarType::minute(u32::MAX), 60).is_err());
+    }
+
+    #[test]
+    fn time_bar_interval_preserves_valid_minute_values() {
+        assert_eq!(
+            time_bar_interval_ns(BarType::minute(5), 60).unwrap(),
+            300_000_000_000
+        );
+    }
 }
 
 pub(super) fn build_time_bars(ticks: &[ReplayTick], interval_ns: i64) -> Vec<Bar> {

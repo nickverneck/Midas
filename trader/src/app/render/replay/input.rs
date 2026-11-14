@@ -450,7 +450,12 @@ impl App {
             | Focus::StrategyContinue
             | Focus::AccountList
             | Focus::InstrumentQuery
-            | Focus::ContractList => {}
+            | Focus::ContractList
+            | Focus::DailyWindowEnabled
+            | Focus::DailyWindowTimezone
+            | Focus::DailyWindowStart
+            | Focus::DailyWindowEnd
+            | Focus::FlattenAtSessionEnd => {}
             #[cfg(feature = "replay")]
             Focus::ReplayDownloadProvider
             | Focus::ReplayDownloadEnv

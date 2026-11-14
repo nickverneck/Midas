@@ -63,6 +63,46 @@ pub(super) async fn handle_execution_account_sync(
     Ok(())
 }
 
+async fn maybe_handle_daily_window_flatten(
+    client: &Client,
+    session: &mut IronbeamSession,
+    latency: &mut LatencySnapshot,
+    internal_tx: InternalEventSender,
+    actual_qty: i32,
+) -> Result<bool> {
+    let window = &session.execution_config.daily_window;
+    if !window.enabled || !window.flatten_at_session_end || actual_qty == 0 {
+        return Ok(false);
+    }
+    let Some(window_ts) = strategy_bars(session).last().map(|bar| bar.ts_ns) else {
+        return Ok(false);
+    };
+    let outside = match window.contains_timestamp(window_ts) {
+        Ok(inside) => !inside,
+        Err(_) => false,
+    };
+    if !outside {
+        return Ok(false);
+    }
+
+    let reason = format!(
+        "{} daily strategy window ended; flattening before next eligible session",
+        active_native_slug(session)
+    );
+    match dispatch_target_position_order(client, session, latency, internal_tx, 0, true, &reason)
+        .await?
+    {
+        OrderDispatchOutcome::NoOp { message } => {
+            session.execution_runtime.last_summary = message;
+        }
+        OrderDispatchOutcome::Queued { target_qty } => {
+            session.execution_runtime.set_pending_target(target_qty);
+            session.execution_runtime.last_summary = reason;
+        }
+    }
+    Ok(true)
+}
+
 pub(super) async fn maybe_run_execution_strategy(
     client: &Client,
     session: &mut IronbeamSession,
@@ -107,6 +147,19 @@ pub(super) async fn maybe_run_execution_strategy(
         session.execution_runtime.last_summary = format!(
             "Waiting for prior Ironbeam order to settle (actual {actual_market_qty}, pending target {pending_target_qty})."
         );
+        rebuild_account_snapshots(session);
+        return Ok(());
+    }
+
+    if maybe_handle_daily_window_flatten(
+        client,
+        session,
+        latency,
+        internal_tx.clone(),
+        actual_market_qty,
+    )
+    .await?
+    {
         rebuild_account_snapshots(session);
         return Ok(());
     }
@@ -160,7 +213,7 @@ pub(super) async fn maybe_run_execution_strategy(
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let current_qty = effective_market_position_qty(session);
-    let (signal_bar, signal, summary, debug_summary) = {
+    let (signal_bar, mut signal, mut summary, debug_summary) = {
         let bars = strategy_bars(session);
         let signal_bar = bars
             .last()
@@ -170,6 +223,64 @@ pub(super) async fn maybe_run_execution_strategy(
             evaluate_active_execution_strategy(session, bars, current_qty);
         (signal_bar, signal, summary, debug_summary)
     };
+    let mut daily_window_flatten = false;
+    let mut daily_window_signal_exit = false;
+    let window_ts = strategy_bars(session)
+        .last()
+        .map(|bar| bar.ts_ns)
+        .unwrap_or(signal_bar.ts_ns);
+    if session.execution_config.daily_window.enabled {
+        match session
+            .execution_config
+            .daily_window
+            .contains_timestamp(window_ts)
+        {
+            Ok(inside) => {
+                if !inside && signal != StrategySignal::Hold {
+                    let proposed = target_qty_for_signal(
+                        signal,
+                        current_qty,
+                        session.execution_config.order_qty,
+                    );
+                    match proposed.and_then(|target| {
+                        crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                            current_qty,
+                            target,
+                        )
+                    }) {
+                        Some(0) if current_qty != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                    summary = format!("{summary} | outside strategy daily window");
+                }
+                daily_window_flatten = !inside
+                    && session.execution_config.daily_window.flatten_at_session_end
+                    && current_qty != 0;
+            }
+            Err(error) => {
+                if let Some(proposed) =
+                    target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
+                {
+                    match crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                        current_qty,
+                        proposed,
+                    ) {
+                        Some(0) if current_qty != 0 && proposed != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                }
+                summary = format!("strategy daily window invalid; entries blocked: {error}");
+            }
+        }
+    }
     let gate_detail = format!(
         "strategy eval | {} | timing {} | bar_ts {} | actual_qty {} | effective_qty {}",
         active_native_slug(session),
@@ -192,7 +303,44 @@ pub(super) async fn maybe_run_execution_strategy(
         },
     )));
 
-    if let Some(window) = session_window_at(session, signal_bar.ts_ns)
+    if session.execution_config.daily_window.enabled
+        && !session
+            .execution_config
+            .daily_window
+            .contains_timestamp(window_ts)
+            .unwrap_or(false)
+    {
+        if daily_window_flatten || daily_window_signal_exit {
+            match dispatch_target_position_order(
+                client,
+                session,
+                latency,
+                internal_tx.clone(),
+                0,
+                true,
+                "Strategy daily window ended; flattening position.",
+            )
+            .await?
+            {
+                OrderDispatchOutcome::NoOp { message } => {
+                    session.execution_runtime.last_summary = message
+                }
+                OrderDispatchOutcome::Queued { target_qty } => {
+                    session.execution_runtime.set_pending_target(target_qty);
+                    session.execution_runtime.last_summary =
+                        "Strategy daily window ended; flattening position.".to_string();
+                }
+            }
+        } else {
+            session.execution_runtime.last_summary = summary;
+            sync_execution_protection(client, session, latency, internal_tx, Some(&signal_bar))
+                .await?;
+        }
+        rebuild_account_snapshots(session);
+        return Ok(());
+    }
+
+    if let Some(window) = session_window_at(session, window_ts)
         && window.hold_entries
     {
         let gate_detail = format!(
@@ -488,6 +636,20 @@ async fn continue_staged_reversal(
             return Ok(true);
         }
 
+        if session.execution_config.daily_window.enabled {
+            let window = &session.execution_config.daily_window;
+            if !strategy_bars(session)
+                .last()
+                .map(|bar| bar.ts_ns)
+                .and_then(|ts| window.contains_timestamp(ts).ok())
+                .unwrap_or(false)
+            {
+                session.execution_runtime.pending_reversal_entry = None;
+                session.execution_runtime.last_summary = "Staged reversal remains flat; strategy daily window is closed or invalid, so the entry was cancelled.".to_string();
+                return Ok(true);
+            }
+        }
+
         match dispatch_target_position_order(
             client,
             session,
@@ -667,6 +829,13 @@ fn evaluate_active_execution_strategy(
     bars: &[Bar],
     current_qty: i32,
 ) -> (StrategySignal, String, String) {
+    if session.execution_config.kind == crate::strategy::StrategyKind::Lua {
+        return (
+            StrategySignal::Hold,
+            "Lua strategies are unavailable in live execution".to_string(),
+            "lua_live_execution_blocked".to_string(),
+        );
+    }
     match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => {
             let evaluation = session

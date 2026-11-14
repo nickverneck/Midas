@@ -140,7 +140,7 @@ impl ReplayState {
         }
     }
 
-    pub(super) fn bars_for_type(&self, bar_type: BarType) -> Result<Vec<Bar>> {
+    pub(crate) fn bars_for_type(&self, bar_type: BarType) -> Result<Vec<Bar>> {
         match &self.data {
             ReplayDataSource::PriceTicks(ticks) | ReplayDataSource::RawTicks(ticks) => {
                 let ticks = ticks.as_ref();

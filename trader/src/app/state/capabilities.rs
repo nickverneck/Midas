@@ -77,7 +77,16 @@ impl App {
     }
 
     pub(in crate::app) fn visible_strategy_kinds(&self) -> &'static [StrategyKind] {
-        &[StrategyKind::Native]
+        const NATIVE: &[StrategyKind] = &[StrategyKind::Native];
+        const CACHED_REPLAY: &[StrategyKind] = &[StrategyKind::Native, StrategyKind::Lua];
+        if self.session_kind == SessionKind::Replay
+            && self.selected_broker == BrokerKind::Tradovate
+            && self.capabilities.automated_orders
+        {
+            CACHED_REPLAY
+        } else {
+            NATIVE
+        }
     }
 
     pub(in crate::app) fn next_visible_strategy_kind(&self) -> StrategyKind {

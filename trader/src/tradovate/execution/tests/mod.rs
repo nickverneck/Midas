@@ -5,6 +5,7 @@ pub(super) use serde_json::json;
 pub(super) use std::collections::BTreeMap;
 
 mod account_sync;
+mod lua_replay;
 mod pending_targets;
 mod protection_sync;
 mod replay;

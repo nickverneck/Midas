@@ -121,7 +121,12 @@ impl App {
             | Focus::BarTypeToggle
             | Focus::BarValue
             | Focus::CandleModeToggle
-            | Focus::ContractList => {}
+            | Focus::ContractList
+            | Focus::DailyWindowEnabled
+            | Focus::DailyWindowTimezone
+            | Focus::DailyWindowStart
+            | Focus::DailyWindowEnd
+            | Focus::FlattenAtSessionEnd => {}
             #[cfg(feature = "replay")]
             Focus::ReplayInstrumentQuery
             | Focus::ReplayDataset

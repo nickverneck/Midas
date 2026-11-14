@@ -100,6 +100,9 @@ pub async fn service_loop(
             }
             Either::InternalOverflow => {
                 let count = internal_tx.take_overflow_count();
+                eprintln!(
+                    "broker service internal event queue overflowed ({count} event(s)); disconnecting safely"
+                );
                 let _ = event_tx.send(ServiceEvent::Error(format!(
                     "broker service internal event queue overflowed ({count} event(s)); disconnecting safely"
                 )));
@@ -111,6 +114,10 @@ pub async fn service_loop(
                 // this backend session so the owner can reconnect from a
                 // fresh authoritative snapshot instead of continuing with a
                 // stale F6/account view.
+                let count = event_tx.take_overflow_count();
+                eprintln!(
+                    "broker service event queue overflowed ({count} event(s)); disconnecting safely"
+                );
                 break;
             }
         }

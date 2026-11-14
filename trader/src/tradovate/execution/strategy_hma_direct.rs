@@ -22,6 +22,9 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
     }
 
     let actual_qty = selected_market_position_qty(session);
+    if maybe_handle_daily_window_flatten(session, broker_tx, event_tx, actual_qty)? {
+        return Ok(());
+    }
     let Some(last_strategy_ts) = latest_strategy_bar_ts(session) else {
         session.execution_runtime.last_summary = format!(
             "HMA Direct {} armed; waiting for first {}.",
@@ -53,7 +56,10 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
         let latest_fingerprint = latest_strategy_bar_fingerprint(session);
-        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
+            && session.execution_runtime.last_closed_bar_ordinal
+                == session.execution_runtime.replay_bar_ordinal
+        {
             let corrected = matches!(
                 (
                     session.execution_runtime.last_closed_bar_fingerprint,
@@ -98,6 +104,8 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         }
         session.execution_runtime.last_closed_bar_fingerprint = latest_fingerprint;
     }
+    session.execution_runtime.last_closed_bar_ordinal =
+        session.execution_runtime.replay_bar_ordinal;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let actual_entry = selected_market_entry_price(session);
@@ -169,7 +177,61 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
     };
     session.execution_runtime.hma_cross_execution = hma_runtime;
     session.execution_runtime.volume_hma_cross_execution = volume_hma_runtime;
-    let (signal_bar, signal, strategy_summary, debug_summary) = evaluation_result;
+    let (signal_bar, mut signal, strategy_summary, debug_summary) = evaluation_result;
+    let mut force_daily_flat = false;
+    let mut daily_window_signal_exit = false;
+    let window_ts = strategy_bars(session)
+        .last()
+        .map(|bar| bar.ts_ns)
+        .unwrap_or(signal_bar.ts_ns);
+    if session.execution_config.daily_window.enabled {
+        match session
+            .execution_config
+            .daily_window
+            .contains_timestamp(window_ts)
+        {
+            Ok(inside) => {
+                if !inside && signal != StrategySignal::Hold {
+                    let proposed = target_qty_for_signal(
+                        signal,
+                        actual_qty,
+                        session.execution_config.order_qty,
+                    );
+                    match proposed.and_then(|target| {
+                        crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                            actual_qty, target,
+                        )
+                    }) {
+                        Some(0) if actual_qty != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                }
+                force_daily_flat = !inside
+                    && session.execution_config.daily_window.flatten_at_session_end
+                    && actual_qty != 0;
+            }
+            Err(_) => {
+                if let Some(proposed) =
+                    target_qty_for_signal(signal, actual_qty, session.execution_config.order_qty)
+                {
+                    match crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                        actual_qty, proposed,
+                    ) {
+                        Some(0) if actual_qty != 0 && proposed != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                }
+            }
+        }
+    }
     let summary = format!(
         "{} | {}",
         strategy_summary,
@@ -177,9 +239,12 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
     );
     session.execution_runtime.last_summary = format!("HMA Direct: {summary}");
 
-    let Some(target_qty) =
+    let target_qty = if force_daily_flat || daily_window_signal_exit {
+        Some(0)
+    } else {
         target_qty_for_signal(signal, actual_qty, session.execution_config.order_qty)
-    else {
+    };
+    let Some(target_qty) = target_qty else {
         let gate_detail = format!(
             "hma direct eval | {} | signal {} | no target | bar_ts {} | actual_qty {} | {}",
             active_native_slug(session),

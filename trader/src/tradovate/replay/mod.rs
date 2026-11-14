@@ -43,6 +43,8 @@ mod walk_forward_eval;
 mod worker;
 
 #[cfg(feature = "replay")]
+pub(crate) use bars::derive_cached_raw_tick_chart_bars;
+#[cfg(feature = "replay")]
 pub(crate) use broker_schedule::ReplayBrokerSchedule;
 pub(crate) use candle_accel::{
     ReplayAcceleration, ReplayAccelerationDevice, ReplayAccelerationStatus, ReplayEmaBatchResult,
@@ -78,6 +80,7 @@ pub(crate) use sweep::{
     ReplaySweepChildSpec, ReplaySweepConstraint, ReplaySweepExecutionMode,
     ReplaySweepGuardrailReport, ReplaySweepGuardrails, ReplaySweepOutputFormat,
     ReplaySweepParameter, ReplaySweepPlan, ReplaySweepResourceEstimate, ReplaySweepSpec,
+    validate_strategy_config,
 };
 #[cfg(feature = "replay")]
 pub(crate) use sweep_analytics::{

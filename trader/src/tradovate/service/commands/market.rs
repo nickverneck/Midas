@@ -93,19 +93,34 @@ pub(super) async fn subscribe_bars(
     session.active_order_strategy = None;
     session.bar_type = bar_type;
     session.candle_mode = candle_mode;
+    let history_requirement = session
+        .execution_config
+        .market_history_requirement(session.cfg.history_bars);
     session.execution_runtime.last_closed_bar_ts = None;
     session.execution_runtime.pending_target_qty = None;
     session.execution_runtime.reset_execution();
-    session.execution_runtime.last_summary =
-        "Selected contract changed; waiting for market data.".to_string();
+    session.execution_runtime.last_summary = format!(
+        "Selected contract changed; requesting {} bars (warm-up {}, configured {}).",
+        history_requirement.requested_bars,
+        history_requirement.warmup_bars,
+        history_requirement.configured_bars,
+    );
     emit_execution_state(event_tx, session);
+
+    let _ = event_tx.send(ServiceEvent::Status(format!(
+        "Market history request: {} bars | strategy warm-up: {} | configured: {}",
+        history_requirement.requested_bars,
+        history_requirement.warmup_bars,
+        history_requirement.configured_bars,
+    )));
 
     if session.replay_enabled {
         let replay = state
             .replay
             .clone()
             .context("replay dataset is unavailable")?;
-        let cfg = session.cfg.clone();
+        let mut cfg = session.cfg.clone();
+        cfg.history_bars = history_requirement.requested_bars;
         state.market_task = Some(replay::spawn_replay_market_task(
             replay,
             cfg,
@@ -125,7 +140,8 @@ pub(super) async fn subscribe_bars(
         )
         .await
         .ok();
-        let cfg = session.cfg.clone();
+        let mut cfg = session.cfg.clone();
+        cfg.history_bars = history_requirement.requested_bars;
         let token = session.tokens.md_access_token.clone();
         state.market_task = Some(tokio::spawn(market_data_worker(
             cfg,
@@ -134,6 +150,7 @@ pub(super) async fn subscribe_bars(
             market_specs,
             bar_type,
             candle_mode,
+            history_requirement,
             internal_tx,
         )));
     }

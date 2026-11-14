@@ -341,6 +341,10 @@ fn handle_user_entities(
     event_tx: &ServiceEventSender,
     internal_tx: InternalEventSender,
 ) -> Result<()> {
+    let headless_replay = state
+        .session
+        .as_ref()
+        .is_some_and(|session| session.replay_enabled && session.cfg.replay_headless);
     #[cfg(feature = "replay")]
     let replay_ledger_changed = state
         .session
@@ -426,7 +430,7 @@ fn handle_user_entities(
                 }
             }
         }
-        if trade_markers_changed {
+        if trade_markers_changed && !headless_replay {
             let _ = event_tx.send(ServiceEvent::TradeMarkersUpdated(
                 session.market.trade_markers.clone(),
             ));
@@ -444,15 +448,17 @@ fn handle_user_entities(
         }
         if history_entities_changed {
             refresh_engine_history(session);
-            emit_engine_history(event_tx, session);
+            if !headless_replay {
+                emit_engine_history(event_tx, session);
+            }
         }
     }
     request_snapshot_refresh(state, &internal_tx);
-    if latency_changed {
+    if latency_changed && !headless_replay {
         let _ = event_tx.send(ServiceEvent::Latency(state.latency));
     }
     #[cfg(feature = "replay")]
-    if replay_ledger_changed {
+    if replay_ledger_changed && !headless_replay {
         let _ = event_tx.send(ServiceEvent::ReplayExecutionLedgerUpdated(
             state.replay_execution_ledger.summary(),
         ));
@@ -694,6 +700,11 @@ fn handle_market_update(
         return Ok(());
     }
 
+    let headless_replay = state
+        .session
+        .as_ref()
+        .is_some_and(|session| session.replay_enabled && session.cfg.replay_headless);
+
     let replay_warmup_only = state.session.as_ref().is_some_and(|session| {
         session.replay_enabled
             && update.live_bars == 0
@@ -708,9 +719,11 @@ fn handle_market_update(
         let session = state.session.as_mut().expect("checked session above");
         let history_sequence = update.history_sequence;
         let history_update = update.history_update;
+        let replay_bar_ordinal = update.replay_bar_ordinal;
         let closed_bar_advanced = apply_market_update(&mut session.market, update);
         session.execution_runtime.market_update_sequence = Some(history_sequence);
         session.execution_runtime.market_update_kind = history_update;
+        session.execution_runtime.replay_bar_ordinal = replay_bar_ordinal;
         if replay_warmup_only {
             // Seed closed-bar timing at the warmup boundary.  This keeps the
             // first evaluation bar eligible without allowing the seed
@@ -735,12 +748,16 @@ fn handle_market_update(
                 }
             }
         }
-        refresh_engine_history_mark(session);
+        if !headless_replay {
+            refresh_engine_history_mark(session);
+        }
         (
-            display_market_snapshot(&session.market),
+            (!headless_replay).then(|| display_market_snapshot(&session.market)),
             closed_bar_advanced,
             history_update,
-            session.engine_run.as_ref().map(|run| run.history.clone()),
+            (!headless_replay)
+                .then(|| session.engine_run.as_ref().map(|run| run.history.clone()))
+                .flatten(),
         )
     };
     // Keep F6/account snapshots fresh at closed-bar cadence. Forming-bar
@@ -748,14 +765,12 @@ fn handle_market_update(
     // range bars), so do not clone and scan UserSyncStore for every quote.
     // The snapshot revision path coalesces a refresh that is still building;
     // corrections are included even when their timestamp did not advance.
-    let headless_replay = state
-        .session
-        .as_ref()
-        .is_some_and(|session| session.replay_enabled && session.cfg.replay_headless);
     if should_refresh_account_snapshot(closed_bar_advanced, history_update, headless_replay) {
         request_snapshot_refresh(state, &internal_tx);
     }
-    let _ = market_tx.send(display_snapshot);
+    if let Some(display_snapshot) = display_snapshot {
+        let _ = market_tx.send(display_snapshot);
+    }
     if let Some(history) = engine_history {
         let _ = event_tx.send(ServiceEvent::EngineHistoryUpdated(history));
     }

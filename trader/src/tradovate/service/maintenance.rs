@@ -131,14 +131,36 @@ pub(super) async fn maintain_session(
         ));
     }
     if restart.market_restarted && !forced_restart {
-        let contract_name = state
+        let (contract_name, history_requirement) = state
             .session
             .as_ref()
-            .and_then(|session| session.selected_contract.as_ref())
-            .map(|contract| contract.name.clone())
-            .unwrap_or_else(|| "selected contract".to_string());
+            .map(|session| {
+                (
+                    session
+                        .selected_contract
+                        .as_ref()
+                        .map(|contract| contract.name.clone())
+                        .unwrap_or_else(|| "selected contract".to_string()),
+                    session
+                        .execution_config
+                        .market_history_requirement(session.cfg.history_bars),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "selected contract".to_string(),
+                    MarketHistoryRequirement {
+                        configured_bars: 0,
+                        warmup_bars: 0,
+                        requested_bars: 0,
+                    },
+                )
+            });
         let _ = event_tx.send(ServiceEvent::Status(format!(
-            "Market data stream restarted for {contract_name}."
+            "Market data stream restarted for {contract_name}; requesting {} bars (warm-up {}, configured {}).",
+            history_requirement.requested_bars,
+            history_requirement.warmup_bars,
+            history_requirement.configured_bars,
         )));
     }
     if restart.rest_probe_restarted && !forced_restart {

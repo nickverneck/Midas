@@ -31,7 +31,8 @@ use debug::{emit_guarded_strategy_eval_debug, guarded_strategy_eval_context};
 pub(crate) use evaluation::*;
 pub(crate) use reversal::*;
 pub(crate) use run_loop::*;
-use signals::{closed_bar_signal_already_dispatched, seed_hma_cross_observed_side};
+pub(crate) use signals::closed_bar_signal_already_dispatched;
+use signals::seed_hma_cross_observed_side;
 pub(crate) use signals::{
     entry_signal_consumed_while_flat, mark_closed_bar_signal_dispatched, target_qty_for_signal,
 };

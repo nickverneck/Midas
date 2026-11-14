@@ -292,7 +292,12 @@ impl App {
             | Focus::LuaEditor
             | Focus::StrategyContinue
             | Focus::ReplayMode
-            | Focus::Connect => {}
+            | Focus::Connect
+            | Focus::DailyWindowEnabled
+            | Focus::DailyWindowTimezone
+            | Focus::DailyWindowStart
+            | Focus::DailyWindowEnd
+            | Focus::FlattenAtSessionEnd => {}
             #[cfg(feature = "replay")]
             Focus::ReplayInstrumentQuery
             | Focus::ReplayDataset

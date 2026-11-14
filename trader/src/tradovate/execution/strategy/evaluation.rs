@@ -1,6 +1,11 @@
 use super::*;
 use crate::strategies::hma_cross::{HmaCalculationMode, HmaCrossConfig, HmaCrossExecutionState};
 
+pub(crate) fn first_bar_after_timestamp(bars: &[Bar], timestamp_ns: i64) -> Option<usize> {
+    let index = bars.partition_point(|bar| bar.ts_ns <= timestamp_ns);
+    (index < bars.len()).then_some(index)
+}
+
 /// Indicator values and gate inputs associated with one strategy evaluation.
 /// This is kept separate from the execution tuple so existing order paths can
 /// continue to use their compact return values while replay diagnostics opt in
@@ -196,8 +201,14 @@ pub(crate) fn evaluate_active_execution_strategy(
     session: &SessionState,
     bars: &[Bar],
     current_qty: i32,
-) -> (StrategySignal, String, String) {
-    match session.execution_config.native_strategy {
+) -> anyhow::Result<(StrategySignal, String, String)> {
+    if session.execution_config.kind == crate::strategy::StrategyKind::Lua {
+        if !session.replay_enabled || session.hosted_replay_orders {
+            anyhow::bail!("Lua strategies are replay-only");
+        }
+        anyhow::bail!("Lua replay requires the mutable stateful evaluator");
+    }
+    Ok(match session.execution_config.native_strategy {
         NativeStrategyKind::HmaAngle => {
             let evaluation = session
                 .execution_config
@@ -282,7 +293,7 @@ pub(crate) fn evaluate_active_execution_strategy(
                 evaluation.debug_summary(),
             )
         }
-    }
+    })
 }
 
 pub(crate) fn evaluate_active_execution_strategy_since(
@@ -290,21 +301,31 @@ pub(crate) fn evaluate_active_execution_strategy_since(
     bars: &[Bar],
     current_qty: i32,
     after_ts: Option<i64>,
-) -> (Bar, StrategySignal, String, String) {
+) -> anyhow::Result<(Bar, StrategySignal, String, String)> {
+    if session.execution_config.kind == crate::strategy::StrategyKind::Lua {
+        if !session.replay_enabled || session.hosted_replay_orders {
+            anyhow::bail!("Lua strategies are replay-only");
+        }
+        anyhow::bail!("Lua replay requires the mutable stateful evaluator");
+    }
     if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
         let signal_bar = bars
             .last()
             .expect("strategy bars must not be empty")
             .clone();
         let (signal, summary, debug_summary) =
-            evaluate_active_execution_strategy(session, bars, current_qty);
-        return (signal_bar, signal, summary, debug_summary);
+            evaluate_active_execution_strategy(session, bars, current_qty)?;
+        return Ok((signal_bar, signal, summary, debug_summary));
     }
 
     let current_side = side_from_signed_qty(current_qty);
-    let start_idx = after_ts
-        .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
-        .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let start_idx = if session.execution_runtime.replay_bar_ordinal.is_some() {
+        bars.len().saturating_sub(1)
+    } else {
+        after_ts
+            .and_then(|ts| first_bar_after_timestamp(bars, ts))
+            .unwrap_or_else(|| bars.len().saturating_sub(1))
+    };
     let hma_config = session.execution_config.native_hma_cross.clone();
     let mut hma_runtime = (session.execution_config.native_strategy
         == NativeStrategyKind::HmaCross
@@ -400,7 +421,7 @@ pub(crate) fn evaluate_active_execution_strategy_since(
             latest = Some((signal_bar, signal, summary, debug_summary));
         }
     }
-    latest.expect("strategy bars must not be empty")
+    Ok(latest.expect("strategy bars must not be empty"))
 }
 
 pub(crate) fn evaluate_active_execution_strategy_since_mut(
@@ -410,7 +431,80 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
     after_ts: Option<i64>,
     source_update_sequence: Option<u64>,
     market_update: crate::broker::MarketHistoryUpdate,
-) -> (Bar, StrategySignal, String, String) {
+) -> anyhow::Result<(Bar, StrategySignal, String, String)> {
+    if session.execution_config.kind == crate::strategy::StrategyKind::Lua {
+        anyhow::ensure!(
+            session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar,
+            "Lua replay supports closed-bar timing only; forming-bar revisions are unsupported"
+        );
+        let allowed = session.replay_enabled
+            && session.session_kind == crate::broker::SessionKind::Replay
+            && !session.hosted_replay_orders;
+        let start_idx = if session.execution_config.native_signal_timing
+            == NativeSignalTiming::LiveBar
+            || session.execution_runtime.replay_bar_ordinal.is_some()
+        {
+            bars.len().saturating_sub(1)
+        } else {
+            after_ts
+                .and_then(|ts| first_bar_after_timestamp(bars, ts))
+                .unwrap_or_else(|| bars.len().saturating_sub(1))
+        };
+        let mut latest = None;
+        session
+            .execution_runtime
+            .lua_replay_execution
+            .ensure_config(&session.execution_config.lua);
+        let expected_history_rows = session.market.replay_window.as_ref().map_or_else(
+            || {
+                if session.cfg.history_bars > crate::tradovate::ENGINE_MARKET_BAR_LIMIT
+                    && session.market.history_loaded >= crate::tradovate::ENGINE_MARKET_BAR_LIMIT
+                {
+                    session.cfg.history_bars
+                } else {
+                    session.market.history_loaded
+                }
+            },
+            |window| {
+                window
+                    .warmup_rows
+                    .saturating_add(window.evaluation_rows_processed)
+            },
+        );
+        session
+            .execution_runtime
+            .lua_replay_execution
+            .ensure_bootstrap_history(expected_history_rows, session.market.bars.len())
+            .map_err(|error| anyhow::anyhow!("Lua replay bootstrap failed: {error}"))?;
+        for (idx, bar) in bars.iter().enumerate().skip(start_idx) {
+            if !allowed {
+                anyhow::bail!("Lua strategies are cached replay only");
+            }
+            let signal = session
+                .execution_runtime
+                .lua_replay_execution
+                .evaluate_with_prefix(
+                    bars,
+                    idx,
+                    current_qty,
+                    session.execution_runtime.market_update_sequence,
+                    session.execution_runtime.market_update_kind,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("Lua replay callback failed at bar {idx}: {error}")
+                })?;
+            let candidate = (
+                bar.clone(),
+                signal,
+                format!("Lua replay callback: {}", signal.label()),
+                "lua_replay".to_string(),
+            );
+            if candidate.1 != StrategySignal::Hold || latest.is_none() {
+                latest = Some(candidate);
+            }
+        }
+        return Ok(latest.expect("strategy bars must not be empty"));
+    }
     if session.execution_config.native_signal_timing == NativeSignalTiming::LiveBar {
         let signal_bar = bars
             .last()
@@ -522,13 +616,19 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
                 )
             }
         };
-        return (signal_bar, signal, summary, debug_summary);
+        return Ok((signal_bar, signal, summary, debug_summary));
     }
 
     let current_side = side_from_signed_qty(current_qty);
-    let start_idx = after_ts
-        .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
-        .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let start_idx = if market_update == crate::broker::MarketHistoryUpdate::Append
+        && bars.last().is_some_and(|bar| after_ts == Some(bar.ts_ns))
+    {
+        bars.len().saturating_sub(1)
+    } else {
+        after_ts
+            .and_then(|ts| first_bar_after_timestamp(bars, ts))
+            .unwrap_or_else(|| bars.len().saturating_sub(1))
+    };
     let mut latest = None;
     for idx in start_idx..bars.len() {
         let window = &bars[..=idx];
@@ -652,7 +752,7 @@ pub(crate) fn evaluate_active_execution_strategy_since_mut(
             latest = Some((signal_bar, signal, summary, debug_summary));
         }
     }
-    latest.expect("strategy bars must not be empty")
+    Ok(latest.expect("strategy bars must not be empty"))
 }
 
 /// Evaluate an incremental HMA crossover directly against the retained market
@@ -694,9 +794,15 @@ pub(crate) fn evaluate_incremental_hma_cross_since(
         );
     }
 
-    let start_idx = after_ts
-        .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
-        .unwrap_or_else(|| bars.len().saturating_sub(1));
+    let start_idx = if market_update == crate::broker::MarketHistoryUpdate::Append
+        && bars.last().is_some_and(|bar| after_ts == Some(bar.ts_ns))
+    {
+        bars.len().saturating_sub(1)
+    } else {
+        after_ts
+            .and_then(|ts| first_bar_after_timestamp(bars, ts))
+            .unwrap_or_else(|| bars.len().saturating_sub(1))
+    };
     let mut latest = None;
     for idx in start_idx..bars.len() {
         let candidate_update_sequence = (idx + 1 == bars.len())

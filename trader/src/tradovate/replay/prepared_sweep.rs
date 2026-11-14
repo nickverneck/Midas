@@ -809,18 +809,18 @@ impl PreparedEmaSweepInputs {
         if child.resolved_strategy.native_signal_timing != NativeSignalTiming::ClosedBar {
             return Err("prepared kernel currently requires closed-bar signals".to_string());
         }
-        if child.resolved_strategy.native_signal_delay_bars != 0 {
-            return Err(
-                "prepared kernel currently requires zero signal delay bars; delayed signals use the reference simulator"
-                    .to_string(),
-            );
-        }
         if child.resolved_strategy.native_execution_path != NativeExecutionPath::Guarded {
             return Err("prepared kernel currently requires the guarded native path".to_string());
         }
         if child.resolved_strategy.native_reversal_mode == NativeReversalMode::FlattenConfirmEnter {
             return Err(
                 "prepared kernel does not emulate staged flatten-confirm-enter transitions; use the reference simulator"
+                    .to_string(),
+            );
+        }
+        if child.resolved_strategy.daily_window.enabled {
+            return Err(
+                "prepared kernel does not emulate the strategy daily window; use the reference simulator"
                     .to_string(),
             );
         }
@@ -1241,7 +1241,72 @@ fn run_prepared_ema_candidate_with_adx_gate(
         } else {
             None
         };
-        let target_qty = signal.map(|direction| direction * strategy.order_qty.max(1));
+        let force_flat_at_window_end = if current_qty != 0 {
+            child
+                .base_dataset_view
+                .entry_session
+                .as_ref()
+                .map(|entry_session| entry_session.should_force_flat(bar.ts_ns))
+                .transpose()?
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let target_qty = if force_flat_at_window_end {
+            Some(0)
+        } else {
+            signal.map(|direction| direction * strategy.order_qty.max(1))
+        };
+        if target_qty.is_some_and(|target| target != 0)
+            && let Some(entry_session) = child.base_dataset_view.entry_session.as_ref()
+            && !entry_session.contains_timestamp(bar.ts_ns)?
+        {
+            append_diagnostic(
+                &mut state,
+                trace,
+                signal_bars,
+                signal_index,
+                diagnostic_history_offset,
+                current_qty,
+                strategy,
+                target_qty,
+                "blocked",
+                "outside configured daily entry window",
+                markov_decision.as_ref(),
+                effective_inverted,
+                direction_gate,
+            );
+            continue;
+        }
+        if force_flat_at_window_end {
+            if state.pending.is_none() {
+                schedule_transition(
+                    &mut state,
+                    PendingTransitionKind::Single,
+                    0,
+                    bar_index,
+                    bar.ts_ns,
+                    bar_index,
+                    latency_ns,
+                );
+                append_diagnostic(
+                    &mut state,
+                    trace,
+                    signal_bars,
+                    signal_index,
+                    diagnostic_history_offset,
+                    current_qty,
+                    strategy,
+                    Some(0),
+                    "dispatching",
+                    "daily entry window ended; force flat",
+                    markov_decision.as_ref(),
+                    effective_inverted,
+                    direction_gate,
+                );
+            }
+            continue;
+        }
         let session_window = strategy
             .blockout_enabled
             .then(|| {

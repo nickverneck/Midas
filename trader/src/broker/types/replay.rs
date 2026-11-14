@@ -1,14 +1,78 @@
 use super::{Bar, BarType, CandleMode};
-use chrono::{DateTime, Utc};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Datelike, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(feature = "replay")]
 use std::sync::{
     OnceLock,
     atomic::{AtomicU64, Ordering},
 };
+
+/// A recurring local-time weekday window used to restrict new replay entries.
+/// Market bars remain available outside the window so indicator history and
+/// protective exits see the full price path; `force_flat_at_end` optionally
+/// closes any remaining position at the first bar outside the window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayDailySessionWindow {
+    pub timezone: String,
+    pub start_local: NaiveTime,
+    pub end_local: NaiveTime,
+    /// Close any open replay position once a bar falls outside this recurring
+    /// entry window. This remains opt-in for compatibility with existing views.
+    #[serde(default)]
+    pub force_flat_at_end: bool,
+}
+
+impl ReplayDailySessionWindow {
+    pub fn validate(&self) -> Result<()> {
+        Tz::from_str(self.timezone.trim())
+            .with_context(|| format!("daily session timezone is invalid: {}", self.timezone))?;
+        if self.start_local >= self.end_local {
+            anyhow::bail!(
+                "daily session start {} must be before end {}",
+                self.start_local,
+                self.end_local
+            );
+        }
+        Ok(())
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "{} {}-{} weekdays",
+            self.timezone, self.start_local, self.end_local
+        )
+    }
+
+    pub fn contains_timestamp(&self, ts_ns: i64) -> Result<bool> {
+        if self.start_local >= self.end_local {
+            anyhow::bail!(
+                "daily session start {} must be before end {}",
+                self.start_local,
+                self.end_local
+            );
+        }
+        let timezone = Tz::from_str(self.timezone.trim())
+            .with_context(|| format!("daily session timezone is invalid: {}", self.timezone))?;
+        if ts_ns <= 0 {
+            return Ok(false);
+        }
+        let local = DateTime::<Utc>::from_timestamp_nanos(ts_ns).with_timezone(&timezone);
+        if matches!(local.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+            return Ok(false);
+        }
+        let time = local.time();
+        Ok(time >= self.start_local && time < self.end_local)
+    }
+
+    pub fn should_force_flat(&self, ts_ns: i64) -> Result<bool> {
+        Ok(self.force_flat_at_end && !self.contains_timestamp(ts_ns)?)
+    }
+}
 
 /// Describes how the retained market-bar history changed in one market
 /// update. Strategy evaluators use this hint to keep the normal append path
@@ -89,6 +153,8 @@ impl ReplayEvaluatorMode {
 pub struct ReplayWindowSnapshot {
     pub preset: String,
     pub input_timezone: String,
+    #[serde(default)]
+    pub entry_session: Option<ReplayDailySessionWindow>,
     pub warmup_start: DateTime<Utc>,
     pub evaluation_start: DateTime<Utc>,
     pub evaluation_end: DateTime<Utc>,

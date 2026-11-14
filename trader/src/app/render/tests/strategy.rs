@@ -69,6 +69,66 @@ fn strategy_setup_scrolls_focused_option_into_short_panel() {
 }
 
 #[test]
+fn daily_window_controls_render_and_are_keyboard_editable() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, _cmd_rx) = unbounded_channel();
+    app.screen = Screen::Strategy;
+    app.strategy.kind = StrategyKind::Native;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+
+    let order = app.strategy_focus_order();
+    let enabled = order
+        .iter()
+        .position(|focus| *focus == Focus::DailyWindowEnabled)
+        .expect("daily window toggle should be focusable");
+    let timezone = order
+        .iter()
+        .position(|focus| *focus == Focus::DailyWindowTimezone)
+        .expect("daily window timezone should be focusable");
+    let start = order
+        .iter()
+        .position(|focus| *focus == Focus::DailyWindowStart)
+        .expect("daily window start should be focusable");
+    let end = order
+        .iter()
+        .position(|focus| *focus == Focus::DailyWindowEnd)
+        .expect("daily window end should be focusable");
+    let flatten = order
+        .iter()
+        .position(|focus| *focus == Focus::FlattenAtSessionEnd)
+        .expect("daily window flatten toggle should be focusable");
+    assert!(enabled < timezone && timezone < start && start < end && end < flatten);
+
+    let setup = strategy_setup_text(&app);
+    for label in [
+        "Daily Window: off",
+        "Window Timezone: America/New_York",
+        "Window Start (HH:MM): 08:30",
+        "Window End (HH:MM): 11:15",
+        "Flatten At Session End: off",
+    ] {
+        assert!(
+            setup.iter().any(|line| line.contains(label)),
+            "missing daily window control: {label}"
+        );
+    }
+
+    app.focus = Focus::DailyWindowEnabled;
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert!(app.strategy.daily_window.enabled);
+    app.focus = Focus::FlattenAtSessionEnd;
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert!(app.strategy.daily_window.flatten_at_session_end);
+
+    app.focus = Focus::DailyWindowStart;
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+    for ch in ['0', '9', ':', '0', '0'] {
+        app.handle_strategy_key(key(KeyCode::Char(ch)), &cmd_tx);
+    }
+    assert_eq!(app.strategy.daily_window.start_local, "09:00");
+}
+
+#[test]
 fn volume_cross_direction_gate_controls_are_keyboard_focusable_and_rendered() {
     for native_strategy in [
         NativeStrategyKind::VolumeAdaptiveEmaCross,
@@ -337,6 +397,53 @@ fn adx_config_is_dispatched_when_strategy_is_armed() {
         cmd_rx.try_recv().expect("expected arm command"),
         ServiceCommand::ArmExecutionStrategy
     ));
+}
+
+#[test]
+fn lua_strategy_can_only_arm_from_cached_tradovate_replay_and_transports_source() {
+    let mut app = App::new(AppConfig::default());
+    let (cmd_tx, mut cmd_rx) = unbounded_channel();
+    enable_tradovate_controls(&mut app);
+    app.session_kind = crate::broker::SessionKind::Replay;
+    app.accounts = vec![account(1, "SIM")];
+    select_ready_contract(&mut app);
+    app.screen = Screen::Strategy;
+    app.focus = Focus::StrategyContinue;
+    app.strategy.kind = StrategyKind::Lua;
+    app.strategy
+        .lua_editor
+        .set_text("function on_bar(ctx, bar) return 'buy' end");
+
+    assert_eq!(
+        app.strategy_readiness().status,
+        StrategyReadinessStatus::ReadyToArm
+    );
+    app.handle_strategy_key(key(KeyCode::Enter), &cmd_tx);
+    expect_select_account(&mut cmd_rx, 1);
+    match cmd_rx
+        .try_recv()
+        .expect("Lua execution config should be sent")
+    {
+        ServiceCommand::SetExecutionStrategyConfig(config) => {
+            assert_eq!(config.kind, StrategyKind::Lua);
+            assert_eq!(
+                config.lua.source,
+                "function on_bar(ctx, bar) return 'buy' end"
+            );
+            assert_eq!(config.native_execution_path, NativeExecutionPath::Guarded);
+        }
+        _ => panic!("expected Lua execution config"),
+    }
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(ServiceCommand::ArmExecutionStrategy)
+    ));
+
+    app.session_kind = crate::broker::SessionKind::Live;
+    assert_eq!(
+        app.strategy_readiness().status,
+        StrategyReadinessStatus::PreviewOnly
+    );
 }
 
 #[test]

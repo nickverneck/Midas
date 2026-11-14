@@ -354,20 +354,25 @@ struct PendingNativeReversalEntry {
 struct ExecutionRuntimeState {
     armed: bool,
     last_closed_bar_ts: Option<i64>,
+    last_closed_bar_ordinal: Option<u64>,
     last_closed_bar_fingerprint: Option<u64>,
     last_dispatched_signal_bar_ts: Option<i64>,
+    last_dispatched_replay_bar_ordinal: Option<u64>,
     last_dispatched_entry_signal: Option<StrategySignal>,
     pending_target_qty: Option<i32>,
     pending_reversal_entry: Option<PendingNativeReversalEntry>,
     last_summary: String,
     market_update_sequence: Option<u64>,
     market_update_kind: MarketHistoryUpdate,
+    replay_bar_ordinal: Option<u64>,
     hma_execution: HmaAngleExecutionState,
     ema_execution: EmaCrossExecutionState,
     hma_cross_execution: HmaCrossExecutionState,
     volume_hma_cross_execution: HmaCrossExecutionState,
     volume_ema_cross_execution: EmaCrossExecutionState,
     adx_execution: crate::strategies::adx::AdxExecutionState,
+    /// Stateful VM owned by this isolated cached replay execution.
+    lua_replay_execution: crate::lua_replay::LuaReplayRuntime,
     /// Replay-only structured strategy decision rows. Kept in runtime state
     /// so live session construction remains allocation-free and unchanged.
     replay_signal_diagnostics: Vec<crate::broker::ReplaySignalDiagnostic>,
@@ -387,7 +392,10 @@ impl ExecutionRuntimeState {
         self.pending_reversal_entry = None;
         self.market_update_sequence = None;
         self.market_update_kind = MarketHistoryUpdate::Snapshot;
+        self.replay_bar_ordinal = None;
         self.last_dispatched_signal_bar_ts = None;
+        self.last_dispatched_replay_bar_ordinal = None;
+        self.last_closed_bar_ordinal = None;
         self.last_dispatched_entry_signal = None;
         self.hma_execution = HmaAngleExecutionState::default();
         self.ema_execution = EmaCrossExecutionState::default();
@@ -395,6 +403,7 @@ impl ExecutionRuntimeState {
         self.volume_hma_cross_execution = HmaCrossExecutionState::default();
         self.volume_ema_cross_execution = EmaCrossExecutionState::default();
         self.adx_execution = crate::strategies::adx::AdxExecutionState::default();
+        self.lua_replay_execution = crate::lua_replay::LuaReplayRuntime::default();
     }
 }
 

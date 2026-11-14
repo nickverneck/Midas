@@ -21,8 +21,8 @@ use super::sweep::{
 use crate::broker::{
     BrokerKind, MarketSnapshot, ReplayEvaluatorMode, ReplayFrameSet, ReplaySpeed,
     SERVICE_COMMAND_QUEUE_CAPACITY, SERVICE_EVENT_QUEUE_CAPACITY, ServiceCommand,
-    ServiceCommandSender, ServiceEvent, ServiceEventReceiver, service_command_channel,
-    service_event_channel,
+    ServiceCommandSender, ServiceEvent, ServiceEventReceiver,
+    headless_replay_service_event_channel, service_command_channel,
 };
 use crate::config::AppConfig;
 use crate::replay_cache::{ReplayDatasetView, ReplayDatasetViewStore};
@@ -31,6 +31,7 @@ use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -338,6 +339,37 @@ async fn run_replay_sweep_with_interrupt(
     // child metadata describe the backend that was actually requested.
     spec.execution_mode = execution_mode;
     let plan = spec.plan()?;
+    if let Some(child) = plan
+        .children
+        .iter()
+        .find(|child| child.resolved_strategy.kind != crate::strategy::StrategyKind::Native)
+    {
+        if child.resolved_strategy.kind == crate::strategy::StrategyKind::Lua {
+            if execution_mode != ReplaySweepExecutionMode::IsolatedServices {
+                bail!(
+                    "Lua replay sweep {} requires execution_mode=isolated_services; batch_cpu and prepared_cpu do not support Lua",
+                    spec.sweep_id
+                );
+            }
+            if let Some(other) = plan.children.iter().find(|candidate| {
+                candidate.resolved_strategy.kind != crate::strategy::StrategyKind::Lua
+            }) {
+                bail!(
+                    "Lua replay sweep {} must contain only Lua children; child {} resolves to {:?}",
+                    spec.sweep_id,
+                    other.run_id,
+                    other.resolved_strategy.kind
+                );
+            }
+        } else {
+            bail!(
+                "replay sweep {} contains unsupported {:?} child {}",
+                spec.sweep_id,
+                child.resolved_strategy.kind,
+                child.run_id
+            );
+        }
+    }
     let output_root = spec.output_dir.clone();
     fs::create_dir_all(&output_root)
         .with_context(|| format!("create sweep output directory {}", output_root.display()))?;
@@ -736,9 +768,17 @@ async fn run_child(
     shared_frames: Option<Arc<ReplayFrameSet>>,
     prepared_inputs: Option<Arc<PreparedEmaSweepInputs>>,
 ) -> Result<ReplaySweepRunSummary> {
-    if child.resolved_strategy.kind != crate::strategy::StrategyKind::Native {
+    if child.resolved_strategy.kind == crate::strategy::StrategyKind::Lua
+        && spec.execution_mode != ReplaySweepExecutionMode::IsolatedServices
+    {
+        bail!("Lua replay sweep children require isolated_services execution");
+    }
+    if !matches!(
+        child.resolved_strategy.kind,
+        crate::strategy::StrategyKind::Native | crate::strategy::StrategyKind::Lua
+    ) {
         bail!(
-            "child {} uses {:?}; headless replay currently supports native strategies only",
+            "child {} uses {:?}; headless replay does not support this strategy kind",
             child.run_id,
             child.resolved_strategy.kind
         );
@@ -916,7 +956,7 @@ async fn run_child(
     }
 
     let (command_tx, command_rx) = service_command_channel(SERVICE_COMMAND_QUEUE_CAPACITY);
-    let (event_tx, event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    let (event_tx, event_rx) = headless_replay_service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
     let (market_tx, _market_rx) = watch::channel(MarketSnapshot::default());
     let service_task = tokio::spawn(crate::tradovate::service_loop(
         command_rx, event_tx, market_tx,
@@ -1109,6 +1149,9 @@ fn completed_result_matches(
             && sweep.get("parameter_values") == Some(&json!(child.parameter_values))
             && sweep.get("overrides") == Some(&json!(child.overrides))
             && sweep.get("resolved_strategy") == Some(&json!(child.resolved_strategy))
+            && (child.resolved_strategy.kind != crate::strategy::StrategyKind::Lua
+                || sweep.get("lua_source_sha256")
+                    == Some(&json!(lua_source_sha256(&child.resolved_strategy))))
             && sweep.get("dataset_view") == Some(&json!(child.base_dataset_view))
             && sweep.get("bar_type") == Some(&json!(child.bar_type))
             && sweep.get("candle_mode") == Some(&json!(child.candle_mode))
@@ -1452,6 +1495,7 @@ fn patch_result_with_sweep_metadata(
         "parameter_values": child.parameter_values,
         "overrides": child.overrides,
         "resolved_strategy": child.resolved_strategy,
+        "lua_source_sha256": lua_source_sha256(&child.resolved_strategy),
         "dataset_view": child.base_dataset_view,
         "bar_type": child.bar_type,
         "candle_mode": child.candle_mode,
@@ -1601,6 +1645,13 @@ fn csv_field(value: &str) -> String {
     }
 }
 
+fn lua_source_sha256(strategy: &crate::strategy::ExecutionStrategyConfig) -> Option<String> {
+    (strategy.kind == crate::strategy::StrategyKind::Lua).then(|| {
+        let digest = Sha256::digest(strategy.lua.source.as_bytes());
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    })
+}
+
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).context("serialize sweep JSON")?;
     write_bytes_atomic(path, &bytes)
@@ -1659,6 +1710,7 @@ mod tests {
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
             daily_session: None,
+            entry_session: None,
             warmup: ReplayDatasetWarmupPolicy::default(),
         };
         ReplaySweepChildSpec {
@@ -2096,6 +2148,198 @@ mod tests {
         assert!(output_root.join("sweep-plan.json").is_file());
         assert!(!output_root.join("sweep-summary.json").exists());
 
+        let _ = fs::remove_dir_all(cache_root);
+        let _ = fs::remove_dir_all(output_root);
+    }
+
+    #[tokio::test]
+    async fn lua_sweep_writes_actual_fill_and_fails_on_bar_dependent_callback_error() {
+        let nonce = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let cache_root = std::env::temp_dir().join(format!("trader-lua-sweep-cache-{nonce}"));
+        let output_root = std::env::temp_dir().join(format!("trader-lua-sweep-output-{nonce}"));
+        fs::create_dir_all(&cache_root).expect("create cache root");
+        let base = Utc.with_ymd_and_hms(2026, 7, 23, 0, 0, 0).single().unwrap();
+        let ticks = (0..40)
+            .map(|index| {
+                let ts = base + ChronoDuration::minutes(index);
+                let price = 100.0 + (index as f64 * 0.25);
+                ReplayCacheRawTickRow {
+                    timestamp: ts,
+                    ts_ns: ts.timestamp_nanos_opt().unwrap(),
+                    tick_id: Some(index + 1),
+                    price,
+                    size: 1.0,
+                    bid_price: Some(price - 0.25),
+                    bid_size: Some(1.0),
+                    ask_price: Some(price + 0.25),
+                    ask_size: Some(1.0),
+                    chart_id: None,
+                    trade_date: None,
+                    packet_source: None,
+                    packet_base_ts_ms: None,
+                    packet_base_price_ticks: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        write_raw_ticks_parquet_cache(ReplayCacheRawTicksWrite {
+            cache_root: cache_root.clone(),
+            target: None,
+            provider: BrokerKind::Tradovate,
+            env: TradingEnvironment::Sim,
+            instrument: ReplayCacheInstrument {
+                symbol: "MES".into(),
+                name: None,
+                exchange: None,
+            },
+            contract: ReplayCacheContract {
+                symbol: "MESU6".into(),
+                id: Some(123),
+                expiration: None,
+            },
+            request_start: base,
+            request_end: base + ChronoDuration::minutes(40),
+            download_request: json!({"source": "lua-sweep-e2e"}),
+            tick_specs: ReplayCacheTickSpecs {
+                tick_size: 0.25,
+                value_per_point: 5.0,
+            },
+            contract_metadata: None,
+            session_template: Some("Globex".into()),
+            ticks,
+            warnings: Vec::new(),
+            display_name: Some("Lua sweep fixture".into()),
+            tags: None,
+            notes: None,
+        })
+        .expect("write replay fixture");
+
+        let library = ReplayCacheLibrary::scan(cache_root.clone());
+        let dataset = library.datasets.first().expect("fixture dataset");
+        let view = ReplayDatasetView::for_dataset(
+            &cache_root,
+            dataset,
+            "lua-sweep-view",
+            ReplayCacheTimeRange::new(base, base + ChronoDuration::minutes(39)).unwrap(),
+            "UTC",
+            ReplayDatasetSessionPreset::FullSource,
+            ReplayDatasetWarmupPolicy::default(),
+        )
+        .expect("fixture dataset view");
+        ReplayDatasetViewStore::new(&cache_root)
+            .save(&view)
+            .expect("save fixture view");
+
+        // State must survive callback invocations in the service-backed
+        // replay. A stateless/fresh-VM-per-bar evaluator never reaches `buy`.
+        let source = r#"
+            local count = 0
+            function on_bar(ctx, bar)
+                count = count + 1
+                if count >= 3 then return 'buy' end
+                return 'hold'
+            end
+        "#;
+        let mut spec = ReplaySweepSpec::default();
+        spec.sweep_id = "lua-sweep-e2e".into();
+        spec.name = "Lua cached replay sweep".into();
+        spec.base_dataset_view = view;
+        spec.base_strategy.kind = crate::strategy::StrategyKind::Lua;
+        spec.base_strategy.lua.source = source.into();
+        spec.output_dir = output_root.clone();
+        spec.max_runs = 1;
+        spec.parallelism = 1;
+        let spec_path = cache_root.join("sweep.json");
+        spec.save(&spec_path).expect("save sweep spec");
+        let mut config = AppConfig::default();
+        config.broker = BrokerKind::Tradovate;
+        config.replay_cache_dir = cache_root.clone();
+        config.replay_result_dir = output_root.join("child-results");
+        let summary = run_replay_sweep_with_interrupt(
+            &config,
+            &spec_path,
+            true,
+            false,
+            false,
+            None,
+            None,
+            Box::pin(futures_util::future::pending()),
+            None,
+        )
+        .await
+        .expect("Lua sweep runs to completion");
+        assert_eq!(summary.completed_count, 1);
+        let run = summary.runs.first().expect("one Lua run");
+        let path = run.result_path.as_ref().expect("result path");
+        let result: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(
+            result["ledger"]["fills"]
+                .as_array()
+                .is_some_and(|fills| !fills.is_empty()),
+            "Lua sweep must persist actual simulator fills"
+        );
+        assert_eq!(
+            result["sweep"]["lua_source_sha256"],
+            json!(lua_source_sha256(&spec.base_strategy))
+        );
+        assert_eq!(result["metadata"]["execution_backend"], "isolated_services");
+        let failed_output_root =
+            output_root.with_file_name(format!("trader-lua-sweep-failed-{nonce}"));
+        spec.sweep_id = "lua-sweep-error-e2e".into();
+        spec.name = "Lua callback error sweep".into();
+        spec.base_strategy.lua.source = r#"
+            function on_bar(ctx, bar)
+                if ctx.bar_index >= 4 then error('bar-dependent callback failure') end
+                return 'buy'
+            end
+        "#
+        .into();
+        // Exercise the legacy replay event path too: callback errors must
+        // still reach the worker and fail the run rather than being logged
+        // as a service error while replay completes.
+        spec.engine_mode = ReplayEngineMode::Legacy;
+        spec.output_dir = failed_output_root.clone();
+        let failed_spec_path = cache_root.join("lua-error-sweep.json");
+        spec.save(&failed_spec_path)
+            .expect("save failing sweep spec");
+        config.replay_result_dir = failed_output_root.join("child-results");
+        let failed_summary = run_replay_sweep_with_interrupt(
+            &config,
+            &failed_spec_path,
+            true,
+            false,
+            false,
+            None,
+            None,
+            Box::pin(futures_util::future::pending()),
+            None,
+        )
+        .await
+        .expect("callback failure should be recorded as a failed child");
+        assert_eq!(failed_summary.completed_count, 0);
+        assert_eq!(failed_summary.failed_count, 1);
+        let failed_run = failed_summary.runs.first().expect("failed run row");
+        assert_eq!(failed_run.status, "failed");
+        assert!(
+            failed_run.error.as_deref().is_some_and(|error| {
+                error.contains("bar-dependent callback failure")
+                    && error.contains("Lua replay callback failed at bar")
+            }),
+            "unexpected failure: {:?}",
+            failed_run.error
+        );
+        let failed_result_path = failed_run
+            .result_path
+            .as_ref()
+            .expect("failed result artifact");
+        let failed_result: Value =
+            serde_json::from_slice(&fs::read(failed_result_path).unwrap()).unwrap();
+        assert_eq!(failed_result["status"], "failed");
+        assert!(
+            failed_result["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("bar-dependent callback failure"))
+        );
+        let _ = fs::remove_dir_all(failed_output_root);
         let _ = fs::remove_dir_all(cache_root);
         let _ = fs::remove_dir_all(output_root);
     }

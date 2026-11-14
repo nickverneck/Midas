@@ -124,7 +124,7 @@ async fn replay_market_worker_inner(
     );
     let mut series = LiveSeries::new();
     for bar in &bars[..history_loaded] {
-        series.push_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT);
+        series.push_replay_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT)?;
     }
     // Warmup history seeds the evaluator but is not emitted as a market
     // update when a dataset view has an explicit evaluation start.
@@ -168,7 +168,7 @@ async fn replay_market_worker_inner(
             None,
             &series,
         ) {
-            emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
+            emit_replay_market_update(update, &internal_tx).await?;
             if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
                 drain_replay_broker(&broker_tx, None, None).await?;
             }
@@ -193,7 +193,7 @@ async fn replay_market_worker_inner(
             )
         {
             update.replay_window = replay_window.clone();
-            emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
+            emit_replay_market_update(update, &internal_tx).await?;
             if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
                 drain_replay_broker(&broker_tx, None, None).await?;
             }
@@ -253,7 +253,7 @@ async fn replay_market_worker_inner(
         let before_closed_len = series.closed_bars.len();
         let before_last_closed = series.closed_bars.last().cloned();
         let before_forming = series.forming_bar.clone();
-        series.push_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT);
+        series.push_replay_closed_bar_capped(bar, ENGINE_MARKET_BAR_LIMIT)?;
         live_bars = live_bars.saturating_add(1);
         replay_window = replay_window_progress(
             replay_window.as_ref(),
@@ -297,6 +297,10 @@ async fn replay_market_worker_inner(
             &series,
         ) {
             update.replay_window = replay_window.clone();
+            // Keep the source timestamp intact; the scheduled bar ordinal is
+            // the replay-only tie breaker for multiple bars at that time.
+            update.replay_bar_ordinal = Some(bar_index as u64);
+            update.history_update = crate::broker::MarketHistoryUpdate::Append;
             if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
                 let ReplayVirtualEventKind::StrategyEvaluation { evaluation_id } =
                     strategy_evaluation.kind
@@ -309,7 +313,7 @@ async fn replay_market_worker_inner(
                     bail!("deterministic strategy evaluation does not match replay bar")
                 }
             }
-            emit_replay_market_update(cfg.replay_engine_mode, update, &internal_tx).await?;
+            emit_replay_market_update(update, &internal_tx).await?;
             if cfg.replay_engine_mode == ReplayEngineMode::Deterministic {
                 drain_replay_broker(
                     &broker_tx,
@@ -413,17 +417,12 @@ async fn configure_replay_broker(
 
 #[cfg(feature = "replay")]
 async fn emit_replay_market_update(
-    mode: ReplayEngineMode,
     update: MarketUpdate,
     internal_tx: &InternalEventSender,
 ) -> Result<()> {
-    if mode == ReplayEngineMode::Legacy {
-        if !send_market_internal_event(internal_tx, InternalEvent::Market(update)).await {
-            return Err(anyhow::anyhow!("replay service is unavailable"));
-        }
-        return Ok(());
-    }
-
+    // Cached replay waits for the service to finish each market update. This
+    // propagates strategy evaluator failures back to the replay worker so it
+    // can write a failed result instead of completing with a silent Hold.
     let (response_tx, response_rx) = oneshot::channel();
     if !send_market_internal_event(
         internal_tx,

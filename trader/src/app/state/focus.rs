@@ -87,6 +87,13 @@ impl App {
             order.push(Focus::NativeReversalMode);
             order.push(Focus::NativeBlockoutEnabled);
             order.push(Focus::NativeBlockoutMinutes);
+            order.extend([
+                Focus::DailyWindowEnabled,
+                Focus::DailyWindowTimezone,
+                Focus::DailyWindowStart,
+                Focus::DailyWindowEnd,
+                Focus::FlattenAtSessionEnd,
+            ]);
             match self.strategy.native_strategy {
                 NativeStrategyKind::HmaAngle => {
                     order.extend([
@@ -488,6 +495,9 @@ impl App {
                 | Focus::AdxTrailTriggerTicks
                 | Focus::AdxTrailOffsetTicks
                 | Focus::NativeBlockoutMinutes
+                | Focus::DailyWindowTimezone
+                | Focus::DailyWindowStart
+                | Focus::DailyWindowEnd
                 | Focus::NativeSignalDelayBars
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
@@ -553,6 +563,9 @@ impl App {
                 | Focus::Cid
                 | Focus::Secret
                 | Focus::TokenPath
+                | Focus::DailyWindowTimezone
+                | Focus::DailyWindowStart
+                | Focus::DailyWindowEnd
                 | Focus::LuaFilePath
                 | Focus::LuaEditor
                 | Focus::InstrumentQuery

@@ -63,6 +63,13 @@ randomness, and quota bypass libraries are unavailable. Lua is not enabled for
 live or hosted replay execution. Replay sweeps require `isolated_services`;
 batch and prepared CPU evaluators reject Lua strategies.
 
+Lua replay requires closed-bar timing. Exact duplicate service updates are
+idempotent when the service supplies the same update sequence; revised bars,
+ambiguous duplicate updates without a stable sequence, and retained windows
+that no longer overlap the last processed bar fail the run. When several
+unseen bars arrive in one update, earlier bars run as warmup with unavailable
+position context, so scripts that need historical positions fail closed.
+
 Run its unit tests with:
 
 ```bash

@@ -2517,6 +2517,7 @@ mod tests {
             replay_window: Some(ReplayWindowSnapshot {
                 preset: "test".to_string(),
                 input_timezone: "UTC".to_string(),
+                entry_session: None,
                 warmup_start: DateTime::from_timestamp(0, 0).unwrap(),
                 evaluation_start: DateTime::from_timestamp(1, 0).unwrap(),
                 evaluation_end: DateTime::from_timestamp(3, 0).unwrap(),

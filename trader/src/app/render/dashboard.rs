@@ -207,8 +207,15 @@ impl App {
         let market_label = self.market_data_title_prefix();
         let mut title = match &self.market.contract_name {
             Some(name) => format!(
-                "{market_label} Market Data [{}] hist={} live={}",
-                name, self.market.history_loaded, self.market.live_bars
+                "{market_label} Market Data [{}] hist={} live={}{}",
+                name,
+                self.market.history_loaded,
+                self.market.live_bars,
+                self.market
+                    .status
+                    .split_once(" | history ")
+                    .map(|(_, telemetry)| format!(" | history {telemetry}"))
+                    .unwrap_or_default()
             ),
             None => format!("{market_label} Market Data"),
         };

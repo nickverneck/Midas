@@ -31,6 +31,9 @@ pub(crate) struct MarketUpdate {
     pub(crate) replay_window: Option<ReplayWindowSnapshot>,
     pub(crate) history_update: MarketHistoryUpdate,
     pub(crate) history_sequence: u64,
+    /// Source bar ordinal for deterministic replay closes. Live and ordinary
+    /// market updates leave this unset; timestamps remain provider timestamps.
+    pub(crate) replay_bar_ordinal: Option<u64>,
     pub(crate) status: String,
     pub(crate) bars: MarketBarsUpdate,
 }
@@ -102,6 +105,41 @@ impl LiveSeries {
             self.closed_bars.drain(0..overflow);
             self.heikin_ashi_closed_bars.drain(0..overflow);
         }
+    }
+
+    /// Replay range/volume builders can emit distinct closed bars with the
+    /// same source timestamp. Preserve those rows in source order; live feed
+    /// corrections continue to use `push_closed_bar_capped` above.
+    pub(crate) fn push_replay_closed_bar_capped(
+        &mut self,
+        bar: &Bar,
+        max_closed_bars: usize,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.closed_bars
+                .last()
+                .is_none_or(|previous| previous.ts_ns <= bar.ts_ns),
+            "replay bars are out of timestamp order: {} follows {}",
+            bar.ts_ns,
+            self.closed_bars
+                .last()
+                .map_or(bar.ts_ns, |previous| previous.ts_ns)
+        );
+        self.closed_bars.push(bar.clone());
+        self.heikin_ashi_closed_bars
+            .push(self.heikin_ashi_state.push(bar));
+        self.closed_revision
+            .set(self.closed_revision.get().saturating_add(1));
+        if max_closed_bars == 0 {
+            self.closed_bars.clear();
+            self.heikin_ashi_closed_bars.clear();
+            self.heikin_ashi_state.reset();
+        } else if self.closed_bars.len() > max_closed_bars {
+            let overflow = self.closed_bars.len() - max_closed_bars;
+            self.closed_bars.drain(0..overflow);
+            self.heikin_ashi_closed_bars.drain(0..overflow);
+        }
+        Ok(())
     }
 
     pub(crate) fn mark_closed_revision_published(&self) {
@@ -251,6 +289,7 @@ pub(crate) fn build_market_update(
         replay_window: None,
         history_update,
         history_sequence: NEXT_MARKET_UPDATE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        replay_bar_ordinal: None,
         status,
         bars,
     })
@@ -299,6 +338,8 @@ fn transform_market_bars_update(
 }
 
 pub(crate) fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpdate) -> bool {
+    let replay_append =
+        update.replay_bar_ordinal.is_some() && update.history_update == MarketHistoryUpdate::Append;
     let prev_last_closed_ts = market_last_closed_ts(market);
     market.contract_id = Some(update.contract_id);
     market.contract_name = Some(update.contract_name);
@@ -321,7 +362,9 @@ pub(crate) fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpd
             if let Some(forming_bar) = forming_bar {
                 market.bars.push(forming_bar);
             }
-            next_last_closed_ts.is_some_and(|ts| prev_last_closed_ts.is_none_or(|prev| ts > prev))
+            replay_append
+                || next_last_closed_ts
+                    .is_some_and(|ts| prev_last_closed_ts.is_none_or(|prev| ts > prev))
         }
         MarketBarsUpdate::Forming { forming_bar } => {
             let closed_len = update.history_loaded.min(market.bars.len());
@@ -337,6 +380,7 @@ pub(crate) fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpd
             let closed_len = market.history_loaded.min(market.bars.len());
             market.bars.truncate(closed_len);
             match market.bars.last_mut() {
+                _ if replay_append => market.bars.push(closed_bar.clone()),
                 Some(last) if last.ts_ns == closed_bar.ts_ns => {
                     *last = closed_bar.clone();
                 }
@@ -355,7 +399,7 @@ pub(crate) fn apply_market_update(market: &mut MarketSnapshot, update: MarketUpd
             if let Some(forming_bar) = forming_bar {
                 market.bars.push(forming_bar);
             }
-            prev_last_closed_ts.is_none_or(|prev| closed_bar.ts_ns > prev)
+            replay_append || prev_last_closed_ts.is_none_or(|prev| closed_bar.ts_ns > prev)
         }
     };
 

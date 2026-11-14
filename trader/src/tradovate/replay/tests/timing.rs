@@ -47,6 +47,7 @@ fn replay_window_progress_counts_only_rows_after_warmup() {
     let template = ReplayWindowSnapshot {
         preset: "Futures RTH (New York)".to_string(),
         input_timezone: "America/New_York".to_string(),
+        entry_session: None,
         warmup_start: "2026-07-23T12:30:00Z".parse().unwrap(),
         evaluation_start: "2026-07-23T13:30:00Z".parse().unwrap(),
         evaluation_end: "2026-07-23T20:00:00Z".parse().unwrap(),

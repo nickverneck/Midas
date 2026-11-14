@@ -5,7 +5,9 @@ pub(super) fn emit_service_debug_log(
     session: Option<&SessionState>,
     message: impl FnOnce() -> String,
 ) {
-    if session.is_some_and(|session| session.cfg.log_mode == crate::config::LogMode::Quiet) {
+    if session.is_some_and(|session| {
+        session.cfg.replay_headless || session.cfg.log_mode == crate::config::LogMode::Quiet
+    }) {
         return;
     }
     let _ = event_tx.send(ServiceEvent::DebugLog(message()));
@@ -16,7 +18,9 @@ pub(super) fn emit_service_operational_status(
     session: Option<&SessionState>,
     message: impl FnOnce() -> String,
 ) {
-    if session.is_some_and(|session| session.cfg.log_mode == crate::config::LogMode::Quiet) {
+    if session.is_some_and(|session| {
+        session.cfg.replay_headless || session.cfg.log_mode == crate::config::LogMode::Quiet
+    }) {
         return;
     }
     let _ = event_tx.send(ServiceEvent::Status(message()));
@@ -58,7 +62,7 @@ fn emit_debug_latency_stage(
     previous: Option<u64>,
     current: Option<u64>,
 ) {
-    if session.cfg.log_mode == crate::config::LogMode::Quiet {
+    if session.cfg.replay_headless || session.cfg.log_mode == crate::config::LogMode::Quiet {
         return;
     }
     if current.is_none() || previous == current {

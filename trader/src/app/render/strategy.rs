@@ -75,6 +75,32 @@ impl App {
             Focus::NativeBlockoutEnabled => {
                 let _ = toggle_bool(&mut self.strategy.blockout_enabled, key);
             }
+            Focus::DailyWindowEnabled => {
+                let _ = toggle_bool(&mut self.strategy.daily_window.enabled, key);
+            }
+            Focus::FlattenAtSessionEnd => {
+                let _ = toggle_bool(&mut self.strategy.daily_window.flatten_at_session_end, key);
+            }
+            Focus::DailyWindowTimezone | Focus::DailyWindowStart | Focus::DailyWindowEnd => {
+                let field = match self.focus {
+                    Focus::DailyWindowTimezone => &mut self.strategy.daily_window.timezone,
+                    Focus::DailyWindowStart => &mut self.strategy.daily_window.start_local,
+                    _ => &mut self.strategy.daily_window.end_local,
+                };
+                match key.code {
+                    KeyCode::Enter => field.clear(),
+                    KeyCode::Char(ch)
+                        if ch.is_ascii_alphanumeric()
+                            || matches!(ch, '/' | '_' | '-' | ':' | '+') =>
+                    {
+                        field.push(ch)
+                    }
+                    KeyCode::Backspace => {
+                        field.pop();
+                    }
+                    _ => {}
+                }
+            }
             Focus::NativeBlockoutMinutes => {
                 let _ = edit_strategy_float(
                     &mut self.strategy_numeric_input,

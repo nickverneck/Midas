@@ -369,6 +369,7 @@ fn apply_market_update_keeps_bars_incremental() {
         replay_window: None,
         history_update: MarketHistoryUpdate::Snapshot,
         history_sequence: 1,
+        replay_bar_ordinal: None,
         status: "initial".to_string(),
         bars: MarketBarsUpdate::Snapshot {
             closed_bars: vec![closed_bar.clone()],
@@ -380,6 +381,10 @@ fn apply_market_update_keeps_bars_incremental() {
     assert_eq!(market.bars, vec![closed_bar.clone(), forming_bar.clone()]);
     assert_eq!(market.trade_markers.len(), 1);
 
+    let replay_duplicate = Bar {
+        close: 5000.75,
+        ..closed_bar.clone()
+    };
     let next = MarketUpdate {
         contract_id: 3570918,
         contract_name: "ESH6".to_string(),
@@ -392,15 +397,19 @@ fn apply_market_update_keeps_bars_incremental() {
         replay_window: None,
         history_update: MarketHistoryUpdate::Append,
         history_sequence: 2,
+        replay_bar_ordinal: Some(0),
         status: "realtime".to_string(),
         bars: MarketBarsUpdate::Closed {
-            closed_bar: forming_bar.clone(),
+            closed_bar: replay_duplicate.clone(),
             forming_bar: Some(next_forming_bar.clone()),
         },
     };
     assert!(apply_market_update(&mut market, next));
     assert_eq!(market.history_loaded, 2);
-    assert_eq!(market.bars, vec![closed_bar, forming_bar, next_forming_bar]);
+    assert_eq!(
+        market.bars,
+        vec![closed_bar, replay_duplicate, next_forming_bar]
+    );
     assert_eq!(market.trade_markers.len(), 1);
 }
 
@@ -470,6 +479,7 @@ fn apply_market_update_drops_oldest_closed_bar_when_window_is_full() {
         replay_window: None,
         history_update: MarketHistoryUpdate::Append,
         history_sequence: 3,
+        replay_bar_ordinal: None,
         status: "realtime".to_string(),
         bars: MarketBarsUpdate::Closed {
             closed_bar: bar(3),
@@ -487,6 +497,7 @@ fn replay_window_progress_survives_market_update_and_display_trimming() {
     let window = ReplayWindowSnapshot {
         preset: "Custom UTC".to_string(),
         input_timezone: "UTC".to_string(),
+        entry_session: None,
         warmup_start: "2026-07-23T00:00:00Z".parse().unwrap(),
         evaluation_start: "2026-07-23T01:00:00Z".parse().unwrap(),
         evaluation_end: "2026-07-23T02:00:00Z".parse().unwrap(),
@@ -518,6 +529,7 @@ fn replay_window_progress_survives_market_update_and_display_trimming() {
         replay_window: Some(window.clone()),
         history_update: MarketHistoryUpdate::Snapshot,
         history_sequence: 4,
+        replay_bar_ordinal: None,
         status: "evaluation 1/60".to_string(),
         bars: MarketBarsUpdate::Snapshot {
             closed_bars: vec![bar],

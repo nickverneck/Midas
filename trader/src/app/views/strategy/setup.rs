@@ -65,6 +65,38 @@ impl App {
                 ),
                 self.focus == Focus::NativeBlockoutMinutes,
             ));
+            lines.push(styled_line(
+                format!(
+                    "Daily Window: {}",
+                    bool_label(self.strategy.daily_window.enabled)
+                ),
+                self.focus == Focus::DailyWindowEnabled,
+            ));
+            lines.push(styled_line(
+                format!("Window Timezone: {}", self.strategy.daily_window.timezone),
+                self.focus == Focus::DailyWindowTimezone,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Window Start (HH:MM): {}",
+                    self.strategy.daily_window.start_local
+                ),
+                self.focus == Focus::DailyWindowStart,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Window End (HH:MM): {}",
+                    self.strategy.daily_window.end_local
+                ),
+                self.focus == Focus::DailyWindowEnd,
+            ));
+            lines.push(styled_line(
+                format!(
+                    "Flatten At Session End: {}",
+                    bool_label(self.strategy.daily_window.flatten_at_session_end)
+                ),
+                self.focus == Focus::FlattenAtSessionEnd,
+            ));
 
             let show_protection_controls = self.native_protection_controls_visible();
             match self.strategy.native_strategy {
@@ -704,7 +736,13 @@ impl App {
                     self.strategy.native_strategy.label()
                 ),
                 StrategyKind::Lua => {
-                    "Lua strategy source is ready for later execution wiring.".to_string()
+                    if self.session_kind == SessionKind::Replay
+                        && self.selected_broker == BrokerKind::Tradovate
+                    {
+                        "Lua runs in the guarded cached replay simulator; live and hosted Replay execution are disabled.".to_string()
+                    } else {
+                        "Lua runs only in cached Tradovate replay.".to_string()
+                    }
                 }
                 StrategyKind::MachineLearning => {
                     "Machine Learning remains lowest execution priority.".to_string()

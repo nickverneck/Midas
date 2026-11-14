@@ -7,12 +7,138 @@ use crate::strategies::hma_cross::HmaCrossConfig;
 use crate::strategies::volume_regime::{
     VolumeAdaptiveEmaCrossConfig, VolumeAdaptiveHmaCrossConfig,
 };
+use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 pub const DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE: f64 = 45.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StrategyDailyWindow {
+    pub enabled: bool,
+    pub timezone: String,
+    pub start_local: String,
+    pub end_local: String,
+    #[serde(default)]
+    pub flatten_at_session_end: bool,
+}
+
+impl Default for StrategyDailyWindow {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timezone: "America/New_York".into(),
+            start_local: "08:30".into(),
+            end_local: "11:15".into(),
+            flatten_at_session_end: false,
+        }
+    }
+}
+
+impl StrategyDailyWindow {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        Tz::from_str(self.timezone.trim())
+            .map_err(|_| anyhow::anyhow!("Unknown strategy-window timezone: {}", self.timezone))?;
+        let start = NaiveTime::parse_from_str(self.start_local.trim(), "%H:%M").map_err(|_| {
+            anyhow::anyhow!("Invalid strategy-window start; use HH:MM (00:00–23:59).")
+        })?;
+        let end = NaiveTime::parse_from_str(self.end_local.trim(), "%H:%M").map_err(|_| {
+            anyhow::anyhow!("Invalid strategy-window end; use HH:MM (00:00–23:59).")
+        })?;
+        if start == end {
+            anyhow::bail!("Strategy-window start and end must differ.");
+        }
+        Ok(())
+    }
+
+    /// Invalid configuration/timestamp fails closed for exposure-increasing entries.
+    pub fn contains_timestamp(&self, ts_ns: i64) -> anyhow::Result<bool> {
+        if !self.enabled {
+            return Ok(true);
+        }
+        self.validate()?;
+        if ts_ns <= 0 {
+            return Ok(false);
+        }
+        let tz = Tz::from_str(self.timezone.trim())
+            .map_err(|_| anyhow::anyhow!("Unknown strategy-window timezone: {}", self.timezone))?;
+        let start = NaiveTime::parse_from_str(self.start_local.trim(), "%H:%M")?;
+        let end = NaiveTime::parse_from_str(self.end_local.trim(), "%H:%M")?;
+        let utc = DateTime::<Utc>::from_timestamp(
+            ts_ns.div_euclid(1_000_000_000),
+            ts_ns.rem_euclid(1_000_000_000) as u32,
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!("Strategy-window timestamp is outside the supported UTC range.")
+        })?;
+        let local: DateTime<Tz> = utc.with_timezone(&tz);
+        let time = local.time();
+        Ok(if start < end {
+            time >= start && time < end
+        } else {
+            time >= start || time < end
+        })
+    }
+
+    /// Window-aware target check: outside the window, same-side reductions and
+    /// flattening remain legal while new exposure and reversals are rejected.
+    pub fn allows_target(
+        &self,
+        ts_ns: i64,
+        current_qty: i32,
+        target_qty: i32,
+    ) -> anyhow::Result<bool> {
+        if !self.enabled || self.contains_timestamp(ts_ns)? {
+            return Ok(true);
+        }
+        Ok(target_qty.abs() <= current_qty.abs()
+            && (target_qty == 0 || target_qty.signum() == current_qty.signum()))
+    }
+
+    /// Constrain a proposed position target while the daily window is closed.
+    ///
+    /// A zero target and same-side exposure reductions remain legal.  A
+    /// reversal is converted to a flatten-only target, while a new entry or
+    /// exposure increase is rejected.
+    pub fn constrain_target_outside_window(current_qty: i32, target_qty: i32) -> Option<i32> {
+        if target_qty == 0 {
+            return Some(0);
+        }
+        if current_qty != 0
+            && target_qty.signum() == current_qty.signum()
+            && target_qty.abs() <= current_qty.abs()
+        {
+            return Some(target_qty);
+        }
+        if current_qty != 0 && target_qty.signum() != current_qty.signum() {
+            return Some(0);
+        }
+        None
+    }
+}
+
+/// Extra history is requested so recursive/rolling indicators are not seeded
+/// at the first bar that the strategy can trade.  The strategy evaluator still
+/// owns the exact warm-up gate; this is only the broker-history request policy.
+pub const MARKET_HISTORY_STABILITY_MULTIPLIER: usize = 2;
+
+/// Minimum extra context beyond the indicator's explicit warm-up boundary.
+pub const MARKET_HISTORY_STABILITY_MARGIN: usize = 64;
+
+/// Native indicators are rebuilt from the broker's historical snapshot after
+/// a market-stream reconnect.  Keep enough history that recursive indicators
+/// such as a slow EMA are effectively converged again instead of being
+/// reseeded from a short window.  This stays below the engine's 4,096-bar
+/// retained-market limit and is applied consistently on the initial
+/// subscription and every automatic stream restart.
+pub const MARKET_HISTORY_NATIVE_MINIMUM_BARS: usize = 3_200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrategyKind {
@@ -455,6 +581,7 @@ pub struct StrategyState {
     pub native_reversal_mode: NativeReversalMode,
     pub blockout_enabled: bool,
     pub blockout_minutes_before_close: f64,
+    pub daily_window: StrategyDailyWindow,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
     pub native_hma_cross: HmaCrossConfig,
@@ -484,6 +611,8 @@ pub struct ExecutionStrategyConfig {
     pub blockout_enabled: bool,
     #[serde(default = "default_blockout_minutes_before_close")]
     pub blockout_minutes_before_close: f64,
+    #[serde(default)]
+    pub daily_window: StrategyDailyWindow,
     pub native_hma: HmaAngleConfig,
     pub native_ema: EmaCrossConfig,
     #[serde(default)]
@@ -496,8 +625,39 @@ pub struct ExecutionStrategyConfig {
     pub native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig,
     #[serde(default)]
     pub native_adx: AdxConfig,
+    #[serde(default)]
+    pub lua: LuaStrategyConfig,
     #[serde(default = "default_order_qty")]
     pub order_qty: i32,
+}
+
+/// Serializable source and bounded-runtime settings for offline Lua replay.
+/// The version is part of the strategy identity and rejects unknown contracts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LuaStrategyConfig {
+    pub schema_version: u32,
+    pub source: String,
+    pub memory_limit_bytes: usize,
+    pub instruction_limit: u64,
+}
+
+impl Default for LuaStrategyConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            source: String::new(),
+            memory_limit_bytes: 8 * 1024 * 1024,
+            instruction_limit: 100_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarketHistoryRequirement {
+    pub configured_bars: usize,
+    pub warmup_bars: usize,
+    pub requested_bars: usize,
 }
 
 fn default_order_qty() -> i32 {
@@ -539,6 +699,7 @@ impl Default for ExecutionStrategyConfig {
             native_reversal_mode: NativeReversalMode::Direct,
             blockout_enabled: true,
             blockout_minutes_before_close: DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE,
+            daily_window: StrategyDailyWindow::default(),
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
@@ -546,12 +707,74 @@ impl Default for ExecutionStrategyConfig {
             native_volume_hma_cross: VolumeAdaptiveHmaCrossConfig::default(),
             native_volume_ema_cross: VolumeAdaptiveEmaCrossConfig::default(),
             native_adx: AdxConfig::default(),
+            lua: LuaStrategyConfig::default(),
             order_qty: 1,
         }
     }
 }
 
 impl ExecutionStrategyConfig {
+    /// Return the number of bars needed before the active strategy can make a
+    /// valid first decision.  These are the same strategy-owned warm-up rules
+    /// used by the evaluators, including optional gate/regime dependencies.
+    pub fn strategy_warmup_bars(&self) -> usize {
+        if self.kind != StrategyKind::Native {
+            return 0;
+        }
+
+        match self.native_strategy {
+            NativeStrategyKind::HmaAngle => self.native_hma.warmup_bars(),
+            NativeStrategyKind::EmaCross => {
+                self.native_ema
+                    .warmup_bars()
+                    .max(if self.native_ema.direction_gate.enabled {
+                        self.native_ema.direction_gate.warmup_bars()
+                    } else {
+                        0
+                    })
+            }
+            NativeStrategyKind::HmaCross => self.native_hma_cross.warmup_bars().max(
+                if self.native_hma_cross.direction_gate.enabled {
+                    self.native_hma_cross.direction_gate.warmup_bars()
+                } else {
+                    0
+                },
+            ),
+            NativeStrategyKind::HeikinAshiColor => self.native_heikin_ashi.warmup_bars(),
+            NativeStrategyKind::VolumeAdaptiveHmaCross => {
+                self.native_volume_hma_cross.warmup_bars()
+            }
+            NativeStrategyKind::VolumeAdaptiveEmaCross => {
+                self.native_volume_ema_cross.warmup_bars()
+            }
+            NativeStrategyKind::Adx => self.native_adx.warmup_bars(),
+        }
+    }
+
+    /// Calculate the broker history request for this strategy.
+    ///
+    /// The configured value remains the floor for compatibility.  A second
+    /// warm-up window plus a fixed margin gives recursive indicators enough
+    /// context to settle before the first live bar can create a crossover.
+    pub fn market_history_requirement(&self, configured_bars: usize) -> MarketHistoryRequirement {
+        let configured_bars = configured_bars.max(1);
+        let warmup_bars = self.strategy_warmup_bars();
+        let stability_bars = warmup_bars
+            .saturating_mul(MARKET_HISTORY_STABILITY_MULTIPLIER)
+            .max(warmup_bars.saturating_add(MARKET_HISTORY_STABILITY_MARGIN));
+        let requested_bars = configured_bars.max(stability_bars);
+        let requested_bars = if self.kind == StrategyKind::Native {
+            requested_bars.max(MARKET_HISTORY_NATIVE_MINIMUM_BARS)
+        } else {
+            requested_bars
+        };
+        MarketHistoryRequirement {
+            configured_bars,
+            warmup_bars,
+            requested_bars,
+        }
+    }
+
     /// Whether the active crossover strategy's directional EMA gate is using
     /// its gate-specific flat-only entry behavior.
     pub fn flat_only_direction_gate_active(&self) -> bool {
@@ -631,6 +854,7 @@ impl StrategyState {
             native_reversal_mode: NativeReversalMode::Direct,
             blockout_enabled: true,
             blockout_minutes_before_close: DEFAULT_BLOCKOUT_MINUTES_BEFORE_CLOSE,
+            daily_window: StrategyDailyWindow::default(),
             native_hma: HmaAngleConfig::default(),
             native_ema: EmaCrossConfig::default(),
             native_hma_cross: HmaCrossConfig::default(),
@@ -941,6 +1165,7 @@ impl StrategyState {
             native_reversal_mode: self.native_reversal_mode,
             blockout_enabled: self.blockout_enabled,
             blockout_minutes_before_close: self.blockout_minutes_before_close,
+            daily_window: self.daily_window.clone(),
             native_hma: self.native_hma.clone(),
             native_ema: self.native_ema.clone(),
             native_hma_cross: self.native_hma_cross.clone(),
@@ -948,6 +1173,10 @@ impl StrategyState {
             native_volume_hma_cross: self.native_volume_hma_cross.clone(),
             native_volume_ema_cross: self.native_volume_ema_cross.clone(),
             native_adx: self.native_adx.clone(),
+            lua: LuaStrategyConfig {
+                source: self.lua_editor.text(),
+                ..LuaStrategyConfig::default()
+            },
             order_qty: self.order_qty,
         }
     }
@@ -961,6 +1190,7 @@ impl StrategyState {
         self.native_reversal_mode = config.native_reversal_mode;
         self.blockout_enabled = config.blockout_enabled;
         self.blockout_minutes_before_close = config.blockout_minutes_before_close;
+        self.daily_window = config.daily_window.clone();
         self.native_hma = config.native_hma.clone();
         self.native_ema = config.native_ema.clone();
         self.native_hma_cross = config.native_hma_cross.clone();
@@ -968,6 +1198,198 @@ impl StrategyState {
         self.native_volume_hma_cross = config.native_volume_hma_cross.clone();
         self.native_volume_ema_cross = config.native_volume_ema_cross.clone();
         self.native_adx = config.native_adx.clone();
+        if !config.lua.source.is_empty() {
+            self.lua_editor.set_text(&config.lua.source);
+        }
         self.order_qty = config.order_qty;
+    }
+}
+
+#[cfg(test)]
+mod market_history_tests {
+    use super::*;
+
+    #[test]
+    fn lua_source_and_limits_round_trip_in_execution_config() {
+        let mut config = ExecutionStrategyConfig::default();
+        config.kind = StrategyKind::Lua;
+        config.lua.source = "function on_bar(ctx, bar) return 'hold' end".into();
+        config.lua.instruction_limit = 50_000;
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded: ExecutionStrategyConfig = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.lua, config.lua);
+    }
+
+    #[test]
+    fn history_request_grows_for_slow_ema() {
+        let mut config = ExecutionStrategyConfig::default();
+        config.native_strategy = NativeStrategyKind::EmaCross;
+        config.native_ema.fast_length = 100;
+        config.native_ema.slow_length = 620;
+
+        let requirement = config.market_history_requirement(500);
+
+        assert_eq!(requirement.configured_bars, 500);
+        assert_eq!(requirement.warmup_bars, 621);
+        assert_eq!(
+            requirement.requested_bars,
+            MARKET_HISTORY_NATIVE_MINIMUM_BARS
+        );
+    }
+
+    #[test]
+    fn enabled_direction_gate_can_extend_warmup() {
+        let mut config = ExecutionStrategyConfig::default();
+        config.native_strategy = NativeStrategyKind::EmaCross;
+        config.native_ema.fast_length = 10;
+        config.native_ema.slow_length = 30;
+        config.native_ema.direction_gate.enabled = true;
+        config.native_ema.direction_gate.fast_length = 100;
+        config.native_ema.direction_gate.slow_length = 200;
+
+        let requirement = config.market_history_requirement(500);
+
+        assert_eq!(requirement.warmup_bars, 201);
+        assert_eq!(
+            requirement.requested_bars,
+            MARKET_HISTORY_NATIVE_MINIMUM_BARS
+        );
+    }
+
+    #[test]
+    fn default_history_remains_the_floor_for_short_strategies() {
+        let config = ExecutionStrategyConfig::default();
+        let requirement = config.market_history_requirement(500);
+
+        assert_eq!(requirement.configured_bars, 500);
+        assert!(requirement.requested_bars >= 500);
+        assert_eq!(
+            requirement.requested_bars,
+            MARKET_HISTORY_NATIVE_MINIMUM_BARS
+        );
+        assert!(requirement.requested_bars >= requirement.warmup_bars);
+    }
+
+    #[test]
+    fn non_native_strategies_keep_the_configured_history_floor() {
+        let mut config = ExecutionStrategyConfig::default();
+        config.kind = StrategyKind::Lua;
+
+        let requirement = config.market_history_requirement(500);
+
+        assert_eq!(requirement.requested_bars, 500);
+    }
+}
+
+#[cfg(test)]
+mod daily_window_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn ts(local: &str) -> i64 {
+        let tz = Tz::America__New_York;
+        tz.from_local_datetime(
+            &chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M").unwrap(),
+        )
+        .single()
+        .unwrap()
+        .with_timezone(&Utc)
+        .timestamp_nanos_opt()
+        .unwrap()
+    }
+
+    #[test]
+    fn old_execution_config_defaults_daily_window_off() {
+        let mut value = serde_json::to_value(ExecutionStrategyConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("daily_window");
+        let restored: ExecutionStrategyConfig = serde_json::from_value(value).unwrap();
+        assert!(!restored.daily_window.enabled);
+        assert_eq!(restored.daily_window.timezone, "America/New_York");
+        assert_eq!(restored.daily_window.start_local, "08:30");
+        assert!(!restored.daily_window.flatten_at_session_end);
+    }
+
+    #[test]
+    fn daily_window_is_start_inclusive_end_exclusive_and_dst_aware() {
+        let window = StrategyDailyWindow {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(window.contains_timestamp(ts("2026-01-15 08:30")).unwrap());
+        assert!(!window.contains_timestamp(ts("2026-01-15 11:15")).unwrap());
+        assert!(window.contains_timestamp(ts("2026-07-15 08:30")).unwrap());
+        assert!(!window.contains_timestamp(ts("2026-07-15 08:29")).unwrap());
+    }
+
+    #[test]
+    fn overnight_window_and_invalid_config_fail_safely() {
+        let overnight = StrategyDailyWindow {
+            enabled: true,
+            start_local: "22:00".into(),
+            end_local: "02:00".into(),
+            ..Default::default()
+        };
+        assert!(
+            overnight
+                .contains_timestamp(ts("2026-01-15 23:00"))
+                .unwrap()
+        );
+        assert!(
+            overnight
+                .contains_timestamp(ts("2026-01-16 01:00"))
+                .unwrap()
+        );
+        assert!(
+            !overnight
+                .contains_timestamp(ts("2026-01-16 02:00"))
+                .unwrap()
+        );
+        let invalid = StrategyDailyWindow {
+            enabled: true,
+            timezone: "Not/AZone".into(),
+            ..Default::default()
+        };
+        assert!(invalid.contains_timestamp(ts("2026-01-15 09:00")).is_err());
+        let equal = StrategyDailyWindow {
+            enabled: true,
+            end_local: "08:30".into(),
+            ..Default::default()
+        };
+        assert!(equal.validate().is_err());
+        assert!(
+            !StrategyDailyWindow {
+                enabled: true,
+                start_local: "bad".into(),
+                ..Default::default()
+            }
+            .contains_timestamp(ts("2026-01-15 09:00"))
+            .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn outside_window_blocks_entries_but_allows_reductions_and_default_keeps_flatten_off() {
+        let window = StrategyDailyWindow {
+            enabled: true,
+            ..Default::default()
+        };
+        let outside = ts("2026-01-15 12:00");
+        assert!(!window.allows_target(outside, 0, 1).unwrap());
+        assert!(!window.allows_target(outside, 1, -1).unwrap());
+        assert!(window.allows_target(outside, 1, 0).unwrap());
+        assert!(window.allows_target(outside, 2, 1).unwrap());
+        assert!(!window.flatten_at_session_end);
+        assert_eq!(
+            StrategyDailyWindow::constrain_target_outside_window(2, -1),
+            Some(0)
+        );
+        assert_eq!(
+            StrategyDailyWindow::constrain_target_outside_window(2, 1),
+            Some(1)
+        );
+        assert_eq!(
+            StrategyDailyWindow::constrain_target_outside_window(0, 1),
+            None
+        );
     }
 }

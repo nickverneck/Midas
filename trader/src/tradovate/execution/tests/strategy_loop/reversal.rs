@@ -109,3 +109,33 @@ fn staged_reversal_submits_broker_owned_entry_after_flat_path_clear() {
                 && message.contains("flat_wait")
     )));
 }
+
+#[test]
+fn staged_reversal_entry_is_cancelled_without_an_in_window_bar_timestamp() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    session.execution_config.daily_window.enabled = true;
+    session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
+        target_qty: 1,
+        reason: "staged reversal".to_string(),
+        started_at: time::Instant::now(),
+        flat_seen_at: Some(time::Instant::now()),
+    });
+
+    assert!(
+        continue_staged_reversal(&mut session, &broker_tx, &event_tx, 0)
+            .expect("closed-window staged reversal should be handled")
+    );
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "staged entry must not bypass the window"
+    );
+    assert!(session.execution_runtime.pending_reversal_entry.is_none());
+    assert!(
+        session
+            .execution_runtime
+            .last_summary
+            .contains("daily window")
+    );
+}

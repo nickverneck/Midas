@@ -189,11 +189,17 @@ async fn ensure_background_tasks(
     };
     let market_spawn = if market_needed {
         session.selected_contract.as_ref().map(|contract| {
+            let history_requirement = session
+                .execution_config
+                .market_history_requirement(session.cfg.history_bars);
+            let mut cfg = session.cfg.clone();
+            cfg.history_bars = history_requirement.requested_bars;
             (
-                session.cfg.clone(),
+                cfg,
                 session.tokens.access_token.clone(),
                 session.tokens.md_access_token.clone(),
                 contract.clone(),
+                history_requirement,
             )
         })
     } else {
@@ -229,7 +235,9 @@ async fn ensure_background_tasks(
             task.abort();
             let _ = task.await;
         }
-        if let Some((cfg, access_token, md_access_token, contract)) = market_spawn {
+        if let Some((cfg, access_token, md_access_token, contract, history_requirement)) =
+            market_spawn
+        {
             let market_specs =
                 fetch_contract_specs(&state.client, &cfg.broker_rest_url(), &access_token, &contract)
                     .await
@@ -251,6 +259,7 @@ async fn ensure_background_tasks(
                 market_specs,
                 bar_type,
                 candle_mode,
+                history_requirement,
                 internal_tx.clone(),
             )));
         }

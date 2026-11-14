@@ -49,7 +49,10 @@ pub(crate) fn maybe_run_simple_execution_strategy(
     }
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
-        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
+            && session.execution_runtime.last_closed_bar_ordinal
+                == session.execution_runtime.replay_bar_ordinal
+        {
             let hma_debug =
                 if session.execution_config.native_strategy == NativeStrategyKind::HmaCross {
                     format!(
@@ -88,24 +91,90 @@ pub(crate) fn maybe_run_simple_execution_strategy(
             latest_strategy_bar_fingerprint(session);
     }
     let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
+    session.execution_runtime.last_closed_bar_ordinal =
+        session.execution_runtime.replay_bar_ordinal;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
 
     let actual_qty = selected_market_position_qty(session);
     let actual_entry = selected_market_entry_price(session);
     sync_active_execution_position(session, actual_qty, actual_entry);
+    if maybe_handle_daily_window_flatten(session, broker_tx, event_tx, actual_qty)? {
+        return Ok(());
+    }
 
-    let (signal_bar, signal, summary, debug_summary) = {
+    let (signal_bar, mut signal, mut summary, debug_summary) = {
         let bars = signal_evaluation_bars(session);
         if bars.is_empty() {
             bail!("latest strategy bar disappeared during simple strategy evaluation");
         }
-        evaluate_active_execution_strategy_since(session, bars, actual_qty, previous_strategy_ts)
+        evaluate_active_execution_strategy_since(session, bars, actual_qty, previous_strategy_ts)?
     };
+    let mut flatten_daily_window = false;
+    let mut daily_window_signal_exit = false;
+    let window_ts = strategy_bars(session)
+        .last()
+        .map(|bar| bar.ts_ns)
+        .unwrap_or(signal_bar.ts_ns);
+    if session.execution_config.daily_window.enabled {
+        match session
+            .execution_config
+            .daily_window
+            .contains_timestamp(window_ts)
+        {
+            Ok(inside) => {
+                if !inside && signal != StrategySignal::Hold {
+                    let proposed = target_qty_for_signal(
+                        signal,
+                        actual_qty,
+                        session.execution_config.order_qty,
+                    );
+                    match proposed.and_then(|target| {
+                        crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                            actual_qty, target,
+                        )
+                    }) {
+                        Some(0) if actual_qty != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                }
+                flatten_daily_window = !inside
+                    && session.execution_config.daily_window.flatten_at_session_end
+                    && actual_qty != 0;
+                if !inside {
+                    summary.push_str(" | outside strategy daily window");
+                }
+            }
+            Err(error) => {
+                if let Some(proposed) =
+                    target_qty_for_signal(signal, actual_qty, session.execution_config.order_qty)
+                {
+                    match crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                        actual_qty, proposed,
+                    ) {
+                        Some(0) if actual_qty != 0 && proposed != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                }
+                summary = format!("strategy daily window invalid; entries blocked: {error}");
+            }
+        }
+    }
     session.execution_runtime.last_summary = format!("Simple diagnostic: {summary}");
 
-    let Some(target_qty) =
+    let target = if flatten_daily_window || daily_window_signal_exit {
+        Some(0)
+    } else {
         target_qty_for_signal(signal, actual_qty, session.execution_config.order_qty)
-    else {
+    };
+    let Some(target_qty) = target else {
         let gate_detail = format!(
             "simple strategy eval | {} | signal {} | no target | bar_ts {} | actual_qty {}",
             active_native_slug(session),

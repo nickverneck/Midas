@@ -316,7 +316,7 @@ pub(in crate::tradovate::service) async fn handle_command(
             internal_tx,
         ),
         ServiceCommand::SetExecutionStrategyConfig(config) => {
-            set_execution_strategy_config(config, state, event_tx)
+            set_execution_strategy_config(config, state, event_tx, market_tx, internal_tx).await
         }
         ServiceCommand::ArmExecutionStrategy => arm_execution_strategy_command(state, event_tx),
         ServiceCommand::DisarmExecutionStrategy { reason } => {

@@ -26,6 +26,9 @@ pub use dataset::*;
 mod library;
 pub use library::*;
 
+mod chart_api;
+pub use chart_api::*;
+
 mod views;
 pub use views::*;
 

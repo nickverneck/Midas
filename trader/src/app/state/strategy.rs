@@ -89,6 +89,53 @@ impl App {
         let mut warnings = Vec::new();
         let mut adjustments = Vec::new();
 
+        if self.strategy.kind == StrategyKind::Lua {
+            let replay_only_context = self.session_kind == SessionKind::Replay
+                && self.selected_broker == BrokerKind::Tradovate
+                && self.capabilities.automated_orders;
+            if !replay_only_context {
+                return StrategyReadiness {
+                    status: StrategyReadinessStatus::PreviewOnly,
+                    blockers: vec![
+                        "Lua execution is available only in cached Tradovate replay.".to_string(),
+                    ],
+                    warnings,
+                    adjustments,
+                };
+            }
+            let source = self.strategy.lua_editor.text();
+            if source.trim().is_empty() {
+                blockers.push("Lua source is empty.".to_string());
+            } else if source.len() > 64 * 1024 {
+                blockers.push("Lua source exceeds the 64 KiB replay limit.".to_string());
+            } else {
+                let lua = crate::strategy::ExecutionStrategyConfig {
+                    kind: StrategyKind::Lua,
+                    lua: crate::strategy::LuaStrategyConfig {
+                        source,
+                        ..Default::default()
+                    },
+                    ..self.strategy.execution_config()
+                };
+                if let Err(error) = crate::lua_replay::validate_source(&lua.lua) {
+                    blockers.push(format!("Lua replay validation failed: {error}"));
+                }
+            }
+            if self.strategy.order_qty <= 0 {
+                blockers.push("Order Qty must be at least 1.".to_string());
+            }
+            return StrategyReadiness {
+                status: if blockers.is_empty() {
+                    StrategyReadinessStatus::ReadyToArm
+                } else {
+                    StrategyReadinessStatus::NeedsAttention
+                },
+                blockers,
+                warnings,
+                adjustments,
+            };
+        }
+
         if self.strategy.kind != StrategyKind::Native {
             return StrategyReadiness {
                 status: StrategyReadinessStatus::PreviewOnly,
@@ -103,6 +150,9 @@ impl App {
 
         if self.strategy.order_qty <= 0 {
             blockers.push("Order Qty must be at least 1.".to_string());
+        }
+        if let Err(error) = self.strategy.daily_window.validate() {
+            blockers.push(error.to_string());
         }
 
         match self.strategy.native_strategy {
@@ -322,7 +372,11 @@ impl App {
     pub(in crate::app) fn strategy_continue_label(&self) -> String {
         match self.strategy_readiness().status {
             StrategyReadinessStatus::ReadyToArm => {
-                "[Enter] Continue / Arm Native Strategy".to_string()
+                if self.strategy.kind == StrategyKind::Lua {
+                    "[Enter] Continue / Arm Lua Replay Strategy".to_string()
+                } else {
+                    "[Enter] Continue / Arm Native Strategy".to_string()
+                }
             }
             StrategyReadinessStatus::AwaitingHostedReplay => {
                 "[Enter] Return to Live Replay setup".to_string()
@@ -357,11 +411,25 @@ impl App {
     }
 
     pub(in crate::app) fn native_summary_for_display(&self) -> String {
-        if self.native_protection_controls_visible() {
+        let mut summary = if self.native_protection_controls_visible() {
             self.strategy.native_summary()
         } else {
             self.strategy.native_summary_without_protection()
+        };
+        if self.strategy.daily_window.enabled {
+            summary.push_str(&format!(
+                " | daily_window={} {}-{}{}",
+                self.strategy.daily_window.timezone,
+                self.strategy.daily_window.start_local,
+                self.strategy.daily_window.end_local,
+                if self.strategy.daily_window.flatten_at_session_end {
+                    " flatten"
+                } else {
+                    ""
+                }
+            ));
         }
+        summary
     }
 
     pub(in crate::app) fn active_native_uses_broker_owned_protection(&self) -> bool {
@@ -448,6 +516,9 @@ impl App {
             self.push_log(format!(
                 "Execution Path switched to Guarded before arming; {previous_path} ignores broker protection or non-direct reversal settings."
             ));
+        }
+        if self.strategy.kind == StrategyKind::Lua {
+            self.strategy.native_execution_path = NativeExecutionPath::Guarded;
         }
         self.sync_execution_strategy_config(cmd_tx);
         let _ = cmd_tx.send(ServiceCommand::ArmExecutionStrategy);

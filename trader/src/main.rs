@@ -13,6 +13,7 @@ mod engine_session;
 mod ipc;
 #[cfg(feature = "ironbeam")]
 mod ironbeam;
+mod lua_replay;
 #[cfg(feature = "replay")]
 mod meta_gate_schedule;
 #[cfg(feature = "replay")]
@@ -44,6 +45,18 @@ use replay_cli::{
 };
 use tui_runtime::run_tui;
 
+fn parse_chart_bar_type(raw: &str, value: u32) -> Result<broker::BarType> {
+    let value = value.max(1);
+    match raw.to_ascii_lowercase().as_str() {
+        "minute" | "minutes" => Ok(broker::BarType::minute(value)),
+        "second" | "seconds" => Ok(broker::BarType::second(value)),
+        "tick" | "ticks" => Ok(broker::BarType::tick(value)),
+        "volume" => Ok(broker::BarType::volume(value)),
+        "range" => Ok(broker::BarType::range(value)),
+        other => anyhow::bail!("invalid chart bar kind `{other}`"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -53,7 +66,8 @@ async fn main() -> Result<()> {
     }
     #[cfg(feature = "tradovate")]
     if let Some(Mode::SwipeProfile(args)) = cli.mode.clone() {
-        let config = AppConfig::load(cli.config.as_deref())?;
+        let config = AppConfig::load(cli.config.as_deref())
+            .map_err(|_| anyhow::anyhow!("could not load standalone market configuration"))?;
         return tradovate::run_swipe_profile(
             config,
             tradovate::SwipeProfileOptions {
@@ -79,9 +93,95 @@ async fn main() -> Result<()> {
         anyhow::bail!("tradovate support is not enabled in this build");
     }
 
+    #[cfg(feature = "tradovate")]
+    if let Some(Mode::StandaloneMarket(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())
+            .map_err(|_| anyhow::anyhow!("could not load standalone market configuration"))?;
+        let bar_type = parse_chart_bar_type(&args.bar_kind, args.bar_value)?;
+        if args.bar_value == 0 || args.bar_value > 100_000 {
+            anyhow::bail!("bar value must be between 1 and 100000");
+        }
+        if args.timeout_seconds == 0 || args.timeout_seconds > if args.stream { 900 } else { 60 } {
+            anyhow::bail!(
+                "timeout-seconds must be between 1 and {}",
+                if args.stream { 900 } else { 60 }
+            );
+        }
+        if args.stream {
+            return tradovate::standalone_market_stream(
+                config,
+                &args.contract,
+                bar_type,
+                std::time::Duration::from_secs(args.timeout_seconds),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "standalone market stream failed; check provider configuration and connectivity"
+                )
+            });
+        }
+        let output = tradovate::standalone_market_snapshot(
+            config,
+            &args.contract,
+            bar_type,
+            std::time::Duration::from_secs(args.timeout_seconds),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("standalone market request failed; check provider credentials, entitlement, contract, and connectivity"))?;
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+    #[cfg(not(feature = "tradovate"))]
+    if matches!(cli.mode, Some(Mode::StandaloneMarket(_))) {
+        anyhow::bail!("standalone market feed requires the Tradovate feature");
+    }
+
     if let Some(Mode::DownloadReplayData(args)) = cli.mode.clone() {
         let config = AppConfig::load(cli.config.as_deref())?;
         return download_replay_data(&config, args).await;
+    }
+    #[cfg(feature = "replay")]
+    if let Some(Mode::ChartCache(args)) = cli.mode.clone() {
+        let config = AppConfig::load(cli.config.as_deref())?;
+        let cache_root = args.cache_dir.unwrap_or(config.replay_cache_dir);
+        if let Some(dataset_id) = args.dataset {
+            let bar_type = parse_chart_bar_type(&args.bar_kind, args.bar_value)?;
+            let candle_mode = match args.chart_mode.to_ascii_lowercase().as_str() {
+                "ohlc" | "standard" => broker::CandleMode::Standard,
+                "heikin-ashi" | "heikin_ashi" | "ha" => broker::CandleMode::HeikinAshi,
+                other => anyhow::bail!("invalid chart mode `{other}`; use ohlc or heikin-ashi"),
+            };
+            let input = match args.input.to_ascii_lowercase().as_str() {
+                "server-bars" | "server_bars" | "bars" => replay_cache::ChartApiInput::ServerBars,
+                "raw-ticks" | "raw_ticks" | "ticks" => replay_cache::ChartApiInput::RawTicks,
+                other => {
+                    anyhow::bail!("invalid chart input `{other}`; use server-bars or raw-ticks")
+                }
+            };
+            let output = replay_cache::chart_api_read_page(
+                cache_root,
+                &dataset_id,
+                replay_cache::ChartApiSeries {
+                    input,
+                    bar_type,
+                    candle_mode,
+                },
+                args.start_ns,
+                args.end_ns,
+                args.offset,
+                args.limit,
+            )?;
+            println!("{}", serde_json::to_string(&output)?);
+        } else {
+            let output = replay_cache::chart_api_catalog(cache_root);
+            println!("{}", serde_json::to_string(&output)?);
+        }
+        return Ok(());
+    }
+    #[cfg(not(feature = "replay"))]
+    if matches!(cli.mode, Some(Mode::ChartCache(_))) {
+        anyhow::bail!("chart-cache requires the replay feature");
     }
     if let Some(Mode::DownloadDatabentoTrades(args)) = cli.mode.clone() {
         return download_databento_trades(args).await;

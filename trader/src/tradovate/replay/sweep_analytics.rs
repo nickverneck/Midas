@@ -903,6 +903,7 @@ mod tests {
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
             daily_session: None,
+            entry_session: None,
             warmup: ReplayDatasetWarmupPolicy::default(),
         };
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap();
@@ -1072,6 +1073,50 @@ mod tests {
         let snapshot = load_replay_sweep_ranking_entries(&root);
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].document.sweep_id, "example");
+        assert!(snapshot.warnings.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ranking_artifact_loader_discovers_webui_job_output_at_scanner_depth_limit() {
+        // This mirrors rankingArtifactPath() in webui: the rank job ID is a
+        // direct child of the source replay output. From the trader root the
+        // artifact is five directories deep:
+        // .run/webui-strategy-jobs/<source>/output/<ranking>/sweep-ranking.json.
+        let root = std::env::temp_dir().join(format!(
+            "trader-webui-sweep-ranking-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let summary =
+            PathBuf::from(".run/webui-strategy-jobs/source-job/output/sweep-summary.json");
+        let ranking_path =
+            root.join(".run/webui-strategy-jobs/source-job/output/ranking-job/sweep-ranking.json");
+        fs::create_dir_all(ranking_path.parent().expect("ranking parent"))
+            .expect("create ranking directory");
+        let document = ReplaySweepRankingDocument {
+            schema_version: REPLAY_SWEEP_RANKING_SCHEMA_VERSION,
+            sweep_id: "webui-example".to_string(),
+            name: "Web UI example".to_string(),
+            generated_at_utc: Utc::now(),
+            source_summary: summary.clone(),
+            metric: ReplaySweepRankingMetric::Robustness,
+            fee_scenario: "active".to_string(),
+            options: ReplaySweepRankingOptions::default(),
+            total_completed_candidates: 1,
+            filtered_candidates: 1,
+            rows: Vec::new(),
+            warnings: Vec::new(),
+        };
+        fs::write(
+            &ranking_path,
+            serde_json::to_vec(&document).expect("ranking json"),
+        )
+        .expect("write ranking");
+
+        let snapshot = load_replay_sweep_ranking_entries(&root);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].path, ranking_path);
+        assert_eq!(snapshot.entries[0].document.source_summary, summary);
         assert!(snapshot.warnings.is_empty());
         let _ = fs::remove_dir_all(root);
     }

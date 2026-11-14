@@ -5,7 +5,14 @@ pub(crate) fn maybe_run_execution_strategy(
     broker_tx: &dyn BrokerCommandSink,
     event_tx: &ServiceEventSender,
 ) -> Result<()> {
-    if !session.execution_runtime.armed || session.execution_config.kind != StrategyKind::Native {
+    let lua_replay = session.execution_config.kind == StrategyKind::Lua
+        && session.session_kind == crate::broker::SessionKind::Replay
+        && session.replay_enabled
+        && !session.hosted_replay_orders
+        && session.execution_config.native_execution_path == NativeExecutionPath::Guarded;
+    if !session.execution_runtime.armed
+        || (session.execution_config.kind != StrategyKind::Native && !lua_replay)
+    {
         return Ok(());
     }
 
@@ -149,6 +156,15 @@ pub(crate) fn maybe_run_execution_strategy(
         return Ok(());
     }
 
+    // An opted-in daily-window flatten must be evaluated independently of
+    // signal cadence.  Otherwise a slow/range bar, the closed-bar same-bar
+    // guard, or the existing Globex preflight could postpone or bypass the
+    // requested flatten entirely.  The default (flatten disabled) path is
+    // untouched.
+    if maybe_handle_daily_window_flatten(session, broker_tx, event_tx, actual_market_qty)? {
+        return Ok(());
+    }
+
     // During the pre-close blockout and the daily Globex break, no new
     // strategy entry can be accepted.  In live guarded execution, check that
     // gate before evaluating EMA/HMA so high-rate market updates do not spend
@@ -230,7 +246,10 @@ pub(crate) fn maybe_run_execution_strategy(
 
     if session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar {
         let latest_fingerprint = latest_strategy_bar_fingerprint(session);
-        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts) {
+        if session.execution_runtime.last_closed_bar_ts == Some(last_strategy_ts)
+            && session.execution_runtime.last_closed_bar_ordinal
+                == session.execution_runtime.replay_bar_ordinal
+        {
             // A correction is actionable only when both sides have a known
             // fingerprint and the value changed.  Older sessions/tests may
             // have an anchored timestamp without the new fingerprint; treat
@@ -303,9 +322,13 @@ pub(crate) fn maybe_run_execution_strategy(
     }
     let previous_strategy_ts = session.execution_runtime.last_closed_bar_ts;
     session.execution_runtime.last_closed_bar_ts = Some(last_strategy_ts);
+    session.execution_runtime.last_closed_bar_ordinal =
+        session.execution_runtime.replay_bar_ordinal;
 
     let current_qty = effective_market_position_qty(session);
-    let (signal_bar, signal, summary, debug_summary) = if session.execution_config.native_strategy
+    let (signal_bar, mut signal, mut summary, mut debug_summary) = if session
+        .execution_config
+        .native_strategy
         == NativeStrategyKind::EmaCross
         && (!session.replay_enabled
             || session.cfg.replay_evaluator_mode == crate::broker::ReplayEvaluatorMode::Streaming)
@@ -357,9 +380,13 @@ pub(crate) fn maybe_run_execution_strategy(
                 // case there is no newer bar and we must reevaluate the last
                 // bar rather than creating an empty `start_idx..bars.len()`
                 // range and reporting that the bar disappeared.
-                let start_idx = previous_strategy_ts
-                    .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
-                    .unwrap_or_else(|| bars.len().saturating_sub(1));
+                let start_idx = if session.execution_runtime.replay_bar_ordinal.is_some() {
+                    bars.len().saturating_sub(1)
+                } else {
+                    previous_strategy_ts
+                        .and_then(|ts| first_bar_after_timestamp(bars, ts))
+                        .unwrap_or_else(|| bars.len().saturating_sub(1))
+                };
                 let mut latest = None;
                 for idx in start_idx..bars.len() {
                     let signal_bar = bars[idx].clone();
@@ -432,9 +459,13 @@ pub(crate) fn maybe_run_execution_strategy(
                 // See the EMA path above: range-bar corrections may keep the
                 // timestamp unchanged, so the corrected last bar remains the
                 // only eligible evaluation target.
-                let start_idx = previous_strategy_ts
-                    .and_then(|ts| bars.iter().position(|bar| bar.ts_ns > ts))
-                    .unwrap_or_else(|| bars.len().saturating_sub(1));
+                let start_idx = if session.execution_runtime.replay_bar_ordinal.is_some() {
+                    bars.len().saturating_sub(1)
+                } else {
+                    previous_strategy_ts
+                        .and_then(|ts| first_bar_after_timestamp(bars, ts))
+                        .unwrap_or_else(|| bars.len().saturating_sub(1))
+                };
                 let mut latest = None;
                 for idx in start_idx..bars.len() {
                     let signal_bar = bars[idx].clone();
@@ -514,14 +545,129 @@ pub(crate) fn maybe_run_execution_strategy(
             previous_strategy_ts,
             source_update_sequence,
             market_update,
-        )
+        )?
     };
     let protection_bar = strategy_bars(session)
         .last()
         .cloned()
         .unwrap_or_else(|| signal_bar.clone());
+    let mut force_flat_at_window_end = false;
+    let mut replay_window_signal_exit = false;
+    if session.replay_enabled {
+        if let Some(entry_session) = session
+            .market
+            .replay_window
+            .as_ref()
+            .and_then(|window| window.entry_session.as_ref())
+        {
+            let needs_window_check = signal != StrategySignal::Hold
+                || (current_qty != 0 && entry_session.force_flat_at_end);
+            let entry_window_open =
+                needs_window_check && entry_session.contains_timestamp(protection_bar.ts_ns)?;
+            if signal != StrategySignal::Hold && !entry_window_open {
+                let proposed =
+                    target_qty_for_signal(signal, current_qty, session.execution_config.order_qty);
+                match proposed.and_then(|target| {
+                    crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                        current_qty,
+                        target,
+                    )
+                }) {
+                    Some(0) if current_qty != 0 => {
+                        replay_window_signal_exit = true;
+                        signal = StrategySignal::Hold;
+                        summary = format!(
+                            "{summary} | outside configured entry session: reversal reduced to a flatten-only exit"
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        signal = StrategySignal::Hold;
+                        summary = format!("{summary} | outside configured entry session");
+                    }
+                }
+                if !debug_summary.is_empty() {
+                    debug_summary.push_str(" | outside configured entry session");
+                }
+            }
+            force_flat_at_window_end =
+                current_qty != 0 && entry_session.force_flat_at_end && !entry_window_open;
+            if force_flat_at_window_end {
+                signal = StrategySignal::Hold;
+                summary = "daily entry window ended; forcing position flat".to_string();
+                debug_summary = summary.clone();
+            }
+        }
+    }
+    let daily_window = &session.execution_config.daily_window;
+    let mut flatten_at_daily_window_end = false;
+    let mut daily_window_signal_exit = false;
+    if daily_window.enabled {
+        match daily_window.contains_timestamp(protection_bar.ts_ns) {
+            Ok(inside) => {
+                if !inside && signal != StrategySignal::Hold {
+                    let proposed = target_qty_for_signal(
+                        signal,
+                        current_qty,
+                        session.execution_config.order_qty,
+                    );
+                    match proposed.and_then(|target| {
+                        crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                            current_qty,
+                            target,
+                        )
+                    }) {
+                        Some(0) if current_qty != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                            summary = format!(
+                                "{summary} | outside window: reversal reduced to a flatten-only exit"
+                            );
+                        }
+                        Some(_) => {}
+                        None => {
+                            signal = StrategySignal::Hold;
+                            summary = format!("{summary} | outside strategy daily window");
+                        }
+                    }
+                    if !debug_summary.is_empty() {
+                        debug_summary.push_str(" | outside strategy daily window");
+                    }
+                }
+                flatten_at_daily_window_end =
+                    !inside && daily_window.flatten_at_session_end && current_qty != 0;
+            }
+            Err(error) => {
+                if let Some(proposed) =
+                    target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
+                {
+                    match crate::strategy::StrategyDailyWindow::constrain_target_outside_window(
+                        current_qty,
+                        proposed,
+                    ) {
+                        Some(0) if current_qty != 0 && proposed != 0 => {
+                            daily_window_signal_exit = true;
+                            signal = StrategySignal::Hold;
+                        }
+                        Some(_) => {}
+                        None => signal = StrategySignal::Hold,
+                    }
+                }
+                summary = format!("strategy daily window invalid; entries blocked: {error}");
+                debug_summary = summary.clone();
+            }
+        }
+    }
+    let signal_bar_ts_ns = if force_flat_at_window_end {
+        protection_bar.ts_ns
+    } else {
+        signal_bar.ts_ns
+    };
 
-    if let Some(window) = session_window_at(session, protection_bar.ts_ns) {
+    if !force_flat_at_window_end
+        && !flatten_at_daily_window_end
+        && let Some(window) = session_window_at(session, protection_bar.ts_ns)
+    {
         if window.hold_entries {
             return handle_session_hold(
                 session,
@@ -540,12 +686,19 @@ pub(crate) fn maybe_run_execution_strategy(
 
     session.execution_runtime.last_summary = summary.clone();
 
-    let Some(target_qty) =
+    let target_qty = if force_flat_at_window_end
+        || flatten_at_daily_window_end
+        || daily_window_signal_exit
+        || replay_window_signal_exit
+    {
+        Some(0)
+    } else {
         target_qty_for_signal(signal, current_qty, session.execution_config.order_qty)
-    else {
+    };
+    let Some(target_qty) = target_qty else {
         record_replay_signal_diagnostic(
             session,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             signal,
             actual_market_qty,
             current_qty,
@@ -561,7 +714,7 @@ pub(crate) fn maybe_run_execution_strategy(
             session,
             "no target",
             signal,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             actual_market_qty,
             current_qty,
             None,
@@ -575,7 +728,7 @@ pub(crate) fn maybe_run_execution_strategy(
     if target_qty == current_qty {
         record_replay_signal_diagnostic(
             session,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             signal,
             actual_market_qty,
             current_qty,
@@ -591,7 +744,7 @@ pub(crate) fn maybe_run_execution_strategy(
             session,
             "target already current",
             signal,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             actual_market_qty,
             current_qty,
             Some(target_qty),
@@ -602,14 +755,17 @@ pub(crate) fn maybe_run_execution_strategy(
         return Ok(());
     }
 
-    if closed_bar_signal_already_dispatched(session, signal_bar.ts_ns) {
+    if !force_flat_at_window_end
+        && !flatten_at_daily_window_end
+        && closed_bar_signal_already_dispatched(session, signal_bar_ts_ns)
+    {
         session.execution_runtime.last_summary = format!(
             "Signal on closed bar {} already dispatched; waiting for a new signal bar.",
-            signal_bar.ts_ns
+            signal_bar_ts_ns
         );
         record_replay_signal_diagnostic(
             session,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             signal,
             actual_market_qty,
             current_qty,
@@ -625,7 +781,7 @@ pub(crate) fn maybe_run_execution_strategy(
             session,
             "closed-bar already dispatched",
             signal,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             actual_market_qty,
             current_qty,
             Some(target_qty),
@@ -644,7 +800,7 @@ pub(crate) fn maybe_run_execution_strategy(
         );
         record_replay_signal_diagnostic(
             session,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             signal,
             actual_market_qty,
             current_qty,
@@ -660,7 +816,7 @@ pub(crate) fn maybe_run_execution_strategy(
             session,
             "flat entry side already consumed",
             signal,
-            signal_bar.ts_ns,
+            signal_bar_ts_ns,
             actual_market_qty,
             current_qty,
             Some(target_qty),
@@ -673,7 +829,7 @@ pub(crate) fn maybe_run_execution_strategy(
 
     record_replay_signal_diagnostic(
         session,
-        signal_bar.ts_ns,
+        signal_bar_ts_ns,
         signal,
         actual_market_qty,
         current_qty,
@@ -693,7 +849,7 @@ pub(crate) fn maybe_run_execution_strategy(
         session,
         "dispatching",
         signal,
-        signal_bar.ts_ns,
+        signal_bar_ts_ns,
         actual_market_qty,
         current_qty,
         Some(target_qty),
@@ -727,13 +883,21 @@ pub(crate) fn maybe_run_execution_strategy(
         )?;
     }
 
-    let reason = format!(
-        "{} {} on {} | {}",
-        active_native_slug(session),
-        signal.label(),
-        active_signal_timing_label(session),
-        summary
-    );
+    let reason = if force_flat_at_window_end || flatten_at_daily_window_end {
+        format!(
+            "{} force flat outside daily strategy window | {}",
+            active_native_slug(session),
+            summary
+        )
+    } else {
+        format!(
+            "{} {} on {} | {}",
+            active_native_slug(session),
+            signal.label(),
+            active_signal_timing_label(session),
+            summary
+        )
+    };
     let signal_context = PendingSignalLatencyContext {
         started_at: time::Instant::now(),
         description: format!(
@@ -763,11 +927,59 @@ pub(crate) fn maybe_run_execution_strategy(
         }
         MarketOrderDispatchOutcome::Queued { target_qty } => {
             session.execution_runtime.pending_target_qty = target_qty;
-            mark_closed_bar_signal_dispatched(session, signal_bar.ts_ns, signal);
+            mark_closed_bar_signal_dispatched(session, signal_bar_ts_ns, signal);
         }
     }
     emit_execution_state(event_tx, session);
     Ok(())
+}
+
+pub(crate) fn maybe_handle_daily_window_flatten(
+    session: &mut SessionState,
+    broker_tx: &dyn BrokerCommandSink,
+    event_tx: &ServiceEventSender,
+    actual_market_qty: i32,
+) -> Result<bool> {
+    let window = &session.execution_config.daily_window;
+    if !window.enabled || !window.flatten_at_session_end || actual_market_qty == 0 {
+        return Ok(false);
+    }
+    let Some(window_ts) = strategy_bars(session).last().map(|bar| bar.ts_ns) else {
+        return Ok(false);
+    };
+    let outside = match window.contains_timestamp(window_ts) {
+        Ok(inside) => !inside,
+        Err(_) => false,
+    };
+    if !outside {
+        return Ok(false);
+    }
+
+    if !native_order_strategy_enabled(session) {
+        sync_native_protection(
+            session,
+            broker_tx,
+            0,
+            None,
+            None,
+            &format!("{} daily-window flatten", active_native_slug(session)),
+        )?;
+    }
+    let reason = format!(
+        "{} daily strategy window ended; flattening before next eligible session",
+        active_native_slug(session)
+    );
+    match dispatch_target_position_order(session, broker_tx, 0, true, &reason)? {
+        MarketOrderDispatchOutcome::NoOp { message } => {
+            let _ = event_tx.send(ServiceEvent::Status(message));
+        }
+        MarketOrderDispatchOutcome::Queued { target_qty } => {
+            session.execution_runtime.pending_target_qty = target_qty;
+        }
+    }
+    session.execution_runtime.last_summary = reason;
+    emit_execution_state(event_tx, session);
+    Ok(true)
 }
 
 fn handle_session_hold(

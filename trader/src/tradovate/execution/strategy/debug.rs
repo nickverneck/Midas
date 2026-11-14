@@ -52,11 +52,33 @@ pub(crate) fn record_replay_signal_diagnostic(
 
     let (bar, bar_index, bar_count, snapshot) = {
         let bars = signal_evaluation_bars(session);
-        let Some(index) = bars.iter().position(|bar| bar.ts_ns == signal_bar_ts) else {
+        let matches = bars
+            .iter()
+            .enumerate()
+            .filter(|(_, bar)| bar.ts_ns == signal_bar_ts);
+        let matching: Vec<_> = matches.collect();
+        let selected = if session.execution_runtime.replay_bar_ordinal.is_some() {
+            // The replay ordinal identifies the scheduled close, and closed
+            // bars are appended in source order. For a delayed signal sharing
+            // that timestamp, the last matching retained row is the current
+            // bar in the same-time run.
+            matching.last().copied()
+        } else if matching.len() == 1 {
+            matching.first().copied()
+        } else {
+            None
+        };
+        let Some((index, bar)) = selected else {
             return;
         };
-        let bar = bars[index].clone();
-        let snapshot = snapshot_active_execution_strategy(session, &bars[..=index], effective_qty);
+        let bar = bar.clone();
+        let snapshot = if session.execution_config.kind == StrategyKind::Lua {
+            // Lua callbacks return the signal directly. A native snapshot here
+            // would describe the configured (but unused) native strategy.
+            StrategyEvaluationSnapshot::default()
+        } else {
+            snapshot_active_execution_strategy(session, &bars[..=index], effective_qty)
+        };
         (bar, Some(index + 1), bars.len(), snapshot)
     };
     let raw_signal = signal_direction(snapshot.raw_buy_signal, snapshot.raw_sell_signal);
@@ -64,7 +86,13 @@ pub(crate) fn record_replay_signal_diagnostic(
         snapshot.effective_buy_signal,
         snapshot.effective_sell_signal,
     );
-    let strategy = active_native_slug(session).to_string();
+    let is_lua = session.execution_config.kind == StrategyKind::Lua;
+    let strategy = if is_lua {
+        "lua"
+    } else {
+        active_native_slug(session)
+    }
+    .to_string();
     let signal_timing = active_signal_timing_label(session).to_string();
     let signal_delay_bars = signal_delay_bars(session);
     let fingerprint = Some(bar_fingerprint(&bar));
@@ -83,12 +111,36 @@ pub(crate) fn record_replay_signal_diagnostic(
             signal_timing,
             signal_delay_bars,
             signal: signal.label().to_string(),
-            raw_signal,
-            effective_signal,
-            raw_buy_signal: snapshot.raw_buy_signal,
-            raw_sell_signal: snapshot.raw_sell_signal,
-            effective_buy_signal: snapshot.effective_buy_signal,
-            effective_sell_signal: snapshot.effective_sell_signal,
+            raw_signal: if is_lua {
+                signal.label().to_string()
+            } else {
+                raw_signal
+            },
+            effective_signal: if is_lua {
+                signal.label().to_string()
+            } else {
+                effective_signal
+            },
+            raw_buy_signal: if is_lua {
+                signal == StrategySignal::EnterLong
+            } else {
+                snapshot.raw_buy_signal
+            },
+            raw_sell_signal: if is_lua {
+                signal == StrategySignal::EnterShort
+            } else {
+                snapshot.raw_sell_signal
+            },
+            effective_buy_signal: if is_lua {
+                signal == StrategySignal::EnterLong
+            } else {
+                snapshot.effective_buy_signal
+            },
+            effective_sell_signal: if is_lua {
+                signal == StrategySignal::EnterShort
+            } else {
+                snapshot.effective_sell_signal
+            },
             current_position_qty: actual_qty,
             effective_position_qty: effective_qty,
             target_qty,

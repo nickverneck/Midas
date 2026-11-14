@@ -108,6 +108,37 @@ pub(crate) struct ReplayDownloadArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct ChartCacheArgs {
+    /// Optional replay-cache root. Defaults to configured replay_cache_dir.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Stable dataset identifier from catalog output; omit to list datasets.
+    #[arg(long)]
+    pub(crate) dataset: Option<String>,
+    /// Stored chart input: server-bars or raw-ticks.
+    #[arg(long, default_value = "server-bars")]
+    pub(crate) input: String,
+    /// Candle kind: minute, second, tick, volume, or range.
+    #[arg(long, default_value = "minute")]
+    pub(crate) bar_kind: String,
+    #[arg(long, default_value_t = 1)]
+    pub(crate) bar_value: u32,
+    /// Candle mode: ohlc or heikin-ashi.
+    #[arg(long, default_value = "ohlc")]
+    pub(crate) chart_mode: String,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) offset: usize,
+    #[arg(long, default_value_t = 1000)]
+    pub(crate) limit: usize,
+    /// Optional inclusive UTC epoch nanoseconds.
+    #[arg(long)]
+    pub(crate) start_ns: Option<i64>,
+    /// Optional exclusive UTC epoch nanoseconds.
+    #[arg(long)]
+    pub(crate) end_ns: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct DatabentoTradesArgs {
     /// Exact Databento raw contract symbols. Repeat or comma-separate, for example GCQ6,GCZ6.
     #[arg(long = "contract", value_delimiter = ',')]
@@ -483,6 +514,25 @@ pub(crate) struct ValidateNinjaTraderTokenArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(crate) struct StandaloneMarketArgs {
+    /// Exact provider contract symbol, for example MESZ6.
+    #[arg(long)]
+    pub(crate) contract: String,
+    /// Supported provider chart bars: minute, second, tick, volume, or range.
+    #[arg(long, default_value = "minute")]
+    pub(crate) bar_kind: String,
+    /// Bar size. Must be between 1 and 100000.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) bar_value: u32,
+    /// Maximum wait for the first provider chart snapshot.
+    #[arg(long, default_value_t = 15)]
+    pub(crate) timeout_seconds: u64,
+    /// Keep one market worker connected and emit bounded JSON snapshots as NDJSON.
+    #[arg(long, default_value_t = false)]
+    pub(crate) stream: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(crate) struct ImportBrowserHarArgs {
     /// HAR file exported from the NinjaTrader/Tradovate browser session.
     #[arg(long)]
@@ -570,6 +620,9 @@ pub(crate) enum Mode {
     /// Download replay data into the local replay cache.
     #[command(name = "download-replay-data")]
     DownloadReplayData(ReplayDownloadArgs),
+    /// Emit a JSON catalog or bounded page of stored replay-cache candles.
+    #[command(name = "chart-cache")]
+    ChartCache(ChartCacheArgs),
     /// Download exact-contract Databento historical trades as reusable job archives.
     #[command(name = "download-databento-trades")]
     DownloadDatabentoTrades(DatabentoTradesArgs),
@@ -618,6 +671,9 @@ pub(crate) enum Mode {
     /// Validate the saved NinjaTrader token and replay entitlement without starting a replay.
     #[command(name = "validate-ninjatrader-token")]
     ValidateNinjaTraderToken(ValidateNinjaTraderTokenArgs),
+    /// Emit one read-only chart snapshot using Tradovate market data without starting the TUI or account stream.
+    #[command(name = "standalone-market")]
+    StandaloneMarket(StandaloneMarketArgs),
     /// Import a NinjaTrader/Tradovate browser market-data HAR into replay cache.
     #[command(name = "import-browser-har")]
     ImportBrowserHar(ImportBrowserHarArgs),

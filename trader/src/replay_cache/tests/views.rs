@@ -334,6 +334,7 @@ fn recurring_daily_session_filter_uses_new_york_clock_and_excludes_weekends() {
         timezone: "America/New_York".to_string(),
         start_local: chrono::NaiveTime::from_hms_opt(8, 30, 0).unwrap(),
         end_local: chrono::NaiveTime::from_hms_opt(16, 15, 0).unwrap(),
+        force_flat_at_end: false,
     };
     assert!(
         filter

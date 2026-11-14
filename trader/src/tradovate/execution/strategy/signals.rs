@@ -44,6 +44,8 @@ pub(crate) fn mark_closed_bar_signal_dispatched(
         return;
     }
     session.execution_runtime.last_dispatched_signal_bar_ts = Some(signal_bar_ts);
+    session.execution_runtime.last_dispatched_replay_bar_ordinal =
+        session.execution_runtime.replay_bar_ordinal;
     if matches!(
         signal,
         StrategySignal::EnterLong | StrategySignal::EnterShort
@@ -52,12 +54,14 @@ pub(crate) fn mark_closed_bar_signal_dispatched(
     }
 }
 
-pub(super) fn closed_bar_signal_already_dispatched(
+pub(crate) fn closed_bar_signal_already_dispatched(
     session: &SessionState,
     signal_bar_ts: i64,
 ) -> bool {
     session.execution_config.native_signal_timing == NativeSignalTiming::ClosedBar
         && session.execution_runtime.last_dispatched_signal_bar_ts == Some(signal_bar_ts)
+        && session.execution_runtime.last_dispatched_replay_bar_ordinal
+            == session.execution_runtime.replay_bar_ordinal
 }
 
 pub(super) fn seed_hma_cross_observed_side(session: &mut SessionState) {

@@ -451,4 +451,237 @@ mod replay_analytics_tests {
         app.handle_analytics_key(key(KeyCode::Char('j')));
         assert_eq!(app.replay_analytics.selected_sweep_row, 0);
     }
+
+    #[test]
+    fn app_discovers_web_rankings_from_repository_root_layout() {
+        // The web UI writes beneath trader/.run, while the documented TUI
+        // launch from the repository root uses .run/replay-results.
+        let fixture_root = std::env::temp_dir().join(format!(
+            "trader-analytics-web-ranking-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let replay_root = fixture_root.join(".run/replay-results");
+        let ranking_path = fixture_root.join(
+            "trader/.run/webui-strategy-jobs/source-job/output/ranking-job/sweep-ranking.json",
+        );
+        std::fs::create_dir_all(ranking_path.parent().expect("ranking parent"))
+            .expect("create web ranking directory");
+        let ranking = ReplaySweepRankingDocument {
+            schema_version: 1,
+            sweep_id: "webui-repo-root".to_string(),
+            name: "Web UI repository-root ranking".to_string(),
+            generated_at_utc: chrono::Utc::now(),
+            source_summary: PathBuf::from("sweep-summary.json"),
+            metric: ReplaySweepRankingMetric::Robustness,
+            fee_scenario: "active".to_string(),
+            options: ReplaySweepRankingOptions::default(),
+            total_completed_candidates: 0,
+            filtered_candidates: 0,
+            rows: Vec::new(),
+            warnings: Vec::new(),
+        };
+        std::fs::write(
+            &ranking_path,
+            serde_json::to_vec(&ranking).expect("serialize ranking"),
+        )
+        .expect("write web ranking");
+
+        let mut config = AppConfig::default();
+        config.replay_result_dir = replay_root;
+        let mut app = App::new(config);
+        app.replay_analytics.refresh_sweeps(None);
+
+        let entry = app
+            .replay_analytics
+            .sweep_entries
+            .iter()
+            .find(|entry| entry.path == ranking_path)
+            .expect("discover repository-root web ranking");
+        assert_eq!(entry.document.sweep_id, "webui-repo-root");
+
+        std::fs::remove_dir_all(fixture_root).expect("remove web ranking fixture");
+    }
+
+    #[test]
+    fn app_discovers_web_rankings_from_trader_directory_layout() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "trader-analytics-local-ranking-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let trader_root = fixture_root.join("trader");
+        let ranking_path = trader_root
+            .join(".run/webui-strategy-jobs/source-job/output/ranking-job/sweep-ranking.json");
+        std::fs::create_dir_all(ranking_path.parent().expect("ranking parent"))
+            .expect("create web ranking directory");
+        let ranking = ReplaySweepRankingDocument {
+            schema_version: 1,
+            sweep_id: "webui-trader-root".to_string(),
+            name: "Web UI trader-root ranking".to_string(),
+            generated_at_utc: chrono::Utc::now(),
+            source_summary: PathBuf::from("sweep-summary.json"),
+            metric: ReplaySweepRankingMetric::Robustness,
+            fee_scenario: "active".to_string(),
+            options: ReplaySweepRankingOptions::default(),
+            total_completed_candidates: 0,
+            filtered_candidates: 0,
+            rows: Vec::new(),
+            warnings: Vec::new(),
+        };
+        std::fs::write(
+            &ranking_path,
+            serde_json::to_vec(&ranking).expect("serialize ranking"),
+        )
+        .expect("write web ranking");
+
+        let mut config = AppConfig::default();
+        config.replay_result_dir = trader_root.join(".run/replay-results");
+        let mut app = App::new(config);
+        app.replay_analytics.refresh_sweeps(None);
+
+        let entry = app
+            .replay_analytics
+            .sweep_entries
+            .iter()
+            .find(|entry| entry.path == ranking_path)
+            .expect("discover trader-root web ranking");
+        assert_eq!(entry.document.sweep_id, "webui-trader-root");
+
+        std::fs::remove_dir_all(fixture_root).expect("remove web ranking fixture");
+    }
+
+    #[test]
+    fn cancelling_staged_candidate_import_preserves_strategy_edits() {
+        let mut app = App::new(AppConfig::default());
+        app.strategy.order_qty = 7;
+        app.replay_analytics.pending_candidate_import =
+            Some(super::super::super::ReplayCandidateImport {
+                schema_version: 1,
+                provenance: super::super::super::ReplayCandidateProvenance {
+                    ranking_artifact: PathBuf::from("ranking.json"),
+                    source_summary: PathBuf::from("summary.json"),
+                    source_plan: PathBuf::from("plan.json"),
+                    sweep_id: "sweep".into(),
+                    run_id: "run-1".into(),
+                    rank: 1,
+                    metric: "robustness".into(),
+                    metric_value: Some(1.0),
+                    fee_scenario: "active".into(),
+                },
+                execution_config: crate::strategy::ExecutionStrategyConfig::default(),
+            });
+        let before = app.strategy.execution_config();
+        app.handle_analytics_key(key(KeyCode::Esc));
+        assert!(app.replay_analytics.pending_candidate_import.is_none());
+        assert_eq!(app.strategy.execution_config(), before);
+    }
+
+    #[test]
+    fn candidate_commit_persists_full_config_and_provenance_without_arming() {
+        let root = std::env::temp_dir().join(format!(
+            "midas-candidate-import-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let mut app = App::new(AppConfig::default());
+        app.replay_analytics.root = root.clone();
+        app.strategy.order_qty = 9;
+        let mut config = crate::strategy::ExecutionStrategyConfig::default();
+        config.native_ema.fast_length = 7;
+        config.order_qty = 2;
+        let candidate = super::super::super::ReplayCandidateImport {
+            schema_version: 1,
+            provenance: super::super::super::ReplayCandidateProvenance {
+                ranking_artifact: PathBuf::from("ranking.json"),
+                source_summary: PathBuf::from("summary.json"),
+                source_plan: PathBuf::from("plan.json"),
+                sweep_id: "sweep".into(),
+                run_id: "run-1".into(),
+                rank: 1,
+                metric: "robustness".into(),
+                metric_value: Some(1.0),
+                fee_scenario: "active".into(),
+            },
+            execution_config: config.clone(),
+        };
+        let path = app
+            .commit_candidate_import(candidate)
+            .expect("commit candidate");
+        let saved: super::super::super::ReplayCandidateImport =
+            serde_json::from_slice(&std::fs::read(path).expect("read saved candidate"))
+                .expect("decode saved candidate");
+        assert_eq!(saved.execution_config, config);
+        assert_eq!(saved.provenance.run_id, "run-1");
+        let applied = app.strategy.execution_config();
+        assert_eq!(
+            applied.native_ema.fast_length,
+            config.native_ema.fast_length
+        );
+        assert_eq!(applied.order_qty, config.order_qty);
+        std::fs::remove_dir_all(root).expect("remove test artifacts");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_commit_uses_private_temp_and_never_replaces_existing_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "midas-candidate-atomic-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let directory = root.join("strategy-candidates");
+        std::fs::create_dir_all(&directory).expect("create candidate directory");
+        let existing = directory.join("sweep-run-1.json");
+        std::fs::write(&existing, b"user edit").expect("write user-owned candidate");
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, b"outside file").expect("write symlink target");
+        let predictable_temp = directory.join("sweep-run-1.json.tmp");
+        std::os::unix::fs::symlink(&victim, &predictable_temp).expect("create old temp symlink");
+
+        let mut app = App::new(AppConfig::default());
+        app.replay_analytics.root = root.clone();
+        let candidate = super::super::super::ReplayCandidateImport {
+            schema_version: 1,
+            provenance: super::super::super::ReplayCandidateProvenance {
+                ranking_artifact: PathBuf::from("ranking.json"),
+                source_summary: PathBuf::from("summary.json"),
+                source_plan: PathBuf::from("plan.json"),
+                sweep_id: "sweep".into(),
+                run_id: "run-1".into(),
+                rank: 1,
+                metric: "robustness".into(),
+                metric_value: Some(1.0),
+                fee_scenario: "active".into(),
+            },
+            execution_config: crate::strategy::ExecutionStrategyConfig::default(),
+        };
+
+        let saved_path = app
+            .commit_candidate_import(candidate)
+            .expect("commit without following temp symlink or replacing destination");
+        assert_eq!(saved_path, directory.join("sweep-run-1-import2.json"));
+        assert_eq!(
+            std::fs::read(&existing).expect("read prior candidate"),
+            b"user edit"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("read symlink target"),
+            b"outside file"
+        );
+        assert!(
+            std::fs::symlink_metadata(&predictable_temp)
+                .expect("inspect old temp symlink")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            serde_json::from_slice::<super::super::super::ReplayCandidateImport>(
+                &std::fs::read(saved_path).expect("read newly committed candidate")
+            )
+            .is_ok()
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test artifacts");
+    }
 }

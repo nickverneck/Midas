@@ -107,7 +107,7 @@ pub(crate) fn internal_event_channel(
 }
 
 pub(crate) const INTERNAL_EVENT_QUEUE_CAPACITY: usize = 512;
-const INTERNAL_CRITICAL_EVENT_QUEUE_CAPACITY: usize = 128;
+pub(crate) const INTERNAL_CRITICAL_EVENT_QUEUE_CAPACITY: usize = 128;
 pub(crate) const MAX_INTERNAL_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_INTERNAL_ENTITY_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_INTERNAL_ENTITY_COUNT: usize = 4096;

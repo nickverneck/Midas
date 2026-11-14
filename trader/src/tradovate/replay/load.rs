@@ -158,6 +158,7 @@ pub(super) fn load_replay_state_blocking_with_shared_frames(
                 })
                 .unwrap_or_else(|| resolved.view.session_preset.label().to_string()),
             input_timezone: resolved.view.input_timezone.clone(),
+            entry_session: resolved.view.entry_session.clone(),
             warmup_start: resolved.load_range.start,
             evaluation_start: resolved.evaluation_range.start,
             evaluation_end: resolved.evaluation_range.end,

@@ -347,6 +347,7 @@ impl Default for ReplaySweepSpec {
                 input_timezone: "UTC".to_string(),
                 session_preset: crate::replay_cache::ReplayDatasetSessionPreset::FullSource,
                 daily_session: None,
+                entry_session: None,
                 warmup: crate::replay_cache::ReplayDatasetWarmupPolicy::default(),
             },
             bar_type: BarType::default(),
@@ -417,6 +418,13 @@ impl ReplaySweepSpec {
                 REPLAY_SWEEP_SPEC_SCHEMA_VERSION
             );
         }
+        if self.base_strategy.kind == crate::strategy::StrategyKind::Lua
+            && self.execution_mode != ReplaySweepExecutionMode::IsolatedServices
+        {
+            bail!(
+                "Lua replay sweeps require execution_mode=isolated_services; batch_cpu and prepared_cpu do not support Lua"
+            );
+        }
         validate_sweep_id(&self.sweep_id)?;
         if self.name.trim().is_empty() {
             bail!("replay sweep name cannot be empty");
@@ -464,6 +472,11 @@ impl ReplaySweepSpec {
         let mut parameter_paths = BTreeSet::new();
         for parameter in &self.parameters {
             validate_parameter_path(&parameter.path)?;
+            if parameter.path == "lua.source"
+                && self.base_strategy.kind != crate::strategy::StrategyKind::Lua
+            {
+                bail!("lua.source can only be swept when base_strategy.kind is Lua");
+            }
             let base_value = if is_markov_parameter_path(&parameter.path) {
                 value_at_path(
                     &base_markov_encoded,
@@ -1073,7 +1086,7 @@ fn validate_output_formats(formats: &[ReplaySweepOutputFormat]) -> Result<()> {
     Ok(())
 }
 
-fn validate_strategy_config(config: &ExecutionStrategyConfig) -> Result<()> {
+pub(crate) fn validate_strategy_config(config: &ExecutionStrategyConfig) -> Result<()> {
     if config.order_qty <= 0 {
         bail!("base strategy order_qty must be greater than zero");
     }
@@ -1088,6 +1101,9 @@ fn validate_strategy_config(config: &ExecutionStrategyConfig) -> Result<()> {
     validate_volume_adaptive_hma_cross(&config.native_volume_hma_cross)?;
     validate_volume_adaptive_ema_cross(&config.native_volume_ema_cross)?;
     validate_adx(&config.native_adx)?;
+    if config.kind == crate::strategy::StrategyKind::Lua {
+        crate::lua_replay::validate_source(&config.lua).context("validate Lua replay source")?;
+    }
     Ok(())
 }
 
@@ -1236,6 +1252,7 @@ fn validate_protection_values(
 }
 
 const SWEEPABLE_PARAMETER_PATHS: &[&str] = &[
+    "lua.source",
     "kind",
     "native_strategy",
     "native_signal_timing",
@@ -1587,6 +1604,7 @@ mod tests {
             input_timezone: "UTC".to_string(),
             session_preset: ReplayDatasetSessionPreset::FullSource,
             daily_session: None,
+            entry_session: None,
             warmup: ReplayDatasetWarmupPolicy {
                 duration_seconds: 600,
                 ..ReplayDatasetWarmupPolicy::default()
@@ -1647,6 +1665,38 @@ mod tests {
                 ReplaySweepOutputFormat::CsvRows,
             ],
         }
+    }
+
+    #[test]
+    fn lua_sweeps_require_isolated_services_and_validate_the_serialized_source() {
+        let mut spec = sample_spec();
+        spec.base_strategy.kind = crate::strategy::StrategyKind::Lua;
+        spec.base_strategy.lua.source = "function on_bar(ctx, bar) return 'hold' end".into();
+        spec.execution_mode = ReplaySweepExecutionMode::PreparedCpu;
+        let error = spec.validate().unwrap_err();
+        assert!(error.to_string().contains("isolated_services"));
+
+        spec.execution_mode = ReplaySweepExecutionMode::IsolatedServices;
+        spec.base_strategy.lua.source = "not valid Lua".into();
+        let error = spec.validate().unwrap_err();
+        assert!(error.to_string().contains("validate Lua replay source"));
+
+        spec.base_strategy.lua.source = "function on_bar(ctx, bar) return 'hold' end".into();
+        spec.parameters = vec![ReplaySweepParameter {
+            path: "lua.source".into(),
+            values: vec![Value::String(
+                "function on_bar(ctx, bar) return 'buy' end".into(),
+            )],
+        }];
+        let child = spec.plan().unwrap().children.remove(0);
+        assert_eq!(
+            child.resolved_strategy.kind,
+            crate::strategy::StrategyKind::Lua
+        );
+        assert_eq!(
+            child.resolved_strategy.lua.source,
+            "function on_bar(ctx, bar) return 'buy' end"
+        );
     }
 
     #[test]

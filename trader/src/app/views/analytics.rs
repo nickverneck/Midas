@@ -4,6 +4,11 @@ impl App {
     pub(in crate::app) fn handle_analytics_key(&mut self, key: KeyEvent) {
         #[cfg(feature = "replay")]
         {
+            if self.replay_analytics.pending_candidate_import.is_some()
+                && !matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+            {
+                self.replay_analytics.pending_candidate_import = None;
+            }
             if matches!(
                 key.code,
                 KeyCode::Tab
@@ -202,6 +207,47 @@ impl App {
                             self.replay_analytics.selected_sweep_row.saturating_sub(1);
                     }
                 }
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        match self.stage_selected_candidate_import() {
+                            Ok(()) => self.status = "Candidate loaded and validated. Press Enter to replace the current strategy setup, or Esc to cancel.".to_string(),
+                            Err(error) => self.status = format!("Candidate import unavailable: {error}"),
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if self.replay_analytics.focus == AnalyticsFocus::Sweeps {
+                        if let Some(candidate) =
+                            self.replay_analytics.pending_candidate_import.take()
+                        {
+                            match self.commit_candidate_import(candidate) {
+                                Ok(path) => {
+                                    self.screen = Screen::Strategy;
+                                    self.focus = Focus::StrategyKind;
+                                    self.status = format!(
+                                        "Imported replay candidate into Strategy setup and saved provenance to {}. Not armed.",
+                                        path.display()
+                                    );
+                                }
+                                Err(error) => {
+                                    self.status = format!("Candidate import failed: {error}")
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    if self
+                        .replay_analytics
+                        .pending_candidate_import
+                        .take()
+                        .is_some()
+                    {
+                        self.status =
+                            "Candidate import cancelled; current strategy setup is unchanged."
+                                .to_string();
+                    }
+                }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
                     if self.replay_analytics.focus == AnalyticsFocus::Trades {
                         self.replay_analytics.cycle_sort();
@@ -238,6 +284,169 @@ impl App {
         }
         #[cfg(not(feature = "replay"))]
         let _ = key;
+    }
+
+    #[cfg(feature = "replay")]
+    fn stage_selected_candidate_import(&mut self) -> anyhow::Result<()> {
+        let entry = self
+            .replay_analytics
+            .selected_sweep_entry()
+            .ok_or_else(|| anyhow::anyhow!("no ranking artifact is selected"))?;
+        let ranking = self
+            .replay_analytics
+            .sweep_ranking
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ranking document is unavailable"))?;
+        anyhow::ensure!(
+            ranking.schema_version == 1,
+            "unsupported ranking schema version {}",
+            ranking.schema_version
+        );
+        let row = self
+            .replay_analytics
+            .selected_sweep_row()
+            .ok_or_else(|| anyhow::anyhow!("no candidate row is selected"))?
+            .clone();
+        let summary_path =
+            if ranking.source_summary.is_absolute() || ranking.source_summary.is_file() {
+                ranking.source_summary.clone()
+            } else {
+                entry
+                    .path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(&ranking.source_summary)
+            };
+        let summary_path = summary_path.canonicalize()?;
+        let plan_path = summary_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("sweep-plan.json");
+        let plan_path = plan_path.canonicalize()?;
+        let plan: crate::tradovate::replay::ReplaySweepPlan =
+            serde_json::from_slice(&std::fs::read(&plan_path)?)?;
+        anyhow::ensure!(
+            plan.spec.sweep_id == ranking.sweep_id,
+            "ranking and plan sweep IDs differ"
+        );
+        let child = plan
+            .children
+            .iter()
+            .find(|child| child.run_id == row.run_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("candidate {} is absent from the source plan", row.run_id)
+            })?;
+        anyhow::ensure!(
+            child.run_index == row.run_index,
+            "candidate run index does not match source plan"
+        );
+        anyhow::ensure!(
+            child.parameter_values == row.parameter_values && child.overrides == row.overrides,
+            "candidate parameters do not match source plan"
+        );
+        crate::tradovate::replay::validate_strategy_config(&child.resolved_strategy)?;
+        self.replay_analytics.pending_candidate_import = Some(ReplayCandidateImport {
+            schema_version: 1,
+            provenance: ReplayCandidateProvenance {
+                ranking_artifact: entry.path.clone(),
+                source_summary: summary_path,
+                source_plan: plan_path,
+                sweep_id: ranking.sweep_id.clone(),
+                run_id: row.run_id,
+                rank: row.rank,
+                metric: ranking.metric.label().to_string(),
+                metric_value: row.metric_value,
+                fee_scenario: row.fee_scenario,
+            },
+            execution_config: child.resolved_strategy.clone(),
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "replay")]
+    pub(in crate::app) fn commit_candidate_import(
+        &mut self,
+        candidate: ReplayCandidateImport,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            candidate.schema_version == 1,
+            "unsupported candidate import schema"
+        );
+        crate::tradovate::replay::validate_strategy_config(&candidate.execution_config)?;
+        let directory = self.replay_analytics.root.join("strategy-candidates");
+        std::fs::create_dir_all(&directory)?;
+        let safe_piece = |value: &str| {
+            value
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        };
+        let stem = format!(
+            "{}-{}",
+            safe_piece(&candidate.provenance.sweep_id),
+            safe_piece(&candidate.provenance.run_id)
+        );
+        let bytes = serde_json::to_vec_pretty(&candidate)?;
+
+        // Keep the temporary file in the destination directory so publishing it
+        // with a hard link is atomic and cannot replace an existing candidate.
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let (temporary, mut temporary_file) = loop {
+            let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let temporary = directory.join(format!(".{stem}.{}.{id}.tmp", std::process::id()));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => break (temporary, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        };
+
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            temporary_file.write_all(&bytes)?;
+            temporary_file.sync_all()
+        })();
+        drop(temporary_file);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+
+        let mut suffix = 1u64;
+        let path = loop {
+            let path = if suffix == 1 {
+                directory.join(format!("{stem}.json"))
+            } else {
+                directory.join(format!("{stem}-import{suffix}.json"))
+            };
+            match std::fs::hard_link(&temporary, &path) {
+                Ok(()) => break path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    suffix = suffix.saturating_add(1);
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error.into());
+                }
+            }
+        };
+        // The final name now owns the complete file. Removing the temporary
+        // name is best-effort cleanup; it must not turn a successful commit
+        // into a reported failure after the candidate has already been saved.
+        let _ = std::fs::remove_file(&temporary);
+        self.strategy
+            .apply_execution_config(&candidate.execution_config);
+        Ok(path)
     }
 
     #[cfg(feature = "replay")]
@@ -331,6 +540,7 @@ impl App {
                     .unwrap_or_else(|| "none".to_string())
             )),
             Line::from("m metric | f fee | d drawdown | t trades | [/] sweep"),
+            Line::from("i stage candidate import | Enter confirm and replace setup | Esc cancel"),
         ];
         if let Some(error) = self.replay_analytics.sweep_ranking_error.as_deref() {
             lines.push(Line::from(format!("Re-rank error: {error}")));
@@ -392,7 +602,7 @@ impl App {
         };
         let parameters = serde_json::to_string(&row.parameter_values).unwrap_or_default();
         let overrides = serde_json::to_string(&row.overrides).unwrap_or_default();
-        vec![
+        let mut lines = vec![
             Line::from(format!(
                 "{} | rank {} | {}",
                 row.run_id, row.rank, row.fee_scenario
@@ -429,7 +639,16 @@ impl App {
             )),
             Line::from(format!("Parameters: {parameters}")),
             Line::from(format!("Overrides: {overrides}")),
-        ]
+        ];
+        if let Some(candidate) = self.replay_analytics.pending_candidate_import.as_ref() {
+            lines.push(Line::from(format!(
+                "IMPORT READY: {} rank {} from {}. Enter replaces Strategy setup; Esc cancels.",
+                candidate.provenance.run_id,
+                candidate.provenance.rank,
+                candidate.provenance.sweep_id
+            )));
+        }
+        lines
     }
 
     #[cfg(feature = "replay")]

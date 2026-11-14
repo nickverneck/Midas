@@ -542,6 +542,7 @@ async fn market_data_worker(
     market_specs: Option<MarketSpecs>,
     bar_type: BarType,
     candle_mode: CandleMode,
+    history_requirement: MarketHistoryRequirement,
     internal_tx: InternalEventSender,
 ) {
     if let Err(err) = market_data_worker_inner(
@@ -551,6 +552,7 @@ async fn market_data_worker(
         market_specs,
         bar_type,
         candle_mode,
+        history_requirement,
         internal_tx.clone(),
     )
     .await
@@ -566,6 +568,7 @@ async fn market_data_worker_inner(
     market_specs: Option<MarketSpecs>,
     bar_type: BarType,
     candle_mode: CandleMode,
+    history_requirement: MarketHistoryRequirement,
     internal_tx: InternalEventSender,
 ) -> Result<()> {
     let ws_config = WebSocketConfig {
@@ -770,6 +773,21 @@ async fn market_data_worker_inner(
                     before_forming,
                     &series,
                 ) {
+                    let readiness = if series.closed_bars.len() >= history_requirement.warmup_bars {
+                        "ready"
+                    } else {
+                        "warming"
+                    };
+                    let mut update = update;
+                    update.status = format!(
+                        "Subscribed to {} bars for {} | history {}/{} | warmup {} | {}",
+                        bar_type.mode_label(candle_mode),
+                        contract.name,
+                        series.closed_bars.len(),
+                        history_requirement.requested_bars,
+                        history_requirement.warmup_bars,
+                        readiness,
+                    );
                     let _ = send_market_internal_event(&internal_tx, InternalEvent::Market(update)).await;
                 }
             }

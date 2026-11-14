@@ -3,12 +3,17 @@ use super::*;
 pub(crate) fn arm_execution_strategy(session: &mut SessionState) {
     session.execution_runtime.pending_target_qty = None;
     session.execution_runtime.reset_execution();
-    if session.execution_config.kind != StrategyKind::Native {
+    let cached_lua_replay = session.execution_config.kind == StrategyKind::Lua
+        && session.session_kind == SessionKind::Replay
+        && session.replay_enabled
+        && !session.hosted_replay_orders
+        && session.execution_config.native_execution_path == NativeExecutionPath::Guarded;
+    if session.execution_config.kind != StrategyKind::Native && !cached_lua_replay {
         session.execution_runtime.armed = false;
         session.execution_runtime.last_closed_bar_ts = None;
         session.execution_runtime.last_closed_bar_fingerprint = None;
         session.execution_runtime.last_summary =
-            "Selected strategy is not an armed native runtime.".to_string();
+            "Selected strategy is not permitted on this execution path.".to_string();
         return;
     }
 
@@ -16,21 +21,24 @@ pub(crate) fn arm_execution_strategy(session: &mut SessionState) {
     session.execution_runtime.last_closed_bar_ts = latest_strategy_bar_ts(session);
     session.execution_runtime.last_closed_bar_fingerprint =
         latest_strategy_bar_fingerprint(session);
-    seed_hma_cross_observed_side(session);
-    session.execution_runtime.last_summary =
-        if session.execution_runtime.last_closed_bar_ts.is_some() {
-            format!(
-                "Native {} armed from current {}.",
-                active_native_label(session),
-                active_signal_timing_label(session)
-            )
-        } else {
-            format!(
-                "Native {} armed; waiting for first {}.",
-                active_native_label(session),
-                active_signal_timing_label(session)
-            )
-        };
+    if session.execution_config.kind == StrategyKind::Native {
+        seed_hma_cross_observed_side(session);
+    }
+    session.execution_runtime.last_summary = if cached_lua_replay {
+        "Lua replay strategy armed on guarded cached replay.".to_string()
+    } else if session.execution_runtime.last_closed_bar_ts.is_some() {
+        format!(
+            "Native {} armed from current {}.",
+            active_native_label(session),
+            active_signal_timing_label(session)
+        )
+    } else {
+        format!(
+            "Native {} armed; waiting for first {}.",
+            active_native_label(session),
+            active_signal_timing_label(session)
+        )
+    };
 }
 
 pub(crate) fn disarm_execution_strategy(session: &mut SessionState, reason: String) {

@@ -109,6 +109,88 @@ fn simple_strategy_path_queues_market_order_without_pending_or_inflight_gates() 
 }
 
 #[test]
+fn simple_strategy_daily_window_blocks_new_entry_when_closed() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::SimpleDiagnostic;
+    session.execution_config.native_ema.fast_length = 2;
+    session.execution_config.native_ema.slow_length = 4;
+    session.execution_config.daily_window.enabled = true;
+    session.execution_runtime.armed = true;
+    session.replay_enabled = true;
+    session.execution_runtime.last_closed_bar_ts = Some(5);
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+            volume: None,
+        })
+        .collect();
+
+    maybe_run_simple_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("daily window should block the closed-window entry");
+
+    assert!(
+        broker_rx.try_recv().is_err(),
+        "no entry order should be queued"
+    );
+    assert!(
+        session
+            .execution_runtime
+            .last_summary
+            .contains("outside strategy daily window")
+    );
+}
+
+#[test]
+fn simple_strategy_daily_window_flattens_only_when_opted_in() {
+    let mut session = test_session();
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_execution_path = NativeExecutionPath::SimpleDiagnostic;
+    session.execution_config.native_ema.fast_length = 2;
+    session.execution_config.native_ema.slow_length = 4;
+    session.execution_config.daily_window.enabled = true;
+    session.execution_config.daily_window.flatten_at_session_end = true;
+    session.execution_runtime.armed = true;
+    session.replay_enabled = true;
+    session.execution_runtime.last_closed_bar_ts = Some(5);
+    session.market.history_loaded = 7;
+    session.market.bars = [10.0, 10.0, 10.0, 10.0, 10.0, 8.0, 12.0]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, close)| Bar {
+            ts_ns: idx as i64 + 1,
+            open: close,
+            high: close + 0.5,
+            low: close - 0.5,
+            close,
+            volume: None,
+        })
+        .collect();
+    seed_long_position(&mut session);
+
+    maybe_run_simple_execution_strategy(&mut session, &broker_tx, &event_tx)
+        .expect("opted-in daily-window flatten should dispatch");
+
+    match broker_rx.try_recv().expect("flatten order queued") {
+        BrokerCommand::MarketOrder { order, .. } => assert_eq!(order.target_qty, Some(0)),
+        _ => panic!("expected a flatten market order"),
+    }
+}
+
+#[test]
 fn live_signal_diagnostics_remain_disabled_even_when_enabled() {
     let mut session = test_session();
     session.cfg.replay_signal_diagnostics = true;
@@ -132,6 +214,135 @@ fn live_signal_diagnostics_remain_disabled_even_when_enabled() {
             .execution_runtime
             .replay_signal_diagnostics
             .is_empty()
+    );
+}
+
+#[test]
+fn lua_replay_diagnostic_uses_callback_signal_without_native_fields() {
+    let mut session = test_session();
+    session.replay_enabled = true;
+    session.cfg.replay_signal_diagnostics = true;
+    session.execution_config.kind = StrategyKind::Lua;
+    // Deliberately select a native strategy too: it must not leak into Lua rows.
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.market.bars.push(Bar {
+        ts_ns: 1,
+        open: 10.0,
+        high: 11.0,
+        low: 9.0,
+        close: 10.5,
+        volume: None,
+    });
+    session.market.history_loaded = 1;
+
+    record_replay_signal_diagnostic(
+        &mut session,
+        1,
+        StrategySignal::EnterShort,
+        0,
+        0,
+        Some(-1),
+        "dispatching",
+        "test gate",
+        Some("Sell"),
+        Some(1),
+        "Lua replay callback: Sell",
+    );
+
+    let diagnostic = session
+        .execution_runtime
+        .replay_signal_diagnostics
+        .first()
+        .unwrap();
+    assert_eq!(diagnostic.strategy, "lua");
+    assert_eq!(diagnostic.signal, "Sell");
+    assert_eq!(diagnostic.raw_signal, "Sell");
+    assert_eq!(diagnostic.effective_signal, "Sell");
+    assert!(!diagnostic.raw_buy_signal && diagnostic.raw_sell_signal);
+    assert!(!diagnostic.effective_buy_signal && diagnostic.effective_sell_signal);
+    assert!(diagnostic.indicator_name.is_empty());
+    assert!(diagnostic.hold_reason.is_none());
+    assert!(diagnostic.fast_indicator.is_none());
+    assert!(diagnostic.slow_indicator.is_none());
+}
+
+#[test]
+fn replay_diagnostic_attributes_duplicate_timestamp_to_current_ordinal_bar() {
+    let mut session = test_session();
+    session.replay_enabled = true;
+    session.cfg.replay_signal_diagnostics = true;
+    session.market.bars = [10.0, 11.0]
+        .into_iter()
+        .map(|close| Bar {
+            ts_ns: 7,
+            open: close - 0.5,
+            high: close + 0.5,
+            low: close - 1.0,
+            close,
+            volume: None,
+        })
+        .collect();
+    session.market.history_loaded = 2;
+    session.execution_runtime.replay_bar_ordinal = Some(1);
+
+    for bar_type in [BarType::range(4), BarType::volume(100)] {
+        session.bar_type = bar_type;
+        record_replay_signal_diagnostic(
+            &mut session,
+            7,
+            StrategySignal::EnterLong,
+            0,
+            0,
+            Some(1),
+            "dispatching",
+            "test gate",
+            Some("Buy"),
+            Some(1),
+            "test",
+        );
+        let diagnostic = session
+            .execution_runtime
+            .replay_signal_diagnostics
+            .last()
+            .expect("ordinal disambiguates duplicate timestamp");
+        assert_eq!(diagnostic.bar_index, Some(2));
+        assert_eq!(diagnostic.bar_close, 11.0);
+    }
+}
+
+#[test]
+fn native_replay_evaluates_and_dispatches_equal_timestamp_bars_by_ordinal() {
+    let mut session = test_session();
+    session.replay_enabled = true;
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_signal_timing = NativeSignalTiming::ClosedBar;
+    session.execution_runtime.replay_bar_ordinal = Some(4);
+    session.market.bars = [10.0, 11.0]
+        .into_iter()
+        .map(|close| Bar {
+            ts_ns: 7,
+            open: close - 0.5,
+            high: close + 0.5,
+            low: close - 1.0,
+            close,
+            volume: None,
+        })
+        .collect();
+    session.market.history_loaded = 2;
+
+    let (bar, _, _, _) =
+        evaluate_active_execution_strategy_since(&session, &session.market.bars, 0, Some(7))
+            .expect("native replay evaluates the ordinal-selected closed bar");
+    assert_eq!(bar.ts_ns, 7);
+    assert_eq!(bar.close, 11.0);
+
+    mark_closed_bar_signal_dispatched(&mut session, 7, StrategySignal::EnterLong);
+    assert!(
+        crate::tradovate::execution::strategy::closed_bar_signal_already_dispatched(&session, 7)
+    );
+    session.execution_runtime.replay_bar_ordinal = Some(5);
+    assert!(
+        !crate::tradovate::execution::strategy::closed_bar_signal_already_dispatched(&session, 7)
     );
 }
 
@@ -379,7 +590,12 @@ fn live_bar_signal_timing_can_trade_on_forming_range_bar() {
     maybe_run_execution_strategy(&mut session, &broker_tx, &event_tx)
         .expect("live timing should evaluate the forming bar");
 
-    assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
+    assert_eq!(
+        session.execution_runtime.pending_target_qty,
+        Some(1),
+        "{}",
+        session.execution_runtime.last_summary
+    );
     match broker_rx.try_recv().expect("broker command queued") {
         BrokerCommand::MarketOrder { order, .. } => {
             assert_eq!(order.target_qty, Some(1));

@@ -1,9 +1,9 @@
 use super::*;
-use chrono::{
-    Datelike, Duration as ChronoDuration, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Weekday,
-};
+use chrono::{Datelike, Duration as ChronoDuration, LocalResult, NaiveDateTime, TimeZone, Weekday};
 use chrono_tz::Tz;
 use std::str::FromStr;
+
+pub use crate::broker::ReplayDailySessionWindow as ReplayDatasetDailySessionFilter;
 
 pub const REPLAY_DATASET_VIEW_VERSION: u32 = 1;
 pub const REPLAY_DATASET_VIEWS_DIR: &str = ".views";
@@ -202,53 +202,6 @@ impl Default for ReplayDatasetWarmupPolicy {
     }
 }
 
-/// Optional recurring local-time filter applied to replay bars after the
-/// source range is loaded. The immutable source cache is never rewritten.
-/// Weekends are excluded because this filter models a weekday trading window.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplayDatasetDailySessionFilter {
-    pub timezone: String,
-    pub start_local: NaiveTime,
-    pub end_local: NaiveTime,
-}
-
-impl ReplayDatasetDailySessionFilter {
-    pub fn validate(&self) -> Result<()> {
-        Tz::from_str(self.timezone.trim())
-            .with_context(|| format!("daily session timezone is invalid: {}", self.timezone))?;
-        if self.start_local >= self.end_local {
-            bail!(
-                "daily session start {} must be before end {}",
-                self.start_local,
-                self.end_local
-            );
-        }
-        Ok(())
-    }
-
-    pub fn label(&self) -> String {
-        format!(
-            "{} {}-{} weekdays",
-            self.timezone, self.start_local, self.end_local
-        )
-    }
-
-    pub fn contains_timestamp(&self, ts_ns: i64) -> Result<bool> {
-        self.validate()?;
-        if ts_ns <= 0 {
-            return Ok(false);
-        }
-        let timezone = Tz::from_str(self.timezone.trim())
-            .with_context(|| format!("daily session timezone is invalid: {}", self.timezone))?;
-        let local = DateTime::<Utc>::from_timestamp_nanos(ts_ns).with_timezone(&timezone);
-        if matches!(local.weekday(), Weekday::Sat | Weekday::Sun) {
-            return Ok(false);
-        }
-        let time = local.time();
-        Ok(time >= self.start_local && time < self.end_local)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplayDatasetView {
     pub view_version: u32,
@@ -262,6 +215,11 @@ pub struct ReplayDatasetView {
     /// Older view documents omit this field and retain full-source behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_session: Option<ReplayDatasetDailySessionFilter>,
+    /// Optional recurring local-time window for strategy entries. Bars outside
+    /// this window remain in replay so indicators and protective exits still
+    /// receive the full price path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_session: Option<ReplayDatasetDailySessionFilter>,
     #[serde(default)]
     pub warmup: ReplayDatasetWarmupPolicy,
 }
@@ -311,6 +269,7 @@ impl ReplayDatasetView {
             input_timezone: input_timezone.into(),
             session_preset,
             daily_session: None,
+            entry_session: None,
             warmup,
         };
         view.validate_model()?;
@@ -373,6 +332,9 @@ impl ReplayDatasetView {
         }
         self.input_tz()?;
         if let Some(filter) = self.daily_session.as_ref() {
+            filter.validate()?;
+        }
+        if let Some(filter) = self.entry_session.as_ref() {
             filter.validate()?;
         }
         self.load_range()?;

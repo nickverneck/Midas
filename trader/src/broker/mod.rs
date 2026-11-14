@@ -90,6 +90,7 @@ struct ServiceEventOverflow {
 pub(crate) struct ServiceEventSender {
     inner: Sender<ServiceEvent>,
     overflow: Arc<ServiceEventOverflow>,
+    headless_replay: bool,
 }
 
 impl ServiceEventSender {
@@ -97,6 +98,9 @@ impl ServiceEventSender {
         &self,
         event: ServiceEvent,
     ) -> Result<(), mpsc::error::TrySendError<ServiceEvent>> {
+        if self.headless_replay && !is_headless_replay_control_event(&event) {
+            return Ok(());
+        }
         match self.inner.try_send(event) {
             Ok(()) => Ok(()),
             Err(error @ TrySendError::Full(_)) => {
@@ -127,14 +131,41 @@ pub(crate) fn service_command_channel(
 }
 
 pub(crate) fn service_event_channel(capacity: usize) -> (ServiceEventSender, ServiceEventReceiver) {
+    service_event_channel_with_mode(capacity, false)
+}
+
+pub(crate) fn headless_replay_service_event_channel(
+    capacity: usize,
+) -> (ServiceEventSender, ServiceEventReceiver) {
+    service_event_channel_with_mode(capacity, true)
+}
+
+fn service_event_channel_with_mode(
+    capacity: usize,
+    headless_replay: bool,
+) -> (ServiceEventSender, ServiceEventReceiver) {
     let (inner, receiver) = mpsc::channel(capacity);
     (
         ServiceEventSender {
             inner,
             overflow: Arc::new(ServiceEventOverflow::default()),
+            headless_replay,
         },
         receiver,
     )
+}
+
+fn is_headless_replay_control_event(event: &ServiceEvent) -> bool {
+    match event {
+        ServiceEvent::Connected { .. }
+        | ServiceEvent::Disconnected
+        | ServiceEvent::Error(_)
+        | ServiceEvent::ReplayResultSaved { .. } => true,
+        ServiceEvent::Status(message) => {
+            message.starts_with("Replay ") && message.contains(" loaded ")
+        }
+        _ => false,
+    }
 }
 
 pub(crate) const SERVICE_COMMAND_QUEUE_CAPACITY: usize = 128;

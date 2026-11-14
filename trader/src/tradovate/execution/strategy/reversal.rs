@@ -64,6 +64,31 @@ pub(crate) fn continue_staged_reversal(
             return Ok(true);
         }
 
+        if session.execution_config.daily_window.enabled {
+            let now_ts = strategy_bars(session)
+                .last()
+                .map(|bar| bar.ts_ns)
+                .unwrap_or_default();
+            let permitted = session
+                .execution_config
+                .daily_window
+                .contains_timestamp(now_ts)
+                .unwrap_or(false);
+            if !permitted {
+                session.execution_runtime.pending_reversal_entry = None;
+                let reason = "Staged reversal remains flat; strategy daily window is closed or invalid, so the entry was cancelled.".to_string();
+                emit_execution_transition_debug(
+                    event_tx,
+                    session,
+                    &reason,
+                    "staged reversal daily-window block",
+                );
+                session.execution_runtime.last_summary = reason;
+                emit_execution_state(event_tx, session);
+                return Ok(true);
+            }
+        }
+
         let entry_summary = format!(
             "Flat confirmed and broker path clear; submitting staged reversal entry to {} ({}).",
             staged.target_qty,

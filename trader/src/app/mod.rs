@@ -188,6 +188,11 @@ enum Focus {
     NativeReversalMode,
     NativeBlockoutEnabled,
     NativeBlockoutMinutes,
+    DailyWindowEnabled,
+    DailyWindowTimezone,
+    DailyWindowStart,
+    DailyWindowEnd,
+    FlattenAtSessionEnd,
     HmaLength,
     HmaMinAngle,
     HmaAngleLookback,
@@ -593,6 +598,29 @@ struct ReplayAnalyticsState {
     sweep_max_drawdown_pct: Option<f64>,
     sweep_ranking: Option<ReplaySweepRankingDocument>,
     sweep_ranking_error: Option<String>,
+    pending_candidate_import: Option<ReplayCandidateImport>,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ReplayCandidateImport {
+    schema_version: u32,
+    provenance: ReplayCandidateProvenance,
+    execution_config: crate::strategy::ExecutionStrategyConfig,
+}
+
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ReplayCandidateProvenance {
+    ranking_artifact: PathBuf,
+    source_summary: PathBuf,
+    source_plan: PathBuf,
+    sweep_id: String,
+    run_id: String,
+    rank: usize,
+    metric: String,
+    metric_value: Option<f64>,
+    fee_scenario: String,
 }
 
 #[cfg(feature = "replay")]
@@ -625,6 +653,7 @@ impl ReplayAnalyticsState {
             sweep_max_drawdown_pct: None,
             sweep_ranking: None,
             sweep_ranking_error: None,
+            pending_candidate_import: None,
         };
         state.refresh();
         state
@@ -676,6 +705,13 @@ impl ReplayAnalyticsState {
         let mut roots = vec![self.root.clone(), PathBuf::from(".")];
         if let Some(parent) = self.root.parent() {
             roots.push(parent.to_path_buf());
+            // The documented repository-root launch stores web rankings in
+            // trader/.run. Scanning the whole repository reaches these files
+            // one level beyond the normal depth cap, so add just the web job
+            // directory associated with this replay root.
+            if let Some(repo_root) = parent.parent() {
+                roots.push(repo_root.join("trader/.run/webui-strategy-jobs"));
+            }
         }
         for root in roots {
             let ReplaySweepRankingLibrarySnapshot {
