@@ -1,8 +1,10 @@
 # Midas Research Workspace
 
-Standalone SvelteKit app, separate from `frontend/` (training UI) and `trader/` (terminal UI). Run `npm install` and `npm run dev` in this directory; build with `npm run build`.
+Standalone Svelte app, separate from `frontend/` (training UI) and `trader/` (terminal UI). The production workspace is served by the Rust trader, including its chart and strategy APIs. Bun and Vite are used to build the browser assets; they do not run on the production server.
 
-The local APIs accept localhost by default. To access them from another device, set `MIDAS_LAN_HOST` to the host computer's IPv4 address and start Vite on a reachable interface, for example `MIDAS_LAN_HOST=192.168.1.57 npm run dev -- --host 0.0.0.0`. Use that same address and port in the browser. This enables access for devices that can reach the server; the host and origin checks are not user authentication.
+From the repository root, build with `npm --prefix webui install`, `bun --cwd webui run build:rust`, and `cargo build --manifest-path trader/Cargo.toml --features web-ui`. Start the server with `MIDAS_LAN_HOST=192.168.1.57 ./trader/target/debug/trader web --listen 0.0.0.0:9757`, replacing the address with this computer's LAN address. Open that address and port in the browser. Without `--listen` the server binds to localhost only. To serve assets from another location, pass `--assets /absolute/path/to/dist-rust`.
+
+The local APIs accept localhost by default. LAN access requires the explicit `MIDAS_LAN_HOST` address and a reachable listen interface. Devices able to reach the server can use it; the host and origin checks are not user authentication. The legacy SvelteKit server and `bun run dev` remain available during migration.
 
 Upload a CSV with timestamp/date and open/high/low/close columns. Actual uploaded rows are rendered with TradingView Lightweight Charts (Apache 2.0; https://github.com/tradingview/lightweight-charts). Heikin Ashi is calculated locally as a chart-only transformation. Workspace settings are stored in localStorage on this device.
 

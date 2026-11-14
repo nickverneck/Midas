@@ -21,6 +21,7 @@ candle-cuda = ["candle", "candle-core/cuda"]
 # Candle's CUDA backend runs its `nvcc` build script.
 candle-metal = ["candle"]
 manual-orders = []
+web-ui = ["replay", "dep:axum", "dep:tower-http"]
 
 [profile.release]
 opt-level = 3
@@ -29,6 +30,7 @@ codegen-units = 1
 
 [dependencies]
 anyhow = "1.0"
+axum = { version = "0.8", optional = true }
 arrow-array = { version = "55", optional = true }
 arrow-schema = { version = "55", optional = true }
 base64 = "0.22"
@@ -51,6 +53,7 @@ sha2 = "0.10"
 socket2 = "0.5"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
 toml = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]

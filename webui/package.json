@@ -1,1 +1,29 @@
-{"name":"midas-research-workspace","private":true,"version":"0.1.0","type":"module","scripts":{"dev":"vite dev","build":"vite build","check":"svelte-check --tsconfig ./tsconfig.json","preview":"vite preview"},"dependencies":{"lightweight-charts":"^5.0.8","lucide-svelte":"^0.562.0","papaparse":"^5.5.2"},"devDependencies":{"@sveltejs/adapter-auto":"^7.0.0","@sveltejs/kit":"^2.49.1","@sveltejs/vite-plugin-svelte":"^6.2.1","@types/papaparse":"^5.5.2","svelte":"^5.45.6","svelte-check":"^4.3.4","typescript":"^5.9.3","vite":"^7.2.6"}}
+{
+  "name": "midas-research-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --bun ./node_modules/vite/bin/vite.js dev",
+    "build": "bun --bun ./node_modules/vite/bin/vite.js build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "preview": "vite preview",
+    "start": "bun ./build/index.js",
+    "build:rust": "bun --bun ./node_modules/vite/bin/vite.js build --config vite.rust.config.ts"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.0.8",
+    "lucide-svelte": "^0.562.0",
+    "papaparse": "^5.5.2"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-node": "^5.5.8",
+    "@sveltejs/kit": "^2.49.1",
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@types/papaparse": "^5.5.2",
+    "svelte": "^5.45.6",
+    "svelte-check": "^4.3.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6"
+  }
+}

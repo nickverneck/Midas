@@ -29,6 +29,8 @@ mod strategy_debug;
 #[cfg(feature = "tradovate")]
 mod tradovate;
 mod tui_runtime;
+#[cfg(feature = "web-ui")]
+mod web;
 
 use anyhow::Result;
 use clap::Parser;
@@ -63,6 +65,14 @@ fn parse_chart_bar_type(raw: &str, value: u32) -> Result<broker::BarType> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
+    #[cfg(feature = "web-ui")]
+    if let Some(Mode::Web { listen, assets }) = cli.mode.clone() {
+        return web::serve(listen, assets).await;
+    }
+    #[cfg(not(feature = "web-ui"))]
+    if matches!(cli.mode, Some(Mode::Web { .. })) {
+        anyhow::bail!("web support requires --features web-ui");
+    }
     #[cfg(feature = "replay")]
     if let Some(Mode::PrintMetaGateSchedule(args)) = cli.mode.clone() {
         return meta_gate_schedule::print_schedule(&args);

@@ -606,6 +606,16 @@ pub(crate) struct MetaGateScheduleArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum Mode {
+    /// Serve the research workspace and its Rust-backed API.
+    #[command(name = "web")]
+    Web {
+        /// TCP address to listen on. Use a loopback address unless LAN access is intended.
+        #[arg(long, default_value = "127.0.0.1:9757")]
+        listen: std::net::SocketAddr,
+        /// Directory produced by the research workspace's build:rust command.
+        #[arg(long)]
+        assets: Option<PathBuf>,
+    },
     /// Run the background engine server.
     Engine,
     /// List running engine processes on this host.
