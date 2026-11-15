@@ -72,13 +72,13 @@ async fn send_user_entity_chunks(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct MarketSpecs {
-    session_profile: Option<InstrumentSessionProfile>,
-    value_per_point: Option<f64>,
-    tick_size: Option<f64>,
+pub(crate) struct MarketSpecs {
+    pub(crate) session_profile: Option<InstrumentSessionProfile>,
+    pub(crate) value_per_point: Option<f64>,
+    pub(crate) tick_size: Option<f64>,
 }
 
-async fn fetch_contract_specs(
+pub(crate) async fn fetch_contract_specs(
     client: &Client,
     rest_url: &str,
     token: &str,

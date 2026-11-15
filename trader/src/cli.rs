@@ -505,6 +505,29 @@ pub(crate) struct CaptureReplayDomArgs {
     pub(crate) overwrite: bool,
 }
 
+#[cfg(feature = "replay")]
+#[derive(Debug, Clone, Args)]
+pub(crate) struct NinjaTraderReplayArgs {
+    /// Exact hosted contract symbol, for example MESU6.
+    #[arg(long)]
+    pub(crate) contract: String,
+    /// UTC replay start (RFC3339).
+    #[arg(long)]
+    pub(crate) start: String,
+    /// Optional exclusive UTC replay end (RFC3339).
+    #[arg(long)]
+    pub(crate) end: Option<String>,
+    /// Hosted replay speed percentage (0 pauses; maximum 400).
+    #[arg(long, default_value_t = 100)]
+    pub(crate) speed: u16,
+    /// Hosted replay chart bars: minute, second, tick, volume, or range.
+    #[arg(long, default_value = "minute")]
+    pub(crate) bar_kind: String,
+    /// Hosted replay bar size (for example --bar-kind range --bar-value 1).
+    #[arg(long, default_value_t = 1)]
+    pub(crate) bar_value: u32,
+}
+
 #[derive(Debug, Clone, Args)]
 pub(crate) struct CaptureLiveDomArgs {
     /// Exact contract symbol, for example MESU6 or GCZ6.
@@ -694,6 +717,10 @@ pub(crate) enum Mode {
     /// Capture historical Level 2 snapshots through a Tradovate Market Replay session.
     #[command(name = "capture-replay-dom")]
     CaptureReplayDom(CaptureReplayDomArgs),
+    /// Start hosted NinjaTrader Market Replay in a private engine and attach the TUI.
+    #[cfg(feature = "replay")]
+    #[command(name = "ninjatrader-replay")]
+    NinjaTraderReplay(NinjaTraderReplayArgs),
     /// Capture live Level 2 snapshots in a separate, opt-in process.
     #[command(name = "capture-live-dom")]
     CaptureLiveDom(CaptureLiveDomArgs),

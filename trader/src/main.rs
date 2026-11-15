@@ -3,7 +3,6 @@ mod broker;
 mod cli;
 mod config;
 mod databento_cli;
-mod ninjatrader_ncd_cli;
 #[cfg(feature = "replay")]
 mod databento_import;
 mod engine_cli;
@@ -15,9 +14,10 @@ mod ipc;
 #[cfg(feature = "ironbeam")]
 mod ironbeam;
 mod lua_replay;
-mod ninjatrader_ncd;
 #[cfg(feature = "replay")]
 mod meta_gate_schedule;
+mod ninjatrader_ncd;
+mod ninjatrader_ncd_cli;
 #[cfg(feature = "replay")]
 mod replay_cache;
 mod replay_cli;
@@ -37,18 +37,18 @@ use clap::Parser;
 use cli::{Cli, Mode};
 use config::AppConfig;
 use databento_cli::download_databento_trades;
-use ninjatrader_ncd_cli::export_ninjatrader_ncd;
 #[cfg(feature = "replay")]
 use databento_import::import_databento_trades;
 use engine_cli::{configure_attach_mode, kill_all_engines, kill_engine, list_engines};
 use ipc::run_engine_server;
+use ninjatrader_ncd_cli::export_ninjatrader_ncd;
 use replay_cli::{
     analyze_replay_margin, download_replay_data, evaluate_replay_walk_forward,
     import_replay_broker_schedule, plan_replay_walk_forward, probe_replay_acceleration,
     profile_replay_sweep, rank_replay_sweep, reprice_replay_result, run_replay_sweep,
     simulate_replay_liquidation, validate_replay_sweep,
 };
-use tui_runtime::run_tui;
+use tui_runtime::{run_tui, run_tui_with_ninjatrader_replay};
 
 fn parse_chart_bar_type(raw: &str, value: u32) -> Result<broker::BarType> {
     let value = value.max(1);
@@ -317,6 +317,63 @@ async fn main() -> Result<()> {
     }
     if matches!(cli.mode, Some(Mode::Engine)) {
         return run_engine_server(&cli.engine_socket).await;
+    }
+    #[cfg(all(feature = "tradovate", feature = "replay"))]
+    if let Some(Mode::NinjaTraderReplay(args)) = cli.mode.clone() {
+        use broker::{CandleMode, NinjaTraderReplaySpeed, ServiceCommand};
+        use chrono::DateTime;
+        use engine_runtime::{spawn_and_connect_engine, unique_engine_socket_path};
+
+        let start = DateTime::parse_from_rfc3339(&args.start)?.with_timezone(&chrono::Utc);
+        let end = args
+            .end
+            .as_deref()
+            .map(DateTime::parse_from_rfc3339)
+            .transpose()?
+            .map(|value| value.with_timezone(&chrono::Utc));
+        if end.is_some_and(|end| end <= start) {
+            anyhow::bail!("--end must be later than --start");
+        }
+        let speed = NinjaTraderReplaySpeed::new(args.speed).map_err(anyhow::Error::msg)?;
+        let paused_speed = NinjaTraderReplaySpeed::new(0).expect("0 is a valid Replay speed");
+        let mut config = AppConfig::load(cli.config.as_deref())?;
+        config.autoconnect = false;
+        if args.bar_value == 0 || args.bar_value > 100_000 {
+            anyhow::bail!("--bar-value must be between 1 and 100000");
+        }
+        let bar_type = parse_chart_bar_type(&args.bar_kind, args.bar_value)?;
+        let contract = tradovate::search_replay_download_contracts(&config, &args.contract, 20)
+            .await?
+            .into_iter()
+            .find(|contract| contract.name.eq_ignore_ascii_case(&args.contract))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "exact contract {} was not returned by provider search; refusing hosted replay",
+                    args.contract
+                )
+            })?;
+        let isolated_socket = unique_engine_socket_path(&cli.engine_socket);
+        let session = spawn_and_connect_engine(cli.config.as_deref(), &isolated_socket).await?;
+        let start_replay = ServiceCommand::EnterNinjaTraderReplay {
+            config: config.clone(),
+            contract,
+            start,
+            end,
+            speed: paused_speed,
+            initial_balance: 50_000.0,
+            bar_type,
+            candle_mode: CandleMode::Standard,
+        };
+        cli.engine_socket = isolated_socket;
+        cli.no_spawn_engine = true;
+        // The TUI adopts this exact IPC session, then starts Replay after its
+        // event relay is attached. This avoids a second client racing the
+        // initial disconnected-state snapshot against hosted Replay startup.
+        return run_tui_with_ninjatrader_replay(&cli, config, session, start_replay, speed).await;
+    }
+    #[cfg(not(all(feature = "tradovate", feature = "replay")))]
+    if matches!(cli.mode, Some(Mode::NinjaTraderReplay(_))) {
+        anyhow::bail!("ninjatrader-replay requires the tradovate and replay features");
     }
     if matches!(cli.mode, Some(Mode::List)) {
         return list_engines().await;

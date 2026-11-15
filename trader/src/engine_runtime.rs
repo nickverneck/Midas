@@ -1,3 +1,4 @@
+use crate::broker::SessionKind;
 use crate::broker::{ServiceCommand, ServiceCommandSender, ServiceEvent, ServiceEventReceiver};
 use crate::ipc::connect_client;
 use anyhow::{Result, bail};
@@ -40,17 +41,49 @@ pub(crate) struct AttachHydration {
 
 impl AttachHydration {
     pub(crate) fn observe(&mut self, event: &ServiceEvent) -> AttachHydrationProgress {
+        self.observe_expected_session(event, None)
+    }
+
+    pub(crate) fn observe_expected_session(
+        &mut self,
+        event: &ServiceEvent,
+        expected_session: Option<SessionKind>,
+    ) -> AttachHydrationProgress {
         match event {
-            ServiceEvent::Connected { .. } => self.saw_connected = true,
-            ServiceEvent::AccountsLoaded(_) => self.saw_accounts = true,
-            ServiceEvent::AccountSnapshotsLoaded(_) => self.saw_account_snapshots = true,
-            ServiceEvent::ExecutionState(_) => self.saw_execution_state = true,
+            ServiceEvent::Connected { session_kind, .. }
+                if expected_session.map_or(true, |expected| expected == *session_kind) =>
+            {
+                self.saw_connected = true;
+            }
+            ServiceEvent::Connected { .. } => {}
+            ServiceEvent::AccountsLoaded(_) if self.saw_connected => self.saw_accounts = true,
+            ServiceEvent::AccountSnapshotsLoaded(_) if self.saw_connected => {
+                self.saw_account_snapshots = true;
+            }
+            ServiceEvent::ExecutionState(_) if self.saw_connected => {
+                self.saw_execution_state = true;
+            }
             // `Disconnected` is the broker state returned by ReplayState when
             // this engine has not selected/connected a broker. It is a valid
             // offline hydration response. Transport loss is reported by the
             // relay as EngineRelayMessage::Closed, while broker failures are
             // represented by Error.
-            ServiceEvent::Disconnected => return AttachHydrationProgress::Ready,
+            ServiceEvent::Disconnected
+                if expected_session.is_some() && self.saw_connected =>
+            {
+                return AttachHydrationProgress::Terminal;
+            }
+            ServiceEvent::Disconnected if expected_session.is_none() => {
+                return AttachHydrationProgress::Ready;
+            }
+            ServiceEvent::Disconnected => {
+                // A newly-created hosted Replay engine initially reports its
+                // empty state before the queued EnterNinjaTraderReplay command
+                // establishes the session. Do not let that stale state satisfy
+                // hydration for the requested Replay session.
+                *self = Self::default();
+                return AttachHydrationProgress::Pending;
+            }
             ServiceEvent::Error(_) => return AttachHydrationProgress::Terminal,
             _ => {}
         }
@@ -282,6 +315,93 @@ mod tests {
         assert_eq!(
             hydration.observe(&ServiceEvent::Disconnected),
             AttachHydrationProgress::Ready
+        );
+    }
+
+    #[test]
+    fn hosted_replay_hydration_waits_for_requested_session_after_initial_disconnect() {
+        let mut hydration = AttachHydration::default();
+        let expected = Some(SessionKind::NinjaTraderReplay);
+
+        assert_eq!(
+            hydration.observe_expected_session(&ServiceEvent::Disconnected, expected),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration
+                .observe_expected_session(&ServiceEvent::AccountsLoaded(Vec::new()), expected,),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration.observe_expected_session(
+                &ServiceEvent::Connected {
+                    broker: BrokerKind::Tradovate,
+                    env: TradingEnvironment::Sim,
+                    user_name: None,
+                    auth_mode: AuthMode::TokenFile,
+                    session_kind: SessionKind::Live,
+                    capabilities: BrokerCapabilities::default(),
+                },
+                expected,
+            ),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration.observe_expected_session(
+                &ServiceEvent::Connected {
+                    broker: BrokerKind::Tradovate,
+                    env: TradingEnvironment::Sim,
+                    user_name: Some("Replay".to_string()),
+                    auth_mode: AuthMode::TokenFile,
+                    session_kind: SessionKind::NinjaTraderReplay,
+                    capabilities: BrokerCapabilities::default(),
+                },
+                expected,
+            ),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration
+                .observe_expected_session(&ServiceEvent::AccountsLoaded(Vec::new()), expected,),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration.observe_expected_session(
+                &ServiceEvent::AccountSnapshotsLoaded(Vec::new()),
+                expected,
+            ),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration.observe_expected_session(
+                &ServiceEvent::ExecutionState(ExecutionStateSnapshot::default()),
+                expected,
+            ),
+            AttachHydrationProgress::Ready
+        );
+    }
+
+    #[test]
+    fn hosted_replay_disconnect_after_connected_is_terminal() {
+        let mut hydration = AttachHydration::default();
+        let expected = Some(SessionKind::NinjaTraderReplay);
+        assert_eq!(
+            hydration.observe_expected_session(
+                &ServiceEvent::Connected {
+                    broker: BrokerKind::Tradovate,
+                    env: TradingEnvironment::Sim,
+                    user_name: Some("Replay".to_string()),
+                    auth_mode: AuthMode::TokenFile,
+                    session_kind: SessionKind::NinjaTraderReplay,
+                    capabilities: BrokerCapabilities::default(),
+                },
+                expected,
+            ),
+            AttachHydrationProgress::Pending
+        );
+        assert_eq!(
+            hydration.observe_expected_session(&ServiceEvent::Disconnected, expected),
+            AttachHydrationProgress::Terminal
         );
     }
 

@@ -52,10 +52,12 @@ struct HostedQuoteState {
 /// Safe counters for diagnosing a hosted Replay feed without retaining any
 /// provider payloads, credentials, or account data.
 #[cfg(feature = "replay")]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct HostedReplayQuoteDiagnostics {
     websocket_array_frames: u64,
     replay_clock_events: u64,
+    event_kinds: BTreeMap<String, u64>,
+    omitted_event_kinds: u64,
     md_items: u64,
     md_items_without_quote_array: u64,
     quote_rows: u64,
@@ -73,11 +75,45 @@ struct HostedReplayQuoteDiagnostics {
 
 #[cfg(feature = "replay")]
 impl HostedReplayQuoteDiagnostics {
-    fn summary(self) -> String {
+    fn record_event_kind(&mut self, item: &Value) {
+        const MAX_DIAGNOSTIC_EVENT_KINDS: usize = 12;
+        let Some(kind) = item.get("e").and_then(Value::as_str) else {
+            return;
+        };
+        let kind: String = kind
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .take(32)
+            .collect();
+        if kind.is_empty() {
+            return;
+        }
+        if !self.event_kinds.contains_key(&kind)
+            && self.event_kinds.len() >= MAX_DIAGNOSTIC_EVENT_KINDS
+        {
+            self.omitted_event_kinds = self.omitted_event_kinds.saturating_add(1);
+            return;
+        }
+        let count = self.event_kinds.entry(kind).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    fn summary(&self) -> String {
+        // Persisted TUI logs redact JSON-like brace/bracket segments. Keep
+        // these bounded protocol event labels in plain text so the diagnostic
+        // survives that sanitizer without retaining any provider payload.
+        let event_kinds = self
+            .event_kinds
+            .iter()
+            .map(|(kind, count)| format!("{kind}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "feed diagnostics: array frames={}, clock events={}, md items={}, md items without quote array={}, quote rows={}, rows without contract id={}, rows for other contracts={}, matching rows={}, trade rows={}, invalid trade values={}, missing trade timestamps={}, out-of-window trades={}, valid trade ticks={}, market updates={}, closed bars={}",
+            "feed diagnostics: array frames={}, clock events={}, event kinds={} ({} omitted), md items={}, md items without quote array={}, quote rows={}, rows without contract id={}, rows for other contracts={}, matching rows={}, trade rows={}, invalid trade values={}, missing trade timestamps={}, out-of-window trades={}, valid trade ticks={}, market updates={}, closed bars={}",
             self.websocket_array_frames,
             self.replay_clock_events,
+            event_kinds,
+            self.omitted_event_kinds,
             self.md_items,
             self.md_items_without_quote_array,
             self.quote_rows,
@@ -367,6 +403,7 @@ pub async fn capture_hosted_replay_quotes(
                 };
                 diagnostics.websocket_array_frames = diagnostics.websocket_array_frames.saturating_add(1);
                 for item in &items {
+                    diagnostics.record_event_kind(item);
                     if let Some(clock_ts_ns) = parse_replay_clock_timestamp(item) {
                         diagnostics.replay_clock_events = diagnostics.replay_clock_events.saturating_add(1);
                         replay_ts_ns = Some(replay_ts_ns.map_or(clock_ts_ns, |current| current.max(clock_ts_ns)));

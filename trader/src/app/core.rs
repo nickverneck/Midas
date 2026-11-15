@@ -1,4 +1,12 @@
 impl App {
+    #[cfg(feature = "replay")]
+    pub(crate) fn set_ninja_replay_resume_speed(
+        &mut self,
+        speed: crate::broker::NinjaTraderReplaySpeed,
+    ) {
+        self.ninja_replay_resume_speed = Some(speed);
+    }
+
     pub fn new(config: AppConfig) -> Self {
         #[cfg(feature = "replay")]
         let mut config = config;

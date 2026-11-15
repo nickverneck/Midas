@@ -1,11 +1,14 @@
 use crate::app::{self, App, EngineKey};
 use crate::broker::{
-    SERVICE_COMMAND_QUEUE_CAPACITY, ServiceCommandSender, ServiceEvent, service_command_channel,
+    NinjaTraderReplaySpeed, SERVICE_COMMAND_QUEUE_CAPACITY, ServiceCommand,
+    ServiceCommandSender, ServiceEvent, SessionKind, service_command_channel,
 };
 use crate::cli::Cli;
 use crate::config::AppConfig;
 use crate::engine_registry::list_running_engines;
-use crate::engine_runtime::{ATTACH_HYDRATION_TIMEOUT, AttachHydration, AttachHydrationProgress};
+use crate::engine_runtime::{
+    ATTACH_HYDRATION_TIMEOUT, AttachHydration, AttachHydrationProgress, EngineSession,
+};
 use crate::engine_session::{
     EngineEntryMode, EngineRelayMessage, EngineRelayQueue, ObservedEngineSession,
     connect_or_spawn_engine, connect_selected_engine, engine_lifecycle_failure_label,
@@ -28,6 +31,7 @@ use std::time::Duration;
 use tokio::time::{Instant as TokioInstant, timeout_at};
 
 const ENGINE_EVENT_BATCH_LIMIT: usize = 256;
+const HOSTED_REPLAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(150);
 
 pub(crate) async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> Result<()> {
     let running_engines = list_running_engines()?;
@@ -37,6 +41,46 @@ pub(crate) async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> 
         None
     };
 
+    run_tui_with_direct_session(cli, config, running_engines, direct_session, None).await
+}
+
+pub(crate) async fn run_tui_with_ninjatrader_replay(
+    cli: &Cli,
+    config: AppConfig,
+    session: EngineSession,
+    start_replay: ServiceCommand,
+    resume_speed: NinjaTraderReplaySpeed,
+) -> Result<()> {
+    let running_engines = list_running_engines()?;
+    run_tui_with_direct_session(
+        cli,
+        config,
+        running_engines,
+        Some(session),
+        Some((
+            EngineEntryMode::CreateNew {
+                mode: app::EngineCreateMode::LiveReplay,
+            },
+            SessionKind::NinjaTraderReplay,
+            start_replay,
+            resume_speed,
+        )),
+    )
+    .await
+}
+
+async fn run_tui_with_direct_session(
+    cli: &Cli,
+    config: AppConfig,
+    running_engines: Vec<crate::engine_registry::RunningEngine>,
+    direct_session: Option<EngineSession>,
+    startup: Option<(
+        EngineEntryMode,
+        SessionKind,
+        ServiceCommand,
+        NinjaTraderReplaySpeed,
+    )>,
+) -> Result<()> {
     let mut terminal = TerminalGuard::new(init_terminal()?);
     let mut app = App::new(config.clone());
     let startup_engines = running_engines
@@ -68,19 +112,46 @@ pub(crate) async fn run_tui(cli: &Cli, config: AppConfig, attach_mode: bool) -> 
             &engine_event_queue,
         )
         .await;
-        if let Err(err) = hydrate_and_enter_existing_engine(
-            &mut app,
-            &mut engine_sessions,
-            &mut active_engine_key,
-            engine_key,
-            cli.engine_socket.clone(),
-            &config,
-            &engine_event_queue,
-            &dummy_cmd_tx,
-        )
-        .await
-        {
-            return Err(err);
+        if let Some((entry_mode, expected_session, command, resume_speed)) = startup {
+            let Some(session) = engine_sessions.get(&engine_key) else {
+                bail!("new hosted Replay engine session disappeared during startup");
+            };
+            session
+                .cmd_tx
+                .send(command)
+                .map_err(|err| anyhow::anyhow!("send hosted Replay startup command: {err}"))?;
+            hydrate_and_enter_engine_with_mode(
+                &mut app,
+                &mut engine_sessions,
+                &mut active_engine_key,
+                engine_key,
+                cli.engine_socket.clone(),
+                &config,
+                &engine_event_queue,
+                &dummy_cmd_tx,
+                entry_mode,
+                Some(expected_session),
+            )
+            .await?;
+            // Initial Disconnected -> Connected hydration clears replay resume
+            // state. Set it only after startup events have been applied so
+            // Continue can arm first, then resume the paused clock.
+            #[cfg(feature = "replay")]
+            app.set_ninja_replay_resume_speed(resume_speed);
+            #[cfg(not(feature = "replay"))]
+            let _ = resume_speed;
+        } else {
+            hydrate_and_enter_existing_engine(
+                &mut app,
+                &mut engine_sessions,
+                &mut active_engine_key,
+                engine_key,
+                cli.engine_socket.clone(),
+                &config,
+                &engine_event_queue,
+                &dummy_cmd_tx,
+            )
+            .await?;
         }
     }
 
@@ -294,7 +365,7 @@ async fn hydrate_and_enter_existing_engine(
     engine_event_queue: &std::sync::Arc<EngineRelayQueue>,
     dummy_cmd_tx: &ServiceCommandSender,
 ) -> Result<()> {
-    hydrate_and_enter_existing_engine_until(
+    hydrate_and_enter_engine_with_mode(
         app,
         engine_sessions,
         active_engine_key,
@@ -303,7 +374,41 @@ async fn hydrate_and_enter_existing_engine(
         config,
         engine_event_queue,
         dummy_cmd_tx,
-        TokioInstant::now() + ATTACH_HYDRATION_TIMEOUT,
+        EngineEntryMode::AttachExisting,
+        None,
+    )
+    .await
+}
+
+async fn hydrate_and_enter_engine_with_mode(
+    app: &mut App,
+    engine_sessions: &mut HashMap<EngineKey, ObservedEngineSession>,
+    active_engine_key: &mut Option<EngineKey>,
+    engine_key: EngineKey,
+    socket_path: std::path::PathBuf,
+    config: &AppConfig,
+    engine_event_queue: &std::sync::Arc<EngineRelayQueue>,
+    dummy_cmd_tx: &ServiceCommandSender,
+    entry_mode: EngineEntryMode,
+    expected_session: Option<SessionKind>,
+) -> Result<()> {
+    let startup_timeout = if expected_session == Some(SessionKind::NinjaTraderReplay) {
+        HOSTED_REPLAY_STARTUP_TIMEOUT
+    } else {
+        ATTACH_HYDRATION_TIMEOUT
+    };
+    hydrate_and_enter_engine_until(
+        app,
+        engine_sessions,
+        active_engine_key,
+        engine_key,
+        socket_path,
+        config,
+        engine_event_queue,
+        dummy_cmd_tx,
+        entry_mode,
+        expected_session,
+        TokioInstant::now() + startup_timeout,
     )
     .await
 }
@@ -317,6 +422,35 @@ async fn hydrate_and_enter_existing_engine_until(
     config: &AppConfig,
     engine_event_queue: &std::sync::Arc<EngineRelayQueue>,
     dummy_cmd_tx: &ServiceCommandSender,
+    deadline: TokioInstant,
+) -> Result<()> {
+    hydrate_and_enter_engine_until(
+        app,
+        engine_sessions,
+        active_engine_key,
+        engine_key,
+        socket_path,
+        config,
+        engine_event_queue,
+        dummy_cmd_tx,
+        EngineEntryMode::AttachExisting,
+        None,
+        deadline,
+    )
+    .await
+}
+
+async fn hydrate_and_enter_engine_until(
+    app: &mut App,
+    engine_sessions: &mut HashMap<EngineKey, ObservedEngineSession>,
+    active_engine_key: &mut Option<EngineKey>,
+    engine_key: EngineKey,
+    socket_path: std::path::PathBuf,
+    config: &AppConfig,
+    engine_event_queue: &std::sync::Arc<EngineRelayQueue>,
+    dummy_cmd_tx: &ServiceCommandSender,
+    entry_mode: EngineEntryMode,
+    expected_session: Option<SessionKind>,
     deadline: TokioInstant,
 ) -> Result<()> {
     app.observe_live_engine_socket(socket_path.clone());
@@ -367,7 +501,8 @@ async fn hydrate_and_enter_existing_engine_until(
             EngineRelayMessage::Event(envelope)
                 if envelope.engine_key == engine_key && envelope.generation == generation =>
             {
-                let progress = hydration.observe(&envelope.event);
+                let progress =
+                    hydration.observe_expected_session(&envelope.event, expected_session);
                 let event = envelope.event;
                 let summary_cmd_tx = active_engine_key
                     .as_ref()
@@ -422,7 +557,7 @@ async fn hydrate_and_enter_existing_engine_until(
                     engine_key.clone(),
                     socket_path.clone(),
                     config,
-                    EngineEntryMode::AttachExisting,
+                    entry_mode,
                 );
                 let Some(session) = engine_sessions.get(&engine_key) else {
                     bail!(

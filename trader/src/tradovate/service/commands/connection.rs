@@ -269,6 +269,7 @@ pub(super) async fn enter_ninjatrader_replay(
     )
     .await?;
     let accounts = started.accounts;
+    let market_specs = started.market_specs;
     let selected_account_id = accounts.first().map(|account| account.id);
     let user_name = started
         .tokens
@@ -298,7 +299,15 @@ pub(super) async fn enter_ninjatrader_replay(
         selected_contract: Some(contract.clone()),
         bar_type,
         candle_mode,
-        market: MarketSnapshot::default(),
+        market: MarketSnapshot {
+            contract_id: Some(contract.id),
+            contract_name: Some(contract.name.clone()),
+            candle_mode,
+            session_profile: market_specs.session_profile,
+            value_per_point: market_specs.value_per_point,
+            tick_size: market_specs.tick_size,
+            ..MarketSnapshot::default()
+        },
         managed_protection: BTreeMap::new(),
         active_order_strategy: None,
         next_strategy_order_nonce: 1,

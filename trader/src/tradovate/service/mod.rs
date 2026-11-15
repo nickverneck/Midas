@@ -26,7 +26,13 @@ pub async fn service_loop(
     market_tx: tokio::sync::watch::Sender<MarketSnapshot>,
 ) {
     initialize_internal_backpressure();
-    let (internal_tx, mut internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
+    // Opt-in burst headroom; keep the default unchanged for existing deployments.
+    let normal_capacity = std::env::var("TRADER_INTERNAL_QUEUE_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (512..=4096).contains(value))
+        .unwrap_or(INTERNAL_EVENT_QUEUE_CAPACITY);
+    let (internal_tx, mut internal_rx) = internal_event_channel(normal_capacity);
     let (broker_tx, broker_rx) = broker_command_channel();
     let (replay_speed_tx, _replay_speed_rx) = tokio::sync::watch::channel(ReplaySpeed::default());
     let broker_task = spawn_broker_gateway_task(broker_rx, internal_tx.clone());
@@ -100,11 +106,12 @@ pub async fn service_loop(
             }
             Either::InternalOverflow => {
                 let count = internal_tx.take_overflow_count();
+                let diagnostics = internal_tx.overflow_diagnostics();
                 eprintln!(
-                    "broker service internal event queue overflowed ({count} event(s)); disconnecting safely"
+                    "broker service internal event queue overflowed ({count} event(s)); {diagnostics}; disconnecting safely"
                 );
                 let _ = event_tx.send(ServiceEvent::Error(format!(
-                    "broker service internal event queue overflowed ({count} event(s)); disconnecting safely"
+                    "broker service internal event queue overflowed ({count} event(s)); {diagnostics}; disconnecting safely"
                 )));
                 break;
             }

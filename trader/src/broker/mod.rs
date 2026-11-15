@@ -305,6 +305,8 @@ fn command_broker(cmd: &ServiceCommand) -> Option<BrokerKind> {
         ServiceCommand::Connect(cfg) => Some(cfg.broker),
         ServiceCommand::EnterReplayMode { config, .. } => Some(config.broker),
         #[cfg(feature = "replay")]
+        ServiceCommand::EnterNinjaTraderReplay { config, .. } => Some(config.broker),
+        #[cfg(feature = "replay")]
         ServiceCommand::EnterReplayModeWithSharedFrames { config, .. } => Some(config.broker),
         #[cfg(feature = "replay")]
         ServiceCommand::DownloadReplayData { config, .. }
@@ -401,7 +403,7 @@ mod tests {
 
     #[cfg(feature = "replay")]
     #[test]
-    fn replay_downloader_commands_lazily_select_the_configured_backend() {
+    fn replay_commands_lazily_select_the_configured_backend() {
         let config = AppConfig::default();
         let contract = crate::broker::ContractSuggestion {
             id: 123,
@@ -422,6 +424,18 @@ mod tests {
             config: config.clone(),
             contract: contract.clone(),
         };
+        let hosted = ServiceCommand::EnterNinjaTraderReplay {
+            config: config.clone(),
+            contract: contract.clone(),
+            start: chrono::DateTime::parse_from_rfc3339("2026-08-17T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            end: None,
+            speed: NinjaTraderReplaySpeed::new(400).unwrap(),
+            initial_balance: 50_000.0,
+            bar_type: BarType::range(1),
+            candle_mode: CandleMode::Standard,
+        };
         let download = ServiceCommand::DownloadReplayData {
             operation_id: ReplayDownloadOperationId::next(),
             config,
@@ -440,7 +454,7 @@ mod tests {
             tags: Vec::new(),
         };
 
-        for command in [lookup, inspect, download] {
+        for command in [lookup, inspect, download, hosted] {
             assert_eq!(command_broker(&command), Some(BrokerKind::Tradovate));
         }
     }

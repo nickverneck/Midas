@@ -23,6 +23,11 @@ pub(crate) struct InternalEventSender {
 #[derive(Debug, Default)]
 struct InternalEventOverflow {
     count: AtomicU64,
+    normal_full: AtomicU64,
+    critical_full: AtomicU64,
+    oversized: AtomicU64,
+    closed: AtomicU64,
+    first_kind: AtomicU64,
     notify: Notify,
 }
 
@@ -31,15 +36,35 @@ impl InternalEventSender {
         &self,
         event: InternalEvent,
     ) -> Result<(), tokio::sync::mpsc::error::TrySendError<InternalEvent>> {
+        let kind = match &event {
+            InternalEvent::Market(_) => 1,
+            InternalEvent::UserEntities(_) => 2,
+            InternalEvent::SnapshotsBuilt { .. } | InternalEvent::SnapshotsBuildFailed { .. } => 3,
+            InternalEvent::BrokerOrderAck(_)
+            | InternalEvent::BrokerOrderFailed(_)
+            | InternalEvent::OrderStrategyAck(_)
+            | InternalEvent::OrderStrategyFailed(_)
+            | InternalEvent::ProtectionSyncApplied(_)
+            | InternalEvent::ProtectionSyncFailed(_) => 4,
+            _ => 5,
+        };
         // Do this check before handing ownership to Tokio's queue.  A single
         // malformed/oversized broker batch must not consume a bounded slot or
         // become a retained allocation while the service is already unhealthy.
         if internal_event_payload_bytes(&event) > MAX_INTERNAL_EVENT_PAYLOAD_BYTES {
+            let _ = self.overflow.first_kind.compare_exchange(
+                0,
+                kind,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+            self.overflow.oversized.fetch_add(1, Ordering::Relaxed);
             self.overflow.count.fetch_add(1, Ordering::Relaxed);
             self.overflow.notify.notify_one();
             return Err(tokio::sync::mpsc::error::TrySendError::Full(event));
         }
-        let queue = if is_critical_event(&event) {
+        let critical = is_critical_event(&event);
+        let queue = if critical {
             &self.critical
         } else {
             &self.normal
@@ -47,11 +72,30 @@ impl InternalEventSender {
         match queue.try_send(event) {
             Ok(()) => Ok(()),
             Err(error @ tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                let _ = self.overflow.first_kind.compare_exchange(
+                    0,
+                    kind,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                if critical {
+                    &self.overflow.critical_full
+                } else {
+                    &self.overflow.normal_full
+                }
+                .fetch_add(1, Ordering::Relaxed);
                 self.overflow.count.fetch_add(1, Ordering::Relaxed);
                 self.overflow.notify.notify_one();
                 Err(error)
             }
             Err(error @ tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                let _ = self.overflow.first_kind.compare_exchange(
+                    0,
+                    kind,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                self.overflow.closed.fetch_add(1, Ordering::Relaxed);
                 // A closed lane is just as fatal as a full lane for service
                 // events: the supervisor must observe it and terminate the
                 // affected session instead of leaving callers waiting for a
@@ -69,6 +113,28 @@ impl InternalEventSender {
 
     pub(crate) fn take_overflow_count(&self) -> u64 {
         self.overflow.count.swap(0, Ordering::AcqRel)
+    }
+
+    pub(crate) fn overflow_diagnostics(&self) -> String {
+        let first_kind = match self.overflow.first_kind.load(Ordering::Relaxed) {
+            1 => "market",
+            2 => "user_entities",
+            3 => "snapshot",
+            4 => "order_or_protection",
+            5 => "other",
+            _ => "unknown",
+        };
+        format!(
+            "first_event={first_kind} normal_full={} critical_full={} oversized={} closed={} normal_queued={}/{} critical_queued={}/{}",
+            self.overflow.normal_full.load(Ordering::Relaxed),
+            self.overflow.critical_full.load(Ordering::Relaxed),
+            self.overflow.oversized.load(Ordering::Relaxed),
+            self.overflow.closed.load(Ordering::Relaxed),
+            self.normal.max_capacity() - self.normal.capacity(),
+            self.normal.max_capacity(),
+            self.critical.max_capacity() - self.critical.capacity(),
+            self.critical.max_capacity()
+        )
     }
 }
 
@@ -302,7 +368,41 @@ mod tests {
             tx.send(InternalEvent::Error("full".into())).unwrap();
         }
         assert!(tx.send(InternalEvent::Error("overflow".into())).is_err());
+        assert!(tx.overflow_diagnostics().contains("critical_full=1"));
         assert_eq!(tx.take_overflow_count(), 1);
+    }
+
+    #[test]
+    fn normal_lane_overflow_is_distinguished() {
+        let (tx, _rx) = internal_event_channel(1);
+        tx.send(InternalEvent::RestLatencyMeasured(1)).unwrap();
+        assert!(tx.send(InternalEvent::RestLatencyMeasured(2)).is_err());
+        let diagnostics = tx.overflow_diagnostics();
+        assert!(diagnostics.contains("normal_full=1"));
+        assert!(diagnostics.contains("normal_queued=1/1"));
+        assert!(diagnostics.contains("critical_full=0"));
+    }
+
+    #[tokio::test]
+    async fn larger_bounded_queue_absorbs_burst_without_blocking_critical_events() {
+        let (small, _small_rx) = internal_event_channel(512);
+        for _ in 0..512 {
+            small.send(InternalEvent::RestLatencyMeasured(1)).unwrap();
+        }
+        assert!(small.send(InternalEvent::RestLatencyMeasured(1)).is_err());
+
+        let (large, mut rx) = internal_event_channel(2048);
+        for n in 0..1024 {
+            large.send(InternalEvent::RestLatencyMeasured(n)).unwrap();
+        }
+        large.send(InternalEvent::Error("critical".into())).unwrap();
+        assert!(matches!(rx.recv().await, Some(InternalEvent::Error(_))));
+        for n in 0..1024 {
+            assert!(
+                matches!(rx.recv().await, Some(InternalEvent::RestLatencyMeasured(value)) if value == n)
+            );
+        }
+        assert_eq!(large.take_overflow_count(), 0);
     }
 
     #[tokio::test]

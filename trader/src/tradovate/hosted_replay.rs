@@ -8,6 +8,10 @@ type ReplayRead = futures_util::stream::SplitStream<ReplaySocket>;
 type ReplayWrite = futures_util::stream::SplitSink<ReplaySocket, Message>;
 
 const HOSTED_REPLAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+// Startup consists of several individually bounded provider requests. Keep
+// the overall guard longer than those per-request deadlines so it cannot
+// mask which handshake stage actually timed out.
+const HOSTED_REPLAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const HOSTED_REPLAY_MAX_SPEED: u16 = NinjaTraderReplaySpeed::MAX;
 
 pub(crate) struct HostedReplayOptions {
@@ -24,6 +28,7 @@ pub(crate) struct HostedReplayOptions {
 
 pub(crate) struct HostedReplayStarted {
     pub(crate) accounts: Vec<AccountInfo>,
+    pub(crate) market_specs: MarketSpecs,
     pub(crate) request_tx: UserSocketCommandSender,
     pub(crate) task: JoinHandle<()>,
     pub(crate) stop_tx: tokio::sync::watch::Sender<bool>,
@@ -48,6 +53,18 @@ pub(crate) async fn start_hosted_replay(
     }
 
     let tokens = authenticate(client, &options.config).await?;
+    let market_specs = time::timeout(
+        HOSTED_REPLAY_REQUEST_TIMEOUT,
+        fetch_contract_specs(
+            client,
+            &options.config.broker_rest_url(),
+            &tokens.access_token,
+            &options.contract,
+        ),
+    )
+    .await
+    .context("timed out loading contract specifications for NinjaTrader hosted Replay")??;
+    let market_specs = validate_replay_market_specs(market_specs)?;
     let replay_ws_url = ninja_replay_ws_url(&tokens)?;
     let user_id = tokens
         .user_id
@@ -62,6 +79,7 @@ pub(crate) async fn start_hosted_replay(
     let (startup_tx, startup_rx) = oneshot::channel::<Result<Vec<AccountInfo>, String>>();
     let task_tokens = tokens.clone();
     let task_internal_tx = internal_tx.clone();
+    let task_market_specs = market_specs;
     let generation = options.generation;
     let task = tokio::spawn(async move {
         hosted_replay_worker(
@@ -74,11 +92,12 @@ pub(crate) async fn start_hosted_replay(
             startup_tx,
             task_internal_tx,
             generation,
+            task_market_specs,
         )
         .await;
     });
 
-    let accounts = match time::timeout(HOSTED_REPLAY_REQUEST_TIMEOUT, startup_rx).await {
+    let accounts = match time::timeout(HOSTED_REPLAY_STARTUP_TIMEOUT, startup_rx).await {
         Ok(Ok(Ok(accounts))) => accounts,
         Ok(Ok(Err(message))) => {
             let _ = stop_tx.send(true);
@@ -100,6 +119,7 @@ pub(crate) async fn start_hosted_replay(
 
     Ok(HostedReplayStarted {
         accounts,
+        market_specs,
         request_tx,
         task,
         stop_tx,
@@ -139,6 +159,7 @@ async fn hosted_replay_worker(
     startup_tx: oneshot::Sender<Result<Vec<AccountInfo>, String>>,
     internal_tx: InternalEventSender,
     generation: u64,
+    market_specs: MarketSpecs,
 ) {
     let mut startup_tx = Some(startup_tx);
     let result = hosted_replay_worker_inner(
@@ -151,6 +172,7 @@ async fn hosted_replay_worker(
         &mut startup_tx,
         &internal_tx,
         generation,
+        market_specs,
     )
     .await;
 
@@ -218,6 +240,7 @@ async fn hosted_replay_worker_inner(
     startup_tx: &mut Option<oneshot::Sender<Result<Vec<AccountInfo>, String>>>,
     internal_tx: &InternalEventSender,
     generation: u64,
+    market_specs: MarketSpecs,
 ) -> Result<HostedReplayExit> {
     let ws_config = WebSocketConfig {
         write_buffer_size: 0,
@@ -441,6 +464,7 @@ async fn hosted_replay_worker_inner(
                 let mut sync_entities = Vec::<EntityEnvelope>::new();
 
                 for item in items {
+                    diagnostics.record_event_kind(&item);
                     let response_id = item.get("i").and_then(Value::as_u64);
                     let status = parse_status_code(&item);
                     if let Some(clock) = parse_hosted_clock(&item) {
@@ -460,7 +484,7 @@ async fn hosted_replay_worker_inner(
                         }
                     }
 
-                    if response_id == sync_id {
+                    if matches_pending_sync_response(response_id, sync_id) {
                         if status.is_some_and(|code| !(200..300).contains(&code)) {
                             let detail = parse_socket_response(&item).expect_err("non-success sync response");
                             bail!("NinjaTrader Replay user/syncRequest failed: {detail}");
@@ -527,7 +551,7 @@ async fn hosted_replay_worker_inner(
                                 series.forming_bar = forming;
                                 if let Some(update) = build_market_update(
                                     &options.contract,
-                                    None,
+                                    Some(market_specs),
                                     options.candle_mode,
                                     series.closed_bars.len(),
                                     live_bars,
@@ -883,6 +907,23 @@ fn parse_hosted_clock(item: &Value) -> Option<(DateTime<Utc>, NinjaTraderReplayS
     Some((timestamp, NinjaTraderReplaySpeed::new(speed).ok()?))
 }
 
+fn matches_pending_sync_response(response_id: Option<u64>, sync_id: Option<u64>) -> bool {
+    // Once the one-shot sync request completes, unsolicited stream events
+    // generally have no response id. `None == None` must not classify them as
+    // another sync response or they'll be discarded before quote parsing.
+    sync_id.is_some() && response_id == sync_id
+}
+
+fn validate_replay_market_specs(specs: MarketSpecs) -> Result<MarketSpecs> {
+    if !specs
+        .tick_size
+        .is_some_and(|tick_size| tick_size.is_finite() && tick_size > 0.0)
+    {
+        bail!("NinjaTrader hosted Replay contract metadata has no valid positive tick size");
+    }
+    Ok(specs)
+}
+
 struct HostedBarAggregator {
     bar_type: BarType,
     current_period_ns: Option<i64>,
@@ -1022,6 +1063,36 @@ fn new_hosted_bar(ts_ns: i64, price: f64, size: f64) -> Bar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsolicited_frames_without_ids_are_not_treated_as_sync_responses() {
+        assert!(!matches_pending_sync_response(None, None));
+        assert!(!matches_pending_sync_response(Some(7), None));
+        assert!(!matches_pending_sync_response(None, Some(7)));
+        assert!(matches_pending_sync_response(Some(7), Some(7)));
+        assert!(!matches_pending_sync_response(Some(8), Some(7)));
+    }
+
+    #[test]
+    fn hosted_replay_requires_a_valid_contract_tick_size() {
+        let valid = MarketSpecs {
+            session_profile: None,
+            value_per_point: Some(20.0),
+            tick_size: Some(0.25),
+        };
+        assert!(validate_replay_market_specs(valid).is_ok());
+
+        for tick_size in [
+            None,
+            Some(0.0),
+            Some(-0.25),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            let invalid = MarketSpecs { tick_size, ..valid };
+            assert!(validate_replay_market_specs(invalid).is_err());
+        }
+    }
 
     #[test]
     fn quote_unsubscribe_uses_contract_symbol() {
