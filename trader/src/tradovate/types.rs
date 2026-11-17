@@ -361,6 +361,7 @@ struct ExecutionRuntimeState {
     last_dispatched_entry_signal: Option<StrategySignal>,
     pending_target_qty: Option<i32>,
     pending_reversal_entry: Option<PendingNativeReversalEntry>,
+    pending_transition_started_at: Option<time::Instant>,
     last_summary: String,
     market_update_sequence: Option<u64>,
     market_update_kind: MarketHistoryUpdate,
@@ -390,6 +391,7 @@ impl ExecutionRuntimeState {
 
     fn reset_execution(&mut self) {
         self.pending_reversal_entry = None;
+        self.pending_transition_started_at = None;
         self.market_update_sequence = None;
         self.market_update_kind = MarketHistoryUpdate::Snapshot;
         self.replay_bar_ordinal = None;

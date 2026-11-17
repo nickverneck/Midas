@@ -996,6 +996,7 @@ pub(super) fn handle_broker_order_ack(
 ) {
     let mut signal_submit_ms = None;
     let mut signal_context = None;
+    let mut transition_submit_ms = None;
     if let Some(session) = state.session.as_mut() {
         session.order_submit_in_flight = false;
         if let Some(run) = session.engine_run.as_mut()
@@ -1007,6 +1008,9 @@ pub(super) fn handle_broker_order_ack(
         if let Some(tracker) = session.order_latency_tracker.as_mut() {
             if tracker.cl_ord_id == ack.cl_ord_id {
                 tracker.order_id = ack.order_id;
+                if let Some(started_at) = tracker.transition_started_at {
+                    transition_submit_ms = Some(started_at.elapsed().as_millis() as u64);
+                }
                 signal_submit_ms = tracker
                     .signal_started_at
                     .map(|started_at| started_at.elapsed().as_millis() as u64);
@@ -1016,12 +1020,16 @@ pub(super) fn handle_broker_order_ack(
     }
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
+    state.latency.last_transition_submit_ms = transition_submit_ms;
     let ack_message = ack.message.clone();
     emit_service_operational_status(event_tx, state.session.as_ref(), || ack.message);
     emit_service_debug_log(event_tx, state.session.as_ref(), || {
         format!(
-            "submit {}{} | endpoint {} | {}",
+            "submit {}{}{} | endpoint {} | {}",
             format_debug_latency_ms(ack.submit_rtt_ms),
+            transition_submit_ms
+                .map(|ms| format!(" | transition total {}", format_debug_latency_ms(ms)))
+                .unwrap_or_default(),
             debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
             ack.endpoint,
             ack_message
@@ -1108,7 +1116,7 @@ fn format_broker_order_failure_debug(
     message
 }
 
-fn handle_order_strategy_ack(
+pub(super) fn handle_order_strategy_ack(
     ack: BrokerOrderStrategyAck,
     state: &mut ServiceState,
     event_tx: &ServiceEventSender,
@@ -1116,11 +1124,15 @@ fn handle_order_strategy_ack(
 ) {
     let mut signal_submit_ms = None;
     let mut signal_context = None;
+    let mut transition_submit_ms = None;
     if let Some(session) = state.session.as_mut() {
         session.order_submit_in_flight = false;
         if let Some(tracker) = session.order_latency_tracker.as_mut() {
             if tracker.cl_ord_id == ack.uuid {
                 tracker.order_strategy_id = ack.order_strategy_id;
+                if let Some(started_at) = tracker.transition_started_at {
+                    transition_submit_ms = Some(started_at.elapsed().as_millis() as u64);
+                }
                 signal_submit_ms = tracker
                     .signal_started_at
                     .map(|started_at| started_at.elapsed().as_millis() as u64);
@@ -1137,12 +1149,16 @@ fn handle_order_strategy_ack(
     }
 
     apply_submit_latency(&mut state.latency, ack.submit_rtt_ms, signal_submit_ms);
+    state.latency.last_transition_submit_ms = transition_submit_ms;
     let ack_message = ack.message.clone();
     emit_service_operational_status(event_tx, state.session.as_ref(), || ack.message);
     emit_service_debug_log(event_tx, state.session.as_ref(), || {
         format!(
-            "submit {}{} | endpoint {} | {}",
+            "submit {}{}{} | endpoint {} | {}",
             format_debug_latency_ms(ack.submit_rtt_ms),
+            transition_submit_ms
+                .map(|ms| format!(" | transition total {}", format_debug_latency_ms(ms)))
+                .unwrap_or_default(),
             debug_signal_latency_suffix(signal_submit_ms, signal_context.as_deref()),
             ack.endpoint,
             ack_message
@@ -1330,6 +1346,10 @@ fn apply_submit_latency(
     latency.last_signal_seen_ms = None;
     latency.last_signal_ack_ms = None;
     latency.last_signal_fill_ms = None;
+    latency.last_transition_submit_ms = None;
+    latency.last_transition_seen_ms = None;
+    latency.last_transition_ack_ms = None;
+    latency.last_transition_fill_ms = None;
 }
 
 fn schedule_pending_target_watchdog(internal_tx: InternalEventSender) {

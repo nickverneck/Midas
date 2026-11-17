@@ -110,6 +110,10 @@ fn persisted_log_body_includes_live_engine_review_metadata_without_secret_fields
             last_signal_seen_ms: Some(5),
             last_signal_ack_ms: Some(7),
             last_signal_fill_ms: Some(11),
+            last_transition_submit_ms: Some(31),
+            last_transition_seen_ms: Some(37),
+            last_transition_ack_ms: Some(41),
+            last_transition_fill_ms: Some(47),
         }),
         &cmd_tx,
     );
@@ -155,6 +159,10 @@ fn persisted_log_body_includes_live_engine_review_metadata_without_secret_fields
     assert!(body.contains("pending_target: 2"));
     assert!(body.contains("last_strategy_summary: strategy decision | buy"));
     assert!(body.contains("latency_last_signal_fill_ms: 11"));
+    assert!(
+        body.contains("latency_transition_summary: sub 31ms | seen 37ms | ack 41ms | fill 47ms")
+    );
+    assert!(body.contains("latency_last_transition_fill_ms: 47"));
     assert!(body.contains("selected_account_id: 7"));
     assert!(body.contains("selected_account_name: SIM"));
     assert!(body.contains("selected_contract_id: 99"));

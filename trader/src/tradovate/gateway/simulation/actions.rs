@@ -276,6 +276,68 @@ impl ReplayBrokerState {
         Ok(events)
     }
 
+    pub(crate) fn simulate_market_then_order_strategy(
+        &mut self,
+        flatten: PendingMarketOrder,
+        strategy: PendingOrderStrategyTransition,
+    ) -> std::result::Result<Vec<InternalEvent>, BrokerOrderStrategyFailure> {
+        let mut flatten_entities = Vec::new();
+        let mut flatten_ack = None;
+        for event in
+            self.simulate_market_order(flatten)
+                .map_err(|failure| BrokerOrderStrategyFailure {
+                    endpoint: failure.endpoint,
+                    uuid: strategy.uuid.clone(),
+                    message: failure.message,
+                    target_qty: strategy.target_qty,
+                    stale_interrupt: failure.stale_interrupt,
+                })?
+        {
+            match event {
+                InternalEvent::BrokerOrderAck(ack) => flatten_ack = Some(ack),
+                InternalEvent::UserEntities(entities) => flatten_entities.extend(entities),
+                _ => {}
+            }
+        }
+
+        let mut strategy_entities = Vec::new();
+        let mut strategy_ack = None;
+        let mut strategy_failure = None;
+        match self.simulate_order_strategy(strategy) {
+            Ok(events) => {
+                for event in events {
+                    match event {
+                        InternalEvent::OrderStrategyAck(ack) => strategy_ack = Some(ack),
+                        InternalEvent::UserEntities(entities) => strategy_entities.extend(entities),
+                        _ => {}
+                    }
+                }
+            }
+            Err(failure) => strategy_failure = Some(failure),
+        }
+
+        flatten_entities.extend(strategy_entities);
+        let mut events = if let Some(mut ack) = strategy_ack {
+            if let Some(flatten_ack) = flatten_ack {
+                ack.message = format!("{}; {}", flatten_ack.message, ack.message);
+            }
+            vec![InternalEvent::OrderStrategyAck(ack)]
+        } else {
+            let mut failed_events = Vec::new();
+            if let Some(flatten_ack) = flatten_ack {
+                failed_events.push(InternalEvent::BrokerOrderAck(flatten_ack));
+            }
+            if let Some(failure) = strategy_failure {
+                failed_events.push(InternalEvent::OrderStrategyFailed(failure));
+            }
+            failed_events
+        };
+        if !flatten_entities.is_empty() {
+            events.push(InternalEvent::UserEntities(flatten_entities));
+        }
+        Ok(events)
+    }
+
     pub(crate) fn simulate_order_strategy(
         &mut self,
         strategy: PendingOrderStrategyTransition,

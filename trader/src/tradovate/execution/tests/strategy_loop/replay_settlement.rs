@@ -39,6 +39,7 @@ fn seed_replay_exit_lifecycle(session: &mut SessionState, strategy_id: i64) {
     });
     session.order_submit_in_flight = true;
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: None,
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),

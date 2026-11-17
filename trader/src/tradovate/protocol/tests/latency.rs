@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 #[test]
 fn tracker_matches_entity_binds_order_id_from_cl_ord_id() {
     let mut tracker = OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: None,
         signal_context: None,
@@ -48,6 +49,7 @@ fn update_latency_from_order_strategy_link_binds_order_id() {
         execution_runtime: ExecutionRuntimeState::default(),
         pending_signal_context: None,
         order_latency_tracker: Some(OrderLatencyTracker {
+            transition_started_at: None,
             started_at: time::Instant::now(),
             signal_started_at: None,
             signal_context: None,
@@ -122,6 +124,7 @@ fn update_latency_from_envelope_records_seen_ack_and_fill() {
         execution_runtime: ExecutionRuntimeState::default(),
         pending_signal_context: None,
         order_latency_tracker: Some(OrderLatencyTracker {
+            transition_started_at: Some(time::Instant::now() - time::Duration::from_secs(30)),
             started_at: time::Instant::now(),
             signal_started_at: Some(time::Instant::now()),
             signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -179,9 +182,24 @@ fn update_latency_from_envelope_records_seen_ack_and_fill() {
         &mut latency,
         &fill
     ));
-    assert!(latency.last_order_seen_ms.is_some());
-    assert!(latency.last_exec_report_ms.is_some());
-    assert!(latency.last_fill_ms.is_some());
+    assert!(latency.last_order_seen_ms.is_some_and(|ms| ms < 30_000));
+    assert!(latency.last_exec_report_ms.is_some_and(|ms| ms < 30_000));
+    assert!(latency.last_fill_ms.is_some_and(|ms| ms < 30_000));
+    assert!(
+        latency
+            .last_transition_seen_ms
+            .is_some_and(|ms| ms >= 30_000)
+    );
+    assert!(
+        latency
+            .last_transition_ack_ms
+            .is_some_and(|ms| ms >= 30_000)
+    );
+    assert!(
+        latency
+            .last_transition_fill_ms
+            .is_some_and(|ms| ms >= 30_000)
+    );
     assert!(latency.last_signal_seen_ms.is_some());
     assert!(latency.last_signal_ack_ms.is_some());
     assert!(latency.last_signal_fill_ms.is_some());
@@ -317,6 +335,7 @@ fn trade_marker_from_sparse_fill_uses_tracked_order_account_without_id_fallback(
         execution_runtime: ExecutionRuntimeState::default(),
         pending_signal_context: None,
         order_latency_tracker: Some(OrderLatencyTracker {
+            transition_started_at: None,
             started_at: time::Instant::now(),
             signal_started_at: None,
             signal_context: None,

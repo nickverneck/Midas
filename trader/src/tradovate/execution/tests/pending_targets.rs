@@ -11,6 +11,7 @@ fn stale_pending_target_clears_when_broker_has_no_live_order_path() {
     session.execution_runtime.pending_target_qty = Some(1);
     session.execution_runtime.last_closed_bar_ts = Some(100);
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now() - time::Duration::from_secs(4),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -70,6 +71,7 @@ fn strategy_loop_clears_stale_pending_target_when_broker_path_missing() {
     session.execution_runtime.pending_target_qty = Some(-1);
     session.execution_runtime.last_closed_bar_ts = Some(200);
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now() - time::Duration::from_secs(11),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 0 -> -1)".to_string()),
@@ -138,6 +140,7 @@ fn strategy_loop_keeps_pending_target_during_broker_path_grace_after_ack() {
         target_qty: 1,
     });
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -194,6 +197,7 @@ fn strategy_loop_keeps_market_order_pending_target_during_position_sync_grace() 
         )]),
     );
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
@@ -246,6 +250,7 @@ fn strategy_loop_keeps_order_strategy_pending_target_during_position_sync_grace(
     session.execution_runtime.pending_target_qty = Some(1);
     session.execution_runtime.last_closed_bar_ts = Some(325);
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now() - time::Duration::from_secs(3),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -380,6 +385,12 @@ fn strategy_loop_rechecks_latest_bar_when_pending_target_reaches_with_live_broke
                 assert_eq!(strategy.order_action, "Buy");
                 saw_buy = true;
             }
+            BrokerCommand::FlattenThenOrderStrategy { strategy, .. } => {
+                assert_eq!(strategy.target_qty, 1);
+                assert_eq!(strategy.entry_order_qty, 2);
+                assert_eq!(strategy.order_action, "Buy");
+                saw_buy = true;
+            }
             BrokerCommand::NativeProtection { .. } => {}
             BrokerCommand::LiquidatePosition { .. } => {}
             #[cfg(feature = "replay")]
@@ -414,6 +425,7 @@ fn strategy_loop_clears_market_order_pending_target_after_position_sync_grace_ex
         )]),
     );
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now() - time::Duration::from_secs(4),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),

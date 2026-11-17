@@ -29,6 +29,7 @@ async fn stale_market_order_interrupt_recovers_and_rearms_signal() {
         target_qty: 1,
     });
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
@@ -118,6 +119,7 @@ async fn order_strategy_submit_failure_debug_logs_request_and_target() {
     session.execution_runtime.pending_target_qty = Some(-1);
     session.order_submit_in_flight = true;
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("hma_cross Sell (qty 1 -> -1)".to_string()),
@@ -202,6 +204,7 @@ async fn asynchronous_command_rejection_reports_reason_and_clears_pending_strate
         target_qty: 1,
     });
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -350,6 +353,7 @@ fn gc_rejection_does_not_affect_armed_es_strategy() {
         target_qty: 1,
     });
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ES buy".to_string()),

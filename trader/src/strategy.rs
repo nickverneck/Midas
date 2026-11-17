@@ -269,6 +269,7 @@ impl NativeExecutionPath {
 pub enum NativeReversalMode {
     Direct,
     FlattenConfirmEnter,
+    FlattenEnter,
     CloseAllEnter,
 }
 
@@ -277,6 +278,7 @@ impl NativeReversalMode {
         match self {
             Self::Direct => "Direct",
             Self::FlattenConfirmEnter => "Flatten > Confirm > Enter",
+            Self::FlattenEnter => "Flatten > Enter (No Confirm)",
             Self::CloseAllEnter => "CloseAll > Enter",
         }
     }
@@ -285,14 +287,16 @@ impl NativeReversalMode {
         match self {
             Self::Direct => Self::CloseAllEnter,
             Self::FlattenConfirmEnter => Self::Direct,
-            Self::CloseAllEnter => Self::FlattenConfirmEnter,
+            Self::FlattenEnter => Self::FlattenConfirmEnter,
+            Self::CloseAllEnter => Self::FlattenEnter,
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             Self::Direct => Self::FlattenConfirmEnter,
-            Self::FlattenConfirmEnter => Self::CloseAllEnter,
+            Self::FlattenConfirmEnter => Self::FlattenEnter,
+            Self::FlattenEnter => Self::CloseAllEnter,
             Self::CloseAllEnter => Self::Direct,
         }
     }

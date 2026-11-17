@@ -210,6 +210,15 @@ impl App {
                 )
             )),
             Line::from(format!(
+                "Transition RTT: {}",
+                format_latency_group(
+                    self.latency.last_transition_submit_ms,
+                    self.latency.last_transition_seen_ms,
+                    self.latency.last_transition_ack_ms,
+                    self.latency.last_transition_fill_ms,
+                )
+            )),
+            Line::from(format!(
                 "Market Update Age: {}",
                 format_age_ms(self.market_update_age_ms())
             )),

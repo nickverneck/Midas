@@ -655,6 +655,9 @@ impl App {
                     Line::from("Closed-bar delay waits extra completed bars before entry."),
                     Line::from("Direct reversal is fastest."),
                     Line::from("Flatten > Confirm > Enter is safer."),
+                    Line::from(
+                        "Flatten > Enter (No Confirm) is Simulation-only and may race the flatten fill.",
+                    ),
                     Line::from("CloseAll > Enter submits close-all and the broker-owned reverse entry immediately."),
                 ]);
                 if self.native_protection_controls_visible() {

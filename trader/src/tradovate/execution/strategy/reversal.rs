@@ -94,13 +94,16 @@ pub(crate) fn continue_staged_reversal(
             staged.target_qty,
             staged_reversal_timing(&staged)
         );
-        let dispatch_outcome = dispatch_target_position_order(
+        session.execution_runtime.pending_transition_started_at = Some(staged.started_at);
+        let dispatch_result = dispatch_target_position_order(
             session,
             broker_tx,
             staged.target_qty,
             true,
             &staged.reason,
-        )?;
+        );
+        session.execution_runtime.pending_transition_started_at = None;
+        let dispatch_outcome = dispatch_result?;
         match dispatch_outcome {
             MarketOrderDispatchOutcome::NoOp { message } => {
                 session.execution_runtime.pending_reversal_entry = None;

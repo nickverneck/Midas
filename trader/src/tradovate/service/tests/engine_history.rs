@@ -348,3 +348,49 @@ async fn automated_liquidation_ack_registers_broker_order_with_engine_run() {
             .is_some_and(|run| run.owned_order_ids.contains(&808))
     );
 }
+
+#[tokio::test]
+async fn order_strategy_ack_keeps_request_rtt_and_records_full_reversal_transition() {
+    let mut session = test_session();
+    session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: Some(time::Instant::now() - time::Duration::from_secs(30)),
+        started_at: time::Instant::now(),
+        signal_started_at: None,
+        signal_context: None,
+        cl_ord_id: "midas-transition-entry".to_string(),
+        order_id: None,
+        order_strategy_id: None,
+        seen_recorded: false,
+        exec_report_recorded: false,
+        fill_recorded: false,
+    });
+    let mut state = test_state(session);
+    let (event_tx, _event_rx) = service_event_channel(SERVICE_EVENT_QUEUE_CAPACITY);
+    let (internal_tx, _internal_rx) = internal_event_channel(INTERNAL_EVENT_QUEUE_CAPACITY);
+
+    super::super::internal::handle_order_strategy_ack(
+        BrokerOrderStrategyAck {
+            endpoint: "orderStrategy/startorderstrategy",
+            uuid: "midas-transition-entry".to_string(),
+            order_strategy_id: Some(901),
+            submit_rtt_ms: 9,
+            message: "entry submitted".to_string(),
+            target_qty: -1,
+            key: StrategyProtectionKey {
+                account_id: 42,
+                contract_id: 3570918,
+            },
+        },
+        &mut state,
+        &event_tx,
+        internal_tx,
+    );
+
+    assert_eq!(state.latency.last_order_ack_ms, Some(9));
+    assert!(
+        state
+            .latency
+            .last_transition_submit_ms
+            .is_some_and(|ms| ms >= 30_000)
+    );
+}

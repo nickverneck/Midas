@@ -181,6 +181,7 @@ enum DeferredReplayCommandKind {
     LiquidatePosition(PendingLiquidation),
     OrderStrategy(PendingOrderStrategyTransition),
     LiquidateThenOrderStrategy(PendingLiquidation, PendingOrderStrategyTransition),
+    FlattenThenOrderStrategy(PendingMarketOrder, PendingOrderStrategyTransition),
 }
 
 #[cfg(feature = "replay")]
@@ -192,6 +193,9 @@ impl DeferredReplayCommandKind {
             Self::OrderStrategy(strategy) => strategy.reference_ts_ns,
             Self::LiquidateThenOrderStrategy(liquidation, strategy) => {
                 liquidation.reference_ts_ns.or(strategy.reference_ts_ns)
+            }
+            Self::FlattenThenOrderStrategy(flatten, strategy) => {
+                flatten.reference_ts_ns.or(strategy.reference_ts_ns)
             }
         }
     }
@@ -412,6 +416,64 @@ impl DeferredReplayCommand {
                 }
                 replay_state
                     .simulate_liquidation_then_order_strategy(liquidation, strategy)
+                    .unwrap_or_else(|failure| vec![InternalEvent::OrderStrategyFailed(failure)])
+            }
+            DeferredReplayCommandKind::FlattenThenOrderStrategy(mut flatten, mut strategy) => {
+                flatten.reference_ts_ns = Some(execution_ts_ns);
+                if let Some(book) = dom_book.as_deref_mut() {
+                    let original_book = book.clone();
+                    let flatten_fill = match book.consume(&flatten.order_action, flatten.order_qty)
+                    {
+                        Ok(fill) => fill,
+                        Err(error) => {
+                            *book = original_book;
+                            return vec![InternalEvent::OrderStrategyFailed(
+                                BrokerOrderStrategyFailure {
+                                    endpoint: "replay/order/placeorder",
+                                    uuid: strategy.uuid,
+                                    message: error.to_string(),
+                                    target_qty: strategy.target_qty,
+                                    stale_interrupt: false,
+                                },
+                            )];
+                        }
+                    };
+                    let entry_fill =
+                        match book.consume(&strategy.order_action, strategy.entry_order_qty) {
+                            Ok(fill) => fill,
+                            Err(error) => {
+                                *book = original_book;
+                                return vec![InternalEvent::OrderStrategyFailed(
+                                    BrokerOrderStrategyFailure {
+                                        endpoint: "replay/orderStrategy/startorderstrategy",
+                                        uuid: strategy.uuid,
+                                        message: error.to_string(),
+                                        target_qty: strategy.target_qty,
+                                        stale_interrupt: false,
+                                    },
+                                )];
+                            }
+                        };
+                    flatten.reference_price = Some(flatten_fill.price);
+                    reprice_strategy_for_dom(&mut strategy, execution_ts_ns, entry_fill.price);
+                    dom_fill = Some(entry_fill);
+                } else if let Some(tick) = tick {
+                    flatten.reference_price = Some(replay_market_fill_price(
+                        &flatten.order_action,
+                        Some(tick),
+                        bar.open,
+                    ));
+                    reprice_strategy_for_tick(&mut strategy, tick);
+                } else {
+                    flatten.reference_price = Some(replay_market_fill_price(
+                        &flatten.order_action,
+                        None,
+                        bar.open,
+                    ));
+                    reprice_strategy_for_bar_open(&mut strategy, bar);
+                }
+                replay_state
+                    .simulate_market_then_order_strategy(flatten, strategy)
                     .unwrap_or_else(|failure| vec![InternalEvent::OrderStrategyFailed(failure)])
             }
         };
@@ -1209,6 +1271,50 @@ async fn broker_gateway_worker(
                     match submit_liquidation_then_order_strategy_via_gateway(
                         &request_tx,
                         liquidation,
+                        strategy,
+                    )
+                    .await
+                    {
+                        Ok(ack) => {
+                            emit!(InternalEvent::OrderStrategyAck(ack));
+                        }
+                        Err(failure) => {
+                            emit!(InternalEvent::OrderStrategyFailed(failure));
+                        }
+                    }
+                }
+            }
+            BrokerCommand::FlattenThenOrderStrategy {
+                request_tx,
+                flatten,
+                strategy,
+            } => {
+                if flatten.simulate {
+                    #[cfg(feature = "replay")]
+                    if replay_engine_mode == ReplayEngineMode::Deterministic {
+                        let latency_ms = replay_latency_sampler.next_latency_ms();
+                        enqueue_deferred_replay_command(
+                            &mut deferred_replay_commands,
+                            &mut next_replay_lifecycle_sequence,
+                            latency_ms,
+                            DeferredReplayCommandKind::FlattenThenOrderStrategy(flatten, strategy),
+                        );
+                        continue;
+                    }
+                    match replay_state.simulate_market_then_order_strategy(flatten, strategy) {
+                        Ok(events) => {
+                            for event in events {
+                                emit!(event);
+                            }
+                        }
+                        Err(failure) => {
+                            emit!(InternalEvent::OrderStrategyFailed(failure));
+                        }
+                    }
+                } else {
+                    match submit_flatten_then_order_strategy_via_gateway(
+                        &request_tx,
+                        flatten,
                         strategy,
                     )
                     .await

@@ -80,7 +80,17 @@ fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig
         return;
     }
 
-    let uses_protection = match config.native_strategy {
+    let uses_protection = execution_config_uses_broker_owned_protection(config);
+    if uses_protection && config.native_reversal_mode == NativeReversalMode::Direct {
+        config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
+    }
+    if uses_protection || config.native_reversal_mode != NativeReversalMode::Direct {
+        config.native_execution_path = NativeExecutionPath::Guarded;
+    }
+}
+
+fn execution_config_uses_broker_owned_protection(config: &ExecutionStrategyConfig) -> bool {
+    match config.native_strategy {
         NativeStrategyKind::HmaAngle => config.native_hma.uses_native_protection(),
         NativeStrategyKind::EmaCross => config.native_ema.uses_native_protection(),
         NativeStrategyKind::HmaCross => config.native_hma_cross.uses_native_protection(),
@@ -92,12 +102,6 @@ fn normalize_broker_owned_protection_config(config: &mut ExecutionStrategyConfig
             config.native_volume_ema_cross.uses_native_protection()
         }
         NativeStrategyKind::Adx => config.native_adx.uses_native_protection(),
-    };
-    if uses_protection && config.native_reversal_mode == NativeReversalMode::Direct {
-        config.native_reversal_mode = NativeReversalMode::CloseAllEnter;
-    }
-    if uses_protection || config.native_reversal_mode != NativeReversalMode::Direct {
-        config.native_execution_path = NativeExecutionPath::Guarded;
     }
 }
 
@@ -110,6 +114,21 @@ pub(super) fn arm_execution_strategy_command(
     };
     if session.hosted_replay_orders && !session.hosted_replay_running {
         bail!("NinjaTrader hosted Replay has ended; start a new Replay session before arming");
+    }
+    if session.execution_config.kind == StrategyKind::Native
+        && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenEnter
+    {
+        if session.cfg.broker != BrokerKind::Tradovate {
+            bail!("Flatten > Enter (No Confirm) is Tradovate-only");
+        }
+        if session.cfg.env != TradingEnvironment::Sim {
+            bail!("Flatten > Enter (No Confirm) is Simulation-only");
+        }
+        if !execution_config_uses_broker_owned_protection(&session.execution_config) {
+            bail!(
+                "Flatten > Enter (No Confirm) requires broker-owned TP/SL or trailing protection"
+            );
+        }
     }
     if session.execution_config.kind == StrategyKind::Lua
         && (session.session_kind != SessionKind::Replay

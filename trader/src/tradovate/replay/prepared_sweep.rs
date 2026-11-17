@@ -1433,9 +1433,9 @@ fn run_prepared_ema_candidate_with_adx_gate(
         let kind = if current_qty != 0 && target_qty != 0 {
             match reversal_mode {
                 NativeReversalMode::FlattenConfirmEnter => PendingTransitionKind::StagedFlatten,
-                NativeReversalMode::CloseAllEnter | NativeReversalMode::Direct => {
-                    PendingTransitionKind::AtomicReverse
-                }
+                NativeReversalMode::FlattenEnter
+                | NativeReversalMode::CloseAllEnter
+                | NativeReversalMode::Direct => PendingTransitionKind::AtomicReverse,
             }
         } else {
             PendingTransitionKind::Single

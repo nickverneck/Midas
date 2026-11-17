@@ -87,7 +87,7 @@ pub(crate) fn dispatch_manual_order(
         interrupt_order_strategy_id,
         detached.cancel_order_ids,
     );
-    enqueue_market_order(session, broker_tx, order)?;
+    enqueue_market_order(session, broker_tx, order, None)?;
     Ok(MarketOrderDispatchOutcome::Queued { target_qty: None })
 }
 
@@ -134,6 +134,65 @@ pub(super) fn dispatch_native_order_strategy_target(
         NativeReversalMode::Direct => NativeReversalMode::CloseAllEnter,
         mode => mode,
     };
+    if is_reversal && reversal_mode == NativeReversalMode::FlattenEnter {
+        if session.cfg.broker != BrokerKind::Tradovate {
+            bail!("Flatten > Enter (No Confirm) is Tradovate-only");
+        }
+        if session.cfg.env != TradingEnvironment::Sim {
+            bail!("Flatten > Enter (No Confirm) is Simulation-only");
+        }
+        if !native_order_strategy_enabled(session) {
+            bail!(
+                "Flatten > Enter (No Confirm) requires broker-owned TP/SL or trailing protection"
+            );
+        }
+        let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
+        if interrupt_order_strategy_id.is_none() {
+            return Ok(MarketOrderDispatchOutcome::NoOp {
+                message: format!(
+                    "Waiting for broker order-strategy state to reconcile before no-confirm reversal {} -> {} on {} ({reason})",
+                    current_qty, target_qty, contract.name
+                ),
+            });
+        }
+
+        let flatten_action = if current_qty > 0 { "Sell" } else { "Buy" };
+        let flatten_reason = format!(
+            "{reason} | no-confirm reversal flatten {} -> 0 before {}",
+            current_qty, target_qty
+        );
+        let detached = detach_strategy_protection_for_selected(session)?;
+        let flatten = build_market_order_request(
+            session,
+            &account,
+            &contract,
+            flatten_action,
+            current_qty.abs(),
+            "Strategy",
+            true,
+            Some(&flatten_reason),
+            Some(0),
+            interrupt_order_strategy_id,
+            detached.cancel_order_ids,
+        );
+        let entry_action = if target_qty > 0 { "Buy" } else { "Sell" };
+        let strategy = build_order_strategy_request(
+            session,
+            &account,
+            &contract,
+            entry_action,
+            target_qty.abs(),
+            target_qty,
+            Some(reason),
+            None,
+            Vec::new(),
+        )?;
+        enqueue_flatten_then_order_strategy(session, broker_tx, flatten, strategy)?;
+        return Ok(MarketOrderDispatchOutcome::Queued {
+            target_qty: Some(target_qty),
+        });
+    }
+
     if is_reversal && reversal_mode == NativeReversalMode::FlattenConfirmEnter {
         let interrupt_order_strategy_id = selected_active_order_strategy_id(session);
         if interrupt_order_strategy_id.is_none() {
@@ -165,11 +224,12 @@ pub(super) fn dispatch_native_order_strategy_target(
             interrupt_order_strategy_id,
             detached.cancel_order_ids,
         );
-        enqueue_market_order(session, broker_tx, order)?;
+        let transition_started_at = time::Instant::now();
+        enqueue_market_order(session, broker_tx, order, Some(transition_started_at))?;
         session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
             target_qty,
             reason: reason.to_string(),
-            started_at: time::Instant::now(),
+            started_at: transition_started_at,
             flat_seen_at: None,
         });
         return Ok(MarketOrderDispatchOutcome::Queued {
@@ -254,7 +314,7 @@ pub(super) fn dispatch_native_order_strategy_target(
             interrupt_order_strategy_id,
             detached.cancel_order_ids,
         );
-        enqueue_market_order(session, broker_tx, order)?;
+        enqueue_market_order(session, broker_tx, order, None)?;
         return Ok(MarketOrderDispatchOutcome::Queued {
             target_qty: Some(target_qty),
         });
@@ -367,6 +427,21 @@ pub(crate) fn dispatch_target_position_order(
     automated: bool,
     reason: &str,
 ) -> Result<MarketOrderDispatchOutcome> {
+    if automated
+        && session.execution_config.native_reversal_mode == NativeReversalMode::FlattenEnter
+    {
+        if session.cfg.broker != BrokerKind::Tradovate {
+            bail!("Flatten > Enter (No Confirm) is Tradovate-only");
+        }
+        if session.cfg.env != TradingEnvironment::Sim {
+            bail!("Flatten > Enter (No Confirm) is Simulation-only");
+        }
+        if !native_order_strategy_enabled(session) {
+            bail!(
+                "Flatten > Enter (No Confirm) requires broker-owned TP/SL or trailing protection"
+            );
+        }
+    }
     if automated && native_order_strategy_enabled(session) {
         return dispatch_native_order_strategy_target(session, broker_tx, target_qty, reason);
     }
@@ -424,7 +499,7 @@ pub(crate) fn dispatch_target_position_order(
         interrupt_order_strategy_id,
         detached.cancel_order_ids,
     );
-    enqueue_market_order(session, broker_tx, order)?;
+    enqueue_market_order(session, broker_tx, order, None)?;
     Ok(MarketOrderDispatchOutcome::Queued {
         target_qty: Some(target_qty),
     })

@@ -117,6 +117,7 @@ pub async fn run_swipe_profile(mut config: AppConfig, options: SwipeProfileOptio
             SwipeScenario::DirectStartOrderStrategy,
             SwipeScenario::DirectMarketThenSync,
             SwipeScenario::FlattenConfirmEnter,
+            SwipeScenario::FlattenEnter,
             SwipeScenario::CloseAllEnter,
         ] {
             let execution_config = build_profile_execution_config(&options, scenario);

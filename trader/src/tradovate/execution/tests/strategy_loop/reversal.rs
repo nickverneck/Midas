@@ -59,10 +59,11 @@ fn staged_reversal_submits_broker_owned_entry_after_flat_path_clear() {
     session.execution_config.native_ema.trail_trigger_ticks = 4.0;
     session.execution_config.native_ema.trail_offset_ticks = 2.0;
     session.market.tick_size = Some(0.25);
+    let transition_started_at = time::Instant::now() - time::Duration::from_secs(30);
     session.execution_runtime.pending_reversal_entry = Some(PendingNativeReversalEntry {
         target_qty: 1,
         reason: "ema_cross staged reversal".to_string(),
-        started_at: time::Instant::now(),
+        started_at: transition_started_at,
         flat_seen_at: Some(time::Instant::now()),
     });
 
@@ -73,6 +74,12 @@ fn staged_reversal_submits_broker_owned_entry_after_flat_path_clear() {
 
     assert_eq!(session.execution_runtime.pending_target_qty, Some(1));
     assert!(session.execution_runtime.pending_reversal_entry.is_none());
+    let tracker = session
+        .order_latency_tracker
+        .as_ref()
+        .expect("entry should retain transition latency tracking");
+    assert_eq!(tracker.transition_started_at, Some(transition_started_at));
+    assert!(tracker.started_at.elapsed().as_secs() < 30);
     match broker_rx
         .try_recv()
         .expect("entry strategy should be queued")

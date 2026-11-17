@@ -8,6 +8,7 @@ mod tasks;
 mod types;
 
 use submit::{
+    submit_flatten_then_order_strategy_via_gateway,
     submit_liquidation_then_order_strategy_via_gateway, submit_liquidation_via_gateway,
     submit_market_order_via_gateway, submit_native_protection_via_gateway,
     submit_order_strategy_via_gateway,

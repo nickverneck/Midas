@@ -16,7 +16,10 @@ use dispatch::dispatch_native_order_strategy_target;
 use protection::plan_native_protection_sync;
 use protection::{detach_strategy_protection_for_selected, selected_active_order_strategy_id};
 pub(super) use queue::enqueue_market_order;
-use queue::{enqueue_liquidation, enqueue_liquidation_then_order_strategy, enqueue_order_strategy};
+use queue::{
+    enqueue_flatten_then_order_strategy, enqueue_liquidation,
+    enqueue_liquidation_then_order_strategy, enqueue_order_strategy,
+};
 
 pub(super) use api::{
     cancel_order_by_id, cancel_orders_by_id, interrupt_order_strategy_by_id, request_order_json,

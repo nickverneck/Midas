@@ -524,6 +524,7 @@ pub(crate) struct UserSocketCommand {
 
 pub(crate) struct OrderLatencyTracker {
     pub(crate) started_at: time::Instant,
+    pub(crate) transition_started_at: Option<time::Instant>,
     pub(crate) signal_started_at: Option<time::Instant>,
     pub(crate) signal_context: Option<String>,
     pub(crate) cl_ord_id: String,
@@ -558,6 +559,11 @@ pub(crate) enum BrokerCommand {
     LiquidateThenOrderStrategy {
         request_tx: UserSocketCommandSender,
         liquidation: PendingLiquidation,
+        strategy: PendingOrderStrategyTransition,
+    },
+    FlattenThenOrderStrategy {
+        request_tx: UserSocketCommandSender,
+        flatten: PendingMarketOrder,
         strategy: PendingOrderStrategyTransition,
     },
     NativeProtection {

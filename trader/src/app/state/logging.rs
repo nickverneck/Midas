@@ -374,6 +374,15 @@ impl App {
         ));
         body.push_str(&format!("latency_summary: {}\n", self.latency_summary()));
         body.push_str(&format!(
+            "latency_transition_summary: {}\n",
+            format_latency_group(
+                self.latency.last_transition_submit_ms,
+                self.latency.last_transition_seen_ms,
+                self.latency.last_transition_ack_ms,
+                self.latency.last_transition_fill_ms,
+            )
+        ));
+        body.push_str(&format!(
             "latency_rest_rtt_ms: {}\n",
             self.optional_u64_label(self.latency.rest_rtt_ms)
         ));
@@ -408,6 +417,22 @@ impl App {
         body.push_str(&format!(
             "latency_last_signal_fill_ms: {}\n",
             self.optional_u64_label(self.latency.last_signal_fill_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_transition_submit_ms: {}\n",
+            self.optional_u64_label(self.latency.last_transition_submit_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_transition_seen_ms: {}\n",
+            self.optional_u64_label(self.latency.last_transition_seen_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_transition_ack_ms: {}\n",
+            self.optional_u64_label(self.latency.last_transition_ack_ms)
+        ));
+        body.push_str(&format!(
+            "latency_last_transition_fill_ms: {}\n",
+            self.optional_u64_label(self.latency.last_transition_fill_ms)
         ));
         body.push_str(&format!(
             "market_update_age: {}\n",

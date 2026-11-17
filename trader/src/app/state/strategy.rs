@@ -74,12 +74,18 @@ impl App {
 
     pub(in crate::app) fn latency_summary(&self) -> String {
         format!(
-            "REST {} | Submit {} | Seen {} | Ack {} | Fill {} | Market {}",
+            "REST {} | Submit {} | Seen {} | Ack {} | Fill {} | Transition {} | Market {}",
             format_latency_ms(self.latency.rest_rtt_ms),
             format_latency_ms(self.latency.last_order_ack_ms),
             format_latency_ms(self.latency.last_order_seen_ms),
             format_latency_ms(self.latency.last_exec_report_ms),
             format_latency_ms(self.latency.last_fill_ms),
+            format_latency_group(
+                self.latency.last_transition_submit_ms,
+                self.latency.last_transition_seen_ms,
+                self.latency.last_transition_ack_ms,
+                self.latency.last_transition_fill_ms,
+            ),
             format_age_ms(self.market_update_age_ms()),
         )
     }
@@ -285,6 +291,23 @@ impl App {
             && !self.active_native_uses_broker_owned_protection()
         {
             warnings.push("No TP/SL/trailing protection is configured.".to_string());
+        }
+        if self.strategy.native_reversal_mode == NativeReversalMode::FlattenEnter {
+            if self.selected_broker != BrokerKind::Tradovate {
+                blockers.push(
+                    "Flatten > Enter (No Confirm) is available only for Tradovate.".to_string(),
+                );
+            }
+            if self.form.env != TradingEnvironment::Sim {
+                blockers
+                    .push("Flatten > Enter (No Confirm) is restricted to Simulation.".to_string());
+            }
+            if !self.active_native_uses_broker_owned_protection() {
+                blockers.push(
+                    "Flatten > Enter (No Confirm) requires broker-owned TP/SL or trailing protection."
+                        .to_string(),
+                );
+            }
         }
 
         if self.active_native_uses_broker_owned_protection() && !self.capabilities.native_protection

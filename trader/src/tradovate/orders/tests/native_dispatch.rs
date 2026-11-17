@@ -698,6 +698,112 @@ fn automated_reversal_closeall_mode_queues_liquidation_then_entry_strategy() {
 }
 
 #[test]
+fn automated_no_confirm_reversal_queues_market_flatten_then_broker_entry() {
+    let mut session = test_session();
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_reversal_mode = NativeReversalMode::FlattenEnter;
+    session.execution_config.native_ema.take_profit_ticks = 8.0;
+    session.market.tick_size = Some(0.25);
+    session.user_store.positions.insert(
+        42,
+        BTreeMap::from([(
+            1,
+            json!({
+                "id": 1,
+                "accountId": 42,
+                "contractId": 3570918,
+                "netPos": 1
+            }),
+        )]),
+    );
+    let key = StrategyProtectionKey {
+        account_id: 42,
+        contract_id: 3570918,
+    };
+    session.active_order_strategy = Some(TrackedOrderStrategy {
+        key,
+        order_strategy_id: 77,
+        target_qty: 1,
+    });
+    session.user_store.orders.insert(
+        42,
+        BTreeMap::from([(
+            1001,
+            json!({
+                "id": 1001,
+                "accountId": 42,
+                "contractId": 3570918,
+                "ordStatus": "Working"
+            }),
+        )]),
+    );
+    session.user_store.order_strategy_links.insert(
+        1,
+        json!({
+            "id": 1,
+            "orderStrategyId": 77,
+            "orderId": 1001
+        }),
+    );
+    let (broker_tx, mut broker_rx) = unbounded_channel();
+
+    let outcome =
+        dispatch_native_order_strategy_target(&mut session, &broker_tx, -1, "ema_cross signal")
+            .expect("no-confirm reversal should queue the ordered pair of broker requests");
+
+    assert!(matches!(
+        outcome,
+        MarketOrderDispatchOutcome::Queued {
+            target_qty: Some(-1)
+        }
+    ));
+    assert!(session.execution_runtime.pending_reversal_entry.is_none());
+    let tracker = session
+        .order_latency_tracker
+        .as_ref()
+        .expect("compound reversal should track its combined latency");
+
+    match broker_rx.try_recv().expect("broker command queued") {
+        BrokerCommand::FlattenThenOrderStrategy {
+            flatten, strategy, ..
+        } => {
+            assert_eq!(flatten.interrupt_order_strategy_id, Some(77));
+            assert_eq!(flatten.target_qty, Some(0));
+            assert_eq!(flatten.order_action, "Sell");
+            assert_eq!(flatten.order_qty, 1);
+            assert_eq!(strategy.interrupt_order_strategy_id, None);
+            assert!(strategy.cancel_order_ids.is_empty());
+            assert_eq!(strategy.target_qty, -1);
+            assert_eq!(strategy.entry_order_qty, 1);
+            assert_eq!(strategy.order_action, "Sell");
+            assert_eq!(tracker.cl_ord_id, strategy.uuid);
+            assert!(strategy.payload.get("params").is_some());
+        }
+        _ => panic!("expected market flatten followed by broker-owned entry"),
+    }
+}
+
+#[test]
+fn no_confirm_reversal_is_rejected_for_live_environment() {
+    let mut session = test_session();
+    session.cfg.env = TradingEnvironment::Live;
+    session.execution_config.kind = StrategyKind::Native;
+    session.execution_config.native_strategy = NativeStrategyKind::EmaCross;
+    session.execution_config.native_reversal_mode = NativeReversalMode::FlattenEnter;
+    session.execution_config.native_ema.take_profit_ticks = 8.0;
+    let (broker_tx, mut broker_rx) = unbounded_channel();
+
+    let error = match dispatch_target_position_order(&mut session, &broker_tx, 1, true, "test") {
+        Err(error) => error,
+        Ok(_) => panic!("no-confirm reversal mode must not dispatch in Live"),
+    };
+
+    assert!(error.to_string().contains("Simulation-only"));
+    assert!(broker_rx.try_recv().is_err());
+}
+
+#[test]
 fn automated_native_target_uses_order_strategy_with_target_qty() {
     let mut session = test_session();
     session.execution_config.kind = StrategyKind::Native;

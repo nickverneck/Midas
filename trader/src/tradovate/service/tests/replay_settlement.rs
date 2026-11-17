@@ -14,6 +14,7 @@ async fn replay_protected_exit_is_reported_and_releases_guarded_state() {
     session.execution_runtime.pending_target_qty = Some(1);
     session.order_submit_in_flight = true;
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: None,
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),

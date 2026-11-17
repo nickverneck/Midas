@@ -371,7 +371,7 @@ async fn main() -> Result<()> {
         // initial disconnected-state snapshot against hosted Replay startup.
         return run_tui_with_ninjatrader_replay(&cli, config, session, start_replay, speed).await;
     }
-    #[cfg(not(all(feature = "tradovate", feature = "replay")))]
+    #[cfg(all(feature = "replay", not(feature = "tradovate")))]
     if matches!(cli.mode, Some(Mode::NinjaTraderReplay(_))) {
         anyhow::bail!("ninjatrader-replay requires the tradovate and replay features");
     }

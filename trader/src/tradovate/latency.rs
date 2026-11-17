@@ -27,9 +27,11 @@ fn update_latency_from_envelope(
             }
             tracker.seen_recorded = true;
             latency.last_order_seen_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            if let Some(started_at) = tracker.transition_started_at {
+                latency.last_transition_seen_ms = Some(started_at.elapsed().as_millis() as u64);
+            }
             if let Some(signal_started_at) = tracker.signal_started_at {
-                latency.last_signal_seen_ms =
-                    Some(signal_started_at.elapsed().as_millis() as u64);
+                latency.last_signal_seen_ms = Some(signal_started_at.elapsed().as_millis() as u64);
             }
             true
         }
@@ -39,9 +41,11 @@ fn update_latency_from_envelope(
             }
             tracker.exec_report_recorded = true;
             latency.last_exec_report_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            if let Some(started_at) = tracker.transition_started_at {
+                latency.last_transition_ack_ms = Some(started_at.elapsed().as_millis() as u64);
+            }
             if let Some(signal_started_at) = tracker.signal_started_at {
-                latency.last_signal_ack_ms =
-                    Some(signal_started_at.elapsed().as_millis() as u64);
+                latency.last_signal_ack_ms = Some(signal_started_at.elapsed().as_millis() as u64);
             }
             true
         }
@@ -51,9 +55,11 @@ fn update_latency_from_envelope(
             }
             tracker.fill_recorded = true;
             latency.last_fill_ms = Some(tracker.started_at.elapsed().as_millis() as u64);
+            if let Some(started_at) = tracker.transition_started_at {
+                latency.last_transition_fill_ms = Some(started_at.elapsed().as_millis() as u64);
+            }
             if let Some(signal_started_at) = tracker.signal_started_at {
-                latency.last_signal_fill_ms =
-                    Some(signal_started_at.elapsed().as_millis() as u64);
+                latency.last_signal_fill_ms = Some(signal_started_at.elapsed().as_millis() as u64);
             }
             true
         }
@@ -241,7 +247,8 @@ fn trade_marker_from_fill(session: &SessionState, fill: &Value) -> Option<TradeM
     let account_id = fill_account_id
         .or_else(|| order_match.map(|(account_id, _)| account_id))
         .or_else(|| {
-            fill_matches_active_latency_tracker(session, fill).then_some(session.selected_account_id)?
+            fill_matches_active_latency_tracker(session, fill)
+                .then_some(session.selected_account_id)?
         })?;
     let order = order_match.map(|(_, order)| order);
     let side = order

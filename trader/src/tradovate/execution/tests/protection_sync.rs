@@ -24,6 +24,7 @@ fn sync_execution_protection_waits_for_hydrating_order_strategy_before_ack() {
         )]),
     );
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty -1 -> 1)".to_string()),
@@ -108,6 +109,7 @@ fn direct_reversal_does_not_synthesize_native_protection() {
         )]),
     );
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),
@@ -172,6 +174,7 @@ fn stale_strategy_record_without_live_child_orders_does_not_enable_software_prot
         )]),
     );
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Sell (qty 1 -> -1)".to_string()),

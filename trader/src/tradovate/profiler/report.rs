@@ -24,6 +24,7 @@ pub(super) enum SwipeScenario {
     DirectStartOrderStrategy,
     DirectMarketThenSync,
     FlattenConfirmEnter,
+    FlattenEnter,
     CloseAllEnter,
 }
 
@@ -33,6 +34,7 @@ impl SwipeScenario {
             Self::DirectStartOrderStrategy => "direct_startorderstrategy",
             Self::DirectMarketThenSync => "direct_market_then_sync",
             Self::FlattenConfirmEnter => "flatten_confirm_enter",
+            Self::FlattenEnter => "flatten_enter_no_confirm",
             Self::CloseAllEnter => "close_all_enter",
         }
     }
@@ -42,6 +44,7 @@ impl SwipeScenario {
             Self::DirectStartOrderStrategy => "Direct / startorderstrategy Reversal",
             Self::DirectMarketThenSync => "Direct / Market Reversal + Native Sync",
             Self::FlattenConfirmEnter => "Flatten > Confirm > Enter",
+            Self::FlattenEnter => "Flatten > Enter (No Confirm)",
             Self::CloseAllEnter => "CloseAll > Enter",
         }
     }
@@ -51,6 +54,7 @@ impl SwipeScenario {
             Self::DirectStartOrderStrategy => NativeReversalMode::Direct,
             Self::DirectMarketThenSync => NativeReversalMode::Direct,
             Self::FlattenConfirmEnter => NativeReversalMode::FlattenConfirmEnter,
+            Self::FlattenEnter => NativeReversalMode::FlattenEnter,
             Self::CloseAllEnter => NativeReversalMode::CloseAllEnter,
         }
     }

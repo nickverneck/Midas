@@ -1,7 +1,7 @@
 use super::support::*;
 
 #[test]
-fn strategy_reversal_mode_cycles_through_all_three_options() {
+fn strategy_reversal_mode_cycles_through_all_options() {
     let mut app = App::new(AppConfig::default());
     let (cmd_tx, _cmd_rx) = unbounded_channel();
     app.screen = Screen::Strategy;
@@ -45,7 +45,49 @@ fn strategy_reversal_mode_cycles_through_all_three_options() {
     app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
     assert_eq!(
         app.strategy.native_reversal_mode,
+        NativeReversalMode::FlattenEnter
+    );
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(
+        app.strategy.native_reversal_mode,
         NativeReversalMode::CloseAllEnter
+    );
+
+    app.handle_strategy_key(key(KeyCode::Right), &cmd_tx);
+    assert_eq!(
+        app.strategy.native_reversal_mode,
+        NativeReversalMode::Direct
+    );
+}
+
+#[test]
+fn no_confirm_reversal_is_limited_to_tradovate_sim_with_broker_protection() {
+    let mut app = App::new(AppConfig::default());
+    enable_tradovate_controls(&mut app);
+    app.form.env = TradingEnvironment::Live;
+    app.strategy.native_strategy = NativeStrategyKind::EmaCross;
+    app.strategy.native_reversal_mode = NativeReversalMode::FlattenEnter;
+    app.strategy.native_ema.take_profit_ticks = 8.0;
+
+    let readiness = app.strategy_readiness();
+
+    assert_eq!(readiness.status, StrategyReadinessStatus::NeedsAttention);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("restricted to Simulation"))
+    );
+
+    app.form.env = TradingEnvironment::Sim;
+    app.strategy.native_ema.take_profit_ticks = 0.0;
+    let readiness = app.strategy_readiness();
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("requires broker-owned TP/SL"))
     );
 }
 
@@ -999,6 +1041,7 @@ fn trailing_stop_tick_fields_show_only_when_trailing_stop_is_enabled() {
 fn strategy_protection_controls_show_for_broker_owned_reversal_modes() {
     for reversal_mode in [
         NativeReversalMode::FlattenConfirmEnter,
+        NativeReversalMode::FlattenEnter,
         NativeReversalMode::CloseAllEnter,
     ] {
         let mut app = App::new(AppConfig::default());

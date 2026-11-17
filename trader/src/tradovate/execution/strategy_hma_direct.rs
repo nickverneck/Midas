@@ -479,7 +479,7 @@ pub(crate) fn maybe_run_hma_direct_execution_strategy(
         None,
         Vec::new(),
     );
-    enqueue_market_order(session, broker_tx, order)?;
+    enqueue_market_order(session, broker_tx, order, None)?;
     session.execution_runtime.pending_target_qty = Some(target_qty);
     mark_closed_bar_signal_dispatched(session, signal_bar.ts_ns, signal);
     let gate_detail = format!(

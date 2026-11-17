@@ -21,6 +21,7 @@ async fn pending_target_watchdog_respects_order_strategy_position_sync_grace() {
         volume: None,
     }];
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now() - Duration::from_secs(3),
         signal_started_at: Some(time::Instant::now()),
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -127,6 +128,7 @@ async fn pending_target_watchdog_does_not_forget_a_stale_broker_owned_path() {
         )]),
     );
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now() - Duration::from_secs(11),
         signal_started_at: None,
         signal_context: None,
@@ -230,6 +232,7 @@ async fn set_target_position_records_pending_target_for_staged_reversal() {
         target_qty: 1,
     });
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: None,
         signal_context: None,

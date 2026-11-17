@@ -105,6 +105,7 @@ fn strategy_loop_waits_when_flat_qty_conflicts_with_live_broker_path() {
     session.execution_runtime.armed = true;
     session.execution_runtime.last_closed_bar_ts = Some(30);
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now(),
         signal_started_at: None,
         signal_context: Some("ema_cross Buy (qty 0 -> 1)".to_string()),
@@ -197,6 +198,7 @@ fn strategy_loop_clears_stale_flat_broker_path_after_sync_grace() {
     session.execution_runtime.armed = true;
     session.execution_runtime.last_closed_bar_ts = Some(30);
     session.order_latency_tracker = Some(OrderLatencyTracker {
+        transition_started_at: None,
         started_at: time::Instant::now()
             - Duration::from_millis((ORDER_STRATEGY_POSITION_SYNC_GRACE_MS + 1) as u64),
         signal_started_at: None,

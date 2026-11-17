@@ -125,6 +125,10 @@ pub struct LatencySnapshot {
     pub last_signal_seen_ms: Option<u64>,
     pub last_signal_ack_ms: Option<u64>,
     pub last_signal_fill_ms: Option<u64>,
+    pub last_transition_submit_ms: Option<u64>,
+    pub last_transition_seen_ms: Option<u64>,
+    pub last_transition_ack_ms: Option<u64>,
+    pub last_transition_fill_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
